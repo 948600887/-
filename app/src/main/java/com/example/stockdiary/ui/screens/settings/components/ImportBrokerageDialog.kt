@@ -5,6 +5,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -34,6 +36,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SuggestionChip
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -396,6 +399,7 @@ private fun CharsetSelector(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun PreviewStep(
     state: ImportBrokerageViewModel.UiState,
@@ -418,6 +422,15 @@ private fun PreviewStep(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+            if (state.autoFilledCount > 0) {
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "已自动匹配 ${state.autoFilledCount} 行证券代码（来自记忆/持仓/历史流水/证券库），" +
+                        "核对无误直接确认即可；你手动填过的会被记住，下次不用再填。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color(0xFF2E7D32)
+                )
+            }
             Spacer(Modifier.height(8.dp))
         }
         items(txs, key = { it.rowNumber }) { tx ->
@@ -427,11 +440,15 @@ private fun PreviewStep(
                 tx.skip -> MaterialTheme.colorScheme.surfaceVariant
                 else -> Color.Transparent
             }
-            // OCR 截图无代码，需要展示输入框让用户补填（即使有异常也要能填代码）
-            val showSymbolInput = state.source == ImportBrokerageViewModel.Source.OCR
+            // 代码为空的行都要能填：截图本来就无代码；CSV 若券商导出没带代码列同样需要补
+            val showSymbolInput =
+                state.source == ImportBrokerageViewModel.Source.OCR || tx.symbol.isBlank()
             // 只有硬错误（价格/数量识别异常、证券代码格式错误）才禁用勾选；
-            // "需手动填写证券代码"不算硬错误——它是待补填的提示，不是错误
-            val hasHardError = tx.errors.any { it != BrokerageImportService.ERR_SYMBOL_REQUIRED }
+            // 单纯的"缺代码"（截图必然缺、CSV 可能缺）是待补填提示，不是错误
+            val hasHardError = tx.errors.any {
+                it != BrokerageImportService.ERR_SYMBOL_REQUIRED &&
+                    it != BrokerageImportService.ERR_SYMBOL_EMPTY
+            }
             Row(
                 modifier = Modifier.fillMaxWidth().background(bg).padding(8.dp),
                 verticalAlignment = Alignment.Top
@@ -456,10 +473,50 @@ private fun PreviewStep(
                         OutlinedTextField(
                             value = tx.symbol,
                             onValueChange = { viewModel.updateSymbol(tx.rowNumber, it) },
-                            label = { Text("证券代码（必填，如 515080）") },
+                            label = {
+                                Text(
+                                    if (tx.symbol.isBlank()) "证券代码（必填，如 515080）"
+                                    else "证券代码"
+                                )
+                            },
                             singleLine = true,
                             modifier = Modifier.fillMaxWidth()
                         )
+                        if (tx.symbol.isNotBlank() && tx.symbolSource.isNotEmpty()) {
+                            Spacer(Modifier.height(2.dp))
+                            Text(
+                                "✓ 已自动匹配（${tx.symbolSource}），核对无误直接确认即可",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = Color(0xFF2E7D32)
+                            )
+                        }
+                    }
+                    // 没能自动匹配的行：给几个「你可能找的是」候选，点一下就填上（并记住）
+                    val rowSuggestions = state.suggestions[tx.rowNumber]
+                    if (rowSuggestions != null && rowSuggestions.isNotEmpty()) {
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            "可能是：",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            rowSuggestions.forEach { candidate ->
+                                SuggestionChip(
+                                    onClick = {
+                                        viewModel.updateSymbol(tx.rowNumber, candidate.symbol)
+                                    },
+                                    label = {
+                                        Text(
+                                            "${candidate.name} ${candidate.symbol}",
+                                            style = MaterialTheme.typography.bodySmall
+                                        )
+                                    }
+                                )
+                            }
+                        }
                     }
                     if (tx.errors.isNotEmpty()) {
                         Text(

@@ -65,7 +65,13 @@ class BrokerageImportService private constructor(private val context: Context) {
         val rowNumber: Int,
         val errors: List<String>,
         val isDuplicate: Boolean,
-        var skip: Boolean = false
+        var skip: Boolean = false,
+        /**
+         * 代码的来源说明。空串 = 用户手填或 CSV 自带；
+         * 非空 = 由 [autoFillSymbols] 自动回填，值是给用户看的来源标签（见 companion 的 SYMBOL_SRC_*）。
+         * 预览页据此显示「已自动匹配（记忆）」，让用户可以判断这份代码值不值得信。
+         */
+        val symbolSource: String = ""
     )
 
     data class ParseResult(
@@ -92,6 +98,20 @@ class BrokerageImportService private constructor(private val context: Context) {
          */
         const val ERR_SYMBOL_REQUIRED = "需手动填写证券代码"
 
+        /** CSV 导入时代码列为空（与截图缺代码的提示语不同，但同样是「代码缺失」） */
+        const val ERR_SYMBOL_EMPTY = "证券代码为空"
+
+        /**
+         * 代码来源标签（[ParsedTransaction.symbolSource]）。UI 展示给用户，一眼看出可信度。
+         */
+        const val SYMBOL_SRC_ALIAS = "记忆"
+        const val SYMBOL_SRC_HOLDING = "持仓"
+        const val SYMBOL_SRC_HISTORY = "历史流水"
+        const val SYMBOL_SRC_BASIC = "证券库"
+        const val SYMBOL_SRC_PRESET = "内置库"
+        /** 同一张截图里前面的同名行用户填过一次，后面的行直接沿用 */
+        const val SYMBOL_SRC_SAME_ROW = "本批同名"
+
         @SuppressLint("StaticFieldLeak")
         @Volatile
         private var instance: BrokerageImportService? = null
@@ -112,6 +132,116 @@ class BrokerageImportService private constructor(private val context: Context) {
 
     private val assetDao get() = StockDatabase.getInstance(context).assetDao()
     private val transactionDao get() = StockDatabase.getInstance(context).transactionDao()
+    private val stockBasicDao get() = StockDatabase.getInstance(context).stockBasicDao()
+    private val aliasStore get() = SymbolAliasStore.getInstance(context)
+
+    /**
+     * 自动回填缺失的证券代码（截图导入专用）。
+     *
+     * 银河对账单只有证券名称没有代码，过去每行都得用户手填。
+     * 这里把「已经知道答案」的地方全用上：用户的历史手填（记忆）、已有持仓、
+     * 历史成交流水、全市场证券库、内置预置列表，由 [SymbolResolver] 统一裁决。
+     *
+     * 同一张截图里经常反复出现同一标的（比如买过两次中证红利），第一行匹配到之后
+     * 后面的同名行直接沿用，用 [SYMBOL_SRC_SAME_ROW] 标记来源。
+     *
+     * 注意：**只填本来为空的行**。已经填了代码的行（用户编辑过）一律不动。
+     */
+    suspend fun autoFillSymbols(
+        transactions: List<BrokerageImportService.ParsedTransaction>
+    ): List<BrokerageImportService.ParsedTransaction> = withContext(Dispatchers.IO) {
+        if (transactions.none { it.symbol.isBlank() }) return@withContext transactions
+
+        val index = buildSymbolIndex()
+        // 本批次已确定的 nameKey → (symbol, 来源标签)
+        val learned = LinkedHashMap<String, Pair<String, String>>()
+
+        transactions.map { tx ->
+            if (tx.symbol.isNotBlank()) {
+                learned.putIfAbsent(SymbolResolver.key(tx.name), tx.symbol to tx.symbolSource)
+                return@map tx
+            }
+            val k = SymbolResolver.key(tx.name)
+            if (k.isBlank()) return@map tx
+
+            val (symbol, source) = learned[k]
+                ?.let { it.first to SYMBOL_SRC_SAME_ROW }
+                ?: SymbolResolver.resolveExact(tx.name, index)
+                    ?.let { it.symbol to it.source.label }
+                ?: return@map tx
+
+            learned.putIfAbsent(k, symbol to source)
+            AppLogger.i("自动回填证券代码: ${tx.name} → $symbol（$source）", "BrokerageImport")
+            tx.copy(
+                symbol = symbol,
+                symbolSource = source,
+                // 代码已经有了，「代码缺失」类提示要撤掉，否则会被当成异常行直接跳过
+                errors = tx.errors.filterNot { it == ERR_SYMBOL_REQUIRED || it == ERR_SYMBOL_EMPTY }
+            )
+        }
+    }
+
+    /**
+     * 给预览页一键填充用的候选列表。仅在 [autoFillSymbols] 没匹配到时才需要展示。
+     */
+    suspend fun suggestSymbols(name: String): List<SymbolResolver.Candidate> =
+        withContext(Dispatchers.IO) {
+            if (name.isBlank()) return@withContext emptyList()
+            runCatching { SymbolResolver.suggest(name, buildSymbolIndex()) }
+                .onFailure { AppLogger.w("查询候选代码失败: ${it.message}", "BrokerageImport") }
+                .getOrDefault(emptyList())
+        }
+
+    /**
+     * 记住用户手填的「名称 → 代码」，下次同名标的直接自动回填。
+     * 只有能通过格式校验的代码才该被记住，否则会把错答案固化下来反复使用。
+     */
+    suspend fun rememberSymbol(name: String, symbol: String) = withContext(Dispatchers.IO) {
+        val k = SymbolResolver.key(name)
+        if (k.isBlank() || symbol.isBlank()) return@withContext
+        runCatching { aliasStore.put(k, symbol) }
+            .onFailure { AppLogger.w("记住证券代码失败: ${it.message}", "BrokerageImport") }
+    }
+
+    /** 一次性构建名称 → 代码索引（读库一轮，供整批行复用，避免逐行查询） */
+    private suspend fun buildSymbolIndex(): SymbolResolver.Index {
+        val alias = runCatching { aliasStore.all() }
+            .onFailure { AppLogger.w("读取证券名称记忆失败: ${it.message}", "BrokerageImport") }
+            .getOrDefault(emptyMap())
+
+        val holding = runCatching {
+            assetDao.getAllAssetsSync()
+                .filter { !it.symbol.isNullOrBlank() && it.name.isNotBlank() }
+                .map { SymbolResolver.NameSymbol(it.name, it.symbol!!) }
+        }.onFailure { AppLogger.w("读取持仓失败: ${it.message}", "BrokerageImport") }
+            .getOrDefault(emptyList())
+
+        // 历史流水按日期倒序，同一名称多次出现时由聚合层做多数表决
+        val history = runCatching {
+            transactionDao.getAll()
+                .filter { it.name.isNotBlank() && it.symbol.isNotBlank() }
+                .sortedByDescending { it.date }
+                .map { SymbolResolver.NameSymbol(it.name, it.symbol) }
+        }.onFailure { AppLogger.w("读取历史流水失败: ${it.message}", "BrokerageImport") }
+            .getOrDefault(emptyList())
+
+        val basic = runCatching {
+            stockBasicDao.getAll().map { SymbolResolver.NameSymbol(it.name, it.code) }
+        }.onFailure { AppLogger.w("读取证券库失败: ${it.message}", "BrokerageImport") }
+            .getOrDefault(emptyList())
+
+        val preset = StockPreset.DEFAULT_PRESETS.map {
+            SymbolResolver.NameSymbol(it.name, it.code)
+        }
+
+        return SymbolResolver.buildIndex(
+            alias = alias,
+            holding = holding,
+            history = history,
+            basic = basic,
+            preset = preset
+        )
+    }
 
     /**
      * 读取文件字节并自动探测编码（BOM 优先，再试 UTF-8 严格解码，失败回退 GBK）。
@@ -292,7 +422,7 @@ class BrokerageImportService private constructor(private val context: Context) {
             if (date == null) errors.add("日期无法解析: '$rawDate'")
 
             val symbol = get(mapping.symbolCol)
-            if (symbol.isEmpty()) errors.add("证券代码为空")
+            if (symbol.isEmpty()) errors.add(ERR_SYMBOL_EMPTY)
             val name = get(mapping.nameCol)
 
             val rawType = get(mapping.typeCol)

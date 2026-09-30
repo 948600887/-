@@ -6,6 +6,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.example.stockdiary.data.BrokerageImportService
 import com.example.stockdiary.data.OcrStatementService
+import com.example.stockdiary.data.SymbolResolver
 import com.example.stockdiary.di.AppContainer
 import com.example.stockdiary.utils.AppLogger
 import kotlinx.coroutines.Dispatchers
@@ -44,7 +45,14 @@ class ImportBrokerageViewModel(
         val charsetName: String = "GBK",
         val ocrYear: Int? = null,
         // OCR 识别出的完整原文（失败时用于弹窗展示与复制，便于用户反馈排查）
-        val ocrRawText: String? = null
+        val ocrRawText: String? = null,
+        /**
+         * 每行「你可能想找的是」候选代码列表（key = rowNumber）。
+         * 只有无法自动回填的行才会有候选——已经匹配好的行不需要占空间。
+         */
+        val suggestions: Map<Int, List<SymbolResolver.Candidate>> = emptyMap(),
+        /** 本次自动回填了多少行（预览页顶部展示「自动匹配 N 行」） */
+        val autoFilledCount: Int = 0
     )
 
     private val _uiState = MutableStateFlow(UiState())
@@ -105,7 +113,6 @@ class ImportBrokerageViewModel(
             try {
                 val result = ocrService.recognizeAndParse(uri)
                 if (result.transactions.isEmpty()) {
-                    // OCR 成功但没匹配到交易 — 把完整原文存起来，用可滚动弹窗展示 + 复制按钮排障
                     _uiState.value = _uiState.value.copy(
                         step = Step.SELECT_FILE,
                         error = "未识别到交易记录。当前解析规则适配【中国银河证券】对账单截图，" +
@@ -113,11 +120,24 @@ class ImportBrokerageViewModel(
                             "「买/卖 日期 数量 费用」两行结构。\n\n可点「复制原文」把 OCR 原文发出来，便于定位格式差异。",
                         ocrRawText = result.recognizedText
                     )
-                } else {
+                    // 截图没有证券代码：先用「记忆/持仓/历史流水/证券库」把能自动回填的都填上，
+                    // 用户只需处理剩下的少数行（且每记一次都写进记忆，下次连这步也省了）
+                    val filled = service.autoFillSymbols(result.transactions)
                     _uiState.value = _uiState.value.copy(
-                        transactions = result.transactions,
-                        ocrYear = result.year
+                        transactions = filled,
+                        ocrYear = result.year,
+                        autoFilledCount = filled.count {
+                            it.symbol.isNotBlank() && it.symbolSource.isNotEmpty()
+                        }
                     )
+                    // 自动回填的行也要跑一遍查重，与库内重复的照样标黄跳过
+                    filled.filter { it.symbol.isNotBlank() && it.symbolSource.isNotEmpty() }
+                        .forEach { tx ->
+                            runCatching { validateSymbolRow(tx.rowNumber) }
+                                .onFailure { AppLogger.w("自动回填行校验失败 row=${tx.rowNumber}: ${it.message}", "ImportBrokerage") }
+                        }
+                    // 剩下的空代码行给候选，点一下就填上
+                    refreshSuggestions()
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -196,8 +216,15 @@ class ImportBrokerageViewModel(
         val parsed = _uiState.value.parseResult ?: return
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                val txs = service.mapRows(parsed)
-                _uiState.value = _uiState.value.copy(transactions = txs, step = Step.PREVIEW)
+                val mapped = service.autoFillSymbols(service.mapRows(parsed))
+                _uiState.value = _uiState.value.copy(
+                    transactions = mapped,
+                    step = Step.PREVIEW,
+                    autoFilledCount = mapped.count {
+                        it.symbol.isNotBlank() && it.symbolSource.isNotEmpty()
+                    }
+                )
+                refreshSuggestions()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -216,17 +243,25 @@ class ImportBrokerageViewModel(
     }
 
     /**
-     * 在预览页编辑某行的证券代码（OCR 截图无代码，必须手动补填）。
+     * 在预览页编辑某行的证券代码。
+     *
+     * 截图本身没有代码，绝大多数行会先由 [BrokerageImportService.autoFillSymbols]
+     * 自动回填；这里处理的是**没自动匹配上**的那部分行。
+     *
+     * 这一次手填不会白填：代码校验通过后立刻做两件事——
+     * 1. 写进记忆库（`名称 → 代码`），**下次同名标的直接自动回填，不用再填**；
+     * 2. 同步给同一张截图里剩下的同名行（一张单子里同一标的常出现多次）。
      *
      * 输入即时回显；格式校验与查重做 [SYMBOL_CHECK_DEBOUNCE_MS] 防抖，
      * 既避免每敲一个字符就查一次库，也避免"5"这种半截输入立刻闪出格式错误。
-     * 校验通过后会查一次库，把与既有记录重复的行在预览页标黄。
      */
     fun updateSymbol(rowNumber: Int, raw: String) {
         val value = raw.trim()
         updateTransaction(rowNumber) { tx ->
             tx.copy(
                 symbol = value,
+                // 用户动过手就把"自动匹配"标签摘掉，避免用户以为这是系统猜的
+                symbolSource = "",
                 errors = tx.errors.filterNot { isSymbolNote(it) },
                 isDuplicate = false // 代码变了，上一次的查重结论作废
             )
@@ -235,7 +270,16 @@ class ImportBrokerageViewModel(
         symbolCheckJobs[rowNumber] = viewModelScope.launch {
             delay(SYMBOL_CHECK_DEBOUNCE_MS)
             try {
-                validateSymbolRow(rowNumber)
+                val valid = validateSymbolRow(rowNumber)
+                if (valid) {
+                    val tx = _uiState.value.transactions.firstOrNull { it.rowNumber == rowNumber }
+                    if (tx != null && tx.symbol.isNotBlank() && tx.name.isNotBlank()) {
+                        // 记住这次手填，下次同名标的直接自动回填
+                        service.rememberSymbol(tx.name, tx.symbol)
+                        propagateToSameName(rowNumber)
+                        refreshSuggestions()
+                    }
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -245,9 +289,73 @@ class ImportBrokerageViewModel(
         }
     }
 
-    /** 校验单行的证券代码，并刷新它的重复标记 */
-    private suspend fun validateSymbolRow(rowNumber: Int) {
-        val tx = _uiState.value.transactions.firstOrNull { it.rowNumber == rowNumber } ?: return
+    /**
+     * 把某一行的代码同步给同一张截图里**同名但还空着**的行。
+     *
+     * 一份对账单里同一个标的出现多次很常见（分批买入），让用户一行行填同样的
+     * 6 位数字毫无意义。填一行，其余自动跟随（标记来源「本批同名」，用户一眼看得出是联动的）。
+     */
+    private suspend fun propagateToSameName(originRow: Int) {
+        val snapshot = _uiState.value.transactions
+        val origin = snapshot.firstOrNull { it.rowNumber == originRow } ?: return
+        val key = SymbolResolver.key(origin.name)
+        if (key.isBlank() || origin.symbol.isBlank()) return
+
+        val targets = snapshot.filter {
+            it.rowNumber != originRow && it.symbol.isBlank() && SymbolResolver.key(it.name) == key
+        }
+        if (targets.isEmpty()) return
+
+        val targetRows = targets.map { it.rowNumber }.toSet()
+        _uiState.value = _uiState.value.copy(
+            transactions = _uiState.value.transactions.map { tx ->
+                if (tx.rowNumber !in targetRows) tx
+                else tx.copy(
+                    symbol = origin.symbol,
+                    symbolSource = BrokerageImportService.SYMBOL_SRC_SAME_ROW,
+                    errors = tx.errors.filterNot { isSymbolNote(it) }
+                )
+            }
+        )
+        // 联动填上的行同样要查一次重，避免把已导入过的流水重复写一遍
+        targetRows.forEach { row ->
+            runCatching { validateSymbolRow(row) }
+                .onFailure { AppLogger.w("联动行校验失败 row=$row: ${it.message}", "ImportBrokerage") }
+        }
+    }
+
+    /**
+     * 刷新「候选代码」列表：只给还没填上代码的行查，同名标的只查一次库。
+     * 候选以 chips 形式展示在预览页，用户点一下即可填入（并顺带写进记忆）。
+     */
+    private suspend fun refreshSuggestions() {
+        val pending = _uiState.value.transactions.filter {
+            it.symbol.isBlank() && it.name.isNotBlank()
+        }
+        if (pending.isEmpty()) {
+            if (_uiState.value.suggestions.isNotEmpty()) {
+                _uiState.value = _uiState.value.copy(suggestions = emptyMap())
+            }
+            return
+        }
+        val cache = LinkedHashMap<String, List<SymbolResolver.Candidate>>()
+        val next = LinkedHashMap<Int, List<SymbolResolver.Candidate>>()
+        for (tx in pending) {
+            val key = SymbolResolver.key(tx.name)
+            if (key.isBlank()) continue
+            val cands = cache.getOrPut(key) { service.suggestSymbols(tx.name) }
+            if (cands.isNotEmpty()) next[tx.rowNumber] = cands
+        }
+        _uiState.value = _uiState.value.copy(suggestions = next)
+    }
+
+    /**
+     * 校验单行的证券代码，并刷新它的重复标记。
+     *
+     * @return 代码是否合法（非空且格式正确）且不与库内记录重复。调用方据此决定是否写入记忆。
+     */
+    private suspend fun validateSymbolRow(rowNumber: Int): Boolean {
+        val tx = _uiState.value.transactions.firstOrNull { it.rowNumber == rowNumber } ?: return false
         var duplicate = false
         val notes = when {
             tx.symbol.isBlank() -> listOf(BrokerageImportService.ERR_SYMBOL_REQUIRED)
@@ -263,6 +371,7 @@ class ImportBrokerageViewModel(
                 isDuplicate = duplicate
             )
         }
+        return notes.isEmpty() && !duplicate
     }
 
     private fun isSymbolNote(msg: String): Boolean =

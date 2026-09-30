@@ -72,6 +72,9 @@ class PriceSyncWorker(
                 prefs.setLastErrorType(null)
                 createOrReplaceTodaySnapshot(repository)
                 notifyTodayDividends(repository, applicationContext)
+                // 跑完一轮后按「此时是否交易时段」重排下一次间隔（15分钟 ↔ 4小时自适应），
+                // 否则间隔永远是上次 App 启动那一刻算出的值，智能间隔形同虚设
+                PriceSyncScheduler.scheduleSmartSync(applicationContext, runImmediately = false)
                 Result.success()
             } else {
                 handleFailure(result.dominantErrorType)
@@ -120,6 +123,8 @@ class PriceSyncWorker(
             AppLogger.w("数据类错误不再重试", "PriceSyncWorker")
             NotificationHelper.showPriceSyncFailureNotification(applicationContext, newCount)
             prefs.setConsecutiveFailureCount(0)
+            // 终态失败也要续期下一轮，否则周期任务就此停摆
+            PriceSyncScheduler.scheduleSmartSync(applicationContext, runImmediately = false)
             return Result.failure()
         }
 

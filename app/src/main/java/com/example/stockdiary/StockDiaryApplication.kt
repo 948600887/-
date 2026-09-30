@@ -6,6 +6,7 @@ import com.example.stockdiary.data.SnapshotScheduler
 import com.example.stockdiary.di.AppContainer
 import com.example.stockdiary.utils.AppLogger
 import com.example.stockdiary.utils.CrashRecoveryManager
+import com.example.stockdiary.utils.GlobalExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -28,7 +29,15 @@ class StockDiaryApplication : Application() {
         super.onCreate()
         instance = this
         container = AppContainer(this)
+        // 崩溃处理必须挂在 Application 级：只在 MainActivity 初始化时，启动早期崩溃无人记录。
+        // GlobalExceptionHandler.initialize 有 isInitialized 幂等保护，MainActivity 重复调用无副作用。
+        GlobalExceptionHandler.initialize(this) {
+            CrashRecoveryManager.getInstance().recordCrash("应用异常退出")
+        }
+        // 伴生 init 只设置 appContext；实例 init 才会真正打开 SharedPreferences 并加载崩溃状态，
+        // 漏掉它 recordCrash 会因 prefs=null 静默空转（崩溃恢复功能等于不存在）。
         CrashRecoveryManager.init(this)
+        CrashRecoveryManager.getInstance().init(this)
 
         AppLogger.i("应用启动，DI容器已初始化", "StockDiaryApplication")
 

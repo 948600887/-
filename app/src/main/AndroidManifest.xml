@@ -9,6 +9,7 @@
         tools:ignore="ProtectedPermissions" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <application
         android:name=".StockDiaryApplication"
@@ -37,6 +38,17 @@
         <receiver
             android:name=".utils.NotificationHelper$ReminderReceiver"
             android:exported="false">
+        </receiver>
+
+        <!-- 开机后重排每日提醒闹钟（AlarmManager 闹钟重启即失效） -->
+        <receiver
+            android:name=".utils.BootReceiver"
+            android:enabled="true"
+            android:exported="true"
+            android:permission="android.permission.RECEIVE_BOOT_COMPLETED">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
         </receiver>
         
         <!-- FileProvider 用于数据导出分享 -->

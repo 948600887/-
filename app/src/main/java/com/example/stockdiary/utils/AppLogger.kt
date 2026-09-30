@@ -24,6 +24,11 @@ object AppLogger {
     
     private var lastFlushTime = System.currentTimeMillis()
     private var appContext: Context? = null
+
+    // 日志落盘专用后台线程：flush 含文件读写与截断，直接在主线程跑会掉帧
+    private val logExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+        Thread(r, "AppLoggerWriter").apply { isDaemon = true }
+    }
     
     fun init(context: Context, debug: Boolean = true) {
         appContext = context.applicationContext
@@ -98,7 +103,11 @@ object AppLogger {
             logQueue.offer(logLine)
             
             if (System.currentTimeMillis() - lastFlushTime > FLUSH_INTERVAL_MS || level == "ERROR") {
-                flushLogs()
+                try {
+                    logExecutor.execute { flushLogs() }
+                } catch (e: Exception) {
+                    // 执行器被拒绝（极端情况）只丢这次落盘，不影响调用方
+                }
             }
         } catch (e: CancellationException) {
             throw e

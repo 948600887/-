@@ -22,6 +22,8 @@ object NotificationHelper {
     private const val ALARM_REQUEST_CODE = 1001
     private const val PREFS_NAME = "notification_prefs"
     private const val KEY_REMINDER_ENABLED = "reminder_enabled"
+    private const val KEY_REMINDER_HOUR = "reminder_hour"
+    private const val KEY_REMINDER_MINUTE = "reminder_minute"
 
     // 不同通知类型使用不同 ID，避免互相覆盖
     private const val NOTIFICATION_ID_GENERAL = 1
@@ -217,6 +219,12 @@ object NotificationHelper {
                 return false
             }
             setReminderEnabled(context, true)
+            // 持久化提醒时间：开机广播重排闹钟时只能从 prefs 读（闹钟 Intent 随重启清空）
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putInt(KEY_REMINDER_HOUR, hour)
+                .putInt(KEY_REMINDER_MINUTE, minute)
+                .apply()
             val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as? AlarmManager
             if (alarmManager != null) {
                 val intent = Intent(context, ReminderReceiver::class.java).apply {
@@ -283,6 +291,12 @@ object NotificationHelper {
     fun isReminderEnabled(context: Context): Boolean {
         return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .getBoolean(KEY_REMINDER_ENABLED, false)
+    }
+
+    /** 读取已保存的提醒时间（供开机重排使用），默认 9:00 */
+    fun getReminderTime(context: Context): Pair<Int, Int> {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs.getInt(KEY_REMINDER_HOUR, 9) to prefs.getInt(KEY_REMINDER_MINUTE, 0)
     }
     
     private fun setReminderEnabled(context: Context, enabled: Boolean) {

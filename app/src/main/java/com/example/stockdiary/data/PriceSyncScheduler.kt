@@ -22,9 +22,13 @@ object PriceSyncScheduler {
     }
 
     /**
-     * 根据当前是否处于交易时段，选择同步间隔并调度后台任务
+     * 根据当前是否处于交易时段，选择同步间隔并调度后台任务。
+     *
+     * @param runImmediately true=立即先跑一次（App 冷启动/用户开启开关时）；
+     *   false=间隔到期后再跑（Worker 跑完一轮后自我续期时必须用 false，
+     *   否则 UPDATE 替换后 initialDelay=0 会立刻又跑一次，形成无限紧循环）。
      */
-    fun scheduleSmartSync(context: Context) {
+    fun scheduleSmartSync(context: Context, runImmediately: Boolean = true) {
         val inTrading = SyncStrategy.isInTradingHours()
         val intervalMillis = SyncStrategy.getCurrentSyncIntervalMillis(inTrading)
         val intervalMinutes = (intervalMillis / 60_000).coerceAtLeast(15)
@@ -40,7 +44,7 @@ object PriceSyncScheduler {
 
         val request = PeriodicWorkRequestBuilder<PriceSyncWorker>(intervalMinutes, TimeUnit.MINUTES)
             .setConstraints(constraints)
-            .setInitialDelay(0, TimeUnit.MILLISECONDS)
+            .setInitialDelay(if (runImmediately) 0L else intervalMillis, TimeUnit.MILLISECONDS)
             .setBackoffCriteria(
                 BackoffPolicy.EXPONENTIAL,
                 backoffDelay,
@@ -57,7 +61,7 @@ object PriceSyncScheduler {
 
         AppLogger.i(
             "智能价格同步已调度，当前${if (inTrading) "交易时段" else "非交易时段"}，" +
-                "间隔: ${intervalMinutes}分钟",
+                "间隔: ${intervalMinutes}分钟${if (runImmediately) "，立即执行一次" else ""}",
             "PriceSyncScheduler"
         )
     }

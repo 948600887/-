@@ -71,6 +71,14 @@ object GalaxyStatementParser {
      */
     private const val AMOUNT_TOLERANCE_RATIO = 0.02
 
+    /**
+     * 金额偏差的绝对容差（元）。
+     * 券商有「最低 5 元佣金」：一笔 300 元的小额买入佣金占比可达 1.7%，
+     * 再加印花税/过户费就超过 2% 的相对容差，真实交易会被误判成列错位。
+     * 所以相对容差之外再放一个绝对容差，两者取大。
+     */
+    private const val AMOUNT_TOLERANCE_ABS = 6.0
+
     /** 一个「首行」锚点的解析结果 */
     private data class Anchor(
         val operation: String,
@@ -239,11 +247,12 @@ object GalaxyStatementParser {
         if (price <= 0) errors.add("价格识别异常：未识别到有效价格")
         if (quantity <= 0) errors.add("数量识别异常: $quantityStr")
         // 交叉校验：金额应当约等于 价格×数量（仅差手续费）。差太多说明列错位了。
+        // 容差取「相对 2%」与「绝对 6 元」的较大者——小额交易触发最低 5 元佣金时不会被误拦
         val amount = anchor.amount
         if (amount != null && price > 0 && quantity > 0) {
             val expected = price * quantity
             val actual = abs(amount)
-            if (actual > 0 && abs(expected - actual) > max(1.0, actual * AMOUNT_TOLERANCE_RATIO)) {
+            if (actual > 0 && abs(expected - actual) > max(AMOUNT_TOLERANCE_ABS, actual * AMOUNT_TOLERANCE_RATIO)) {
                 errors.add("金额与价格×数量不符，可能列错位，请核对")
             }
         }

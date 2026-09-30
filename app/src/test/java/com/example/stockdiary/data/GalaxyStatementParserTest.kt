@@ -341,6 +341,20 @@ class GalaxyStatementParserTest {
     }
 
     @Test
+    fun `最低佣金的小额交易不被交叉校验误拦`() {
+        // 100 股 × 1.0 元 = 100 元，最低佣金 5 元 + 杂费后金额 105.50。
+        // 相对偏差高达 5.5%（远超 2% 相对容差），但差额的绝对值只有 5.5 元，
+        // 属于最低佣金档的真实交易，绝对容差（6 元）必须放行。
+        val lines = listOf(
+            "证券买入-某股票 1.000 -105.50",
+            "09-24 11:09 100 5.50"
+        )
+        val result = GalaxyStatementParser.parse(lines, 2026)
+        assertEquals(1, result.size)
+        assertTrue(result[0].errors.none { it.contains("列错位") })
+    }
+
+    @Test
     fun `逆回购行被跳过且不影响相邻交易`() {
         val lines = listOf(
             "通用回购逆回购-GC001  1.345  -83,000.83",

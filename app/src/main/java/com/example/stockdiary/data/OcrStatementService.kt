@@ -172,11 +172,13 @@ class OcrStatementService private constructor(private val context: Context) {
     private suspend fun decodeBitmap(uri: Uri): Bitmap = withContext(Dispatchers.IO) {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         context.contentResolver.openInputStream(uri)?.use { input ->
+            // inJustDecodeBounds 模式下 decodeStream 恒返回 null（只填 outWidth/outHeight），
+            // 返回值没有任何意义——绝不能用 Elvis 把它当成解码失败（这个 bug 曾导致所有 OCR 导入必崩）
             BitmapFactory.decodeStream(input, null, bounds)
-        } ?: throw IllegalStateException("无法解码图片")
+        } ?: throw IllegalStateException("无法打开图片（可能无读取权限或文件已被删除）")
 
         if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
-            throw IllegalStateException("图片尺寸无效，可能不是有效的图片文件")
+            throw IllegalStateException("无法解码图片（格式不支持或文件损坏）")
         }
 
         val options = BitmapFactory.Options().apply {
@@ -185,7 +187,7 @@ class OcrStatementService private constructor(private val context: Context) {
         }
         context.contentResolver.openInputStream(uri)?.use { input ->
             BitmapFactory.decodeStream(input, null, options)
-        } ?: throw IllegalStateException("无法解码图片")
+        } ?: throw IllegalStateException("无法解码图片（内存不足或格式不支持）")
     }
 
     /** 取最小的 2 的幂，使最长边不超过 [maxEdge]（inSampleSize 只认 2 的幂） */

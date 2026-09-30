@@ -171,11 +171,14 @@ class OcrStatementService private constructor(private val context: Context) {
      */
     private suspend fun decodeBitmap(uri: Uri): Bitmap = withContext(Dispatchers.IO) {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        context.contentResolver.openInputStream(uri)?.use { input ->
-            // inJustDecodeBounds 模式下 decodeStream 恒返回 null（只填 outWidth/outHeight），
-            // 返回值没有任何意义——绝不能用 Elvis 把它当成解码失败（这个 bug 曾导致所有 OCR 导入必崩）
+        // 注意：bounds 模式下 decodeStream 恒返回 null（只填 outWidth/outHeight），
+        // 所以这里不能把 use{} 的返回值接给 Elvis 判空——返回值是 decodeStream 的 null，
+        // 不是流打开失败。流是否打开失败必须在 use 之前单独判断。
+        val boundsStream = context.contentResolver.openInputStream(uri)
+            ?: throw IllegalStateException("无法打开图片（可能无读取权限或文件已被删除）")
+        boundsStream.use { input ->
             BitmapFactory.decodeStream(input, null, bounds)
-        } ?: throw IllegalStateException("无法打开图片（可能无读取权限或文件已被删除）")
+        }
 
         if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
             throw IllegalStateException("无法解码图片（格式不支持或文件损坏）")
@@ -185,7 +188,9 @@ class OcrStatementService private constructor(private val context: Context) {
             inSampleSize = calculateInSampleSize(bounds.outWidth, bounds.outHeight, MAX_DECODE_EDGE)
             inPreferredConfig = Bitmap.Config.ARGB_8888
         }
-        context.contentResolver.openInputStream(uri)?.use { input ->
+        val pixelStream = context.contentResolver.openInputStream(uri)
+            ?: throw IllegalStateException("无法打开图片（可能无读取权限或文件已被删除）")
+        pixelStream.use { input ->
             BitmapFactory.decodeStream(input, null, options)
         } ?: throw IllegalStateException("无法解码图片（内存不足或格式不支持）")
     }

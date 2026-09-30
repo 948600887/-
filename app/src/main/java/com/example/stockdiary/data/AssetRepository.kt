@@ -57,11 +57,25 @@ class AssetRepository private constructor(
     
     suspend fun updateAsset(asset: Asset) = assetDao.updateAsset(asset)
     
-    suspend fun updatePriceBySymbol(symbol: String, price: Double) = 
+    /**
+     * 更新现价。拒绝写入非正价格：行情/净值解析失败时常返回 0.0，
+     * 直接落库会把持仓市值清零并污染总资产曲线，此处统一拦截。
+     */
+    suspend fun updatePriceBySymbol(symbol: String, price: Double) {
+        if (price <= 0.0) {
+            AppLogger.w("拒绝写入非正价格: $symbol = $price（可能为解析失败）", "AssetRepository")
+            return
+        }
         assetDao.updatePriceBySymbol(symbol, price, System.currentTimeMillis())
-    
-    suspend fun updatePriceById(id: Long, price: Double) = 
+    }
+
+    suspend fun updatePriceById(id: Long, price: Double) {
+        if (price <= 0.0) {
+            AppLogger.w("拒绝写入非正价格: id=$id price=$price（可能为解析失败）", "AssetRepository")
+            return
+        }
         assetDao.updatePriceById(id, price, System.currentTimeMillis())
+    }
     
     suspend fun updateBalance(id: Long, balance: Double) = 
         assetDao.updateBalance(id, balance, System.currentTimeMillis())
@@ -141,7 +155,8 @@ class AssetRepository private constructor(
     
     /**
      * 添加或合并股票/基金资产（替代旧 Portfolio 逻辑）
-     * 如果已存在同 symbol 的资产，则合并数量并重新计算加权成本价。
+     * 如果已存在同 symbol 且同 account 的资产，则合并数量并重新计算加权成本价；
+     * 不同账户的持仓独立核算，不跨账户合并。
      * 资产变更与交易记录写入在同一事务中执行，确保数据一致。
      */
     suspend fun addOrUpdateStockAsset(
@@ -156,12 +171,14 @@ class AssetRepository private constructor(
         val now = System.currentTimeMillis()
 
         return StockDatabase.getInstance(context).withTransaction {
-            val existingAsset = assetDao.getAssetBySymbol(symbol)
+            // 按 symbol + account 查找：不同账户的同名持仓独立核算，不跨账户合并
+            val existingAsset = assetDao.getAssetBySymbolAndAccount(symbol, account)
 
             val resultAsset = if (existingAsset != null) {
                 val newBalance = existingAsset.balance + balance
+                // 成本含买入手续费（与券商 App「摊薄成本」口径一致），全项目统一此口径
                 val newPurchasePrice = if (newBalance > 0) {
-                    ((existingAsset.balance * existingAsset.purchasePrice) + (balance * price)) / newBalance
+                    ((existingAsset.balance * existingAsset.purchasePrice) + (balance * price) + fee) / newBalance
                 } else {
                     price
                 }
@@ -178,7 +195,8 @@ class AssetRepository private constructor(
                     symbol = symbol,
                     account = account,
                     balance = balance,
-                    purchasePrice = price,
+                    // 新建成仓时同样把手续费摊入成本
+                    purchasePrice = if (balance > 0) price + fee / balance else price,
                     lastUpdateTime = now
                 )
                 val newId = assetDao.insertAsset(newAsset)

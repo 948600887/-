@@ -23,6 +23,9 @@ interface AssetDao {
     
     @Query("SELECT * FROM assets WHERE symbol = :symbol LIMIT 1")
     suspend fun getAssetBySymbol(symbol: String): Asset?
+
+    @Query("SELECT * FROM assets WHERE symbol = :symbol AND account = :account LIMIT 1")
+    suspend fun getAssetBySymbolAndAccount(symbol: String, account: String): Asset?
     
     @Query("SELECT * FROM assets WHERE symbol IN (:symbols)")
     suspend fun getAssetsBySymbols(symbols: List<String>): List<Asset>

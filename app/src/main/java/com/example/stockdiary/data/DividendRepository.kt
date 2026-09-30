@@ -38,8 +38,10 @@ class DividendRepository private constructor(
     }
     
     companion object {
-        // 每10份分红超过100元视为异常（A股极端高分红如茅台约300元/10股，基金/ETF不可能达到）
-        private const val MAX_DIVIDEND_PER_TEN_SHARES = 100.0
+        // 基金/ETF 每10份分红超过100元视为异常（基金分红来自净值拆分，不可能达到）
+        private const val MAX_DIVIDEND_PER_TEN_SHARES_FUND = 100.0
+        // 股票每10股分红上限放宽：A股极端高分红如茅台约300元/10股（含特别分红更高），留足余量
+        private const val MAX_DIVIDEND_PER_TEN_SHARES_STOCK = 1000.0
 
         @SuppressLint("StaticFieldLeak")
         @Volatile
@@ -364,13 +366,18 @@ class DividendRepository private constructor(
     private suspend fun saveDividendsToDbInternal(symbol: String, records: List<DividendRecord>, isIncremental: Boolean = false) {
         if (records.isEmpty()) return
 
-        // 过滤异常分红数据（每10份分红超过100元视为异常），避免错误数据入库
+        // 过滤异常分红数据：基金/ETF 上限 100 元/10份，股票上限 1000 元/10股（茅台类高分红不误杀）
+        val maxAmount = if (StockCodeManager.isStock(symbol)) {
+            MAX_DIVIDEND_PER_TEN_SHARES_STOCK
+        } else {
+            MAX_DIVIDEND_PER_TEN_SHARES_FUND
+        }
         val validRecords = records.filter { record ->
             val amount = record.dividendPerShare.toDoubleOrNull() ?: 0.0
             if (amount <= 0) {
                 AppLogger.w("跳过非正分红记录: $symbol, 日期=${record.exDividendDate}, 金额=$amount", "DividendRepository")
                 false
-            } else if (amount > MAX_DIVIDEND_PER_TEN_SHARES) {
+            } else if (amount > maxAmount) {
                 AppLogger.w("跳过异常高分红记录: $symbol, 日期=${record.exDividendDate}, 金额=$amount", "DividendRepository")
                 false
             } else {

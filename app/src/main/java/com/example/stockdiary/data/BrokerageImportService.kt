@@ -384,6 +384,10 @@ class BrokerageImportService private constructor(private val context: Context) {
                 failed++
             }
         }
+        // 导入改变了持仓与流水，清空行情/价格缓存，避免界面继续展示导入前的旧数据
+        if (success > 0) {
+            runCatching { StockDataManager.getInstance(context).clearCache() }
+        }
         // 用户跳过：勾选了「不导入」的行（含异常行被勾选跳过）
         val skippedUser = transactions.count { it.skip }
         // 异常跳过：有异常但用户未勾选跳过，被系统自动跳过
@@ -391,13 +395,13 @@ class BrokerageImportService private constructor(private val context: Context) {
         CommitResult(success, skippedDup, skippedUser, skippedError, failed, failures)
     }
 
-    /** 买入：已有持仓则合并加权成本，否则新建资产 */
+    /** 买入：同 symbol 且同 account 的已有持仓则合并加权成本（含手续费摊入），否则新建资产 */
     private suspend fun applyBuy(t: ParsedTransaction, now: Long) {
-        val existing = assetDao.getAssetBySymbol(t.symbol)
+        val existing = assetDao.getAssetBySymbolAndAccount(t.symbol, t.account)
         if (existing != null) {
             val newBalance = existing.balance + t.quantity
             val newCost = if (newBalance > 0) {
-                ((existing.balance * existing.purchasePrice) + (t.quantity * t.price)) / newBalance
+                ((existing.balance * existing.purchasePrice) + (t.quantity * t.price) + t.fee) / newBalance
             } else t.price
             assetDao.updateBalanceAndPrice(existing.id, newBalance, newCost, now)
         } else {
@@ -408,7 +412,7 @@ class BrokerageImportService private constructor(private val context: Context) {
                     symbol = t.symbol,
                     account = t.account,
                     balance = t.quantity,
-                    purchasePrice = t.price,
+                    purchasePrice = if (t.quantity > 0) t.price + t.fee / t.quantity else t.price,
                     lastUpdateTime = now
                 )
             )
@@ -420,7 +424,7 @@ class BrokerageImportService private constructor(private val context: Context) {
      * 这里不抛异常——卖出无持仓视为交易记录补录，持仓由后续买入记录重建。
      */
     private suspend fun applySell(t: ParsedTransaction, now: Long) {
-        val existing = assetDao.getAssetBySymbol(t.symbol)
+        val existing = assetDao.getAssetBySymbolAndAccount(t.symbol, t.account)
         if (existing == null) {
             // 无持仓但仍记录交易；标记为提示而非硬失败
             return

@@ -39,6 +39,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -69,6 +70,12 @@ fun ImportBrokerageDialog(
         factory = ImportBrokerageViewModel.Factory(container)
     )
     val state by viewModel.uiState.collectAsState()
+
+    // ViewModel 挂在宿主 Activity 的作用域上，对话框关掉后实例还活着——
+    // 不复位的话下次打开会残留上一次的文件、映射和预览数据
+    DisposableEffect(Unit) {
+        onDispose { viewModel.reset() }
+    }
 
     if (state.error != null) {
         ErrorDialog(

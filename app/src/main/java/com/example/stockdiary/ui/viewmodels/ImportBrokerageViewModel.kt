@@ -285,18 +285,26 @@ class ImportBrokerageViewModel(
     fun commit() {
         // 防抖窗口内用户可能直接按了提交，此时校验结论还没落到状态里。
         // 提交前把 OCR 行的代码同步校验一遍，避免把格式错误的代码写进库。
-        val preValidated = _uiState.value.transactions.map { tx ->
-            if (_uiState.value.source != Source.OCR) tx
-            else {
-                val notes = tx.errors.filterNot { isSymbolNote(it) }
-                when {
-                    tx.symbol.isBlank() ->
-                        tx.copy(errors = notes + BrokerageImportService.ERR_SYMBOL_REQUIRED)
-                    !SYMBOL_PATTERN.matches(tx.symbol) ->
-                        tx.copy(errors = notes + symbolFormatError(tx.symbol))
-                    else -> tx.copy(errors = notes)
+        // 注意：本段运行在点击回调线程（主线程）上，没有协程兜底，
+        // 任何异常都会直接闪退，必须自己兜住。
+        val preValidated = try {
+            _uiState.value.transactions.map { tx ->
+                if (_uiState.value.source != Source.OCR) tx
+                else {
+                    val notes = tx.errors.filterNot { isSymbolNote(it) }
+                    when {
+                        tx.symbol.isBlank() ->
+                            tx.copy(errors = notes + BrokerageImportService.ERR_SYMBOL_REQUIRED)
+                        !SYMBOL_PATTERN.matches(tx.symbol) ->
+                            tx.copy(errors = notes + symbolFormatError(tx.symbol))
+                        else -> tx.copy(errors = notes)
+                    }
                 }
             }
+        } catch (e: Exception) {
+            AppLogger.e("提交前校验异常: ${e.message}", e, "ImportVM")
+            _uiState.value = _uiState.value.copy(error = "提交前校验失败: ${e.message}")
+            return
         }
         _uiState.value = _uiState.value.copy(transactions = preValidated)
 

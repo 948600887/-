@@ -5,6 +5,7 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.material3.Surface
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.CompositionLocalProvider
@@ -14,6 +15,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
 import com.example.stockdiary.di.LocalAppContainer
 import com.example.stockdiary.ui.theme.GoldVaultTheme
 import com.example.stockdiary.ui.navigation.GoldVaultNavHost
@@ -52,25 +54,31 @@ class MainActivity : ComponentActivity() {
                     }
 
                     if (showRecoveryDialog && recoveryMessage != null) {
+                        val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
                         androidx.compose.material3.AlertDialog(
                             onDismissRequest = { showRecoveryDialog = false },
-                            title = { androidx.compose.material3.Text("应用恢复") },
+                            title = { androidx.compose.material3.Text("应用上次异常退出") },
                             text = {
                                 androidx.compose.material3.Text(
-                                    "应用之前遇到了问题并已恢复。您可以继续使用或重启应用以获得更好的体验。"
+                                    recoveryMessage ?: "",
+                                    style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                                    modifier = androidx.compose.ui.Modifier
+                                        .heightIn(max = 360.dp)
+                                        .verticalScroll(androidx.compose.foundation.rememberScrollState())
                                 )
                             },
                             confirmButton = {
-                                androidx.compose.material3.TextButton(onClick = { showRecoveryDialog = false }) {
-                                    androidx.compose.material3.Text("继续使用")
+                                androidx.compose.material3.TextButton(onClick = {
+                                    clipboard.setText(androidx.compose.ui.text.AnnotatedString(recoveryMessage ?: ""))
+                                    showRecoveryDialog = false
+                                }) {
+                                    androidx.compose.material3.Text("复制错误信息")
                                 }
                             },
                             dismissButton = {
-                                androidx.compose.material3.TextButton(onClick = {
-                                    showRecoveryDialog = false
-                                    recreate()
-                                }) {
-                                    androidx.compose.material3.Text("重启应用")
+                                androidx.compose.material3.TextButton(onClick = { showRecoveryDialog = false }) {
+                                    androidx.compose.material3.Text("关闭")
                                 }
                             }
                         )

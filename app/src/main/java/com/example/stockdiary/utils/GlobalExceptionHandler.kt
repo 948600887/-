@@ -48,6 +48,13 @@ object GlobalExceptionHandler {
         val crashInfo = buildCrashInfo(thread, throwable)
         saveCrashLog(crashInfo)
 
+        // 把完整堆栈写入崩溃恢复状态，下次启动的恢复弹窗直接展示（listener 只记录一句概述，定位不了问题）
+        try {
+            CrashRecoveryManager.getInstance().recordCrash(crashInfo)
+        } catch (e: Exception) {
+            AppLogger.e("记录崩溃详情失败", e, "CrashHandler")
+        }
+
         AppLogger.e("未捕获异常: ${throwable.message}", throwable, "CrashHandler")
 
         try {
@@ -250,15 +257,16 @@ class CrashRecoveryManager private constructor() {
                 putBoolean("has_crash", true)
                 putLong("last_crash_time", currentTime)
                 putInt("crash_count", crashState.crashCount + 1)
-                putString("last_crash_info", crashInfo.take(500))
+                // 堆栈较长，截断太少会丢掉关键帧，4K 足够覆盖常见堆栈
+                putString("last_crash_info", crashInfo.take(4000))
                 apply()
             }
-            
+
             crashState = crashState.copy(
                 hasCrash = true,
                 lastCrashTime = currentTime,
                 crashCount = crashState.crashCount + 1,
-                lastCrashInfo = crashInfo.take(500)
+                lastCrashInfo = crashInfo.take(4000)
             )
             
         } catch (e: CancellationException) {

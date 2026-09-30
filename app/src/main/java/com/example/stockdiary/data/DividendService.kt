@@ -10,6 +10,7 @@ import kotlin.math.min
 import com.example.stockdiary.network.NetworkClient
 import com.example.stockdiary.utils.StockCodeManager
 import com.example.stockdiary.common.Result as AppResult
+import kotlinx.coroutines.CancellationException
 
 /**
  * 分红数据获取服务
@@ -77,6 +78,8 @@ class DividendService {
                 }
             } catch (e: IOException) {
                 AppResult.Error(e)
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 AppResult.Error(e)
             }
@@ -136,6 +139,8 @@ class DividendService {
                                 fiscalYear = fiscalYear
                             )
                         )
+                    } catch (e: CancellationException) {
+                        throw e
                     } catch (e: Exception) {
                         AppLogger.e("解析表格行失败: ${e.message}", tag = "DividendService")
                         continue
@@ -146,6 +151,8 @@ class DividendService {
             }
 
             AppLogger.d("最终解析到 ${records.size} 条分红记录", "DividendService")
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             AppLogger.e("HTML解析异常", e, "DividendService")
         }

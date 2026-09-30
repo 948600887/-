@@ -14,6 +14,7 @@ import com.example.stockdiary.data.DividendRepository
 import com.example.stockdiary.data.DividendRecord
 import com.example.stockdiary.data.DividendMetrics
 import com.example.stockdiary.utils.AppLogger
+import kotlinx.coroutines.CancellationException
 
 /**
  * 增强版股票详情ViewModel，包含分红数据
@@ -63,6 +64,8 @@ class EnhancedStockDetailViewModel(
             }
             
             AppLogger.d("设置股票完成: $fullCode", "StockDetailVM")
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             AppLogger.e("设置股票失败", e, "StockDetailVM")
             withContext(Dispatchers.Main) {
@@ -106,6 +109,8 @@ class EnhancedStockDetailViewModel(
                 }
             }
             
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             _errorMessage.value = "获取数据失败: ${e.message}"
             AppLogger.e("获取数据异常", e, "StockData")
@@ -151,6 +156,8 @@ class EnhancedStockDetailViewModel(
                 val year = dividend.exDividendDate.substring(0, 4).toInt()
                 val amount = dividend.dividendPerShare.toDoubleOrNull() ?: 0.0
                 if (year > 0 && amount > 0) year to amount else null
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 null
             }

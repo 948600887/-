@@ -8,6 +8,7 @@ import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.CancellationException
 
 abstract class BaseAPI<T>(
     protected val tag: String = "BaseAPI"
@@ -45,6 +46,8 @@ abstract class BaseAPI<T>(
                     return@withContext Result.failure(Exception("HTTP ${it.code}"))
                 }
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             AppLogger.e("Request error: ${e.message}", e, tag)
             Result.failure(e)

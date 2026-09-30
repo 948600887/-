@@ -8,6 +8,7 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.withContext
 import okhttp3.Request
 import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.CancellationException
 
 /**
  * 基金数据 API：从东方财富 pingzhongdata 接口获取基金净值数据。
@@ -73,6 +74,8 @@ object FundAPI {
             } else {
                 Result.failure(Exception("基金数据获取失败"))
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             AppLogger.e("获取基金数据异常: ${e.message}", e, TAG)
             Result.failure(e)
@@ -150,6 +153,8 @@ object FundAPI {
                         date = nawData.date
                     )
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 AppLogger.e("获取基金信息失败: ${e.message}", e, TAG)
                 null

@@ -11,6 +11,7 @@ import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.CancellationException
 
 object AppLogger {
     private var isDebug = true
@@ -99,6 +100,8 @@ object AppLogger {
             if (System.currentTimeMillis() - lastFlushTime > FLUSH_INTERVAL_MS || level == "ERROR") {
                 flushLogs()
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Log.w(LOG_TAG, "队列日志写入失败", e)
         }
@@ -140,6 +143,8 @@ object AppLogger {
             
             lastFlushTime = System.currentTimeMillis()
             trimLogFile(logFile)
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Log.w(LOG_TAG, "日志刷新失败", e)
         } finally {
@@ -161,6 +166,8 @@ object AppLogger {
                 }
             }
             File(dir, "app.log")
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             null
         }
@@ -191,6 +198,8 @@ object AppLogger {
                 }
                 file.writeText(linesToKeep.joinToString("\n"))
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             // 忽略
         }
@@ -205,6 +214,8 @@ object AppLogger {
             val logFile = getLogFileSafe()
             logFile?.writeText("")
             logQueue.clear()
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Log.w(LOG_TAG, "清空日志失败", e)
         }

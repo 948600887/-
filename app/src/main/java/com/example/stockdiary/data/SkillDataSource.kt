@@ -7,6 +7,7 @@ import com.example.stockdiary.utils.StockCodeManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
+import kotlinx.coroutines.CancellationException
 
 /**
  * 妙想Skill数据源实现
@@ -35,6 +36,8 @@ class SkillDataSource : StockDataSource {
                 }
                 else -> Result.failure("未知状态")
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             AppLogger.e("妙想Skill获取股票数据异常: ${e.message}", e, TAG)
             Result.failure(e)
@@ -65,6 +68,8 @@ class SkillDataSource : StockDataSource {
             } else {
                 Result.failure("批量获取失败: ${errors.joinToString("; ")}")
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             AppLogger.e("妙想Skill批量获取股票数据异常: ${e.message}", e, TAG)
             Result.failure(e)
@@ -77,6 +82,8 @@ class SkillDataSource : StockDataSource {
         try {
             EastmoneySkillApi.queryStock("上证指数最新行情")
             true
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             false
         }
@@ -114,6 +121,8 @@ class SkillDataSource : StockDataSource {
                 timestamp = dataObj.optString("time", 
                     dataObj.optString("timestamp", ""))
             )
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             AppLogger.e("解析妙想Skill股票数据失败: ${e.message}", e, TAG)
             null

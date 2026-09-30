@@ -26,6 +26,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.CancellationException
 
 class SettingsViewModel(
     private val assetRepository: AssetRepository,
@@ -63,19 +64,38 @@ class SettingsViewModel(
     val lastPriceSyncTime: StateFlow<Long> = _lastPriceSyncTime.asStateFlow()
 
     init {
+        // Room Flow 在数据库异常时会向收集者抛错，不兜住会让 viewModelScope 崩溃
         viewModelScope.launch {
-            assetRepository.getAllAssets().collect { assets ->
-                _uiState.value = _uiState.value.copy(assets = assets)
+            try {
+                assetRepository.getAllAssets().collect { assets ->
+                    _uiState.value = _uiState.value.copy(assets = assets)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                AppLogger.e("资产流收集异常: ${e.message}", e, "SettingsVM")
             }
         }
         viewModelScope.launch {
-            snapshotDao.getAllSnapshots().collect { snapshots ->
-                _uiState.value = _uiState.value.copy(snapshots = snapshots)
+            try {
+                snapshotDao.getAllSnapshots().collect { snapshots ->
+                    _uiState.value = _uiState.value.copy(snapshots = snapshots)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                AppLogger.e("快照流收集异常: ${e.message}", e, "SettingsVM")
             }
         }
         viewModelScope.launch {
-            transactionDao.getAllFlow().collect { transactions ->
-                _uiState.value = _uiState.value.copy(transactions = transactions)
+            try {
+                transactionDao.getAllFlow().collect { transactions ->
+                    _uiState.value = _uiState.value.copy(transactions = transactions)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                AppLogger.e("交易流收集异常: ${e.message}", e, "SettingsVM")
             }
         }
     }
@@ -130,6 +150,8 @@ class SettingsViewModel(
                 } else {
                     _uiState.value = _uiState.value.copy(isExporting = false, exportResult = Result.failure("导出失败"))
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 AppLogger.e("导出失败: ${e.message}", e, "SettingsVM")
                 _uiState.value = _uiState.value.copy(isExporting = false, exportResult = Result.failure(e))
@@ -143,6 +165,8 @@ class SettingsViewModel(
             try {
                 assetRepository.deleteAllData()
                 _uiState.value = _uiState.value.copy(isDeleting = false, deleteResult = Result.success(Unit))
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 AppLogger.e("删除数据失败: ${e.message}", e, "SettingsVM")
                 _uiState.value = _uiState.value.copy(isDeleting = false, deleteResult = Result.failure(e))
@@ -156,6 +180,8 @@ class SettingsViewModel(
             try {
                 val health = dataSourceHealthChecker.checkAllHealth()
                 _uiState.value = _uiState.value.copy(isCheckingHealth = false, dataSourceHealth = health)
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 AppLogger.e("检查数据源健康失败: ${e.message}", e, "SettingsVM")
                 _uiState.value = _uiState.value.copy(
@@ -183,6 +209,8 @@ class SettingsViewModel(
             try {
                 dashboardPreferencesManager.savePreferences(preferences)
                 _dashboardPreferences.value = preferences
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 AppLogger.e("保存仪表盘偏好失败: ${e.message}", e, "SettingsVM")
             }
@@ -197,6 +225,8 @@ class SettingsViewModel(
                     priceSyncPreferencesManager.setConsecutiveFailureCount(0)
                 }
                 _autoPriceSyncEnabled.value = enabled
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 AppLogger.e("保存自动价格同步设置失败: ${e.message}", e, "SettingsVM")
             }

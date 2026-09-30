@@ -13,6 +13,7 @@ import java.util.concurrent.atomic.AtomicReference
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.minutes
 import com.example.stockdiary.utils.StockCodeManager
+import kotlinx.coroutines.CancellationException
 
 /**
  * 股票API管理器
@@ -74,6 +75,8 @@ class StockAPIManager {
                         return@withContext result
                     }
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 val currentFail = failCount.incrementAndGet()
                 AppLogger.e("API调用异常 ($currentFail/$maxFailures): ${e.message}", e, "StockAPIManager")
@@ -143,6 +146,8 @@ class StockAPIManager {
                     } else {
                         AppLogger.d("主API（腾讯财经）仍未恢复", "StockAPIManager")
                     }
+                } catch (e: CancellationException) {
+                    throw e
                 } catch (e: Exception) {
                     AppLogger.d("主API（腾讯财经）仍未恢复: ${e.message}", "StockAPIManager")
                 }
@@ -255,6 +260,8 @@ object TencentStockAPI : StockAPI {
                         return@withContext Result.failure(IOException("未获取到股票数据，请检查股票代码"))
                     }
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 AppLogger.e("异常: ${e.message}", e, "TencentStockAPI")
                 Result.failure(e)
@@ -342,6 +349,8 @@ object TencentStockAPI : StockAPI {
             } else {
                 AppLogger.d("未匹配到股票数据", "TencentStockAPI")
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             AppLogger.e("解析错误: ${e.message}", e, "TencentStockAPI")
         }

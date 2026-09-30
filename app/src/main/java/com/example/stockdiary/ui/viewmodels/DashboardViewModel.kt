@@ -18,6 +18,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.CancellationException
 
 class DashboardViewModel(private val container: AppContainer) : ViewModel() {
 
@@ -72,7 +73,13 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
 
     init {
         viewModelScope.launch {
-            _existingAccounts.value = repository.getAllAccounts().sorted()
+            try {
+                _existingAccounts.value = repository.getAllAccounts().sorted()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                AppLogger.w("加载账户列表失败: ${e.message}", "DashboardVM")
+            }
         }
     }
 
@@ -94,6 +101,8 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
                     else -> null
                 }
                 hasLoadedIncome = true
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 AppLogger.e("计算收入失败: ${e.message}", e, "DashboardVM")
                 _realAnnualIncome.value = 0.0
@@ -109,16 +118,25 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
         viewModelScope.launch {
             _isSyncing.value = true
             _syncResult.value = null
-            var lastProgress: SyncProgress? = null
-            val result = AssetSyncManager.syncAllAssets(
-                context = container.context,
-                repository = repository,
-                assets = assets.value,
-                onProgress = { lastProgress = it }
-            )
-            _syncProgress.value = lastProgress
-            _syncResult.value = result
-            _isSyncing.value = false
+            try {
+                var lastProgress: SyncProgress? = null
+                val result = AssetSyncManager.syncAllAssets(
+                    context = container.context,
+                    repository = repository,
+                    assets = assets.value,
+                    onProgress = { lastProgress = it }
+                )
+                _syncProgress.value = lastProgress
+                _syncResult.value = result
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // 不捕获的话 _isSyncing 永远停在 true，后续同步全被挡死、界面一直转圈
+                AppLogger.e("同步异常: ${e.message}", e, "DashboardVM")
+                _syncResult.value = null
+            } finally {
+                _isSyncing.value = false
+            }
         }
     }
 
@@ -134,6 +152,8 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
                     onProgress = { },
                     forceRefresh = true
                 )
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 AppLogger.w("同步失败: ${e.message}", "DashboardVM")
             }
@@ -143,6 +163,8 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
                 _realAnnualIncome.value = result.totalAnnualIncome
                 _estimatedDailyDividend.value = result.totalAnnualIncome / 365
                 _incomeCalculationStatus.value = null
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 AppLogger.e("加载分红收入失败: ${e.message}", e, "DashboardViewModel")
                 _incomeCalculationStatus.value = "加载分红收入失败: ${e.localizedMessage ?: e.message}"

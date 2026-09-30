@@ -19,6 +19,7 @@ import java.nio.charset.CodingErrorAction
 import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
+import kotlinx.coroutines.CancellationException
 
 /**
  * 券商交割单批量导入服务。
@@ -148,6 +149,8 @@ class BrokerageImportService private constructor(private val context: Context) {
                 .onUnmappableCharacter(CodingErrorAction.REPORT)
             decoder.decode(ByteBuffer.wrap(bytes))
             Charsets.UTF_8
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Charset.forName("GBK")
         }
@@ -378,6 +381,8 @@ class BrokerageImportService private constructor(private val context: Context) {
                     success++
                 }
                 if (localSkipped) skippedDup++
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 AppLogger.e("交割单导入第 ${t.rowNumber} 行失败: ${e.message}", e, "BrokerageImport")
                 failures.add(RowFailure(t.rowNumber, e.message ?: "未知错误"))

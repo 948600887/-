@@ -4,6 +4,7 @@ import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
 import java.time.LocalDate
 import kotlin.math.pow
+import kotlinx.coroutines.CancellationException
 
 /**
  * 股息收益计算器
@@ -246,6 +247,8 @@ object DividendIncomeCalculator {
                 val day = parts[2].toInt()
                 Pair(month, day)
             } else null
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             null
         }

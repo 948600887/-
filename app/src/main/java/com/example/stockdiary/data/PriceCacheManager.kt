@@ -6,6 +6,7 @@ import com.example.stockdiary.utils.AppLogger
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import kotlinx.coroutines.CancellationException
 
 object PriceCacheManager {
     private const val TAG = "PriceCacheManager"
@@ -150,6 +151,8 @@ object PriceCacheManager {
         synchronized(diskLock) {
             try {
                 cacheFile?.delete()
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 AppLogger.e("清空缓存文件失败: ${e.message}", tag = TAG)
             }
@@ -183,6 +186,8 @@ object PriceCacheManager {
 
                 file.writeText(jsonArray.toString())
                 AppLogger.d("缓存已保存到磁盘: ${snapshot.size} 条", TAG)
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 AppLogger.e("保存缓存失败: ${e.message}", tag = TAG)
             }
@@ -221,6 +226,8 @@ object PriceCacheManager {
                 }
 
                 AppLogger.d("从磁盘加载缓存: ${memoryCache.size} 条", TAG)
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 AppLogger.e("加载缓存失败: ${e.message}", tag = TAG)
                 memoryCache.clear()

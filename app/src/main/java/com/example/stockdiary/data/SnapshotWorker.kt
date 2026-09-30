@@ -6,6 +6,7 @@ import androidx.work.WorkerParameters
 import com.example.stockdiary.utils.AppLogger
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
+import kotlinx.coroutines.CancellationException
 
 class SnapshotWorker(
     context: Context,
@@ -32,6 +33,8 @@ class SnapshotWorker(
                 AppLogger.w("自动快照失败", "SnapshotWorker")
                 Result.retry()
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             AppLogger.e("自动快照异常: ${e.message}", e, "SnapshotWorker")
             Result.retry()

@@ -72,6 +72,8 @@ class CalendarViewModel(
             try {
                 val result = incomeLoader.loadIncome(assets, forceRefresh = false, tag = "CalendarVM")
                 _uiState.value = _uiState.value.copy(realAnnualIncome = result.totalAnnualIncome)
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 AppLogger.e("计算分红收入失败: ${e.message}", e, "CalendarVM")
             }
@@ -84,6 +86,8 @@ class CalendarViewModel(
             try {
                 val current = dashboardPreferencesManager.loadPreferences()
                 dashboardPreferencesManager.savePreferences(current.copy(monthlyExpense = expense))
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 AppLogger.e("保存月度生活费失败: ${e.message}", e, "CalendarVM")
             }
@@ -133,12 +137,21 @@ class CalendarViewModel(
         }
         _uiState.value = _uiState.value.copy(isLoading = true, errorMessage = null)
         val requestState = _uiState.value
-        val result = withContext(Dispatchers.IO) {
-            if (requestState.selectedTab == "资产日历") {
-                generateAssetCalendarData(requestState.currentMonth, assets, forceRefresh)
-            } else {
-                generateIncomeCalendarData(requestState.currentMonth, assets, forceRefresh)
+        // 顶层兜底：内部虽返回 Result，但 withContext 链路上的意外异常不能让 viewModelScope 崩溃
+        val result = try {
+            withContext(Dispatchers.IO) {
+                if (requestState.selectedTab == "资产日历") {
+                    generateAssetCalendarData(requestState.currentMonth, assets, forceRefresh)
+                } else {
+                    generateIncomeCalendarData(requestState.currentMonth, assets, forceRefresh)
+                }
             }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            AppLogger.e("生成日历数据异常: ${e.message}", e, "CalendarVM")
+            _uiState.value = _uiState.value.copy(isLoading = false, errorMessage = "日历数据加载失败，请重试")
+            return
         }
         val currentState = _uiState.value
         if (currentState.selectedTab != requestState.selectedTab || currentState.currentMonth != requestState.currentMonth) {
@@ -187,6 +200,8 @@ class CalendarViewModel(
                 try {
                     val date = LocalDate.parse(snapshot.date)
                     date.year == month.year && date.monthValue == month.monthValue
+                } catch (e: CancellationException) {
+                    throw e
                 } catch (e: Exception) {
                     false
                 }
@@ -195,6 +210,8 @@ class CalendarViewModel(
                 try {
                     val date = LocalDate.parse(snapshot.date)
                     data[date] = snapshot.netAssets
+                } catch (e: CancellationException) {
+                    throw e
                 } catch (e: Exception) {
                     // ignore
                 }
@@ -214,6 +231,8 @@ class CalendarViewModel(
                         try {
                             val date = LocalDate.parse(record.exDividendDate)
                             date.year == month.year && date.monthValue == month.monthValue
+                        } catch (e: CancellationException) {
+                            throw e
                         } catch (e: Exception) {
                             false
                         }
@@ -223,11 +242,15 @@ class CalendarViewModel(
                         monthDividends.forEach { record ->
                             try {
                                 dividendDates.add(LocalDate.parse(record.exDividendDate))
+                            } catch (e: CancellationException) {
+                                throw e
                             } catch (e: Exception) {
                                 AppLogger.w("解析分红日期失败: ${record.exDividendDate}", "CalendarViewModel")
                             }
                         }
                     }
+                } catch (e: CancellationException) {
+                    throw e
                 } catch (e: Exception) {
                     AppLogger.w("获取 ${asset.name} 分红记录失败: ${e.message}", "CalendarViewModel")
                 }
@@ -240,6 +263,8 @@ class CalendarViewModel(
 
             CalendarResult(data, dividendDates, dividends)
         })
+    } catch (e: CancellationException) {
+        throw e
     } catch (e: CancellationException) {
         throw e
     } catch (e: Exception) {
@@ -271,6 +296,8 @@ class CalendarViewModel(
                         try {
                             val date = LocalDate.parse(record.exDividendDate)
                             date.year == month.year && date.monthValue == month.monthValue
+                        } catch (e: CancellationException) {
+                            throw e
                         } catch (e: Exception) {
                             false
                         }
@@ -287,11 +314,15 @@ class CalendarViewModel(
                                 if (totalAmount > 0) {
                                     data[date] = (data[date] ?: 0.0) + totalAmount
                                 }
+                            } catch (e: CancellationException) {
+                                throw e
                             } catch (e: Exception) {
                                 // ignore
                             }
                         }
                     }
+                } catch (e: CancellationException) {
+                    throw e
                 } catch (e: Exception) {
                     AppLogger.w("获取 ${asset.name} 分红记录失败: ${e.message}", "CalendarViewModel")
                 }
@@ -304,6 +335,8 @@ class CalendarViewModel(
 
             CalendarResult(data, dividendDates, dividends)
         })
+    } catch (e: CancellationException) {
+        throw e
     } catch (e: CancellationException) {
         throw e
     } catch (e: Exception) {

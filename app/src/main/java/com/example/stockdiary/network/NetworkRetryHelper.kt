@@ -6,6 +6,7 @@ import kotlinx.coroutines.delay
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
 import java.io.IOException
+import kotlinx.coroutines.CancellationException
 
 object NetworkRetryHelper {
     
@@ -39,6 +40,8 @@ object NetworkRetryHelper {
                 } else {
                     return Result.failure(lastException)
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 lastException = e
                 
@@ -79,6 +82,8 @@ object NetworkRetryHelper {
     ): Result<T> {
         return try {
             primaryBlock()
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             AppLogger.e("主请求失败: ${e.message}", e, TAG)
             

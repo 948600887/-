@@ -6,6 +6,7 @@ import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.jsoup.Jsoup
+import kotlinx.coroutines.CancellationException
 
 /**
  * 场外基金分红API服务
@@ -57,6 +58,8 @@ class FundDividendApiService {
                     AppLogger.w("OkHttp HTTP 请求失败: ${response.code}", TAG)
                 }
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             AppLogger.w("OkHttp 获取天天基金分红失败: ${e.message}", TAG)
         }
@@ -76,6 +79,8 @@ class FundDividendApiService {
             if (records.isNotEmpty()) {
                 return@withContext Result.success(records)
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             AppLogger.e("Jsoup 获取天天基金分红失败: ${e.message}", e, TAG)
         }
@@ -133,6 +138,8 @@ class FundDividendApiService {
                                 )
                             )
                         }
+                    } catch (e: CancellationException) {
+                        throw e
                     } catch (e: Exception) {
                         AppLogger.w("解析基金分红行失败: ${e.message}", TAG)
                         continue
@@ -181,6 +188,8 @@ class FundDividendApiService {
 
             records.sortByDescending { it.exDividendDate }
 
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             AppLogger.e("HTML解析异常: ${e.message}", e, TAG)
         }

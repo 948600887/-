@@ -17,6 +17,7 @@ import com.example.stockdiary.common.Constants
 import com.example.stockdiary.utils.PerformanceMonitor
 import com.example.stockdiary.utils.StockCodeManager
 import com.example.stockdiary.data.PriceCacheManager
+import kotlinx.coroutines.CancellationException
 
 object SinaStockAPI : StockAPI {
     private const val TAG = "SinaStockAPI"
@@ -159,6 +160,8 @@ object SinaStockAPI : StockAPI {
                                 request.complete(Result.success(batchResult))
                                 return@use batchResult
                             }
+                        } catch (e: CancellationException) {
+                            throw e
                         } catch (e: Exception) {
                             AppLogger.e("批次请求失败: ${e.message}", e, TAG)
                             request.complete(Result.failure(e))
@@ -173,6 +176,8 @@ object SinaStockAPI : StockAPI {
                         } finally {
                             batchPendingRequests.remove(batchKey)
                         }
+                    } catch (e: CancellationException) {
+                        throw e
                     } catch (e: Exception) {
                         AppLogger.e("批次请求异常: ${e.message}", e, TAG)
                         val partialResult = mutableMapOf<String, SinaStockData>()
@@ -198,6 +203,8 @@ object SinaStockAPI : StockAPI {
                 AppLogger.d("API调用成功，返回 ${allResults.size} 条数据", TAG)
                 PerformanceMonitor.end("network_request")
                 Result.success(allResults)
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 PerformanceMonitor.end("network_request")
                 AppLogger.e("异常: ${e.message}", e, TAG)
@@ -240,6 +247,8 @@ object SinaStockAPI : StockAPI {
 
                     return@withContext Result.success(kLineData)
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 AppLogger.e("K线API异常: ${e.message}", e, TAG)
                 Result.failure(e)
@@ -267,6 +276,8 @@ object SinaStockAPI : StockAPI {
                     )
                 }
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             AppLogger.e("解析K线数据错误: ${e.message}", e, TAG)
         }
@@ -304,6 +315,8 @@ object SinaStockAPI : StockAPI {
 
                     return@withContext Result.success(searchResults)
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 AppLogger.e("搜索API异常: ${e.message}", e, TAG)
                 Result.failure(e)
@@ -336,6 +349,8 @@ object SinaStockAPI : StockAPI {
                     result.add(StockSearchResult(symbol, name, market))
                 }
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             AppLogger.e("解析搜索结果错误: ${e.message}", e, TAG)
         }
@@ -383,6 +398,8 @@ object SinaStockAPI : StockAPI {
                     }
                 }
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             AppLogger.e("解析实时数据错误: ${e.message}", e, TAG)
         }

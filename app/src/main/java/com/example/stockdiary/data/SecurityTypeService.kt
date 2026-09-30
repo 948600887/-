@@ -6,6 +6,7 @@ import kotlinx.coroutines.withContext
 import okhttp3.Request
 import org.json.JSONObject
 import java.util.regex.Pattern
+import kotlinx.coroutines.CancellationException
 
 /**
  * 证券类型枚举
@@ -200,6 +201,8 @@ object SecurityTypeService {
                 if (result.type != SecurityType.UNKNOWN) {
                     results.add(result)
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 // 忽略单个数据源失败
             }
@@ -322,6 +325,8 @@ object SecurityTypeService {
                     result["amount"] = fields[9]
                 }
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             // 忽略解析错误
         }

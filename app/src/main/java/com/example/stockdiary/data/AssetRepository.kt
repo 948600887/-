@@ -16,6 +16,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
+import kotlinx.coroutines.CancellationException
 
 class AssetRepository private constructor(
     private val assetDao: AssetDao,
@@ -47,6 +48,8 @@ class AssetRepository private constructor(
     suspend fun insertAsset(asset: Asset): Long {
         return try {
             assetDao.insertAsset(asset)
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             AppLogger.e("Failed to insert asset: ${e.message}", e)
             throw e
@@ -126,6 +129,8 @@ class AssetRepository private constructor(
                 AppLogger.i("Snapshot created: ${snapshot.date}, netAssets=${snapshot.netAssets}, yield=${snapshot.yieldRate}%")
                 snapshot.copy(id = snapshotId)
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             AppLogger.e("Failed to create snapshot: ${e.message}", e)
             null

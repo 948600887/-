@@ -5,6 +5,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.Request
 import org.json.JSONObject
+import kotlinx.coroutines.CancellationException
 
 object BinanceAPI {
     private const val BASE_URL = "https://api.binance.com/api/v3"
@@ -38,6 +39,8 @@ object BinanceAPI {
                     val json = JSONObject(body)
                     return@withContext json.getString("price").toDoubleOrNull()
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 AppLogger.e("获取价格失败: ${e.message}", e, "BinanceAPI")
                 null
@@ -63,6 +66,8 @@ object BinanceAPI {
                     val body = it.body?.string() ?: return@withContext null
                     return@withContext parse24hrStats(body)
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 AppLogger.e("获取24小时统计失败: ${e.message}", e, "BinanceAPI")
                 null
@@ -82,6 +87,8 @@ object BinanceAPI {
                 lowPrice = obj.getString("lowPrice").toDoubleOrNull() ?: 0.0,
                 volume = obj.getString("volume").toDoubleOrNull() ?: 0.0
             )
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             null
         }

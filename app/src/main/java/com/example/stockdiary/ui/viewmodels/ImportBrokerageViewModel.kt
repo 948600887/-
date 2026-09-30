@@ -16,6 +16,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import java.nio.charset.Charset
+import kotlinx.coroutines.CancellationException
 
 /**
  * 交割单导入 ViewModel：支持 CSV 文件 和 截图 OCR 两种来源。
@@ -82,6 +83,8 @@ class ImportBrokerageViewModel(
                     parseResult = result,
                     charsetName = result.charset.name()
                 )
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 AppLogger.e("交割单解析失败: ${e.message}", e, "ImportVM")
                 _uiState.value = _uiState.value.copy(
@@ -116,6 +119,8 @@ class ImportBrokerageViewModel(
                         ocrYear = result.year
                     )
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 AppLogger.e("OCR 识别失败: ${e.message}", e, "ImportVM")
                 val msg = when {
@@ -158,6 +163,8 @@ class ImportBrokerageViewModel(
                     parseResult = result.copy(mapping = clamped),
                     charsetName = charset.name()
                 )
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 AppLogger.e("重新解析失败: ${e.message}", e, "ImportVM")
                 _uiState.value = _uiState.value.copy(error = "重新解析失败: ${e.message}")
@@ -191,6 +198,8 @@ class ImportBrokerageViewModel(
             try {
                 val txs = service.mapRows(parsed)
                 _uiState.value = _uiState.value.copy(transactions = txs, step = Step.PREVIEW)
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 AppLogger.e("转换交易记录失败: ${e.message}", e, "ImportVM")
                 _uiState.value = _uiState.value.copy(error = "转换失败: ${e.message}")
@@ -225,7 +234,14 @@ class ImportBrokerageViewModel(
         symbolCheckJobs.remove(rowNumber)?.cancel()
         symbolCheckJobs[rowNumber] = viewModelScope.launch {
             delay(SYMBOL_CHECK_DEBOUNCE_MS)
-            validateSymbolRow(rowNumber)
+            try {
+                validateSymbolRow(rowNumber)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // 校验失败（如数据库异常）只记日志，不能让防抖任务崩掉整个作用域
+                AppLogger.w("代码校验失败 row=$rowNumber: ${e.message}", "ImportBrokerage")
+            }
         }
     }
 
@@ -292,6 +308,8 @@ class ImportBrokerageViewModel(
                 _uiState.value = _uiState.value.copy(
                     committing = false, commitResult = result, step = Step.RESULT
                 )
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 AppLogger.e("交割单提交失败: ${e.message}", e, "ImportVM")
                 _uiState.value = _uiState.value.copy(

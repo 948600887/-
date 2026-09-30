@@ -11,6 +11,7 @@ import com.example.stockdiary.utils.AppLogger
 import kotlinx.coroutines.*
 import okhttp3.Request
 import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.CancellationException
 
 object UnifiedPriceService {
     private const val TAG = "UnifiedPriceService"
@@ -50,6 +51,8 @@ object UnifiedPriceService {
 
             deferred.complete(result)
             result
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             val failure = Result.failure<AssetPrice>(e)
             deferred.complete(failure)
@@ -94,6 +97,8 @@ object UnifiedPriceService {
                     Result.failure(Exception("解析股票数据失败"))
                 }
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             AppLogger.e("获取股票价格失败: $code", e, TAG)
             Result.failure(e)
@@ -139,6 +144,8 @@ object UnifiedPriceService {
                 low = low,
                 timestamp = System.currentTimeMillis()
             )
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             AppLogger.e("解析股票数据失败", e, TAG)
             null
@@ -180,6 +187,8 @@ object UnifiedPriceService {
             } else {
                 Result.failure(Exception("未找到基金数据"))
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             AppLogger.e("获取基金价格失败: $code", e, TAG)
             Result.failure(e)
@@ -220,6 +229,8 @@ object UnifiedPriceService {
                     Result.failure(Exception("解析加密货币数据失败"))
                 }
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             AppLogger.e("获取加密货币价格失败: $code", e, TAG)
             Result.failure(e)
@@ -250,6 +261,8 @@ object UnifiedPriceService {
                 volume = volume,
                 timestamp = System.currentTimeMillis()
             )
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             AppLogger.e("解析加密货币数据失败", e, TAG)
             null

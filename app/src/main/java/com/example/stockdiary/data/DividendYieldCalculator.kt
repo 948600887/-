@@ -2,6 +2,7 @@ package com.example.stockdiary.data
 
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
+import kotlinx.coroutines.CancellationException
 
 /**
  * 股息率计算器
@@ -28,6 +29,8 @@ object DividendYieldCalculator {
             try {
                 val date = parseDate(dividend.exDividendDate)
                 date != null && date.isAfter(twelveMonthsAgo)
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 false
             }
@@ -69,6 +72,8 @@ object DividendYieldCalculator {
                 try {
                     val date = parseDate(dividend.exDividendDate)
                     date != null && date.isAfter(twelveMonthsAgo)
+                } catch (e: CancellationException) {
+                    throw e
                 } catch (e: Exception) {
                     false
                 }
@@ -94,6 +99,8 @@ object DividendYieldCalculator {
                     val date = parseDate(dividend.exDividendDate)
                     val year = getYearFromDate(date)
                     year == lastYear
+                } catch (e: CancellationException) {
+                    throw e
                 } catch (e: Exception) {
                     false
                 }
@@ -109,6 +116,8 @@ object DividendYieldCalculator {
             try {
                 val date = parseDate(dividend.exDividendDate)
                 getYearFromDate(date)
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 0
             }
@@ -136,6 +145,8 @@ object DividendYieldCalculator {
         val yearlyDividends = dividends.groupBy { dividend ->
             try {
                 getYearFromDate(parseDate(dividend.exDividendDate))
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 0
             }
@@ -173,6 +184,8 @@ object DividendYieldCalculator {
         for (format in formats) {
             try {
                 return LocalDate.parse(dateStr, format)
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 // 尝试下一种格式
             }

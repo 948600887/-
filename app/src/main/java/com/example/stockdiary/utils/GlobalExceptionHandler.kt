@@ -11,6 +11,7 @@ import java.io.StringWriter
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.CancellationException
 
 object GlobalExceptionHandler {
     
@@ -51,6 +52,8 @@ object GlobalExceptionHandler {
 
         try {
             showCrashNotification(throwable)
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             AppLogger.e("记录崩溃通知失败", e, "CrashHandler")
         }
@@ -109,6 +112,8 @@ object GlobalExceptionHandler {
             val logFile = File(crashFile, "$crashId.log")
             logFile.writeText(crashInfo)
             
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             AppLogger.e("保存崩溃日志失败", e, "CrashHandler")
         }
@@ -129,6 +134,8 @@ object GlobalExceptionHandler {
     private fun invokeDefaultHandler(thread: Thread?, throwable: Throwable?) {
         try {
             onCrashListener?.invoke()
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             AppLogger.e("Crash listener failed", e, "CrashHandler")
         }
@@ -154,6 +161,8 @@ object GlobalExceptionHandler {
                 packageInfo.versionCode
             }
             versionCode.toString()
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             "Unknown"
         }
@@ -168,6 +177,8 @@ object GlobalExceptionHandler {
         try {
             val crashDir = File(appContext?.getExternalFilesDir(null), "crash_reports")
             crashDir.listFiles()?.forEach { it.delete() }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             AppLogger.e("清除崩溃日志失败", e, "CrashHandler")
         }
@@ -176,6 +187,8 @@ object GlobalExceptionHandler {
     fun logSafe(tag: String, message: String) {
         try {
             AppLogger.d(message, tag)
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             // 静默处理，避免日志写入失败
         }
@@ -248,6 +261,8 @@ class CrashRecoveryManager private constructor() {
                 lastCrashInfo = crashInfo.take(500)
             )
             
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             GlobalExceptionHandler.logSafe("CrashRecovery", "记录崩溃失败: ${e.message}")
         }
@@ -266,6 +281,8 @@ class CrashRecoveryManager private constructor() {
             
             crashState = CrashRecoveryState()
             
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             GlobalExceptionHandler.logSafe("CrashRecovery", "清除崩溃状态失败: ${e.message}")
         }
@@ -276,6 +293,8 @@ class CrashRecoveryManager private constructor() {
             val prefs = this.prefs ?: return
             val count = prefs.getInt("crash_count", 0)
             prefs.edit().putInt("crash_count", count + 1).apply()
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             // 忽略
         }

@@ -15,6 +15,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.CancellationException
 
 class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
 
@@ -47,7 +48,13 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
 
     init {
         viewModelScope.launch {
-            _existingAccounts.value = repository.getAllAccounts().sorted()
+            try {
+                _existingAccounts.value = repository.getAllAccounts().sorted()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                AppLogger.w("加载账户列表失败: ${e.message}", "PortfolioVM")
+            }
         }
     }
 
@@ -62,6 +69,8 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
                     "暂无分红数据"
                 } else null
                 hasLoadedDividend = true
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 AppLogger.e("计算分红失败: ${e.message}", e, "PortfolioVM")
             } finally {
@@ -84,6 +93,8 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
                     onProgress = { },
                     forceRefresh = true
                 )
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 AppLogger.w("同步失败: ${e.message}", "PortfolioVM")
             }
@@ -92,6 +103,8 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
                 val result = incomeLoader.loadIncome(stockAssets, forceRefresh = false, tag = "PortfolioVM")
                 _estimatedAnnualDividend.value = result.totalAnnualIncome
                 _incomeCalculationStatus.value = null
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 AppLogger.e("刷新失败: ${e.message}", e, "PortfolioVM")
                 _errorMessage.value = "刷新失败"
@@ -125,6 +138,8 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
             try {
                 repository.deleteAssetsByIds(assetIds)
                 _existingAccounts.value = repository.getAllAccounts().sorted()
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 AppLogger.e("批量删除失败: ${e.message}", e, "PortfolioVM")
                 _errorMessage.value = "批量删除失败"
@@ -137,6 +152,8 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
             try {
                 repository.updateAccountForAssets(assetIds, targetAccount)
                 _existingAccounts.value = repository.getAllAccounts().sorted()
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 AppLogger.e("批量移动账户失败: ${e.message}", e, "PortfolioVM")
                 _errorMessage.value = "批量移动账户失败"
@@ -157,6 +174,8 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
                 )
                 val result = incomeLoader.loadIncome(assets, forceRefresh = false, tag = "PortfolioVM")
                 _estimatedAnnualDividend.value = result.totalAnnualIncome
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 AppLogger.w("批量同步失败: ${e.message}", "PortfolioVM")
                 _errorMessage.value = "批量同步失败"

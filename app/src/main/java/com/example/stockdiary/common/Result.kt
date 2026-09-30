@@ -1,5 +1,7 @@
 package com.example.stockdiary.common
 
+import kotlinx.coroutines.CancellationException
+
 sealed class Result<out T> {
     data class Success<T>(val data: T) : Result<T>()
     data class Error(val exception: Throwable, val message: String? = null) : Result<Nothing>()
@@ -45,6 +47,8 @@ sealed class Result<out T> {
     inline fun <R> mapCatching(transform: (T) -> R): Result<R> {
         return try {
             map(transform)
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Error(e)
         }
@@ -84,6 +88,8 @@ sealed class Result<out T> {
 inline fun <T> runCatching(block: () -> T): Result<T> {
     return try {
         Result.Success(block())
+    } catch (e: CancellationException) {
+        throw e
     } catch (e: Exception) {
         Result.Error(e)
     }

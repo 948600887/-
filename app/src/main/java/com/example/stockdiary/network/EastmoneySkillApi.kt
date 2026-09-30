@@ -11,6 +11,7 @@ import org.json.JSONObject
 import java.util.concurrent.TimeUnit
 import com.example.stockdiary.common.Result as AppResult
 import com.example.stockdiary.utils.AppLogger
+import kotlinx.coroutines.CancellationException
 
 object EastmoneySkillApi {
     
@@ -42,6 +43,8 @@ object EastmoneySkillApi {
                 if (response.isSuccessful) AppResult.Success(response.body?.string() ?: "")
                 else AppResult.Error(Exception("请求失败: ${response.code}"))
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             AppLogger.e("API请求失败: ${e.message}", e, TAG)
             AppResult.Error(e)

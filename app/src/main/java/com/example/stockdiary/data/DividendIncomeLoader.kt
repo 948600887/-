@@ -9,6 +9,7 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.CancellationException
 
 class DividendIncomeLoader(
     private val dividendRepository: DividendRepository
@@ -34,6 +35,8 @@ class DividendIncomeLoader(
                     val symbol = asset.symbol ?: return@async
                     val dividends = try {
                         dividendRepository.getDividendsBySymbol(symbol, forceRefresh)
+                    } catch (e: CancellationException) {
+                        throw e
                     } catch (e: Exception) {
                         AppLogger.e("获取${symbol}分红失败: ${e.message}", e, tag)
                         emptyList()

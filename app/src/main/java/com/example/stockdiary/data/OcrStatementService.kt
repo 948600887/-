@@ -97,12 +97,10 @@ class OcrStatementService private constructor(private val context: Context) {
      */
     suspend fun recognizeAndParse(imageUri: Uri): OcrResult = withContext(Dispatchers.IO) {
         val bitmap = decodeBitmap(imageUri)
-        val text = try {
-            recognizeText(bitmap)
-        } finally {
-            // 识别结束即可释放，几十 MB 的位图没必要留在内存里等 GC
-            if (!bitmap.isRecycled) bitmap.recycle()
-        }
+        // 位图生命周期由 recognizeText 内部管理：必须在 ML Kit 回调（识别真正结束）后回收，
+        // 否则协程取消时 finally 提前 recycle，ML Kit 后台线程仍在读会抛
+        // "trying to use a recycled bitmap" 崩溃。
+        val text = recognizeText(bitmap)
 
         val fullText = text.text
         AppLogger.d("OCR 识别文本:\n$fullText", "OcrStatement")
@@ -200,14 +198,26 @@ class OcrStatementService private constructor(private val context: Context) {
 
     private suspend fun recognizeText(bitmap: Bitmap): Text =
         suspendCancellableCoroutine { cont ->
+            fun recycleSafely() {
+                if (!bitmap.isRecycled) bitmap.recycle()
+            }
             val image = InputImage.fromBitmap(bitmap, 0)
-            obtainRecognizer().process(image)
-                .addOnSuccessListener { result ->
-                    if (cont.isActive) cont.resume(result)
-                }
-                .addOnFailureListener { e ->
-                    if (cont.isActive) cont.resumeWithException(e)
-                }
+            try {
+                obtainRecognizer().process(image)
+                    .addOnSuccessListener { result ->
+                        // 识别真正结束才释放位图；协程已取消也要释放，避免泄漏
+                        recycleSafely()
+                        if (cont.isActive) cont.resume(result)
+                    }
+                    .addOnFailureListener { e ->
+                        recycleSafely()
+                        if (cont.isActive) cont.resumeWithException(e)
+                    }
+            } catch (e: Exception) {
+                // 识别器构建/调用本身失败（非协程取消路径），此处回收是安全的
+                recycleSafely()
+                if (cont.isActive) cont.resumeWithException(e)
+            }
         }
 
     /**

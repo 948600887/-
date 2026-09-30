@@ -11,6 +11,7 @@ import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.CancellationException
 
 /**
  * Asset 同步管理器
@@ -212,6 +213,8 @@ object AssetSyncManager {
                 errorTypes.offer(SyncStrategy.classifyError(lastError))
             }
 
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             AppLogger.w("同步资产 ${asset.name} 失败: ${e.message}", "AssetSyncManager")
             failedCount.incrementAndGet()

@@ -4,6 +4,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.Request
 import com.example.stockdiary.network.NetworkClient
+import kotlinx.coroutines.CancellationException
 
 data class DataSourceHealth(
     val name: String,
@@ -46,6 +47,8 @@ object DataSourceHealthChecker {
                 lastCheck = System.currentTimeMillis(),
                 errorMessage = if (!response.isSuccessful) "HTTP ${response.code}" else null
             )
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             DataSourceHealth(
                 name = "新浪财经",
@@ -78,6 +81,8 @@ object DataSourceHealthChecker {
                 lastCheck = System.currentTimeMillis(),
                 errorMessage = if (!response.isSuccessful) "HTTP ${response.code}" else null
             )
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             DataSourceHealth(
                 name = "天天基金",
@@ -109,6 +114,8 @@ object DataSourceHealthChecker {
                 lastCheck = System.currentTimeMillis(),
                 errorMessage = if (!response.isSuccessful) "HTTP ${response.code}" else null
             )
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             DataSourceHealth(
                 name = "Binance",

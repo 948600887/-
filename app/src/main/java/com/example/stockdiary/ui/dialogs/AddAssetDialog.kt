@@ -33,6 +33,7 @@ import com.example.stockdiary.utils.StockCodeManager
 import com.example.stockdiary.utils.StockCodeManager.CodeCategory
 import com.example.stockdiary.utils.format
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.CancellationException
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -117,10 +118,14 @@ fun AddAssetDialog(
                     } else {
                         loadError = "未找到该代码，请手动输入名称"
                     }
+                } catch (e: CancellationException) {
+                    throw e
                 } catch (e: Exception) {
                     loadError = "未找到该代码，请手动输入名称"
                 }
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             loadError = "网络错误：${e.message}"
         }
@@ -150,6 +155,8 @@ fun AddAssetDialog(
                     } else {
                         loadError = "未找到该代码，请手动输入名称"
                     }
+                } catch (e: CancellationException) {
+                    throw e
                 } catch (e: Exception) {
                     loadError = "网络错误：${e.message}"
                 } finally {
@@ -197,6 +204,8 @@ fun AddAssetDialog(
                 }
                 else -> {}
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             loadError = "网络错误：${e.message}"
         } finally {

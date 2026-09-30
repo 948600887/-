@@ -14,6 +14,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.CancellationException
 
 class AssetDetailViewModel(private val container: AppContainer, private val assetId: Long) : ViewModel() {
 
@@ -56,6 +57,8 @@ class AssetDetailViewModel(private val container: AppContainer, private val asse
                     loadDividendData(forceRefresh = forceRefreshDividend)
                     loadTransactionData(foundAsset)
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 _errorMessage.value = "加载失败，请稍后重试"
                 AppLogger.e("加载资产详情失败: ${e.message}", e, "AssetDetailVM")
@@ -79,6 +82,8 @@ class AssetDetailViewModel(private val container: AppContainer, private val asse
                 val result = dividendRepository.getDividendsBySymbol(symbol, forceRefresh = forceRefresh)
                 _dividends.value = result
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             AppLogger.e("加载分红数据异常: ${e.message}", tag = "AssetDetailVM")
         } finally {
@@ -90,6 +95,8 @@ class AssetDetailViewModel(private val container: AppContainer, private val asse
         val symbol = asset.symbol ?: return
         try {
             _transactions.value = transactionDao.getBySymbol(symbol)
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             AppLogger.e("加载交易记录异常: ${e.message}", tag = "AssetDetailVM")
         }
@@ -108,6 +115,8 @@ class AssetDetailViewModel(private val container: AppContainer, private val asse
                             assets = listOf(currentAsset),
                             onProgress = { }
                         )
+                    } catch (e: CancellationException) {
+                        throw e
                     } catch (e: Exception) {
                         AppLogger.w("资产详情页同步失败: ${e.message}", "AssetDetailViewModel")
                         _errorMessage.value = "价格同步失败: ${e.localizedMessage ?: e.message}"

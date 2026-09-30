@@ -27,6 +27,7 @@ import java.io.File
 import java.io.FileInputStream
 import java.io.FileWriter
 import java.lang.reflect.Type
+import kotlinx.coroutines.CancellationException
 
 /**
  * 数据导入导出服务
@@ -113,6 +114,8 @@ class DataImportExportService(private val context: Context) {
                     "transactions" to transactions.size
                 )
             )
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             AppLogger.e("数据导出失败: ${e.message}", e, TAG)
             ExportResult(success = false, errorMessage = e.message)
@@ -204,6 +207,8 @@ class DataImportExportService(private val context: Context) {
                     "transactions" to transactionCount
                 )
             )
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             AppLogger.e("数据导入失败: ${e.message}", e, TAG)
             ImportResult(success = false, errorMessage = e.message)
@@ -311,6 +316,8 @@ class DataImportExportService(private val context: Context) {
             FileWriter(file).use { it.write(jsonContent) }
 
             ExportResult(success = true)
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             AppLogger.e("创建导入前备份失败: ${e.message}", e, TAG)
             ExportResult(success = false, errorMessage = e.message)
@@ -328,6 +335,8 @@ class DataImportExportService(private val context: Context) {
         return try {
             val packageInfo = context.packageManager.getPackageInfo(context.packageName, 0)
             packageInfo.versionName ?: "unknown"
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             "unknown"
         }

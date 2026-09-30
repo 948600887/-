@@ -10,6 +10,7 @@ import com.example.stockdiary.utils.NotificationHelper
 import kotlinx.coroutines.flow.first
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
+import kotlinx.coroutines.CancellationException
 
 /**
  * 自动价格同步 Worker
@@ -75,6 +76,8 @@ class PriceSyncWorker(
             } else {
                 handleFailure(result.dominantErrorType)
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             AppLogger.e("自动价格同步异常: ${e.message}", e, "PriceSyncWorker")
             handleFailure(SyncStrategy.classifyError(e))
@@ -94,6 +97,8 @@ class PriceSyncWorker(
             } else {
                 AppLogger.w("价格同步后刷新当日快照失败", "PriceSyncWorker")
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             AppLogger.e("刷新当日快照失败: ${e.message}", e, "PriceSyncWorker")
         }
@@ -172,6 +177,8 @@ class PriceSyncWorker(
                 NotificationHelper.showDividendNotification(context, name, totalAmount)
                 AppLogger.i("今日分红到账通知: $name, 总额: ¥$totalAmount", "PriceSyncWorker")
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             AppLogger.e("分红通知检查失败: ${e.message}", e, "PriceSyncWorker")
         }

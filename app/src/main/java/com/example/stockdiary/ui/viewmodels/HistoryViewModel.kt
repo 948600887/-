@@ -25,6 +25,7 @@ import java.time.YearMonth
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import kotlin.math.sqrt
+import kotlinx.coroutines.CancellationException
 
 class HistoryViewModel(
     private val assetRepository: AssetRepository,
@@ -101,6 +102,8 @@ class HistoryViewModel(
                 val today = LocalDate.now().format(dateFormatter)
                 assetRepository.createSnapshot(today) ?: error("创建快照失败")
             }.map { }
+            // runCatching 会把协程取消也吞掉，必须重新抛出保证取消语义
+            result.onFailure { if (it is CancellationException) throw it }
             result.onSuccess {
                 AppLogger.i("Snapshot saved successfully", "HistoryVM")
             }.onFailure { e ->
@@ -259,6 +262,8 @@ private fun calculateMonthlyReturns(sortedSnapshots: List<AssetSnapshot>): List<
     for (snapshot in sortedSnapshots) {
         val date = try {
             LocalDate.parse(snapshot.date)
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             continue
         }

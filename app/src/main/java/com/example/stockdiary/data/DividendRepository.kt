@@ -13,6 +13,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import com.example.stockdiary.common.Result
 import com.example.stockdiary.utils.AppLogger
 import com.example.stockdiary.utils.StockCodeManager
+import kotlinx.coroutines.CancellationException
 
 class DividendRepository private constructor(
     private val context: Context
@@ -116,6 +117,8 @@ class DividendRepository private constructor(
                 lastFullFetch = if (isIncremental) existingEntry?.lastFullFetch ?: System.currentTimeMillis() else System.currentTimeMillis()
             )
             mergedData
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             AppLogger.e("获取分红数据失败: ${e.message}", e, "DividendRepository")
             cache[normalizedSymbol]?.data ?: emptyList()
@@ -179,6 +182,8 @@ class DividendRepository private constructor(
         for (fmt in formats) {
             val data = try {
                 fetchFromEastmoneyWithFormat(fmt)
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 AppLogger.w("ETF东方财富格式[$fmt]重试失败: ${e.message}", "DividendRepository")
                 emptyList()
@@ -191,6 +196,8 @@ class DividendRepository private constructor(
 
         return try {
             fetchFromFundApiForETF(stockCode)
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             AppLogger.w("ETF天天基金接口重试失败: ${e.message}", "DividendRepository")
             emptyList()
@@ -211,6 +218,8 @@ class DividendRepository private constructor(
                         java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd")
                     )
                     date.isAfter(oneYearAgo)
+                } catch (e: CancellationException) {
+                    throw e
                 } catch (e: Exception) {
                     false
                 }
@@ -246,6 +255,8 @@ class DividendRepository private constructor(
             } else {
                 emptyList()
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             AppLogger.w("东方财富分红数据获取失败: ${e.message}", "DividendRepository")
             emptyList()
@@ -268,6 +279,8 @@ class DividendRepository private constructor(
             } else {
                 emptyList()
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             AppLogger.w("ETF东方财富带格式[$securityCode]获取失败: ${e.message}", "DividendRepository")
             emptyList()
@@ -282,6 +295,8 @@ class DividendRepository private constructor(
             } else {
                 emptyList()
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             AppLogger.w("ETF天天基金接口获取失败[${fundCode}]: ${e.message}", "DividendRepository")
             emptyList()
@@ -296,6 +311,8 @@ class DividendRepository private constructor(
             } else {
                 emptyList()
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             AppLogger.w("新浪分红数据获取失败: ${e.message}", "DividendRepository")
             emptyList()
@@ -311,6 +328,8 @@ class DividendRepository private constructor(
             } else {
                 emptyList()
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             AppLogger.w("天天基金分红数据获取失败: ${e.message}", "DividendRepository")
             emptyList()

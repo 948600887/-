@@ -14,6 +14,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.first
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
+import kotlinx.coroutines.CancellationException
 
 class StockDiaryApplication : Application() {
 
@@ -46,6 +47,8 @@ class StockDiaryApplication : Application() {
     private suspend fun scheduleDailySnapshot() {
         try {
             SnapshotScheduler.scheduleDailySnapshot(this)
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             AppLogger.e("调度快照失败: ${e.message}", e, "StockDiaryApplication")
         }
@@ -56,6 +59,8 @@ class StockDiaryApplication : Application() {
             if (container.priceSyncPreferencesManager.isAutoSyncEnabled()) {
                 PriceSyncScheduler.scheduleDailySync(this)
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             AppLogger.e("调度自动价格同步失败: ${e.message}", e, "StockDiaryApplication")
         }
@@ -83,12 +88,16 @@ class StockDiaryApplication : Application() {
                     AppLogger.i("补全缺失快照: $dateStr", "StockDiaryApplication")
                     try {
                         repository.createSnapshot(dateStr)
+                    } catch (e: CancellationException) {
+                        throw e
                     } catch (e: Exception) {
                         AppLogger.e("补全 $dateStr 快照失败: ${e.message}", e, "StockDiaryApplication")
                     }
                     currentDate = currentDate.plusDays(1)
                 }
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             AppLogger.e("补全快照失败: ${e.message}", e, "StockDiaryApplication")
         }

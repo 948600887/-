@@ -20,6 +20,7 @@ import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import java.io.IOException
 import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.CancellationException
 
 /**
  * 股票数据管理器 v2
@@ -346,6 +347,8 @@ class GenericStockDataSource(
             } else {
                 Result.failure(result.exceptionOrNull() ?: IOException("未知错误"))
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Result.failure(e)
         }

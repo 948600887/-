@@ -5,6 +5,7 @@ import java.time.Instant
 import java.time.ZoneId
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
+import kotlinx.coroutines.CancellationException
 
 /**
  * 天天基金数据解析器：从 pingzhongdata JS 响应中提取基金名称、净值和回报率。
@@ -66,12 +67,16 @@ object FundDataParser {
                 val instant = Instant.ofEpochMilli(timestamp)
                 val localDate = ZonedDateTime.ofInstant(instant, ZoneId.systemDefault()).toLocalDate()
                 localDate.format(dateFormatter)
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 null
             }
             
             AppLogger.d("最新净值: $naw, 日期: $dateStr, 回报: $equityReturn", TAG)
             NawData(naw = naw, equityReturn = equityReturn, date = dateStr)
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             AppLogger.e("解析净值数据失败: ${e.message}", e, TAG)
             NawData()

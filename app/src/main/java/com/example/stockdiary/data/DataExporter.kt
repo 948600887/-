@@ -24,6 +24,7 @@ import java.io.File
 import java.io.FileWriter
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
+import kotlinx.coroutines.CancellationException
 
 class DataExporter(private val context: Context) {
     
@@ -68,6 +69,8 @@ class DataExporter(private val context: Context) {
             }
             
             getUriForFile(file)
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             AppLogger.e("导出资产到CSV失败: ${e.message}", e, "DataExporter")
             null
@@ -106,6 +109,8 @@ class DataExporter(private val context: Context) {
             }
             
             getUriForFile(file)
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             AppLogger.e("导出资产到文本失败: ${e.message}", e, "DataExporter")
             null
@@ -170,6 +175,8 @@ class DataExporter(private val context: Context) {
             }
 
             getUriForFile(file)
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             AppLogger.e("导出交易对账单失败: ${e.message}", e, "DataExporter")
             null
@@ -237,6 +244,8 @@ class DataExporter(private val context: Context) {
             }
 
             getUriForFile(file)
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             AppLogger.e("导出综合对账单失败: ${e.message}", e, "DataExporter")
             null
@@ -310,6 +319,8 @@ class DataExporter(private val context: Context) {
             }
             
             getUriForFile(file)
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             AppLogger.e("导出资产到文本失败: ${e.message}", e, "DataExporter")
             null

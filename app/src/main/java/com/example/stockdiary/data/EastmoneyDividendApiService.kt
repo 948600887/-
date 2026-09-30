@@ -11,6 +11,7 @@ import java.net.URLEncoder
 import com.example.stockdiary.network.NetworkClient
 import com.example.stockdiary.utils.StockCodeManager
 import com.example.stockdiary.utils.getLatest
+import kotlinx.coroutines.CancellationException
 
 /**
  * 东方财富股票分红API服务
@@ -139,6 +140,8 @@ class EastmoneyDividendApiService(private val context: Context) : DividendApi {
                 AppLogger.d("解析到 ${allDividendList.size} 条分红数据", "EastmoneyDividend")
                 Result.success(allDividendList)
                 
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 AppLogger.e("获取分红数据失败: ${e.message}", e, "EastmoneyDividend")
                 Result.failure(e)

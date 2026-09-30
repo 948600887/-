@@ -16,6 +16,7 @@ import com.example.stockdiary.utils.format
 import java.time.LocalDateTime
 import java.time.ZoneId
 import kotlin.math.abs
+import kotlinx.coroutines.CancellationException
 
 object NotificationHelper {
     private const val ALARM_REQUEST_CODE = 1001
@@ -45,6 +46,8 @@ object NotificationHelper {
             notificationManager?.let {
                 createNotificationChannels()
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             AppLogger.e("初始化通知管理器失败: ${e.message}", e, "NotificationHelper")
             // 通知管理器初始化失败，不影响应用运行
@@ -58,6 +61,8 @@ object NotificationHelper {
                 notificationManager?.let {
                     createNotificationChannels()
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 AppLogger.e("获取通知管理器失败: ${e.message}", e, "NotificationHelper")
                 // 通知管理器初始化失败，返回null
@@ -196,6 +201,8 @@ object NotificationHelper {
                     flags = Intent.FLAG_ACTIVITY_NEW_TASK
                 }
                 context.startActivity(intent)
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 AppLogger.e("打开闹钟设置失败: ${e.message}", e, "NotificationHelper")
             }
@@ -241,6 +248,8 @@ object NotificationHelper {
                 alarmManager.setAlarmClock(alarmInfo, pendingIntent)
             }
             true
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             AppLogger.e("设置每日提醒失败: ${e.message}", e, "NotificationHelper")
             // 提醒设置失败，不影响应用运行
@@ -263,6 +272,8 @@ object NotificationHelper {
                 )
                 alarmManager.cancel(pendingIntent)
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             AppLogger.e("取消提醒失败: ${e.message}", e, "NotificationHelper")
             // 取消提醒失败，不影响应用运行
@@ -348,6 +359,8 @@ object NotificationHelper {
                         alarmManager.setAlarmClock(alarmInfo, reminderPendingIntent)
                     }
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 AppLogger.e("处理提醒失败: ${e.message}", e, "NotificationHelper")
                 // 处理提醒失败，不影响应用运行

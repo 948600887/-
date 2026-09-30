@@ -1,0 +1,21 @@
+# Gradle / build
+.gradle/
+build/
+*/build/
+.kotlin/
+
+# Android Studio
+.idea/
+*.iml
+local.properties
+
+# Logs
+*.log
+
+# Local gradle distribution (project-local, huge)
+gradle-8.13/
+gradle-8.13-bin.zip
+
+# OS
+Thumbs.db
+.DS_Store

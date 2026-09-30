@@ -1,0 +1,149 @@
+package com.example.stockdiary.data
+
+import java.io.IOException
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
+import java.time.DayOfWeek
+import java.time.LocalDateTime
+import java.time.LocalTime
+import java.time.ZoneId
+import kotlin.math.min
+
+/**
+ * 同步错误类型
+ */
+enum class SyncErrorType {
+    NETWORK,      // 网络不可用/超时/DNS 解析失败
+    SERVER,       // 服务端返回 5xx 或空数据
+    DATA,         // 数据解析失败或代码不存在
+    UNKNOWN       // 其他未知错误
+}
+
+/**
+ * 智能同步策略
+ * 用于识别交易时段、分类错误、计算退避重试间隔
+ */
+object SyncStrategy {
+
+    // A 股交易时段（北京时间）
+    private val MORNING_START = LocalTime.of(9, 30)
+    private val MORNING_END = LocalTime.of(11, 30)
+    private val AFTERNOON_START = LocalTime.of(13, 0)
+    private val AFTERNOON_END = LocalTime.of(15, 0)
+
+    private val ZONE_SHANGHAI = ZoneId.of("Asia/Shanghai")
+
+    /**
+     * 判断当前是否处于 A 股交易时段（工作日 9:30-11:30、13:00-15:00）
+     */
+    fun isInTradingHours(dateTime: LocalDateTime = LocalDateTime.now(ZONE_SHANGHAI)): Boolean {
+        val dayOfWeek = dateTime.dayOfWeek
+        if (dayOfWeek == DayOfWeek.SATURDAY || dayOfWeek == DayOfWeek.SUNDAY) return false
+
+        val time = dateTime.toLocalTime()
+        val inMorning = !time.isBefore(MORNING_START) && !time.isAfter(MORNING_END)
+        val inAfternoon = !time.isBefore(AFTERNOON_START) && !time.isAfter(AFTERNOON_END)
+        return inMorning || inAfternoon
+    }
+
+    /**
+     * 获取当前建议的同步间隔（毫秒）
+     * 交易时段内更短，非交易时段更长
+     */
+    fun getCurrentSyncIntervalMillis(
+        isInTradingHours: Boolean = isInTradingHours()
+    ): Long {
+        return if (isInTradingHours) {
+            TRADING_INTERVAL_MILLIS
+        } else {
+            NON_TRADING_INTERVAL_MILLIS
+        }
+    }
+
+    /**
+     * 分类同步异常
+     */
+    fun classifyError(error: Throwable?): SyncErrorType {
+        return when (error) {
+            is UnknownHostException,
+            is SocketTimeoutException,
+            is java.net.ConnectException -> SyncErrorType.NETWORK
+            is IOException -> {
+                val message = error.message?.lowercase() ?: ""
+                when {
+                    message.contains("timeout") -> SyncErrorType.NETWORK
+                    message.contains("unable to resolve") -> SyncErrorType.NETWORK
+                    // 5xx 服务端错误：匹配关键字或独立的 5xx 状态码（避免误匹配含 "5" 的端口号等）
+                    message.contains("internal server") ||
+                        message.contains("bad gateway") ||
+                        message.contains("service unavailable") ||
+                        message.contains("gateway timeout") ||
+                        message.contains("server error") ||
+                        STATUS_5XX.containsMatchIn(message) -> SyncErrorType.SERVER
+                    // 4xx 数据/请求错误：匹配关键字或独立的 4xx 状态码
+                    message.contains("not found") ||
+                        message.contains("bad request") ||
+                        message.contains("no such") ||
+                        message.contains("does not exist") ||
+                        STATUS_4XX.containsMatchIn(message) -> SyncErrorType.DATA
+                    else -> SyncErrorType.UNKNOWN
+                }
+            }
+            is IllegalArgumentException,
+            is NumberFormatException,
+            is IndexOutOfBoundsException -> SyncErrorType.DATA
+            else -> SyncErrorType.UNKNOWN
+        }
+    }
+
+    /**
+     * 计算下次重试延迟（指数退避，按错误类型区分上限）
+     * @param consecutiveFailures 连续失败次数
+     * @param errorType 错误类型
+     */
+    fun calculateRetryDelayMillis(
+        consecutiveFailures: Int,
+        errorType: SyncErrorType
+    ): Long {
+        val baseDelay = when (errorType) {
+            SyncErrorType.NETWORK -> NETWORK_BASE_DELAY_MILLIS
+            SyncErrorType.SERVER -> SERVER_BASE_DELAY_MILLIS
+            SyncErrorType.DATA -> DATA_BASE_DELAY_MILLIS
+            SyncErrorType.UNKNOWN -> UNKNOWN_BASE_DELAY_MILLIS
+        }
+        val maxDelay = when (errorType) {
+            SyncErrorType.NETWORK -> NETWORK_MAX_DELAY_MILLIS
+            SyncErrorType.SERVER -> SERVER_MAX_DELAY_MILLIS
+            SyncErrorType.DATA -> DATA_MAX_DELAY_MILLIS
+            SyncErrorType.UNKNOWN -> UNKNOWN_MAX_DELAY_MILLIS
+        }
+        val exponential = baseDelay * (1 shl consecutiveFailures.coerceAtMost(6))
+        return min(exponential, maxDelay)
+    }
+
+    /**
+     * 判断某类错误是否值得重试
+     */
+    fun isRetryable(errorType: SyncErrorType): Boolean {
+        return errorType != SyncErrorType.DATA
+    }
+
+    private const val TRADING_INTERVAL_MILLIS = 15 * 60 * 1000L       // 15 分钟
+    private const val NON_TRADING_INTERVAL_MILLIS = 4 * 60 * 60 * 1000L // 4 小时
+
+    private const val NETWORK_BASE_DELAY_MILLIS = 10_000L
+    private const val NETWORK_MAX_DELAY_MILLIS = 5 * 60 * 1000L
+
+    private const val SERVER_BASE_DELAY_MILLIS = 30_000L
+    private const val SERVER_MAX_DELAY_MILLIS = 10 * 60 * 1000L
+
+    private const val DATA_BASE_DELAY_MILLIS = 60_000L
+    private const val DATA_MAX_DELAY_MILLIS = 60_000L
+
+    private const val UNKNOWN_BASE_DELAY_MILLIS = 30_000L
+    private const val UNKNOWN_MAX_DELAY_MILLIS = 5 * 60 * 1000L
+
+    // 匹配独立的 4xx/5xx HTTP 状态码，使用词边界避免误匹配端口号等（如 5432、8080）
+    private val STATUS_4XX = Regex("\\b4\\d\\d\\b")
+    private val STATUS_5XX = Regex("\\b5\\d\\d\\b")
+}

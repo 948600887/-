@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>资产分布</title>
+    <script src="file:///android_asset/echarts.min.js"></script>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            height: 100vh;
+            overflow: hidden;
+        }
+        #chart-container {
+            width: 100%;
+            height: 100%;
+        }
+    </style>
+</head>
+<body>
+    <div id="chart-container"></div>
+    <script>
+        // 初始化图表
+        const chart = echarts.init(document.getElementById('chart-container'));
+        var cw = chart.getWidth() || window.innerWidth;
+        var ch = chart.getHeight() || window.innerHeight;
+        var outerRadiusRatio = 0.35;
+        var minDim = Math.min(cw, ch);
+        var outerR = minDim / 2 * outerRadiusRatio;
+        var lineTotal = 18;
+        var labelW = Math.max(40, Math.floor(cw / 2 - outerR - lineTotal - 5));
+        
+        // 模拟资产分布数据
+        const generateDistributionData = () => {
+            return [
+                { name: '苹果', value: 30000 },
+                { name: '微软', value: 25000 },
+                { name: '谷歌', value: 20000 },
+                { name: '亚马逊', value: 15000 },
+                { name: 'Meta', value: 10000 }
+            ];
+        };
+        
+        // 配置项
+        const option = {
+            animation: false,
+            title: {
+                text: '资产分布',
+                left: 'center'
+            },
+            tooltip: {
+                trigger: 'item',
+                textStyle: { fontSize: 10 },
+                padding: [4, 8]
+            },
+            legend: {
+                top: '0%',
+                left: 'center',
+                textStyle: {
+                    color: "#000"
+                }
+            },
+            series: [
+                {
+                    name: '资产百分比',
+                    type: 'pie',
+                    center: ['50%', '60%'],
+                    radius: ['15%', '35%'],
+                    avoidLabelOverlap: true,
+                    itemStyle: {
+                        borderRadius: 10,
+                        borderColor: '#fff',
+                        borderWidth: 2
+                    },
+                    label: {
+                        formatter: '{b} ({d}%)',
+                        fontSize: 10,
+                        fontWeight: 'bold',
+                        color: '#000',
+                        overflow: 'truncate',
+                        width: labelW
+                    },
+                    emphasis: {
+                        label: {
+                            show: true,
+                            fontSize: 10,
+                            fontWeight: 'bold'
+                        }
+                    },
+                    labelLine: {
+                        show: true,
+                        length: 8,
+                        length2: 10
+                    },
+                    data: []
+                }
+            ]
+        };
+        
+        // 填充数据
+        const distributionData = generateDistributionData();
+        const legendData = distributionData.map(item => item.name);
+        
+        option.series[0].data = distributionData;
+        
+        // 设置配置项
+        chart.setOption(option);
+        
+        // 响应式
+        window.addEventListener('resize', () => {
+            chart.resize();
+        });
+        
+        // 接收来自Android的数据
+        window.addEventListener('message', (event) => {
+            const data = event.data;
+            if (data.type === 'updateData') {
+                updateDistributionData(data.data);
+            }
+        });
+        
+        // 更新分布数据
+        function updateDistributionData(newData) {
+            option.series[0].data = newData;
+            chart.setOption(option);
+        }
+    </script>
+</body>
+</html>

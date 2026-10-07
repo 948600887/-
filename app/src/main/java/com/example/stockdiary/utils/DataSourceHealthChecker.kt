@@ -36,17 +36,20 @@ object DataSourceHealthChecker {
                 .addHeader("Referer", "https://finance.sina.com.cn")
                 .build()
             
-            val response = client.newCall(request).execute()
-            val latency = System.currentTimeMillis() - startTime
-            
-            DataSourceHealth(
-                name = "新浪财经",
-                url = "hq.sinajs.cn",
-                isAvailable = response.isSuccessful,
-                latency = latency,
-                lastCheck = System.currentTimeMillis(),
-                errorMessage = if (!response.isSuccessful) "HTTP ${response.code}" else null
-            )
+            // 必须 use{}：ResponseBody 不 close 的话连接不会归还连接池，
+            // 每次打开设置页都会泄漏 3 条，直到 keepAlive 60s 超时才释放
+            client.newCall(request).execute().use { response ->
+                val latency = System.currentTimeMillis() - startTime
+
+                DataSourceHealth(
+                    name = "新浪财经",
+                    url = "hq.sinajs.cn",
+                    isAvailable = response.isSuccessful,
+                    latency = latency,
+                    lastCheck = System.currentTimeMillis(),
+                    errorMessage = if (!response.isSuccessful) "HTTP ${response.code}" else null
+                )
+            }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -70,17 +73,18 @@ object DataSourceHealthChecker {
                 .addHeader("Referer", "https://fund.eastmoney.com/")
                 .build()
             
-            val response = client.newCall(request).execute()
-            val latency = System.currentTimeMillis() - startTime
-            
-            DataSourceHealth(
-                name = "天天基金",
-                url = "fund.eastmoney.com",
-                isAvailable = response.isSuccessful,
-                latency = latency,
-                lastCheck = System.currentTimeMillis(),
-                errorMessage = if (!response.isSuccessful) "HTTP ${response.code}" else null
-            )
+            client.newCall(request).execute().use { response ->
+                val latency = System.currentTimeMillis() - startTime
+
+                DataSourceHealth(
+                    name = "天天基金",
+                    url = "fund.eastmoney.com",
+                    isAvailable = response.isSuccessful,
+                    latency = latency,
+                    lastCheck = System.currentTimeMillis(),
+                    errorMessage = if (!response.isSuccessful) "HTTP ${response.code}" else null
+                )
+            }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -103,17 +107,18 @@ object DataSourceHealthChecker {
                 .addHeader("User-Agent", "Mozilla/5.0")
                 .build()
             
-            val response = client.newCall(request).execute()
-            val latency = System.currentTimeMillis() - startTime
-            
-            DataSourceHealth(
-                name = "Binance",
-                url = "api.binance.com",
-                isAvailable = response.isSuccessful,
-                latency = latency,
-                lastCheck = System.currentTimeMillis(),
-                errorMessage = if (!response.isSuccessful) "HTTP ${response.code}" else null
-            )
+            client.newCall(request).execute().use { response ->
+                val latency = System.currentTimeMillis() - startTime
+
+                DataSourceHealth(
+                    name = "Binance",
+                    url = "api.binance.com",
+                    isAvailable = response.isSuccessful,
+                    latency = latency,
+                    lastCheck = System.currentTimeMillis(),
+                    errorMessage = if (!response.isSuccessful) "HTTP ${response.code}" else null
+                )
+            }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {

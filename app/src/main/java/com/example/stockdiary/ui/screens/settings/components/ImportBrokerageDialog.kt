@@ -131,7 +131,8 @@ fun ImportBrokerageDialog(
             ) { padding ->
                 Box(modifier = Modifier.fillMaxSize().padding(padding)) {
                     when (state.step) {
-                        ImportBrokerageViewModel.Step.SELECT_FILE -> SelectFileStep(fileLauncher, imageLauncher)
+                        ImportBrokerageViewModel.Step.SELECT_FILE ->
+                            SelectFileStep(fileLauncher, imageLauncher, state.recognizing)
                         ImportBrokerageViewModel.Step.MAPPING -> MappingStep(state, viewModel)
                         ImportBrokerageViewModel.Step.PREVIEW -> PreviewStep(state, viewModel)
                         ImportBrokerageViewModel.Step.COMMITTING -> CommittingStep()
@@ -196,9 +197,12 @@ private fun BottomActionBar(
         ) {
             when (state.step) {
                 ImportBrokerageViewModel.Step.SELECT_FILE -> {
-                    OutlinedButton(onClick = onDismiss) { Text("取消") }
-                    // 选文件步骤的两个入口已在 SelectFileStep 中展示，底部保留 CSV 快捷入口
-                    Button(onClick = { fileLauncher.launch(arrayOf("text/csv", "*/*")) }) {
+                    // OCR 识别中禁用按钮，避免同一张图被重复提交两次识别
+                    OutlinedButton(onClick = onDismiss, enabled = !state.recognizing) { Text("取消") }
+                    Button(
+                        onClick = { fileLauncher.launch(arrayOf("text/csv", "*/*")) },
+                        enabled = !state.recognizing
+                    ) {
                         Icon(Icons.Default.UploadFile, contentDescription = null)
                         Spacer(Modifier.width(8.dp)); Text("CSV 文件")
                     }
@@ -238,8 +242,26 @@ private fun BottomActionBar(
 @Composable
 private fun SelectFileStep(
     fileLauncher: androidx.activity.result.ActivityResultLauncher<Array<String>>,
-    imageLauncher: androidx.activity.result.ActivityResultLauncher<String>
+    imageLauncher: androidx.activity.result.ActivityResultLauncher<String>,
+    recognizing: Boolean = false
 ) {
+    if (recognizing) {
+        // OCR 识别中：给明确进度，不要让用户对着选择页以为没点上。
+        Box(modifier = Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                CircularProgressIndicator()
+                Spacer(Modifier.height(16.dp))
+                Text("正在识别截图…", fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "首次识别需加载模型，通常需要 1~3 秒",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+        return
+    }
     Column(
         modifier = Modifier.fillMaxSize().padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally,

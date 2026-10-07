@@ -69,11 +69,35 @@ object NetworkRetryHelper {
                 true
             }
             is IOException -> {
-                AppLogger.w("IO异常: ${exception.message}，将重试", TAG)
-                true
+                // 不是所有 IOException 都值得重试：
+                // - 新浪 403 是限流，重试只会火上浇油（还会加速被封）
+                // - "未获取到股票数据/请检查股票代码"是代码无效或退市，重试 N 次结果完全一样
+                // 这些都属于"确定失败"，打一次就够了。
+                val msg = exception.message.orEmpty()
+                if (isNonRetryableBusinessFailure(msg)) {
+                    AppLogger.w("业务侧的确定性失败，不重试: $msg", TAG)
+                    false
+                } else {
+                    AppLogger.w("IO异常: $msg，将重试", TAG)
+                    true
+                }
             }
             else -> false
         }
+    }
+
+    /**
+     * 判断是否是"重试也不会改变结果"的确定性失败。
+     *
+     * 各类数据源目前把业务失败统一包成 [IOException] 往外抛（HTTP 403、代码不存在、
+     * 返回空串都是同一类型），重试层只能靠文案识别。这是现状下的最小侵入方案。
+     */
+    private fun isNonRetryableBusinessFailure(message: String): Boolean {
+        val patterns = listOf(
+            "频率过高", "请求过于频繁", "rate limit", "403", "429",
+            "请检查股票代码", "未获取到股票数据", "代码不存在", "无效的代码"
+        )
+        return patterns.any { message.contains(it, ignoreCase = true) }
     }
     
     suspend fun <T> executeWithFallback(

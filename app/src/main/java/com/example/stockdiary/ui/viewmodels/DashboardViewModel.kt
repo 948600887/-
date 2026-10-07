@@ -174,6 +174,22 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
         }
     }
 
+    /**
+     * 恢复显示全部资产类型。
+     *
+     * 用户在「设置 → 仪表盘显示」里把四类资产全关掉后，仪表盘只剩总览卡片、
+     * 下面整片空白，而开关只在设置页里 —— 不提供一键恢复就只能自己去翻设置。
+     */
+    fun showAllAssetTypes() {
+        _preferences.value = _preferences.value.copy(
+            showBankDeposits = true,
+            showStocks = true,
+            showFunds = true,
+            showCrypto = true
+        )
+        preferencesManager.savePreferences(_preferences.value)
+    }
+
     fun updateSortOrder(sortOrder: SortOrder) {
         _preferences.value = _preferences.value.copy(sortOrder = sortOrder)
         preferencesManager.savePreferences(_preferences.value)

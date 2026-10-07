@@ -16,6 +16,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.foundation.layout.height
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -41,6 +42,21 @@ fun DataSourceStatusDialog(
                     contentAlignment = Alignment.Center
                 ) {
                     androidx.compose.material3.CircularProgressIndicator()
+                }
+            } else if (healthList.isEmpty()) {
+                // 检测失败（离线/异常）时列表为空。必须给空状态，
+                // 否则用户点开就是一个没有任何内容的对话框，看起来像 App 坏了。
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(
+                        text = "暂无检测结果",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    androidx.compose.foundation.layout.Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "可能当前无网络连接，可点「刷新」重试",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
             } else {
                 Column {

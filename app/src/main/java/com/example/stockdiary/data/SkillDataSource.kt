@@ -105,10 +105,18 @@ class SkillDataSource : StockDataSource {
             // 处理市场前缀
             val symbol = StockCodeManager.normalizeSymbol(code)
             
+            val price = dataObj.optDouble("price", 0.0)
+            if (!price.isFinite() || price <= 0.0) {
+                // 妙想返回文本里没有 price 字段时 optDouble 默认给 0.0。这里不能把它当成一条成功数据，
+                // 否则 0 价会一路写进三级缓存、把持仓市值算成 0。
+                AppLogger.w("妙想Skill未返回有效价格: $symbol price=$price", TAG)
+                return null
+            }
+
             StockData(
                 symbol = symbol,
                 name = dataObj.optString("name", ""),
-                price = dataObj.optDouble("price", 0.0),
+                price = price,
                 open = dataObj.optDouble("open", 0.0),
                 prevClose = dataObj.optDouble("previousClose", 
                     dataObj.optDouble("prevClose", 0.0)),

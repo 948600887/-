@@ -21,6 +21,7 @@ import com.example.stockdiary.ui.theme.*
 import com.example.stockdiary.ui.components.DialogInfoItem
 import com.example.stockdiary.ui.components.DialogSectionHeader
 import com.example.stockdiary.ui.components.DialogTypeChip
+import com.example.stockdiary.utils.StockCodeManager
 import com.example.stockdiary.utils.format
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -39,6 +40,10 @@ fun EditAssetDialog(
     var notes by remember { mutableStateOf(asset.notes ?: "") }
     var interestRateInput by remember { mutableStateOf(asset.interestRate?.toString() ?: "") }
     val isSaving = remember { mutableStateOf(false) }
+    val saveError = remember { mutableStateOf<String?>(null) }
+
+    // 「碰过」的字段才报错：编辑弹窗一打开字段都是有值的，只有用户改坏了才提示
+    var touched by remember { mutableStateOf(setOf<String>()) }
     
     val isValid by remember {
         derivedStateOf {
@@ -139,18 +144,18 @@ fun EditAssetDialog(
                     
                     OutlinedTextField(
                         value = name,
-                        onValueChange = { name = it },
+                        onValueChange = { name = it; touched = touched + "name" },
                         label = { Text("资产名称") },
                         modifier = Modifier.fillMaxWidth(),
                         singleLine = true,
-                        isError = name.isBlank(),
-                        supportingText = if (name.isBlank()) { { Text("必填") } } else null
+                        isError = "name" in touched && name.isBlank(),
+                        supportingText = if ("name" in touched && name.isBlank()) { { Text("必填") } } else null
                     )
                     
                     if (selectedType == AssetType.STOCK || selectedType == AssetType.FUND || selectedType == AssetType.CRYPTO) {
                         OutlinedTextField(
                             value = symbol,
-                            onValueChange = { symbol = it },
+                            onValueChange = { symbol = it; touched = touched + "symbol" },
                             label = { 
                                 when (selectedType) {
                                     AssetType.FUND -> Text("基金代码")
@@ -166,19 +171,19 @@ fun EditAssetDialog(
                     
                     OutlinedTextField(
                         value = account,
-                        onValueChange = { account = it },
+                        onValueChange = { account = it; touched = touched + "account" },
                         label = { Text("账户/平台") },
                         modifier = Modifier.fillMaxWidth(),
                         singleLine = true,
-                        isError = account.isBlank(),
-                        supportingText = if (account.isBlank()) { { Text("必填") } } else null
+                        isError = "account" in touched && account.isBlank(),
+                        supportingText = if ("account" in touched && account.isBlank()) { { Text("必填") } } else null
                     )
                     
                     SectionHeader("交易信息")
                     
                     OutlinedTextField(
                         value = balance,
-                        onValueChange = { balance = it },
+                        onValueChange = { balance = it; touched = touched + "balance" },
                         label = { 
                             when (selectedType) {
                                 AssetType.STOCK -> Text("持股数量")
@@ -192,12 +197,14 @@ fun EditAssetDialog(
                         modifier = Modifier.fillMaxWidth(),
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                         singleLine = true,
-                        isError = (balance.toDoubleOrNull() ?: -1.0) < 0,
+                        isError = "balance" in touched && balance.toDoubleOrNull() == null,
                         supportingText = {
-                            when {
-                                balance.toDoubleOrNull() == null -> Text("请输入有效数字")
-                                (balance.toDoubleOrNull() ?: -1.0) < 0 -> Text("数量不能为负数")
-                                else -> {}
+                            if ("balance" in touched) {
+                                when {
+                                    balance.toDoubleOrNull() == null -> Text("请输入有效数字")
+                                    balance.toDouble() < 0 -> Text("数量不能为负数")
+                                    else -> {}
+                                }
                             }
                         }
                     )
@@ -205,16 +212,20 @@ fun EditAssetDialog(
                     if (selectedType != AssetType.BANK_DEPOSIT) {
                         OutlinedTextField(
                             value = purchasePriceInput,
-                            onValueChange = { purchasePriceInput = it },
+                            onValueChange = { purchasePriceInput = it; touched = touched + "price" },
                             label = { Text("买入单价") },
                             placeholder = { Text("可选，留空则不计算盈亏") },
                             modifier = Modifier.fillMaxWidth(),
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                             singleLine = true,
-                            isError = purchasePriceInput.isNotBlank() && (purchasePriceInput.toDoubleOrNull() ?: -1.0) < 0,
+                            isError = "price" in touched && purchasePriceInput.isNotBlank() && purchasePriceInput.toDoubleOrNull() == null,
                             supportingText = {
-                                if (purchasePriceInput.isNotBlank() && (purchasePriceInput.toDoubleOrNull() ?: -1.0) < 0) {
-                                    Text("价格不能为负数")
+                                if ("price" in touched && purchasePriceInput.isNotBlank()) {
+                                    when {
+                                        purchasePriceInput.toDoubleOrNull() == null -> Text("请输入有效数字")
+                                        purchasePriceInput.toDouble() < 0 -> Text("价格不能为负数")
+                                        else -> {}
+                                    }
                                 }
                             }
                         )
@@ -223,18 +234,20 @@ fun EditAssetDialog(
                     if (selectedType == AssetType.BANK_DEPOSIT) {
                         OutlinedTextField(
                             value = interestRateInput,
-                            onValueChange = { interestRateInput = it },
+                            onValueChange = { interestRateInput = it; touched = touched + "rate" },
                             label = { Text("年利率 (%)") },
                             placeholder = { Text("例如：3.5") },
                             modifier = Modifier.fillMaxWidth(),
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                             singleLine = true,
-                            isError = (interestRateInput.toDoubleOrNull() ?: -1.0) < 0,
+                            isError = "rate" in touched && interestRateInput.toDoubleOrNull() == null,
                             supportingText = {
-                                when {
-                                    interestRateInput.toDoubleOrNull() == null -> Text("必填，请输入有效数字")
-                                    (interestRateInput.toDoubleOrNull() ?: -1.0) < 0 -> Text("利率不能为负数")
-                                    else -> {}
+                                if ("rate" in touched) {
+                                    when {
+                                        interestRateInput.toDoubleOrNull() == null -> Text("必填，请输入有效数字")
+                                        interestRateInput.toDouble() < 0 -> Text("利率不能为负数")
+                                        else -> {}
+                                    }
                                 }
                             }
                         )
@@ -272,11 +285,25 @@ fun EditAssetDialog(
                         Button(
                             onClick = {
                                 if (isSaving.value) return@Button
+                                // 保存时统一标记为已触碰：否则按钮灰着却没有红字，用户不知道改哪儿
+                                touched = setOf("name", "account", "balance", "price", "rate")
+                                if (!isValid) {
+                                    saveError.value = "请检查标红的必填项"
+                                    return@Button
+                                }
                                 isSaving.value = true
-                                val updatedAsset = asset.copy(
+                                saveError.value = null
+                                // asset.copy() 会走 Asset.init 的 require(...)，主线程抛出就是整 App 崩溃
+                                val updatedAsset = try {
+                                // 代码必须走归一化，和 AddAssetDialog / 交割单导入保持同一口径
+                                // （全项目存库形态是 StockCodeManager.normalizeSymbol 的结果，如 600519 → sh600519）。
+                                // 否则改过代码的资产在加仓、导入回放、分红匹配时会全部失配，
+                                // 连"同名 packs 持仓合并"也会失效——同一只票同一个账户出现两条持仓。
+                                val normalizedSymbol = StockCodeManager.normalizeSymbol(symbol.trim())
+                                asset.copy(
                                     name = name,
                                     type = selectedType,
-                                    symbol = symbol.takeIf { it.isNotBlank() },
+                                    symbol = normalizedSymbol.takeIf { it.isNotBlank() },
                                     account = account,
                                     balance = balance.toDoubleOrNull() ?: 0.0,
                                     purchasePrice = if (selectedType == AssetType.BANK_DEPOSIT) {
@@ -291,9 +318,15 @@ fun EditAssetDialog(
                                     },
                                     notes = notes.takeIf { it.isNotBlank() }
                                 )
+                                } catch (e: Exception) {
+                                    // 保留可操作性：把 loader 复位，否则按钮永久禁用且无提示
+                                    isSaving.value = false
+                                    saveError.value = e.message ?: "资产数据不合法"
+                                    return@Button
+                                }
                                 onConfirm(updatedAsset)
                             },
-                            enabled = isValid && !isSaving.value,
+                            enabled = !isSaving.value,
                             modifier = Modifier.weight(1f)
                         ) {
                             if (isSaving.value) {
@@ -306,6 +339,14 @@ fun EditAssetDialog(
                                 Text("保存")
                             }
                         }
+                    }
+
+                    saveError.value?.let { message ->
+                        Text(
+                            "保存失败：$message",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error
+                        )
                     }
                 }
             }
@@ -324,6 +365,9 @@ fun AdjustPositionDialog(
     var amount by remember { mutableStateOf("") }
     var price by remember { mutableStateOf("") }
     val isSaving = remember { mutableStateOf(false) }
+
+    // 只有用户改过数量后才报错，避免刚打开空框就一片红
+    var amountTouched by remember { mutableStateOf(false) }
     
     val isValid by remember { 
         derivedStateOf { 
@@ -437,7 +481,7 @@ fun AdjustPositionDialog(
                     
                     OutlinedTextField(
                         value = amount,
-                        onValueChange = { amount = it },
+                        onValueChange = { amount = it; amountTouched = true },
                         label = { 
                             when (asset.type) {
                                 AssetType.STOCK -> Text("买卖数量（股）")
@@ -449,13 +493,20 @@ fun AdjustPositionDialog(
                         modifier = Modifier.fillMaxWidth(),
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                         singleLine = true,
-                        isError = amount.toDoubleOrNull() == null || 
-                                  (action == "减仓" && amount.toDoubleOrNull() ?: 0.0 > asset.balance),
-                        supportingText = if (amount.toDoubleOrNull() == null) {
-                            { Text("请输入有效数字") }
-                        } else if (action == "减仓" && amount.toDoubleOrNull() ?: 0.0 > asset.balance) {
-                            { Text("减仓数量不能超过持仓") }
-                        } else null
+                        isError = amountTouched && (
+                            amount.toDoubleOrNull() == null ||
+                                (action == "减仓" && (amount.toDoubleOrNull() ?: 0.0) > asset.balance)
+                            ),
+                        supportingText = {
+                            if (amountTouched) {
+                                when {
+                                    amount.toDoubleOrNull() == null -> Text("请输入有效数字")
+                                    action == "减仓" && (amount.toDoubleOrNull() ?: 0.0) > asset.balance ->
+                                        Text("减仓数量不能超过持仓")
+                                    else -> {}
+                                }
+                            }
+                        }
                     )
                     
                     OutlinedTextField(
@@ -521,9 +572,20 @@ fun AdjustPositionDialog(
                         Button(
                             onClick = {
                                 if (isSaving.value) return@Button
-                                isSaving.value = true
-                                val delta = if (action == "加仓") amount.toDouble() else -amount.toDouble()
+                                val quantity = amount.toDoubleOrNull()
+                                if (quantity == null || quantity <= 0) {
+                                    amountTouched = true
+                                    return@Button
+                                }
+                                val delta = if (action == "加仓") quantity else -quantity
                                 val newBalance = asset.balance + delta
+                                // 减到负数 / 归零后再除以 0 会得到 Infinity 成本，
+                                // Asset.init 的 require 会在主线程抛出。这里先挡住。
+                                if (newBalance <= 0) {
+                                    amountTouched = true
+                                    return@Button
+                                }
+                                isSaving.value = true
                                 val tradePrice = price.toDoubleOrNull()
                                 
                                 val oldCost = asset.purchasePrice
@@ -535,11 +597,11 @@ fun AdjustPositionDialog(
                                 
                                 val updatedAsset = asset.copy(
                                     balance = newBalance,
-                                    purchasePrice = if (newCost > 0) newCost else asset.purchasePrice
+                                    purchasePrice = if (newCost.isFinite() && newCost > 0) newCost else asset.purchasePrice
                                 )
                                 onConfirm(updatedAsset)
                             },
-                            enabled = isValid && !isSaving.value,
+                            enabled = !isSaving.value,
                             modifier = Modifier.weight(1f)
                         ) {
                             if (isSaving.value) {

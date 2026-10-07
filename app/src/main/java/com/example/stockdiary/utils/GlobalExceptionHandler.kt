@@ -118,12 +118,29 @@ object GlobalExceptionHandler {
             
             val logFile = File(crashFile, "$crashId.log")
             logFile.writeText(crashInfo)
+
+            // 磁盘目录不受 MAX_CRASH_LOGS 约束：只删内存里的旧记录而文件一直留着，
+            // 反复崩溃会把外部存储慢慢写满，且用户毫无感知。
+            pruneCrashFiles(crashFile)
             
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             AppLogger.e("保存崩溃日志失败", e, "CrashHandler")
         }
+    }
+
+    /** 只保留最近 [MAX_CRASH_LOGS] 份崩溃日志，其余删除 */
+    private fun pruneCrashFiles(dir: File) {
+        val files = dir.listFiles() ?: return
+        if (files.size <= MAX_CRASH_LOGS) return
+        // 文件名是 "crash_<timestamp>.log"，字典序即时间序
+        files.sortedByDescending { it.name }
+            .drop(MAX_CRASH_LOGS)
+            .forEach { file ->
+                runCatching { file.delete() }
+                    .onFailure { AppLogger.w("删除旧崩溃日志失败: ${file.name}", "CrashHandler") }
+            }
     }
     
     private fun showCrashNotification(throwable: Throwable) {
@@ -259,7 +276,11 @@ class CrashRecoveryManager private constructor() {
                 putInt("crash_count", crashState.crashCount + 1)
                 // 堆栈较长，截断太少会丢掉关键帧，4K 足够覆盖常见堆栈
                 putString("last_crash_info", crashInfo.take(4000))
-                apply()
+                // 必须是 commit() 而不是 apply()：写完后紧接着就会 invokeDefaultHandler 终止进程，
+                // apply() 的异步落盘与 kill 存在竞态，崩溃堆栈经常还没落地进程就没了
+                // —— 表现为"下次启动有时弹、有时不弹"。
+                // 一次崩溃只写一次，同步写几十 KB 完全可接受。
+                commit()
             }
 
             crashState = crashState.copy(

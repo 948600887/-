@@ -378,15 +378,21 @@ object SinaStockAPI : StockAPI {
                         val high = fields[4].toDoubleOrNull() ?: 0.0
                         val low = fields[5].toDoubleOrNull() ?: 0.0
                         val volume = fields[8].toLongOrNull() ?: 0L
-                        
-                        val change = if (close > 0) current - close else 0.0
-                        val changePercent = if (close > 0) (change / close) * 100 else 0.0
-                        
-                        if (current > 0 || close > 0) {
+
+                        // 停牌/集合竞价前/退市整理期：新浪返回的"现价"是 0，但昨收正常。
+                        // 直接把 0 当价格会静默污染三层缓存（内存、PriceCacheManager 磁盘、调用方），
+                        // 表现为市值归零、涨跌幅 -100%，且下轮拉取前不会自愈。
+                        // 处理：现价有效用现价；否则退到昨收并把涨跌记为 0（券商 App 的通行做法）。
+                        val hasValidPrice = current > 0
+                        val effectivePrice = if (hasValidPrice) current else close
+                        val change = if (hasValidPrice && close > 0) current - close else 0.0
+                        val changePercent = if (hasValidPrice && close > 0) (change / close) * 100 else 0.0
+
+                        if (effectivePrice > 0) {
                             result[code] = SinaStockData(
                                 name = name,
                                 code = code,
-                                price = current,
+                                price = effectivePrice,
                                 change = change,
                                 changePercent = changePercent,
                                 open = open,
@@ -394,6 +400,8 @@ object SinaStockAPI : StockAPI {
                                 low = low,
                                 volume = volume
                             )
+                        } else {
+                            AppLogger.w("丢弃无效报价: $code（现价=$current, 昨收=$close）", TAG)
                         }
                     }
                 }

@@ -65,7 +65,8 @@ class AssetRepository private constructor(
      * 直接落库会把持仓市值清零并污染总资产曲线，此处统一拦截。
      */
     suspend fun updatePriceBySymbol(symbol: String, price: Double) {
-        if (price <= 0.0) {
+        // !isFinite 是必须的：NaN 参与的任何比较都返回 false，`price <= 0` 拦不住 NaN
+        if (!price.isFinite() || price <= 0.0) {
             AppLogger.w("拒绝写入非正价格: $symbol = $price（可能为解析失败）", "AssetRepository")
             return
         }
@@ -73,7 +74,7 @@ class AssetRepository private constructor(
     }
 
     suspend fun updatePriceById(id: Long, price: Double) {
-        if (price <= 0.0) {
+        if (!price.isFinite() || price <= 0.0) {
             AppLogger.w("拒绝写入非正价格: id=$id price=$price（可能为解析失败）", "AssetRepository")
             return
         }

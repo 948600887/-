@@ -38,11 +38,11 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.stockdiary.di.LocalAppContainer
 import com.example.stockdiary.ui.screens.history.components.HistorySaveSnapshotDialog
+import com.example.stockdiary.ui.screens.history.components.HistoryPeriodSelector
 import com.example.stockdiary.ui.screens.history.components.historyAssetDistribution
 import com.example.stockdiary.ui.screens.history.components.historyMonthlyReturnChart
 import com.example.stockdiary.ui.screens.history.components.historyOverviewCard
 import com.example.stockdiary.ui.screens.history.components.historyPeriodReturnCard
-import com.example.stockdiary.ui.screens.history.components.historyPeriodSelector
 import com.example.stockdiary.ui.screens.history.components.historyRiskCard
 import com.example.stockdiary.ui.screens.history.components.historyTrendChart
 import com.example.stockdiary.ui.theme.OnSurfaceVariant
@@ -111,39 +111,44 @@ fun HistoryScreen(
             )
         }
     ) { padding ->
-        if (uiState.filteredSnapshots.isEmpty()) {
-            EmptyHistoryContent(modifier = Modifier.fillMaxSize().padding(padding))
-        } else {
-            val latest = uiState.filteredSnapshots.last()
-            val earliest = uiState.filteredSnapshots.first()
+        // 周期选择器放在两条分支的公共外层：否则一旦某周期窗口内没有快照，
+        // 选择器随 LazyColumn 一起消失，用户再也切不回「全部」。
+        Column(modifier = Modifier.fillMaxSize().padding(padding)) {
+            HistoryPeriodSelector(
+                selectedPeriod = uiState.selectedPeriod,
+                onPeriodSelected = { viewModel.selectPeriod(it) }
+            )
+            if (uiState.filteredSnapshots.isEmpty()) {
+                EmptyHistoryContent(
+                    hasAnySnapshot = uiState.snapshots.isNotEmpty(),
+                    modifier = Modifier.fillMaxSize()
+                )
+            } else {
+                val latest = uiState.filteredSnapshots.last()
+                val earliest = uiState.filteredSnapshots.first()
 
-            BoxWithConstraints(
-                modifier = Modifier.fillMaxSize().padding(padding)
-            ) {
-                val trendChartHeight = maxOf(maxHeight * 0.3f, 180.dp)
-                LazyColumn(
-                    modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(bottom = 24.dp)
-                ) {
-                    historyPeriodSelector(
-                        selectedPeriod = uiState.selectedPeriod,
-                        onPeriodSelected = { viewModel.selectPeriod(it) }
-                    )
-                    historyOverviewCard(latest = latest)
-                    historyTrendChart(
-                        snapshots = uiState.filteredSnapshots,
-                        selectedPeriod = uiState.selectedPeriod,
-                        height = trendChartHeight
-                    )
-                    historyPeriodReturnCard(earliest = earliest, latest = latest)
+                BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+                    val trendChartHeight = maxOf(maxHeight * 0.3f, 180.dp)
+                    LazyColumn(
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(bottom = 24.dp)
+                    ) {
+                        historyOverviewCard(latest = latest)
+                        historyTrendChart(
+                            snapshots = uiState.filteredSnapshots,
+                            selectedPeriod = uiState.selectedPeriod,
+                            height = trendChartHeight
+                        )
+                        historyPeriodReturnCard(earliest = earliest, latest = latest)
 
-                    val statistics = uiState.statistics
-                    if (statistics != null) {
-                        historyRiskCard(stats = statistics)
+                        val statistics = uiState.statistics
+                        if (statistics != null) {
+                            historyRiskCard(stats = statistics)
+                        }
+
+                        historyMonthlyReturnChart(monthlyReturns = uiState.monthlyReturns)
+                        historyAssetDistribution(latest = latest)
                     }
-
-                    historyMonthlyReturnChart(monthlyReturns = uiState.monthlyReturns)
-                    historyAssetDistribution(latest = latest)
                 }
             }
         }
@@ -160,7 +165,10 @@ fun HistoryScreen(
 }
 
 @Composable
-private fun EmptyHistoryContent(modifier: Modifier = Modifier) {
+private fun EmptyHistoryContent(
+    hasAnySnapshot: Boolean,
+    modifier: Modifier = Modifier
+) {
     Box(
         modifier = modifier,
         contentAlignment = Alignment.Center
@@ -171,8 +179,24 @@ private fun EmptyHistoryContent(modifier: Modifier = Modifier) {
                 modifier = Modifier.size(64.dp), tint = OnSurfaceVariant
             )
             Spacer(modifier = Modifier.height(16.dp))
-            Text("暂无历史数据", style = MaterialTheme.typography.titleMedium)
-            Text("点击右上角保存第一份快照", style = MaterialTheme.typography.bodyMedium, color = OnSurfaceVariant)
+            if (hasAnySnapshot) {
+                // 有快照但被当前周期滤掉了：提示切更长的周期，而不是让人以为没数据。
+                Text("当前周期内暂无快照", style = MaterialTheme.typography.titleMedium)
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    "试试切换到更长的周期，或点右上角补一份快照",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = OnSurfaceVariant
+                )
+            } else {
+                Text("暂无历史数据", style = MaterialTheme.typography.titleMedium)
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    "点击右上角保存第一份快照",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = OnSurfaceVariant
+                )
+            }
         }
     }
 }

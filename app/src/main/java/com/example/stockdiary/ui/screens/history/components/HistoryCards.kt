@@ -48,32 +48,38 @@ private val periodOptions = listOf(
     "6M" to "6月", "1Y" to "1年", "ALL" to "全部"
 )
 
-fun LazyListScope.historyPeriodSelector(
+/**
+ * 周期选择器。
+ *
+ * 必须是普通 @Composable 而非 LazyListScope 扩展：历史页在「当前周期内没有快照」时走空态分支，
+ * 选择器若只挂在 LazyColumn 里就会被一起隐藏，导致用户无法切回「全部」——形成死路。
+ */
+@Composable
+fun HistoryPeriodSelector(
     selectedPeriod: String,
-    onPeriodSelected: (String) -> Unit
+    onPeriodSelected: (String) -> Unit,
+    modifier: Modifier = Modifier
 ) {
-    item {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 8.dp),
-            horizontalArrangement = Arrangement.SpaceEvenly
-        ) {
-            periodOptions.forEach { (key, label) ->
-                val isSelected = selectedPeriod == key
-                Surface(
-                    modifier = Modifier.clickable { onPeriodSelected(key) },
-                    shape = RoundedCornerShape(8.dp),
-                    color = if (isSelected) Primary else SurfaceContainerLow,
-                    contentColor = if (isSelected) Color.White else OnSurfaceVariant
-                ) {
-                    Text(
-                        text = label, fontSize = 13.sp,
-                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
-                        maxLines = 1,
-                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp)
-                    )
-                }
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+        horizontalArrangement = Arrangement.SpaceEvenly
+    ) {
+        periodOptions.forEach { (key, label) ->
+            val isSelected = selectedPeriod == key
+            Surface(
+                modifier = Modifier.clickable { onPeriodSelected(key) },
+                shape = RoundedCornerShape(8.dp),
+                color = if (isSelected) Primary else SurfaceContainerLow,
+                contentColor = if (isSelected) Color.White else OnSurfaceVariant
+            ) {
+                Text(
+                    text = label, fontSize = 13.sp,
+                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                    maxLines = 1,
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp)
+                )
             }
         }
     }

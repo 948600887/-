@@ -17,15 +17,32 @@ object UnifiedPriceService {
     private const val TAG = "UnifiedPriceService"
     
     private val client = NetworkClient.defaultClient
-    
-    private val priceCache = ConcurrentHashMap<String, AssetPrice>()
+
+    /**
+     * 行情价的进程内有效期。
+     *
+     * 缓存原本没有 TTL：同一个进程里第一次取到价格后就永远命中缓存，
+     * 非 forceRefresh 的刷新（含后台定时同步）拿到的永远是启动那一刻的价。
+     */
+    private const val PRICE_CACHE_TTL_MS = 60_000L
+
+    /** 缓存条目：价格 + 写入时间，用于判断过期 */
+    private data class CacheEntry(val price: AssetPrice, val timestamp: Long)
+
+    private val priceCache = ConcurrentHashMap<String, CacheEntry>()
     private val pendingRequests = ConcurrentHashMap<String, CompletableDeferred<Result<AssetPrice>>>()
+
+    private fun isFresh(entry: CacheEntry): Boolean =
+        System.currentTimeMillis() - entry.timestamp < PRICE_CACHE_TTL_MS
 
     suspend fun getPrice(code: String, type: AssetType, forceRefresh: Boolean = false): Result<AssetPrice> = withContext(Dispatchers.IO) {
         val cacheKey = "${type.name}_$code"
 
         if (!forceRefresh) {
-            priceCache[cacheKey]?.let { return@withContext Result.success(it) }
+            val cached = priceCache[cacheKey]
+            if (cached != null && isFresh(cached)) {
+                return@withContext Result.success(cached.price)
+            }
         }
 
         // 如果已有相同请求正在进行，直接 await 其完成，避免自旋等待
@@ -40,13 +57,13 @@ object UnifiedPriceService {
         try {
             val result: Result<AssetPrice> = when (type) {
                 AssetType.STOCK -> getStockPrice(code).map { AssetPrice.Stock(it) }
-                AssetType.FUND -> getFundPrice(code).map { AssetPrice.Fund(it) }
+                AssetType.FUND -> getFundPrice(code, forceRefresh).map { AssetPrice.Fund(it) }
                 AssetType.CRYPTO -> getCryptoPrice(code).map { AssetPrice.Crypto(it) }
                 else -> Result.failure(Exception("不支持的资产类型: $type"))
             }
 
             result.onSuccess { price ->
-                priceCache[cacheKey] = price
+                priceCache[cacheKey] = CacheEntry(price, System.currentTimeMillis())
             }
 
             deferred.complete(result)
@@ -169,10 +186,12 @@ object UnifiedPriceService {
         }
     }
     
-    private suspend fun getFundPrice(code: String): Result<FundData> = withContext(Dispatchers.IO) {
+    private suspend fun getFundPrice(code: String, forceRefresh: Boolean): Result<FundData> = withContext(Dispatchers.IO) {
         try {
-            // 委托 FundAPI 统一查询（避免多套 HTTP 实现导致请求头不一致）
-            val fundInfo = FundAPI.getFundInfo(code)
+            // 走带缓存的版本：原来直接调 getFundInfo 会绕过 FundAPI 的 5 分钟缓存，
+            // 每次同步都重新打天天基金接口，既慢又容易被限流。
+            val result = FundAPI.getFundInfoWithCache(code, forceRefresh)
+            val fundInfo = result.getOrNull()
             if (fundInfo != null && fundInfo.name.isNotEmpty()) {
                 val fundData = FundData(
                     code = fundInfo.code.ifEmpty { code },
@@ -289,7 +308,7 @@ object UnifiedPriceService {
     }
     
     fun getCachedPrice(code: String, type: AssetType): AssetPrice? {
-        return priceCache["${type.name}_$code"]
+        return priceCache["${type.name}_$code"]?.price
     }
     
     fun getCacheSize(): Int = priceCache.size
@@ -311,7 +330,9 @@ object UnifiedPriceService {
         AppLogger.d("移除缓存: $cacheKey", TAG)
     }
     
+    /** 缓存里是否有一份尚未过期的价格 */
     fun isCacheValid(code: String, type: AssetType): Boolean {
-        return priceCache.containsKey("${type.name}_$code")
+        val entry = priceCache["${type.name}_$code"] ?: return false
+        return isFresh(entry)
     }
 }

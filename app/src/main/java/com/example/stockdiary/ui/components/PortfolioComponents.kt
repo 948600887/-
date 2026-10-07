@@ -346,6 +346,8 @@ fun DividendDetailDialog(
 
     var editingRecord by remember { mutableStateOf<Dividend?>(null) }
     var showEditDialog by remember { mutableStateOf(false) }
+    // 删除是撤不回的操作，手滑点到就永久丢一条分红记录 —— 必须先确认
+    var pendingDeleteRecord by remember { mutableStateOf<Dividend?>(null) }
 
     suspend fun loadRecords() {
         if (symbol.isBlank()) {
@@ -481,14 +483,7 @@ fun DividendDetailDialog(
                                                 Icon(Icons.Filled.Edit, contentDescription = "编辑", tint = Primary, modifier = Modifier.size(16.dp))
                                             }
                                             IconButton(
-                                                onClick = {
-                                                    coroutineScope.launch {
-                                                        withContext(Dispatchers.IO) {
-                                                            container.dividendRepository.deleteManualDividend(record.id, symbol)
-                                                        }
-                                                        loadRecords()
-                                                    }
-                                                },
+                                                onClick = { pendingDeleteRecord = record },
                                                 modifier = Modifier.size(24.dp)
                                             ) {
                                                 Icon(Icons.Filled.Delete, contentDescription = "删除", tint = LossRed, modifier = Modifier.size(16.dp))
@@ -536,6 +531,34 @@ fun DividendDetailDialog(
                     showEditDialog = false
                     loadRecords()
                 }
+            }
+        )
+    }
+
+    pendingDeleteRecord?.let { record ->
+        AlertDialog(
+            onDismissRequest = { pendingDeleteRecord = null },
+            title = { Text("删除分红记录", fontWeight = FontWeight.Bold) },
+            text = {
+                Text(
+                    "将删除 ${record.date} 的分红记录（每10股 ¥${record.amount.format(2)}），删除后无法恢复。"
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        coroutineScope.launch {
+                            withContext(Dispatchers.IO) {
+                                container.dividendRepository.deleteManualDividend(record.id, symbol)
+                            }
+                            pendingDeleteRecord = null
+                            loadRecords()
+                        }
+                    }
+                ) { Text("删除", color = LossRed) }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingDeleteRecord = null }) { Text("取消") }
             }
         )
     }

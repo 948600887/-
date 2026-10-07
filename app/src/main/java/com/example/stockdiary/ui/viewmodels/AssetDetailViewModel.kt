@@ -141,17 +141,24 @@ class AssetDetailViewModel(private val container: AppContainer, private val asse
     suspend fun adjustPosition(updatedAsset: Asset) {
         val currentAsset = _asset.value ?: return
         val delta = updatedAsset.balance - currentAsset.balance
-        val tradePrice = if (delta > 0) {
-            ((currentAsset.balance * currentAsset.purchasePrice) + (delta * updatedAsset.purchasePrice)) / updatedAsset.balance
-        } else {
-            currentAsset.currentPrice ?: currentAsset.purchasePrice
-        }
         if (delta > 0) {
+            // UI 传进来的 purchasePrice 已经是"加仓后摊薄的新成本"，
+            // 而 addOrUpdateStockAsset 会自己再按余额做一次加权平均 ——
+            // 直接把它当成交单价传下去就是双重加权，成本会被算错（越加越偏低）。
+            // 这里反解出本次这笔的成交单价：新增总金额 / 增量数量。
+            val blendedCost = updatedAsset.purchasePrice
+            val incrementalPrice = if (blendedCost.isFinite()) {
+                val derived = (blendedCost * updatedAsset.balance -
+                    currentAsset.balance * currentAsset.purchasePrice) / delta
+                if (derived.isFinite() && derived > 0) derived else blendedCost
+            } else {
+                updatedAsset.currentPrice ?: currentAsset.purchasePrice
+            }
             repository.addOrUpdateStockAsset(
                 symbol = currentAsset.symbol ?: "",
                 name = currentAsset.name,
                 balance = delta,
-                price = tradePrice,
+                price = incrementalPrice,
                 account = currentAsset.account,
                 assetType = currentAsset.type
             )

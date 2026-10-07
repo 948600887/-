@@ -1,5 +1,7 @@
 package com.example.stockdiary.ui.navigation
 
+import android.app.Activity
+import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
@@ -13,6 +15,7 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.stockdiary.di.LocalAppContainer
 import com.example.stockdiary.ui.screens.*
@@ -35,6 +38,8 @@ private val screensByRoute = listOf(
     Screen.History,
     Screen.Settings
 ).associateBy { it.route }
+
+private const val BACK_TO_EXIT_WINDOW_MS = 2000L
 
 @Composable
 fun GoldVaultNavHost() {
@@ -66,6 +71,24 @@ fun GoldVaultNavHost() {
 
     BackHandler(enabled = isDetailScreen) {
         currentDetailId = null
+    }
+
+    // 一级页面：先退回「资产」页；已在首页则要求「再按一次」才退出，避免误触丢 App。
+    // 子页面里注册的 BackHandler（如持仓批量选择态）优先级更高，会先于这里处理。
+    val context = LocalContext.current
+    var lastBackPressAt by remember { mutableLongStateOf(0L) }
+    BackHandler(enabled = !isDetailScreen) {
+        if (selectedScreenRoute != Screen.Dashboard.route) {
+            selectedScreenRoute = Screen.Dashboard.route
+        } else {
+            val now = System.currentTimeMillis()
+            if (now - lastBackPressAt < BACK_TO_EXIT_WINDOW_MS) {
+                (context as? Activity)?.finish()
+            } else {
+                lastBackPressAt = now
+                Toast.makeText(context, "再按一次退出", Toast.LENGTH_SHORT).show()
+            }
+        }
     }
 
     Scaffold(

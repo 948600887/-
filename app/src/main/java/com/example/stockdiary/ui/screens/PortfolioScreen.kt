@@ -1,5 +1,7 @@
 package com.example.stockdiary.ui.screens
 
+import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -8,6 +10,8 @@ import androidx.compose.material.icons.automirrored.filled.DriveFileMove
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.platform.LocalContext
+import com.example.stockdiary.utils.AppLogger
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -46,6 +50,7 @@ fun PortfolioScreen(
     var showDeleteConfirmDialog by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
+    val context = LocalContext.current
 
     val stockAssets by remember {
         derivedStateOf {
@@ -68,10 +73,31 @@ fun PortfolioScreen(
         viewModel.loadDividendIncome(stockAssets)
     }
 
-    LaunchedEffect(stockAssets) {
-        if (expandedAccounts.isEmpty() && filteredAssetsByAccount.isNotEmpty()) {
-            expandedAccounts = filteredAssetsByAccount.keys.toSet()
+    // Set 的相等性是结构性的，用它做副作用 key 可以保证「账户集合没变」时不重跑，
+    // 避免价格波动刷新列表就把用户刚收起的分组重新展开。
+    val accountKeys = remember(filteredAssetsByAccount) { filteredAssetsByAccount.keys.toSet() }
+
+    // null = 还没初始化过（首屏）。初始化后只自动展开「新出现」的账户，
+    // 用户手动收起的分组不会再被强行展开。
+    var initializedAccounts by remember { mutableStateOf<Set<String>?>(null) }
+
+    // 处在批量选择态时，返回键应当先退出选择态，而不是直接退出 App
+    BackHandler(enabled = selectionMode) {
+        selectionMode = false
+        selectedIds = emptySet()
+    }
+
+    LaunchedEffect(accountKeys) {
+        val current = initializedAccounts
+        if (current == null) {
+            expandedAccounts = accountKeys
+        } else {
+            val added = accountKeys - current
+            if (added.isNotEmpty()) {
+                expandedAccounts = expandedAccounts + added
+            }
         }
+        initializedAccounts = accountKeys
     }
 
     if (errorMessage != null) {
@@ -232,8 +258,14 @@ fun PortfolioScreen(
             onDismiss = { showAddDialog = false },
             existingAccounts = existingAccounts,
             onConfirm = { asset ->
+                // 保存失败也要关闭并提示，否则异常让关闭语句执行不到，
+                // 弹窗里的 isSaving 又没人复位 —— 按钮会一直转圈
                 scope.launch {
-                    viewModel.addAsset(asset)
+                    runCatching { viewModel.addAsset(asset) }
+                        .onFailure {
+                            AppLogger.e("新增资产失败: ${it.message}", it, "PortfolioScreen")
+                            Toast.makeText(context, "保存失败：${it.message ?: "未知错误"}", Toast.LENGTH_LONG).show()
+                        }
                     showAddDialog = false
                 }
             }

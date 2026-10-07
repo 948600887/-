@@ -1,5 +1,7 @@
 package com.example.stockdiary.ui.screens
 
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -14,9 +16,11 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Calculate
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -29,6 +33,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -77,12 +82,25 @@ fun CalendarScreen(modifier: Modifier = Modifier) {
         return
     }
 
+    // 首次加载：日历数据还没回来，先给进度条，别让用户对着一张全空的日历猜
+    if (isLoading && calendarData.isEmpty()) {
+        Box(modifier = modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            CircularProgressIndicator()
+        }
+        return
+    }
+
     Column(
         modifier = modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState()),
         verticalArrangement = androidx.compose.foundation.layout.Arrangement.Top
     ) {
+        // 切月份/切 Tab 时的进度：数据要重新算，不给反馈会像卡住了
+        if (isLoading) {
+            LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+        }
+
         CalendarHeader(
             selectedTab = uiState.selectedTab,
             onTabSelected = { viewModel.selectTab(it) },
@@ -110,14 +128,13 @@ fun CalendarScreen(modifier: Modifier = Modifier) {
             )
         }
 
-        // 月度汇总
-        if (!isLoading) {
-            MonthlySummary(
-                isAssetCalendar = uiState.selectedTab == "资产日历",
-                calendarData = calendarData,
-                assetCount = assets.size
-            )
-        }
+        // 月度汇总：刷新时保持占位并置灰，避免每次切月都整块消失再出现（闪烁）
+        MonthlySummary(
+            isAssetCalendar = uiState.selectedTab == "资产日历",
+            calendarData = calendarData,
+            assetCount = assets.size,
+            modifier = Modifier.alpha(if (isLoading) 0.5f else 1f)
+        )
 
         if (errorMessage != null) {
             ErrorMessageCard(
@@ -268,7 +285,8 @@ private fun SelectedDateDetail(
 private fun MonthlySummary(
     isAssetCalendar: Boolean,
     calendarData: Map<LocalDate, Double>,
-    assetCount: Int
+    assetCount: Int,
+    modifier: Modifier = Modifier
 ) {
     val snapshotDays = calendarData.values.count { it > 0 }
     val noDataDays = calendarData.values.count { it == 0.0 }
@@ -280,7 +298,7 @@ private fun MonthlySummary(
     val zeroDays = calendarData.values.count { it == 0.0 }
 
     Card(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .padding(16.dp),
         shape = RoundedCornerShape(12.dp),

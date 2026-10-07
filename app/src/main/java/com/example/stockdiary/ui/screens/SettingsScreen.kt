@@ -27,9 +27,13 @@ import androidx.compose.material.icons.filled.MoneyOff
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.Sync
+import androidx.compose.material.icons.filled.Notifications
+import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TimePicker
+import androidx.compose.material3.rememberTimePickerState
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -54,6 +58,7 @@ import com.example.stockdiary.ui.screens.settings.components.DashboardConfigShee
 import com.example.stockdiary.ui.screens.settings.components.DataSourceStatusDialog
 import com.example.stockdiary.ui.screens.settings.components.ExportDataDialog
 import com.example.stockdiary.ui.screens.settings.components.ImportBrokerageDialog
+import com.example.stockdiary.ui.screens.settings.components.ReminderTimePickerDialog
 import com.example.stockdiary.ui.screens.settings.components.SettingsItem
 import com.example.stockdiary.ui.screens.settings.components.SettingsSection
 import com.example.stockdiary.ui.screens.settings.components.ThemeSelectionDialog
@@ -74,6 +79,10 @@ fun SettingsScreen(
     val dashboardPrefs by viewModel.dashboardPreferences.collectAsState()
     val autoPriceSyncEnabled by viewModel.autoPriceSyncEnabled.collectAsState()
     val lastPriceSyncTime by viewModel.lastPriceSyncTime.collectAsState()
+    val reminderEnabled by viewModel.reminderEnabled.collectAsState()
+    val reminderHour by viewModel.reminderHour.collectAsState()
+    val reminderMinute by viewModel.reminderMinute.collectAsState()
+    val reminderError by viewModel.reminderError.collectAsState()
     var currentTheme by remember { mutableStateOf(ThemeManager.getThemeMode(context)) }
 
     DisposableEffect(Unit) {
@@ -97,6 +106,7 @@ fun SettingsScreen(
     var showExportDialog by remember { mutableStateOf(false) }
     var showImportDialog by remember { mutableStateOf(false) }
     var showApiSelectionDialog by remember { mutableStateOf(false) }
+    var showReminderTimePicker by remember { mutableStateOf(false) }
     var currentPriceApi by remember { mutableStateOf(com.example.stockdiary.data.ApiManager.getPriceApi(context)) }
 
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
@@ -121,6 +131,13 @@ fun SettingsScreen(
         uiState.errorMessage?.let { message ->
             Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
             viewModel.clearErrorMessage()
+        }
+    }
+
+    LaunchedEffect(reminderError) {
+        reminderError?.let { message ->
+            Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+            viewModel.clearReminderError()
         }
     }
 
@@ -203,10 +220,12 @@ fun SettingsScreen(
                 SettingsItemData(
                     icon = Icons.Default.Sync,
                     title = "自动刷新价格与分红",
+                    // 实际策略是 SyncStrategy：交易时段 15 分钟一次、非交易时段 4 小时一次，
+                    // 文案不能写"每日 17:15"，那会让人以为一天只更新一次。
                     subtitle = when {
                         !autoPriceSyncEnabled -> "已关闭"
-                        lastPriceSyncTime > 0 -> "每日约 17:15 自动同步价格与分红 · 上次: ${formatPriceSyncTime(lastPriceSyncTime)}"
-                        else -> "每日约 17:15 自动同步价格与分红 · 尚未同步"
+                        lastPriceSyncTime > 0 -> "交易时段每 15 分钟、其余时段每 4 小时 · 上次: ${formatPriceSyncTime(lastPriceSyncTime)}"
+                        else -> "交易时段每 15 分钟、其余时段每 4 小时 · 尚未同步"
                     },
                     isSwitch = true,
                     switchChecked = autoPriceSyncEnabled,
@@ -255,6 +274,25 @@ fun SettingsScreen(
             )),
             SettingsSectionData("应用", listOf(
                 SettingsItemData(
+                    icon = Icons.Default.Notifications,
+                    title = "每日查看提醒",
+                    subtitle = if (reminderEnabled) {
+                        "每天 ${reminderHour.toString().padStart(2, '0')}:${reminderMinute.toString().padStart(2, '0')} 提醒查看资产"
+                    } else {
+                        "已关闭"
+                    },
+                    isSwitch = true,
+                    switchChecked = reminderEnabled,
+                    onSwitchCheckedChange = { enabled -> viewModel.setReminderEnabled(enabled) }
+                ),
+                SettingsItemData(
+                    icon = Icons.Default.Schedule,
+                    title = "提醒时间",
+                    subtitle = "${reminderHour.toString().padStart(2, '0')}:${reminderMinute.toString().padStart(2, '0')}",
+                    enabled = reminderEnabled,
+                    onClick = { if (reminderEnabled) showReminderTimePicker = true }
+                ),
+                SettingsItemData(
                     icon = Icons.Default.Info,
                     title = "关于",
                     subtitle = "金库 v1.0.0",
@@ -302,7 +340,8 @@ fun SettingsScreen(
                         isDestructive = item.isDestructive,
                         isSwitch = item.isSwitch,
                         switchChecked = item.switchChecked,
-                        onSwitchCheckedChange = item.onSwitchCheckedChange
+                        onSwitchCheckedChange = item.onSwitchCheckedChange,
+                        enabled = item.enabled
                     )
                 }
             }
@@ -388,15 +427,28 @@ fun SettingsScreen(
         )
     }
 
+    if (showReminderTimePicker) {
+        ReminderTimePickerDialog(
+            initialHour = reminderHour,
+            initialMinute = reminderMinute,
+            onDismiss = { showReminderTimePicker = false },
+            onConfirm = { hour, minute ->
+                viewModel.setReminderTime(hour, minute)
+                showReminderTimePicker = false
+            }
+        )
+    }
+
     if (showDataSourceDialog) {
-        uiState.dataSourceHealth?.let { currentHealth ->
-            DataSourceStatusDialog(
-                healthList = currentHealth,
-                isLoading = uiState.isCheckingHealth,
-                onDismiss = { showDataSourceDialog = false },
-                onRefresh = { viewModel.checkDataSourceHealth() }
-            )
-        }
+        // 之前这里写成 uiState.dataSourceHealth?.let { ... }：健康列表初始是 null，
+        // 点开后要等好几个网络请求跑完才突然出现；一旦检测抛异常（离线）就永远为 null，
+        // 这个菜单项再也打不开。判空从"渲染条件"移到对话框内部的空状态处理。
+        DataSourceStatusDialog(
+            healthList = uiState.dataSourceHealth ?: emptyList(),
+            isLoading = uiState.isCheckingHealth,
+            onDismiss = { showDataSourceDialog = false },
+            onRefresh = { viewModel.checkDataSourceHealth() }
+        )
     }
 }
 
@@ -413,7 +465,9 @@ private data class SettingsItemData(
     val isDestructive: Boolean = false,
     val isSwitch: Boolean = false,
     val switchChecked: Boolean = false,
-    val onSwitchCheckedChange: ((Boolean) -> Unit)? = null
+    val onSwitchCheckedChange: ((Boolean) -> Unit)? = null,
+    /** false 时置灰且不可点击（用于依赖其它开关的子项，如「提醒时间」依赖「每日提醒」） */
+    val enabled: Boolean = true
 )
 
 private fun formatPriceSyncTime(timeMillis: Long): String {

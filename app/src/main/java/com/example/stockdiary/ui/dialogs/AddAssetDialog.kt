@@ -16,6 +16,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
@@ -51,6 +52,7 @@ fun AddAssetDialog(
     var purchasePrice by remember { mutableStateOf("") }
     var notes by remember { mutableStateOf("") }
     var isSaving by remember { mutableStateOf(false) }
+    var saveError by remember { mutableStateOf<String?>(null) }
     var interestRate by remember { mutableStateOf("") }
     var isLoading by remember { mutableStateOf(false) }
     var loadError by remember { mutableStateOf<String?>(null) }
@@ -213,16 +215,33 @@ fun AddAssetDialog(
         }
     }
 
+    // 需要行情价格的资产类型必须提供代码：没有 symbol 就永远同步不到价格，
+    // 也不会被任何导入回放/持仓合并/分红匹配命中。
+    val symbolRequired by remember(selectedType) {
+        derivedStateOf {
+            selectedType == AssetType.STOCK ||
+                selectedType == AssetType.FUND ||
+                selectedType == AssetType.CRYPTO
+        }
+    }
+
+    // 「碰过」的字段才报错。否则一打开弹窗，空的必填项全红，
+    // 用户还没输入就被判错，体验等于打了脸。
+    var touched by remember { mutableStateOf(setOf<String>()) }
+    fun markTouched(field: String) { touched = touched + field }
+
     val isValid by remember {
         derivedStateOf {
             val balanceValid = (balance.toDoubleOrNull() ?: -1.0) >= 0
             val interestRateValid = selectedType != AssetType.BANK_DEPOSIT || (interestRate.toDoubleOrNull() ?: -1.0) >= 0
             val purchasePriceValid = selectedType == AssetType.BANK_DEPOSIT || purchasePrice.isBlank() || (purchasePrice.toDoubleOrNull() ?: -1.0) >= 0
+            val symbolValid = !symbolRequired || symbol.isNotBlank()
             name.isNotBlank() &&
             account.isNotBlank() &&
             balanceValid &&
             interestRateValid &&
-            purchasePriceValid
+            purchasePriceValid &&
+            symbolValid
         }
     }
 
@@ -338,19 +357,19 @@ fun AddAssetDialog(
 
                     OutlinedTextField(
                         value = name,
-                        onValueChange = { name = it },
+                        onValueChange = { name = it; markTouched("name") },
                         label = { Text("资产名称") },
                         placeholder = { Text("例如：贵州茅台、易方达消费精选") },
                         modifier = Modifier.fillMaxWidth(),
                         singleLine = true,
-                        isError = name.isBlank(),
-                        supportingText = if (name.isBlank()) { { Text("必填") } } else null
+                        isError = "name" in touched && name.isBlank(),
+                        supportingText = if ("name" in touched && name.isBlank()) { { Text("必填") } } else null
                     )
 
                     if (selectedType == AssetType.STOCK || selectedType == AssetType.FUND || selectedType == AssetType.CRYPTO) {
                         OutlinedTextField(
                             value = symbol,
-                            onValueChange = { symbol = it },
+                            onValueChange = { symbol = it; markTouched("symbol") },
                             label = {
                                 when (selectedType) {
                                     AssetType.CRYPTO -> Text("交易对")
@@ -365,6 +384,16 @@ fun AddAssetDialog(
                             },
                             modifier = Modifier.fillMaxWidth(),
                             singleLine = true,
+                            // 没有代码的证券类资产永远拿不到行情：价格同步、持仓合并、导入回放、
+                            // 分红匹配全都按 symbol 走，留空意味着市值和盈亏恒为 PurchasePrice 的静态值。
+                            isError = symbolRequired && "symbol" in touched && symbol.isBlank(),
+                            supportingText = if (symbolRequired && "symbol" in touched && symbol.isBlank()) {
+                                { Text("请填写代码，否则无法同步行情价格") }
+                            } else null,
+                            keyboardOptions = KeyboardOptions(
+                                keyboardType = KeyboardType.Ascii,
+                                imeAction = ImeAction.Next
+                            ),
                             trailingIcon = {
                                 if (isLoading) {
                                     CircularProgressIndicator(
@@ -439,6 +468,7 @@ fun AddAssetDialog(
                             value = account,
                             onValueChange = {
                                 account = it
+                                markTouched("account")
                                 accountExpanded = true
                             },
                             label = { Text("账户/平台") },
@@ -447,8 +477,8 @@ fun AddAssetDialog(
                                 .fillMaxWidth()
                                 .menuAnchor(),
                             singleLine = true,
-                            isError = account.isBlank(),
-                            supportingText = if (account.isBlank()) { { Text("必填") } } else null,
+                            isError = "account" in touched && account.isBlank(),
+                            supportingText = if ("account" in touched && account.isBlank()) { { Text("必填") } } else null,
                             trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = accountExpanded && filteredAccounts.isNotEmpty()) }
                         )
 
@@ -474,7 +504,7 @@ fun AddAssetDialog(
 
                     OutlinedTextField(
                         value = balance,
-                        onValueChange = { balance = it },
+                        onValueChange = { balance = it; markTouched("balance") },
                         label = {
                             when (selectedType) {
                                 AssetType.STOCK -> Text("持股数量")
@@ -488,12 +518,14 @@ fun AddAssetDialog(
                         modifier = Modifier.fillMaxWidth(),
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                         singleLine = true,
-                        isError = (balance.toDoubleOrNull() ?: -1.0) < 0,
+                        isError = "balance" in touched && balance.toDoubleOrNull() == null,
                         supportingText = {
-                            when {
-                                balance.toDoubleOrNull() == null -> Text("请输入有效数字")
-                                (balance.toDoubleOrNull() ?: -1.0) < 0 -> Text("数量不能为负数")
-                                else -> {}
+                            if ("balance" in touched) {
+                                when {
+                                    balance.toDoubleOrNull() == null -> Text("请输入有效数字")
+                                    balance.toDouble() < 0 -> Text("数量不能为负数")
+                                    else -> {}
+                                }
                             }
                         }
                     )
@@ -506,7 +538,7 @@ fun AddAssetDialog(
                         }
                         OutlinedTextField(
                             value = purchasePrice,
-                            onValueChange = { purchasePrice = it },
+                            onValueChange = { purchasePrice = it; markTouched("price") },
                             label = { Text("买入单价") },
                             placeholder = {
                                 if (autoPrice != null) {
@@ -518,10 +550,14 @@ fun AddAssetDialog(
                             modifier = Modifier.fillMaxWidth(),
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                             singleLine = true,
-                            isError = purchasePrice.isNotBlank() && (purchasePrice.toDoubleOrNull() ?: -1.0) < 0,
+                            isError = "price" in touched && purchasePrice.isNotBlank() && purchasePrice.toDoubleOrNull() == null,
                             supportingText = {
-                                if (purchasePrice.isNotBlank() && (purchasePrice.toDoubleOrNull() ?: -1.0) < 0) {
-                                    Text("价格不能为负数")
+                                if ("price" in touched && purchasePrice.isNotBlank()) {
+                                    when {
+                                        purchasePrice.toDoubleOrNull() == null -> Text("请输入有效数字")
+                                        purchasePrice.toDouble() < 0 -> Text("价格不能为负数")
+                                        else -> {}
+                                    }
                                 }
                             }
                         )
@@ -530,18 +566,20 @@ fun AddAssetDialog(
                     if (selectedType == AssetType.BANK_DEPOSIT) {
                         OutlinedTextField(
                             value = interestRate,
-                            onValueChange = { interestRate = it },
+                            onValueChange = { interestRate = it; markTouched("rate") },
                             label = { Text("年利率 (%)") },
                             placeholder = { Text("例如：3.5") },
                             modifier = Modifier.fillMaxWidth(),
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                             singleLine = true,
-                            isError = (interestRate.toDoubleOrNull() ?: -1.0) < 0,
+                            isError = "rate" in touched && interestRate.toDoubleOrNull() == null,
                             supportingText = {
-                                when {
-                                    interestRate.toDoubleOrNull() == null -> Text("必填，请输入有效数字")
-                                    (interestRate.toDoubleOrNull() ?: -1.0) < 0 -> Text("利率不能为负数")
-                                    else -> {}
+                                if ("rate" in touched) {
+                                    when {
+                                        interestRate.toDoubleOrNull() == null -> Text("必填，请输入有效数字")
+                                        interestRate.toDouble() < 0 -> Text("利率不能为负数")
+                                        else -> {}
+                                    }
                                 }
                             }
                         )
@@ -581,38 +619,55 @@ fun AddAssetDialog(
                         Button(
                             onClick = {
                                 if (isSaving) return@Button
-                                isSaving = true
-                                val normalizedSymbol = if (selectedType == AssetType.STOCK || selectedType == AssetType.FUND) {
-                                    StockCodeManager.normalizeSymbol(symbol)
-                                } else {
-                                    symbol
+                                // 点保存时把所有字段标记为"已碰过"：否则按钮直接灰着、
+                                // 界面上却没有一处红字，用户不知道该改哪一项。
+                                touched = setOf("name", "account", "balance", "symbol", "price", "rate")
+                                if (!isValid) {
+                                    saveError = "请检查标红的必填项"
+                                    return@Button
                                 }
-                                val asset = Asset(
-                                    name = name,
-                                    type = selectedType,
-                                    symbol = normalizedSymbol.takeIf { it.isNotBlank() },
-                                    account = account,
-                                    balance = balance.toDoubleOrNull() ?: 0.0,
-                                    purchasePrice = if (selectedType == AssetType.BANK_DEPOSIT) {
-                                        1.0
+                                isSaving = true
+                                saveError = null
+                                // Asset 的 init 里有 require(...)，构造本身会抛异常；
+                                // 这里运行在主线程且没有任何兜底，抛出去就是整 App 崩溃
+                                val asset = try {
+                                    val normalizedSymbol = if (selectedType == AssetType.STOCK || selectedType == AssetType.FUND) {
+                                        StockCodeManager.normalizeSymbol(symbol)
                                     } else {
-                                        purchasePrice.toDoubleOrNull() ?: fundInfo?.price ?: stockInfo?.price ?: 0.0
-                                    },
-                                    currentPrice = if (selectedType == AssetType.BANK_DEPOSIT) {
-                                        1.0
-                                    } else {
-                                        fundInfo?.price ?: stockInfo?.price ?: purchasePrice.toDoubleOrNull()
-                                    },
-                                    interestRate = if (selectedType == AssetType.BANK_DEPOSIT) {
-                                        interestRate.toDoubleOrNull()
-                                    } else {
-                                        null
-                                    },
-                                    notes = notes.takeIf { it.isNotBlank() }
-                                )
+                                        symbol
+                                    }
+                                    Asset(
+                                        name = name,
+                                        type = selectedType,
+                                        symbol = normalizedSymbol.takeIf { it.isNotBlank() },
+                                        account = account,
+                                        balance = balance.toDoubleOrNull() ?: 0.0,
+                                        purchasePrice = if (selectedType == AssetType.BANK_DEPOSIT) {
+                                            1.0
+                                        } else {
+                                            purchasePrice.toDoubleOrNull() ?: fundInfo?.price ?: stockInfo?.price ?: 0.0
+                                        },
+                                        currentPrice = if (selectedType == AssetType.BANK_DEPOSIT) {
+                                            1.0
+                                        } else {
+                                            fundInfo?.price ?: stockInfo?.price ?: purchasePrice.toDoubleOrNull()
+                                        },
+                                        interestRate = if (selectedType == AssetType.BANK_DEPOSIT) {
+                                            interestRate.toDoubleOrNull()
+                                        } else {
+                                            null
+                                        },
+                                        notes = notes.takeIf { it.isNotBlank() }
+                                    )
+                                } catch (e: Exception) {
+                                    // 别把 loader 留在转圈状态——那会让"添加"按钮永久禁用且没有任何提示
+                                    isSaving = false
+                                    saveError = e.message ?: "资产数据不合法"
+                                    return@Button
+                                }
                                 onConfirm(asset)
                             },
-                            enabled = isValid && !isSaving,
+                            enabled = !isSaving,
                             modifier = Modifier.weight(1f)
                         ) {
                             if (isSaving) {
@@ -625,6 +680,14 @@ fun AddAssetDialog(
                                 Text("添加")
                             }
                         }
+                    }
+
+                    if (saveError != null) {
+                        Text(
+                            "保存失败：$saveError",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error
+                        )
                     }
                 }
             }

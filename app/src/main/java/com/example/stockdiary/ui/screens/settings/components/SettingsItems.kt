@@ -30,40 +30,52 @@ fun SettingsItem(
     isDestructive: Boolean = false,
     isSwitch: Boolean = false,
     switchChecked: Boolean = false,
-    onSwitchCheckedChange: ((Boolean) -> Unit)? = null
+    onSwitchCheckedChange: ((Boolean) -> Unit)? = null,
+    /** false 时整行置灰且不可点击 */
+    enabled: Boolean = true
 ) {
+    val contentAlpha = if (enabled) 1f else 0.38f
+    val headlineColor = when {
+        isDestructive -> MaterialTheme.colorScheme.error
+        else -> MaterialTheme.colorScheme.onSurface
+    }
     ListItem(
         headlineContent = {
             Text(
                 text = title,
-                color = if (isDestructive) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
+                color = headlineColor.copy(alpha = contentAlpha)
             )
         },
         supportingContent = {
             Text(
                 text = subtitle,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = contentAlpha)
             )
         },
         leadingContent = {
             androidx.compose.material3.Icon(
                 imageVector = icon,
                 contentDescription = null,
-                tint = if (isDestructive) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant
+                tint = if (isDestructive) {
+                    MaterialTheme.colorScheme.error.copy(alpha = contentAlpha)
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = contentAlpha)
+                }
             )
         },
         trailingContent = if (isSwitch) {
             {
                 Switch(
                     checked = switchChecked,
-                    onCheckedChange = onSwitchCheckedChange
+                    onCheckedChange = onSwitchCheckedChange,
+                    enabled = enabled
                 )
             }
         } else null,
         modifier = if (isSwitch) {
-            Modifier.clickable { onSwitchCheckedChange?.invoke(!switchChecked) }
+            Modifier.clickable(enabled = enabled) { onSwitchCheckedChange?.invoke(!switchChecked) }
         } else {
-            Modifier.clickable(onClick = onClick)
+            Modifier.clickable(enabled = enabled, onClick = onClick)
         }
     )
 }

@@ -144,6 +144,13 @@ object FundAPI {
 
                     val nawData = FundDataParser.parseNawData(body)
 
+                    // 净值解析失败时 parseNawData 会返回默认值 0.0。0 净值会让场外基金市值归零，
+                    // 且因为没有明显报错用户很难察觉，所以这里宁可不返回这条数据（触发下一数据源）。
+                    if (nawData.naw <= 0.0) {
+                        AppLogger.w("基金净值无效，丢弃该条: $code naw=${nawData.naw}", tag = TAG)
+                        return@withContext null
+                    }
+
                     return@withContext FundInfo(
                         name = name,
                         code = code,

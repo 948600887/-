@@ -33,6 +33,14 @@ class StockDataManager(
     // 失败计数
     private val failureCount = ConcurrentHashMap<String, Int>()
     private val maxFailures = 3
+
+    /**
+     * 价格是否可用于"写缓存 + 认定成功"。
+     *
+     * 必须用 isFinite 而不是简单的 `> 0`：NaN 参与的任何比较都返回 false，
+     * 所以 `price <= 0` 拦不住 NaN，NaN 会一路写进资产表。
+     */
+    private fun isValidPrice(price: Double): Boolean = price.isFinite() && price > 0.0
     
     // 数据缓存（内存缓存）
     private val cache = ConcurrentHashMap<String, CacheItem>()
@@ -173,7 +181,10 @@ class StockDataManager(
             
             if (result.isSuccess) {
                 val stockData = result.getOrNull()
-                if (stockData != null) {
+                // 拿到了"结果"不等于拿到了好数据：解析失败时各源会把现价落成 0.0/NaN，
+                // 若照单全收就会写进三级缓存、把持仓市值算成 0。这里统一挡一道，
+                // 并视作该数据源失败（继续找下一个源），而不是把它当成成功。
+                if (stockData != null && isValidPrice(stockData.price)) {
                     // 成功：更新所有缓存
                     cache[symbol] = CacheItem(stockData, System.currentTimeMillis())
                     
@@ -195,6 +206,12 @@ class StockDataManager(
                     resetFailureCount(apiName)
                     AppLogger.d("使用${apiName}获取数据成功: ${stockData.name}", TAG)
                     return Result.success(stockData)
+                }
+                if (stockData != null) {
+                    AppLogger.w(
+                        "${apiName}返回的价格无效（${stockData.price}），视为失败并尝试下一个数据源",
+                        TAG
+                    )
                 }
             }
             

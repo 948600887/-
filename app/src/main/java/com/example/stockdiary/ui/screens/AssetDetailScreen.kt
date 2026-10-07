@@ -1,5 +1,6 @@
 package com.example.stockdiary.ui.screens
 
+import android.widget.Toast
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -10,6 +11,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -23,6 +25,7 @@ import com.example.stockdiary.ui.components.ReturnAttributionCard
 import com.example.stockdiary.ui.dialogs.EditAssetDialog
 import com.example.stockdiary.ui.theme.*
 import com.example.stockdiary.ui.viewmodels.AssetDetailViewModel
+import com.example.stockdiary.utils.AppLogger
 import com.example.stockdiary.utils.StockCodeManager
 import com.example.stockdiary.utils.format
 import com.example.stockdiary.utils.profitColor
@@ -50,6 +53,7 @@ fun AssetDetailScreen(
     var isDeleting by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
+    val context = LocalContext.current
 
     val shareBonus = remember(asset, dividends) {
         val assetVal = asset ?: return@remember null
@@ -282,8 +286,14 @@ fun AssetDetailScreen(
             asset = currentAsset,
             onDismiss = { showEditDialog = false },
             onConfirm = { updatedAsset ->
+                // 同 Dashboard/Portfolio：保存失败也要关闭弹窗并提示，
+                // 不能把用户留在一个按钮永久转圈、又没有其它出口的对话框里
                 scope.launch {
-                    viewModel.updateAsset(updatedAsset)
+                    runCatching { viewModel.updateAsset(updatedAsset) }
+                        .onFailure {
+                            AppLogger.e("更新资产失败: ${it.message}", it, "AssetDetailScreen")
+                            Toast.makeText(context, "保存失败：${it.message ?: "未知错误"}", Toast.LENGTH_LONG).show()
+                        }
                     showEditDialog = false
                 }
             }
@@ -302,9 +312,16 @@ fun AssetDetailScreen(
                         if (isDeleting) return@Button
                         isDeleting = true
                         scope.launch {
-                            viewModel.deleteAsset()
+                            val failure = runCatching { viewModel.deleteAsset() }.exceptionOrNull()
+                            // 无论成败都要收尾：失败时留在原页面并提示，不能卡在转圈 + 对话框不关
+                            isDeleting = false
                             showDeleteDialog = false
-                            onNavigateBack()
+                            if (failure == null) {
+                                onNavigateBack()
+                            } else {
+                                AppLogger.e("删除资产失败: ${failure.message}", failure, "AssetDetailScreen")
+                                Toast.makeText(context, "删除失败：${failure.message ?: "未知错误"}", Toast.LENGTH_LONG).show()
+                            }
                         }
                     },
                     enabled = !isDeleting,

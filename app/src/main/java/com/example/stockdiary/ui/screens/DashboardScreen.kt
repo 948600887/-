@@ -1,5 +1,6 @@
 package com.example.stockdiary.ui.screens
 
+import android.widget.Toast
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -9,7 +10,9 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.stockdiary.data.SortOrder
@@ -18,6 +21,7 @@ import com.example.stockdiary.ui.components.*
 import com.example.stockdiary.ui.dialogs.AddAssetDialog
 import com.example.stockdiary.ui.theme.*
 import com.example.stockdiary.ui.viewmodels.DashboardViewModel
+import com.example.stockdiary.utils.AppLogger
 import com.example.stockdiary.utils.sumCostCny
 import com.example.stockdiary.utils.sumProfitCny
 import com.example.stockdiary.utils.sumTotalValueCny
@@ -44,6 +48,7 @@ fun DashboardScreen(
     var showAddDialog by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
+    val context = LocalContext.current
 
     val assetsOnly = remember(assets) { assets.filter { !it.type.isLiability } }
     val liabilities = remember(assets) { assets.filter { it.type.isLiability } }
@@ -62,6 +67,12 @@ fun DashboardScreen(
 
     val totalAssets = remember(assetsOnly) { assetsOnly.sumTotalValueCny() }
     val totalCost = remember(assetsOnly) { assetsOnly.sumCostCny() }
+
+    // 分布图必须用「可见资产」做分母：分子是过滤后的，若分母用未过滤的总资产，
+    // 用户把某类资产藏起来后各分类百分比之和会小于 100%，看起来像账算错了。
+    val visibleTotalAssets = remember(visibleAssetsOnly) { visibleAssetsOnly.sumTotalValueCny() }
+    val hasHiddenAssets = remember(visibleAssetsOnly, assetsOnly) { visibleAssetsOnly.size < assetsOnly.size }
+
     val totalProfit = totalAssets - totalCost
     val totalProfitPercent = if (totalCost > 0) (totalProfit / totalCost) * 100 else 0.0
     val totalLiabilities = remember(liabilities) { liabilities.sumTotalValueCny() }
@@ -171,10 +182,23 @@ fun DashboardScreen(
                     }
                 }
 
-                // 资产分布
+                // 资产分布（分母用可见资产，保证百分比之和为 100%）
                 if (preferences.showDistribution) {
                     item {
-                        AssetDistributionCard(assetsByType = assetsByType, totalAssets = totalAssets)
+                        AssetDistributionCard(
+                            assetsByType = assetsByType,
+                            totalAssets = visibleTotalAssets
+                        )
+                    }
+                    if (hasHiddenAssets) {
+                        item {
+                            Text(
+                                "分布图仅统计当前显示的资产类别",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(bottom = 4.dp)
+                            )
+                        }
                     }
                 }
 
@@ -189,6 +213,38 @@ fun DashboardScreen(
                             currentSort = preferences.sortOrder,
                             onSortChange = { viewModel.updateSortOrder(it) }
                         )
+                    }
+                }
+
+                // 四类资产全被藏起来：列表区一片空白，必须给出口，否则用户以为资产丢了
+                if (assetsByType.isEmpty()) {
+                    item {
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = CardDefaults.cardColors(
+                                containerColor = MaterialTheme.colorScheme.surfaceVariant
+                            )
+                        ) {
+                            Column(
+                                modifier = Modifier.fillMaxWidth().padding(16.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                Text(
+                                    "当前未显示任何资产类别",
+                                    style = MaterialTheme.typography.titleSmall
+                                )
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    "你共有 ${assetsOnly.size} 项资产，但显示开关把它们全部隐藏了",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Spacer(modifier = Modifier.height(12.dp))
+                                Button(onClick = { viewModel.showAllAssetTypes() }) {
+                                    Text("显示全部资产")
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -236,9 +292,15 @@ fun DashboardScreen(
         AddAssetDialog(
             onDismiss = { showAddDialog = false },
             existingAccounts = existingAccounts,
+            // 保存失败也必须关掉弹窗并告诉用户：异常会让下面那行关闭语句根本执行不到，
+            // 而弹窗内的 isSaving 没有任何复位路径 —— "添加"按钮会变成永久转圈。
             onConfirm = { asset ->
                 scope.launch {
-                    viewModel.addAsset(asset)
+                    runCatching { viewModel.addAsset(asset) }
+                        .onFailure {
+                            AppLogger.e("新增资产失败: ${it.message}", it, "DashboardScreen")
+                            Toast.makeText(context, "保存失败：${it.message ?: "未知错误"}", Toast.LENGTH_LONG).show()
+                        }
                     showAddDialog = false
                 }
             }

@@ -2,6 +2,7 @@ package com.example.stockdiary.data
 
 import android.content.Context
 import android.content.SharedPreferences
+import com.example.stockdiary.utils.AppLogger
 
 data class DashboardPreferences(
     val showTotalAssets: Boolean = false,
@@ -67,6 +68,24 @@ class DashboardPreferencesManager(context: Context) {
                 instance ?: DashboardPreferencesManager(context.applicationContext).also { instance = it }
             }
         }
+
+        /**
+         * 容错解析排序方式。
+         *
+         * 这里是**绝对不能裸 [,valueOf]** 的地方：[DashboardPreferencesManager] 被四个
+         * ViewModel 在构造期调用（Dashboard / Settings / Calendar / History）。
+         * 一旦 SharedPreferences 里的值是非法的（跨版本改名、备份还原、被外部改写），
+         * [valueOf] 会抛 IllegalArgumentException，表现为 Activity 创建即崩溃 —— 用户连
+         * 卸载重装之外的自救手段都没有。坏数据应该退化成默认值，而不是炸掉整个 App。
+         */
+        private fun sortOrderOf(raw: String?): SortOrder {
+            if (raw == null) return SortOrder.BY_TYPE
+            return runCatching { SortOrder.valueOf(raw) }
+                .getOrElse {
+                    AppLogger.w("未知的排序偏好 '$raw'，已回退为默认（${SortOrder.BY_TYPE}）", "DashboardPrefs")
+                    SortOrder.BY_TYPE
+                }
+        }
     }
     
     fun loadPreferences(): DashboardPreferences {
@@ -81,9 +100,7 @@ class DashboardPreferencesManager(context: Context) {
             showCrypto = prefs.getBoolean(KEY_SHOW_CRYPTO, true),
             showLiabilities = prefs.getBoolean(KEY_SHOW_LIABILITIES, true),
             defaultExpanded = prefs.getStringSet(KEY_DEFAULT_EXPANDED, emptySet()) ?: emptySet(),
-            sortOrder = SortOrder.valueOf(
-                prefs.getString(KEY_SORT_ORDER, SortOrder.BY_TYPE.name) ?: SortOrder.BY_TYPE.name
-            ),
+            sortOrder = sortOrderOf(prefs.getString(KEY_SORT_ORDER, null)),
             defaultPeriod = prefs.getString(KEY_DEFAULT_PERIOD, "1M") ?: "1M",
             monthlyExpense = prefs.getString(KEY_MONTHLY_EXPENSE, "5000") ?: "5000"
         )

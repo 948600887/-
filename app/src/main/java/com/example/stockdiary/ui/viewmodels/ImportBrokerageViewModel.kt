@@ -52,7 +52,9 @@ class ImportBrokerageViewModel(
          */
         val suggestions: Map<Int, List<SymbolResolver.Candidate>> = emptyMap(),
         /** 本次自动回填了多少行（预览页顶部展示「自动匹配 N 行」） */
-        val autoFilledCount: Int = 0
+        val autoFilledCount: Int = 0,
+        /** OCR 识别进行中：识别通常要 1~3 秒，期间停留在来源选择页显示进度 */
+        val recognizing: Boolean = false
     )
 
     private val _uiState = MutableStateFlow(UiState())
@@ -106,24 +108,32 @@ class ImportBrokerageViewModel(
     /** 截图被选中后：OCR 识别并解析，直接进入预览（截图格式固定，无需列映射） */
     fun onImageSelected(uri: Uri) {
         viewModelScope.launch(Dispatchers.IO) {
+            // 停留在选择页展示进度条，不要直接跳 PREVIEW：
+            // OCR 通常要 1~3 秒，先跳过去会闪一个「共 0 行」的空预览页。
             _uiState.value = _uiState.value.copy(
-                uri = uri, source = Source.OCR, step = Step.PREVIEW, error = null,
-                transactions = emptyList(), commitResult = null
+                uri = uri, source = Source.OCR, error = null, step = Step.SELECT_FILE,
+                transactions = emptyList(), commitResult = null, ocrRawText = null,
+                suggestions = emptyMap(), autoFilledCount = 0, recognizing = true
             )
             try {
                 val result = ocrService.recognizeAndParse(uri)
                 if (result.transactions.isEmpty()) {
+                    // OCR 成功但没匹配到交易 — 把完整原文存起来，用可滚动弹窗展示 + 复制按钮排障
                     _uiState.value = _uiState.value.copy(
                         step = Step.SELECT_FILE,
+                        recognizing = false,
                         error = "未识别到交易记录。当前解析规则适配【中国银河证券】对账单截图，" +
                             "请确认截图内容完整、清晰，且包含「证券买入-名称 价格 金额」与" +
                             "「买/卖 日期 数量 费用」两行结构。\n\n可点「复制原文」把 OCR 原文发出来，便于定位格式差异。",
                         ocrRawText = result.recognizedText
                     )
+                } else {
                     // 截图没有证券代码：先用「记忆/持仓/历史流水/证券库」把能自动回填的都填上，
                     // 用户只需处理剩下的少数行（且每记一次都写进记忆，下次连这步也省了）
                     val filled = service.autoFillSymbols(result.transactions)
                     _uiState.value = _uiState.value.copy(
+                        step = Step.PREVIEW,
+                        recognizing = false,
                         transactions = filled,
                         ocrYear = result.year,
                         autoFilledCount = filled.count {
@@ -153,6 +163,7 @@ class ImportBrokerageViewModel(
                 }
                 _uiState.value = _uiState.value.copy(
                     step = Step.SELECT_FILE,
+                    recognizing = false,
                     error = msg
                 )
             }

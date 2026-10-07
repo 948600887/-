@@ -6,7 +6,6 @@ import com.example.stockdiary.data.AssetRepository
 import com.example.stockdiary.data.DashboardPreferencesManager
 import com.example.stockdiary.data.DataExporter
 import com.example.stockdiary.data.BrokerageImportService
-import com.example.stockdiary.data.DataImportExportService
 import com.example.stockdiary.data.DividendRepository
 import com.example.stockdiary.data.OcrStatementService
 import com.example.stockdiary.data.PriceSyncPreferencesManager
@@ -24,7 +23,6 @@ class AppContainer(val context: Context) {
     val priceSyncPreferencesManager: PriceSyncPreferencesManager by lazy { PriceSyncPreferencesManager.getInstance(context) }
     val database: StockDatabase by lazy { StockDatabase.getInstance(context) }
     val dataExporter: DataExporter by lazy { DataExporter.getInstance(context) }
-    val dataImportExportService: DataImportExportService by lazy { DataImportExportService.getInstance(context) }
     val brokerageImportService: BrokerageImportService by lazy { BrokerageImportService.getInstance(context) }
     val ocrStatementService: OcrStatementService by lazy { OcrStatementService.getInstance(context) }
     val crashRecoveryManager: CrashRecoveryManager by lazy { CrashRecoveryManager.getInstance() }

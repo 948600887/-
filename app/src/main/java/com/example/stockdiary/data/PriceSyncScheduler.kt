@@ -14,7 +14,9 @@ import kotlin.random.Random
  */
 object PriceSyncScheduler {
 
-    private const val MIN_BACKOFF_MILLIS = 10_000L
+    // WorkManager 的退避下限是 WorkRequest.MIN_BACKOFF_MILLIS（10 分钟），低于它的值会被
+    // 静默夹取。原先写死 10 秒，实际一律按 10 分钟走，还让人误以为失败后很快能重试。
+    private val MIN_BACKOFF_MILLIS = WorkRequest.MIN_BACKOFF_MILLIS
     private const val MAX_BACKOFF_MILLIS = 5 * 60 * 60_000L
 
     fun scheduleDailySync(context: Context) {
@@ -39,7 +41,8 @@ object PriceSyncScheduler {
             .setRequiresBatteryNotLow(true)
             .build()
 
-        val jitter = Random.nextLong(0, MIN_BACKOFF_MILLIS)
+        // 加一点抖动，避免所有设备在整点同时重试把接口打挂
+        val jitter = Random.nextLong(0, MIN_BACKOFF_MILLIS / 2)
         val backoffDelay = (MIN_BACKOFF_MILLIS + jitter).coerceAtMost(MAX_BACKOFF_MILLIS)
 
         val request = PeriodicWorkRequestBuilder<PriceSyncWorker>(intervalMinutes, TimeUnit.MINUTES)

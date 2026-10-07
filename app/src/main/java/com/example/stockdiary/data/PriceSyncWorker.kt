@@ -55,11 +55,15 @@ class PriceSyncWorker(
                 return handleFailure()
             }
 
-            NotificationHelper.showPriceSyncNotification(
-                applicationContext,
-                result.successCount,
-                result.failedCount
-            )
+            // 通知只是附加反馈：失败不能把"成功的同步"判成失败，更不能让它穿透到 doWork
+            // 的 catch 里导致走到 handleFailure 后无法自我续期。所以这里一律兜住。
+            notifySafely {
+                NotificationHelper.showPriceSyncNotification(
+                    applicationContext,
+                    result.successCount,
+                    result.failedCount
+                )
+            }
 
             AppLogger.i(
                 "自动价格同步完成，成功: ${result.successCount}, 失败: ${result.failedCount}",
@@ -84,6 +88,23 @@ class PriceSyncWorker(
         } catch (e: Exception) {
             AppLogger.e("自动价格同步异常: ${e.message}", e, "PriceSyncWorker")
             handleFailure(SyncStrategy.classifyError(e))
+        }
+    }
+
+    /**
+     * 发通知的兜底座。
+     *
+     * 通知失败（权限被拒、渠道异常、PendingIntent 序列化异常…）绝不能影响业务结果：
+     * 一旦让它抛出去，[handleFailure] 之后的代码（尤其是 priceSyncScheduler 的自我续期）
+     * 就不会执行，周期任务会彻底停摆且用户毫无察觉。
+     */
+    private fun notifySafely(block: () -> Unit) {
+        try {
+            block()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            AppLogger.w("发送通知失败（不影响同步结果）: ${e.message}", "PriceSyncWorker")
         }
     }
 
@@ -121,7 +142,9 @@ class PriceSyncWorker(
 
         if (!SyncStrategy.isRetryable(effectiveErrorType)) {
             AppLogger.w("数据类错误不再重试", "PriceSyncWorker")
-            NotificationHelper.showPriceSyncFailureNotification(applicationContext, newCount)
+            notifySafely {
+                NotificationHelper.showPriceSyncFailureNotification(applicationContext, newCount)
+            }
             prefs.setConsecutiveFailureCount(0)
             // 终态失败也要续期下一轮，否则周期任务就此停摆
             PriceSyncScheduler.scheduleSmartSync(applicationContext, runImmediately = false)
@@ -130,7 +153,9 @@ class PriceSyncWorker(
 
         if (newCount >= MAX_CONSECUTIVE_FAILURES) {
             prefs.setConsecutiveFailureCount(0)
-            NotificationHelper.showPriceSyncFailureNotification(applicationContext, newCount)
+            notifySafely {
+                NotificationHelper.showPriceSyncFailureNotification(applicationContext, newCount)
+            }
             AppLogger.w("自动价格同步连续失败 $newCount 次，已通知用户", "PriceSyncWorker")
         }
 

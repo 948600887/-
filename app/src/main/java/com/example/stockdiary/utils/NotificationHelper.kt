@@ -103,6 +103,18 @@ object NotificationHelper {
         requestCode: Int = notificationId,
         channelId: String = CHANNEL_ID_GENERAL
     ) {
+        // Android 13+ 未授予 POST_NOTIFICATIONS 时 notify() 会抛 SecurityException。
+        // 这里必须拦在前面：PriceSyncWorker 在同步成功/失败后都会发通知，
+        // 一旦抛异常，doWork 会把它当成"同步失败"，导致
+        // 「明明同步成功却报失败 + 无法自我续期 → 周期任务彻底停摆」。
+        // 用户拒绝了通知权限不应该连累价格同步，所以直接静默跳过即可。
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            !NotificationPermissionHelper.isGranted(context)
+        ) {
+            AppLogger.w("未授予通知权限，跳过通知: $title", "NotificationHelper")
+            return
+        }
+
         val intent = Intent(context, MainActivity::class.java)
         val pendingIntent = PendingIntent.getActivity(
             context,

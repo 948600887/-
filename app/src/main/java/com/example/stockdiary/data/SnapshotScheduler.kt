@@ -8,8 +8,10 @@ import kotlin.random.Random
 
 object SnapshotScheduler {
 
-    // 最小退避 10 秒，最大退避 5 小时，失败时指数增长并加抖动
-    private const val MIN_BACKOFF_MILLIS = 10_000L
+    // 最大退避 5 小时，失败时指数增长并加抖动。
+    // 下限直接用 WorkRequest.MIN_BACKOFF_MILLIS：写死更小的值会被 WorkManager 静默夹取，
+    // 看起来配了 10 秒，实际还是 10 分钟。
+    private val MIN_BACKOFF_MILLIS = WorkRequest.MIN_BACKOFF_MILLIS
     private const val MAX_BACKOFF_MILLIS = 5 * 60 * 60_000L
 
     fun scheduleDailySnapshot(context: Context) {
@@ -18,7 +20,7 @@ object SnapshotScheduler {
             .setRequiredNetworkType(NetworkType.NOT_REQUIRED)
             .build()
 
-        val jitter = Random.nextLong(0, MIN_BACKOFF_MILLIS)
+        val jitter = Random.nextLong(0, MIN_BACKOFF_MILLIS / 2)
         val backoffDelay = (MIN_BACKOFF_MILLIS + jitter).coerceAtMost(MAX_BACKOFF_MILLIS)
 
         val request = PeriodicWorkRequestBuilder<SnapshotWorker>(1, TimeUnit.DAYS)

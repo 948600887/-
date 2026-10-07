@@ -240,17 +240,25 @@ class GalaxyStatementParserTest {
     @Test
     fun `不会去抢下一笔交易的次行`() {
         // 第一笔缺次行、第二笔完整。错误实现会把第二笔的次行配给第一笔，
-        // 造成数量与费用张冠李戴，因此这里必须只解析出 1 笔，且是第二笔的数据。
+        // 造成数量与费用张冠李戴，所以第二笔的数据必须原样是自己的。
+        // 第一笔不再被静默丢弃，而是留成「待补全」记录——少一行却无提示是最难排查的失败模式。
         val lines = listOf(
             "证券买入-缺次行  1.000  -100.0",
             "证券买入-完整  2.000  -400.20",
             "买 09-23 10:00  200  0.20"
         )
         val result = GalaxyStatementParser.parse(lines, 2026)
-        assertEquals(1, result.size)
-        assertEquals("完整", result[0].name)
-        assertEquals(200.0, result[0].quantity, 0.001)
-        assertEquals(0.20, result[0].fee, 0.001)
+        assertEquals(2, result.size)
+
+        assertEquals("缺次行", result[0].name)
+        assertTrue(
+            "缺明细的一笔要标成待补全: ${result[0].errors}",
+            result[0].errors.contains(GalaxyStatementParser.ERR_DETAIL_MISSING)
+        )
+
+        assertEquals("完整", result[1].name)
+        assertEquals(200.0, result[1].quantity, 0.001)
+        assertEquals(0.20, result[1].fee, 0.001)
     }
 
     // ---------- 以下为真实截图形态 ----------

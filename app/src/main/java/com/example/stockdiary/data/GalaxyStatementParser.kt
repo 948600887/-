@@ -29,19 +29,47 @@ import kotlin.math.max
  */
 object GalaxyStatementParser {
 
+    /**
+     * 操作关键字。
+     *
+     * OCR 对这几率的误认是有规律的，全部纳入匹配而不是当成未知行跳过：
+     * - 券 → 卷 / 劵（字形极近，是最高频的误认）
+     * - 入 → 人（买入被认成「买人」）
+     * - 出 → 人（卖出被认成「卖人」）
+     * - 字与字之间被插入空格（「证券买 入」）
+     *
+     * 不这么做的话，这类行会连一条告警都不留地消失——用户看到的就是「凭空少一行」。
+     */
+    private const val OP_PREFIX = """证\s*[券卷劵]\s*"""
+    private const val OP_BUY = """买\s*[入人]"""
+    private const val OP_SELL = """卖\s*[出入]"""
+    /** 方向捕获组：命中即「买」或「卖」的首字，据此归一化成买卖方向 */
+    private const val OP_DIR = """($OP_BUY|$OP_SELL)"""
+
     /** 首行（名称 + 价格 + 金额都在同一行；列合并后就是这种形态） */
     private val FIRST_LINE_WITH_NUMBERS_REGEX = Regex(
-        """(证券买入|证券卖出)\s*-?\s*(.+?)\s+([\d,]+\.?\d*)\s+(-?[\d,]+\.?\d*)\s*$"""
+        """$OP_PREFIX$OP_DIR\s*-?\s*(.+?)\s+([\d,]+\.?\d*)\s+(-?[\d,]+\.?\d*)\s*$"""
     )
 
     /** 首行（只有操作 + 名称，价格/金额在另外的列里） */
     private val FIRST_LINE_NAME_ONLY_REGEX = Regex(
-        """(证券买入|证券卖出)\s*-?\s*(\S.*?)\s*$"""
+        """$OP_PREFIX$OP_DIR\s*-?\s*(\S.*?)\s*$"""
     )
 
-    /** 详情行：方向? 日期 时间? 数量 费用 */
+    /** 关键字独占一行（名称被 OCR 拆到下一行） */
+    private val OPERATION_ONLY_REGEX = Regex("""$OP_PREFIX$OP_DIR\s*[-—－]?\s*""")
+
+    /**
+     * 详情行：方向? 日期 时间? 数量 费用?
+     *
+     * 每一段都放宽到 OCR 的实际输出形态：
+     * - 日期后面可能跟着句点（"09-23."）
+     * - 数量可能是小数（基金份额）
+     * - 时间可能用全角冒号
+     * - 费用列可能整列缺失（此时按 0 处理并提示，不能因此丢掉整笔）
+     */
     private val SECOND_LINE_REGEX = Regex(
-        """(?:(买|卖|其|更)\s*)?(\d{1,2})[-/月](\d{1,2})日?(?:\s+(\d{1,2}):(\d{2}))?\s+([\d,]+)\s+([\d,]+\.?\d*)"""
+        """(?:(买|卖|其|更)\s*)?(\d{1,2})[-/月](\d{1,2})[日.。]?(?:\s+(\d{1,2})[:：](\d{2}))?\s+([\d,]+(?:\.\d+)?)(?:\s+([\d,]+\.?\d*))?"""
     )
 
     /** 找年份：截图顶部通常有"2026-09" */
@@ -51,7 +79,7 @@ object GalaxyStatementParser {
     private val REPO_REGEX = Regex("""逆回购|回购""")
 
     /** 首行关键字（用于识别"含关键字但格式没匹配上"的情况） */
-    private val FIRST_LINE_KEYWORD_REGEX = Regex("""证券(买入|卖出)""")
+    private val FIRST_LINE_KEYWORD_REGEX = Regex("""$OP_PREFIX(?:$OP_BUY|$OP_SELL)""")
 
     /** 独占一行的纯价格（列没合并成功时的兜底来源）；带负号的金额不算 */
     private val PURE_PRICE_REGEX = Regex("""[\d,]+\.\d+""")
@@ -79,9 +107,16 @@ object GalaxyStatementParser {
      */
     private const val AMOUNT_TOLERANCE_ABS = 6.0
 
+    /**
+     * 首行认出来了、明细行没认出来时的提示。
+     * 这一笔会被保留下来交给用户补全，而不是丢弃。
+     */
+    const val ERR_DETAIL_MISSING = "未识别到成交明细（日期/数量/费用），请手工补全"
+
     /** 一个「首行」锚点的解析结果 */
     private data class Anchor(
-        val operation: String,
+        /** 已归一化的方向（OCR 误字「买人」同样归为买入） */
+        val isBuy: Boolean,
         val name: String,
         val price: Double?,
         val amount: Double?
@@ -106,53 +141,191 @@ object GalaxyStatementParser {
         var repoLines = 0
         var i = 0
         while (i < normalized.size) {
-            val anchor = matchAnchor(normalized[i])
+            val line = normalized[i]
+
+            // ① OCR 把首行和详情行压成了一行：先把详情段切出来，剩下的才当首行
+            var anchorText = line
+            var inlineDetail: MatchResult? = null
+            SECOND_LINE_REGEX.find(line)?.let { m ->
+                val head = line.substring(0, m.range.first).trim()
+                if (head.isNotEmpty() && matchAnchor(head) != null) {
+                    anchorText = head
+                    inlineDetail = m
+                }
+            }
+
+            var anchor = matchAnchor(anchorText)
+
+            // ② 关键字独占一行（名称/价格被拆到了下一行）：并上下一行再试一次
+            var consumed = 0
+            if (anchor == null || anchor.name.isBlank()) {
+                val next = normalized.getOrNull(i + 1)
+                if (next != null && (OPERATION_ONLY_REGEX.matches(line) || anchor?.name?.isBlank() == true)) {
+                    matchAnchor("$line $next")?.let { merged ->
+                        if (merged.name.isNotBlank()) {
+                            anchor = merged
+                            anchorText = "$line $next"
+                            consumed = 1
+                        }
+                    }
+                }
+            }
+
             if (anchor == null) {
-                if (REPO_REGEX.containsMatchIn(normalized[i])) {
+                if (REPO_REGEX.containsMatchIn(line)) {
                     repoLines++
-                } else if (FIRST_LINE_KEYWORD_REGEX.containsMatchIn(normalized[i])) {
+                } else if (FIRST_LINE_KEYWORD_REGEX.containsMatchIn(line)) {
                     // 含「证券买入/卖出」但整体没匹配 — 正则需扩展
-                    logger("WARN 含关键字但首行正则未匹配: ${normalized[i]}")
+                    logger("WARN 含关键字但首行正则未匹配: $line")
                 }
                 i++
                 continue
             }
+            // 后续只读。上面在 lambda 里赋值过，智能转换失效，这里显式取非空
+            val matched = anchor!!
 
-            var detailIdx = -1
-            var fallbackPrice: Double? = null
-            var k = i + 1
-            while (k < normalized.size && k <= i + DETAIL_SEARCH_WINDOW) {
-                val candidate = normalized[k]
-                // 撞到下一笔的首行就立刻停，绝不抢它的详情行（否则数量/费用会张冠李戴）
-                if (matchAnchor(candidate) != null) break
-                if (SECOND_LINE_REGEX.containsMatchIn(candidate)) {
-                    detailIdx = k
-                    break
-                }
-                // 列没合并成功时，价格会独占一行，且紧跟在名称行之后
-                if (fallbackPrice == null && k == i + 1 && PURE_PRICE_REGEX.matches(candidate)) {
-                    fallbackPrice = candidate.replace(",", "").toDoubleOrNull()
-                }
-                k++
-            }
-
-            if (detailIdx < 0) {
-                logger("WARN 首行匹配但未找到详情行（日期/数量/费用）。首行=${normalized[i]}")
-                i++
+            if (inlineDetail != null) {
+                result.add(buildTransaction(matched, inlineDetail!!, null, year, rowNo))
+                rowNo++
+                i += 1 + consumed
                 continue
             }
 
-            val detailMatch = SECOND_LINE_REGEX.find(normalized[detailIdx])!!
-            result.add(buildTransaction(anchor, detailMatch, fallbackPrice, year, rowNo))
-            logger("第 ${i + 1}/${detailIdx + 1} 行配对成功: ${normalized[i]} | ${normalized[detailIdx]}")
+            // ③ 常规形态：向后找紧跟的详情行
+            val hit = findDetail(normalized, i + 1 + consumed, matched.isBuy)
+            if (hit.index >= 0) {
+                val detailMatch = SECOND_LINE_REGEX.find(normalized[hit.index])!!
+                result.add(buildTransaction(matched, detailMatch, hit.fallbackPrice, year, rowNo))
+                logger("第 ${i + 1}/${hit.index + 1} 行配对成功: $anchorText | ${normalized[hit.index]}")
+                rowNo++
+                i = hit.index + 1
+                continue
+            }
+
+            // ④ 首行连成一片、详情行被整体推到后面（ML Kit 按列切块没合并回来）。
+            //    就近搜索必然让后一笔抢走前一笔的明细，只能按出现顺序一一配对。
+            if (hit.blockedByAnchor) {
+                val block = pairAnchorBlock(normalized, i, year, rowNo, logger)
+                if (block != null) {
+                    result.addAll(block.first)
+                    rowNo = block.second
+                    i = block.third
+                    continue
+                }
+            }
+
+            // ⑤ 仍然配不上也不丢：留一条待补全记录。
+            //    静默丢行是最糟的失败模式——用户只会觉得「少了一笔」却无从下手。
+            logger("WARN 首行匹配但未找到详情行，已保留为待补全记录: $anchorText")
+            result.add(buildIncomplete(matched, year, rowNo))
             rowNo++
-            i = detailIdx + 1
+            i += 1 + consumed
         }
         if (repoLines > 0) {
             logger("已跳过逆回购/回购相关 $repoLines 行（非证券买卖，不入库）")
         }
         logger("GalaxyParser 解析完成，共 ${result.size} 笔交易")
         return result
+    }
+
+    private data class DetailHit(
+        /** 详情行下标；-1 = 没找到 */
+        val index: Int,
+        /** 列没合并成功时，从独占一行的文本里兜底取到的价格 */
+        val fallbackPrice: Double?,
+        /** 是被下一个首行挡住才停下的（说明出现了「列被拆开」的形态） */
+        val blockedByAnchor: Boolean
+    )
+
+    /**
+     * 从 [from] 开始向后找紧跟的详情行。
+     *
+     * 两条保护：
+     * - 撞到下一个首行立刻停，绝不抢它的详情行；
+     * - 详情行的方向前缀若与首行冲突（逆回购的明细是「其」），跳过继续找，
+     *   否则证券买入会张冠李戴地用上逆回购的数量与费用。
+     */
+    private fun findDetail(normalized: List<String>, from: Int, isBuy: Boolean): DetailHit {
+        var fallbackPrice: Double? = null
+        var k = from
+        while (k < normalized.size && k <= from + DETAIL_SEARCH_WINDOW) {
+            val candidate = normalized[k]
+            if (matchAnchor(candidate) != null) {
+                return DetailHit(-1, fallbackPrice, blockedByAnchor = true)
+            }
+            val m = SECOND_LINE_REGEX.find(candidate)
+            if (m != null && !directionConflicts(m.groupValues[1], isBuy)) {
+                return DetailHit(k, fallbackPrice, blockedByAnchor = false)
+            }
+            // 列没合并成功时，价格会独占一行，且紧跟在名称行之后
+            if (fallbackPrice == null && k == from && PURE_PRICE_REGEX.matches(candidate)) {
+                fallbackPrice = candidate.replace(",", "").toDoubleOrNull()
+            }
+            k++
+        }
+        return DetailHit(-1, fallbackPrice, blockedByAnchor = false)
+    }
+
+    /** 详情行的方向前缀与首行的买卖方向是否矛盾（决定能不能配对） */
+    private fun directionConflicts(dir: String, isBuy: Boolean): Boolean = when (dir) {
+        "买" -> !isBuy
+        "卖" -> isBuy
+        // 「其」是逆回购等非证券交易的前缀，「更」是更正单，都不属于证券买卖
+        "其", "更" -> true
+        else -> false
+    }
+
+    /**
+     * 「列被拆开」形态的配对：连续多个首行挤在一起，它们的详情行被整体推到后面。
+     *
+     * 这种排版下「谁离得近就配给谁」必然错位——第 1 个首行的明细其实排在第 n 个首行之后。
+     * 唯一可靠的对应关系是「各自序列内的先后顺序」，所以按出现顺序一一配对，
+     * 并给每笔打上「位置异常，请核对」，让用户在预览页复核。
+     *
+     * @return (解析出的交易, 下一个 rowNumber, 下一轮要从哪一行继续)；无法配对时返回 null
+     */
+    private fun pairAnchorBlock(
+        normalized: List<String>,
+        start: Int,
+        year: Int,
+        startRowNo: Int,
+        logger: (String) -> Unit
+    ): Triple<List<BrokerageImportService.ParsedTransaction>, Int, Int>? {
+        val anchors = mutableListOf<Pair<Int, Anchor>>()
+        var lastAnchor = -1
+        var k = start
+        while (k < normalized.size && k <= start + DETAIL_SEARCH_WINDOW) {
+            val a = matchAnchor(normalized[k])
+            if (a != null) {
+                anchors.add(k to a)
+                lastAnchor = k
+            } else if (lastAnchor >= 0 && SECOND_LINE_REGEX.containsMatchIn(normalized[k])) {
+                break // 详情段开始了
+            }
+            k++
+        }
+        if (anchors.size < 2 || lastAnchor < 0) return null
+
+        val details = mutableListOf<Int>()
+        var d = lastAnchor + 1
+        while (d < normalized.size && d <= lastAnchor + DETAIL_SEARCH_WINDOW) {
+            val line = normalized[d]
+            if (matchAnchor(line) != null) break
+            if (SECOND_LINE_REGEX.containsMatchIn(line)) details.add(d)
+            d++
+        }
+        // 详情行不够分，说明不是「整段被拆开」，交给调用方按缺明细处理
+        if (details.size < anchors.size) return null
+
+        logger("WARN 检测到列块未合并（${anchors.size} 个首行连在一起），按出现顺序配对明细")
+        val out = mutableListOf<BrokerageImportService.ParsedTransaction>()
+        var rowNo = startRowNo
+        anchors.forEachIndexed { idx, (_, a) ->
+            val m = SECOND_LINE_REGEX.find(normalized[details[idx]])!!
+            out.add(buildTransaction(a, m, null, year, rowNo, "明细行位置异常，请核对"))
+            rowNo++
+        }
+        return Triple(out, rowNo, details[anchors.size - 1] + 1)
     }
 
     /**
@@ -162,7 +335,7 @@ object GalaxyStatementParser {
     private fun matchAnchor(line: String): Anchor? {
         FIRST_LINE_WITH_NUMBERS_REGEX.find(line)?.let { m ->
             return Anchor(
-                operation = m.groupValues[1],
+                isBuy = m.groupValues[1].contains("买"),
                 name = cleanName(m.groupValues[2]),
                 price = m.groupValues[3].replace(",", "").toDoubleOrNull(),
                 amount = m.groupValues[4].replace(",", "").toDoubleOrNull()
@@ -172,7 +345,7 @@ object GalaxyStatementParser {
             // 名称后面若误粘了数字（价格只识别到一半），把它们摘掉
             val raw = m.groupValues[2].replace(TRAILING_NUMBER_TOKEN_REGEX, "")
             return Anchor(
-                operation = m.groupValues[1],
+                isBuy = m.groupValues[1].contains("买"),
                 name = cleanName(raw),
                 price = null,
                 amount = null
@@ -194,7 +367,9 @@ object GalaxyStatementParser {
     private fun normalizeLine(raw: String): String {
         var s = toHalfWidth(raw)
         // 小数点两侧被拆开：'1 . 546' / '1. 546' / '1 .546' → '1.546'
-        s = s.replace(Regex("""(\d)\s*\.\s*(\d)""")) { m ->
+        // 后顾断言排除了「日期后面的句点」：'09-23. 10:48' 若被粘成 '09-23.10:48'，
+        // 日期就整个消失了，这笔会连一条告警都留不下地丢失。
+        s = s.replace(Regex("""(?<![-/月]\d)(\d)\s*\.\s*(\d)""")) { m ->
             m.groupValues[1] + "." + m.groupValues[2]
         }
         // 千分位逗号两侧被拆开：'1 , 082' → '1,082'（限定 3 位数字，避免吞掉分隔两个数字的空格）
@@ -219,12 +394,44 @@ object GalaxyStatementParser {
         return sb.toString()
     }
 
+    /**
+     * 明细行没找到时的兜底记录。
+     *
+     * 关键：宁可给用户一条「数据不全、待补全」的红字行，也不要让这笔凭空消失——
+     * 首行已经把名称、价格、金额都认出来了，这些信息对用户核对仍然有用。
+     * 这条记录的 errors 非空，[BrokerageImportService.commit] 不会把它写进库。
+     */
+    private fun buildIncomplete(
+        anchor: Anchor,
+        year: Int,
+        rowNo: Int
+    ): BrokerageImportService.ParsedTransaction {
+        val errors = mutableListOf<String>(ERR_DETAIL_MISSING)
+        if (anchor.price == null) errors.add("价格识别异常：未识别到有效价格")
+        errors.add(BrokerageImportService.ERR_SYMBOL_REQUIRED)
+        return BrokerageImportService.ParsedTransaction(
+            date = "", // 日期在明细行里，此处无从得知；留给用户在预览页补
+            symbol = "",
+            name = anchor.name,
+            type = if (anchor.isBuy) TransactionType.BUY.value else TransactionType.SELL.value,
+            quantity = 0.0,
+            price = anchor.price ?: 0.0,
+            fee = 0.0,
+            account = "银河证券",
+            rowNumber = rowNo,
+            errors = errors,
+            isDuplicate = false,
+            skip = false
+        )
+    }
+
     private fun buildTransaction(
         anchor: Anchor,
         secondMatch: MatchResult,
         fallbackPrice: Double?,
         year: Int,
-        rowNo: Int
+        rowNo: Int,
+        extraError: String? = null
     ): BrokerageImportService.ParsedTransaction {
         val month = secondMatch.groupValues[2].padStart(2, '0')
         val day = secondMatch.groupValues[3].padStart(2, '0')
@@ -233,7 +440,7 @@ object GalaxyStatementParser {
         val feeStr = secondMatch.groupValues[7]
 
         // 方向以「证券买入/证券卖出」为准：详情行的方向前缀可能缺失或是 OCR 误字
-        val type = if (anchor.operation.contains("买入")) {
+        val type = if (anchor.isBuy) {
             TransactionType.BUY.value
         } else {
             TransactionType.SELL.value
@@ -246,6 +453,9 @@ object GalaxyStatementParser {
         val errors = mutableListOf<String>()
         if (price <= 0) errors.add("价格识别异常：未识别到有效价格")
         if (quantity <= 0) errors.add("数量识别异常: $quantityStr")
+        // 费用列整列缺失时按 0 处理，但要说出来——静默当 0 会让成本悄悄算少
+        if (feeStr.isBlank()) errors.add("费用未识别，已按 0 处理，请核对")
+        if (extraError != null) errors.add(extraError)
         // 交叉校验：金额应当约等于 价格×数量（仅差手续费）。差太多说明列错位了。
         // 容差取「相对 2%」与「绝对 6 元」的较大者——小额交易触发最低 5 元佣金时不会被误拦
         val amount = anchor.amount

@@ -57,6 +57,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.stockdiary.data.BrokerageImportService
+import com.example.stockdiary.data.GalaxyStatementParser
 import com.example.stockdiary.di.AppContainer
 import com.example.stockdiary.ui.viewmodels.ImportBrokerageViewModel
 
@@ -431,6 +432,9 @@ private fun PreviewStep(
     val errorCount = txs.count { it.errors.isNotEmpty() }
     val dupCount = txs.count { it.isDuplicate && it.errors.isEmpty() }
     val okCount = txs.count { it.errors.isEmpty() }
+    // 只认出名称/金额、没认到日期与数量的一笔。保留成异常行而不是丢掉，
+    // 否则用户只会看到总数对不上，却不知道少的到底是哪一笔。
+    val incompleteCount = txs.count { it.errors.contains(GalaxyStatementParser.ERR_DETAIL_MISSING) }
 
     LazyColumn(modifier = Modifier.fillMaxWidth().padding(16.dp)) {
         item {
@@ -444,6 +448,15 @@ private fun PreviewStep(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+            if (incompleteCount > 0) {
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "有 $incompleteCount 行只认出了名称和金额、没认到日期与数量，已保留为异常行（不会导入）。" +
+                        "通常是这一行在截图里被截断或表格列错位，重新截一张完整对账单即可。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color(0xFFC62828)
+                )
+            }
             if (state.autoFilledCount > 0) {
                 Spacer(Modifier.height(4.dp))
                 Text(
@@ -482,7 +495,7 @@ private fun PreviewStep(
                 )
                 Column(modifier = Modifier.padding(start = 8.dp).fillMaxWidth()) {
                     Text(
-                        "行${tx.rowNumber} · ${tx.date} · ${tx.symbol.ifEmpty { "【无代码】" }} ${tx.name}",
+                        "行${tx.rowNumber} · ${tx.date.ifEmpty { "日期未识别" }} · ${tx.symbol.ifEmpty { "【无代码】" }} ${tx.name}",
                         fontWeight = FontWeight.Medium
                     )
                     Text(

@@ -100,47 +100,62 @@ object GlobalExceptionHandler {
     }
     
     private fun saveCrashLog(crashInfo: String) {
+        // 崩溃现场随时可能是 OOM / StackOverflow：这里 catch 的是 Throwable。
+        // 只 catch Exception 的话，Error 会穿透到 handleUncaughtException，
+        // 连 invokeDefaultHandler 都执行不到 —— 表现为 ANR/黑屏卡死而不是重启。
         try {
             val timestamp = System.currentTimeMillis().toFileTimestamp()
             val crashId = "crash_$timestamp"
-            
+
             crashLogs[crashId] = crashInfo
-            
+
             if (crashLogs.size > MAX_CRASH_LOGS) {
                 // key 格式为 "crash_<timestamp>"，按字典序即按时间排序，删除最旧记录
                 crashLogs.keys().toList().minOrNull()?.let { oldestKey ->
                     crashLogs.remove(oldestKey)
                 }
             }
-            
+
             val crashFile = File(appContext?.getExternalFilesDir(null), "crash_reports")
             if (!crashFile.exists()) crashFile.mkdirs()
-            
+
             val logFile = File(crashFile, "$crashId.log")
             logFile.writeText(crashInfo)
 
-            // 磁盘目录不受 MAX_CRASH_LOGS 约束：只删内存里的旧记录而文件一直留着，
-            // 反复崩溃会把外部存储慢慢写满，且用户毫无感知。
-            pruneCrashFiles(crashFile)
-            
         } catch (e: CancellationException) {
             throw e
-        } catch (e: Exception) {
-            AppLogger.e("保存崩溃日志失败", e, "CrashHandler")
+        } catch (t: Throwable) {
+            // 记不下就不记了，绝不能因为写日志把进程卡死在这里
+            AppLogger.e("保存崩溃日志失败", t, "CrashHandler")
         }
     }
 
-    /** 只保留最近 [MAX_CRASH_LOGS] 份崩溃日志，其余删除 */
-    private fun pruneCrashFiles(dir: File) {
-        val files = dir.listFiles() ?: return
-        if (files.size <= MAX_CRASH_LOGS) return
-        // 文件名是 "crash_<timestamp>.log"，字典序即时间序
-        files.sortedByDescending { it.name }
-            .drop(MAX_CRASH_LOGS)
-            .forEach { file ->
-                runCatching { file.delete() }
-                    .onFailure { AppLogger.w("删除旧崩溃日志失败: ${file.name}", "CrashHandler") }
+    /**
+     * 只保留最近 [MAX_CRASH_LOGS] 份崩溃日志。
+     *
+     * 放在启动阶段做，不在崩溃现场做：磁盘目录不受 MAX_CRASH_LOGS 约束，
+     * 只删内存里的旧记录而文件一直留着，反复崩溃会把外部存储悄悄写满。
+     * 而崩溃现场多一次 listFiles + 排序的分配，在 OOM 时是纯负收益。
+     */
+    fun pruneCrashFiles() {
+        try {
+            val dir = File(appContext?.getExternalFilesDir(null), "crash_reports")
+            val files = dir.listFiles() ?: return
+            if (files.size <= MAX_CRASH_LOGS) return
+            // 文件名是 "crash_<timestamp>.log"，定长时间戳，字典序即时间序
+            files.sortByDescending { it.name }
+            for (i in MAX_CRASH_LOGS until files.size) {
+                // delete() 只在抛 SecurityException 时才走异常路径，
+                // 返回 false 表示没删掉 —— 必须自己判断，否则删不掉也毫无察觉。
+                if (!files[i].delete()) {
+                    AppLogger.w("删除旧崩溃日志失败: ${files[i].name}", "CrashHandler")
+                }
             }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (t: Throwable) {
+            AppLogger.e("裁剪崩溃日志失败", t, "CrashHandler")
+        }
     }
     
     private fun showCrashNotification(throwable: Throwable) {

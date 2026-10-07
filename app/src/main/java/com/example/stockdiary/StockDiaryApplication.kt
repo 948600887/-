@@ -44,6 +44,9 @@ class StockDiaryApplication : Application() {
             scheduleDailySnapshot()
             fillMissingSnapshots()
             scheduleAutoPriceSync()
+            // 崩溃日志的磁盘裁剪挪到启动阶段：崩溃现场多一次目录遍历与排序，
+            // 在 OOM/StackOverflow 时只会火上浇油。
+            GlobalExceptionHandler.pruneCrashFiles()
         }
     }
 

@@ -22,6 +22,7 @@ import com.example.stockdiary.data.DividendIncomeCalculator
 import com.example.stockdiary.ui.components.CostCurveCard
 import com.example.stockdiary.ui.components.ReturnAttribution
 import com.example.stockdiary.ui.components.ReturnAttributionCard
+import com.example.stockdiary.ui.dialogs.AdjustPositionDialog
 import com.example.stockdiary.ui.dialogs.EditAssetDialog
 import com.example.stockdiary.ui.theme.*
 import com.example.stockdiary.ui.viewmodels.AssetDetailViewModel
@@ -49,6 +50,7 @@ fun AssetDetailScreen(
     val isRefreshing by viewModel.isRefreshing.collectAsState()
 
     var showEditDialog by remember { mutableStateOf(false) }
+    var showAdjustDialog by remember { mutableStateOf(false) }
     var showDeleteDialog by remember { mutableStateOf(false) }
     var isDeleting by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
@@ -272,6 +274,14 @@ fun AssetDetailScreen(
                             ) {
                                 Text("编辑资产")
                             }
+                            Button(
+                                // 加仓减仓此前只有弹窗没有入口，整条链路（含成本摊薄与流水记录）
+                                // 一直处于「写好了但谁也点不到」的状态。
+                                onClick = { showAdjustDialog = true },
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text("加仓 / 减仓")
+                            }
                         }
                     }
                 }
@@ -295,6 +305,33 @@ fun AssetDetailScreen(
                             Toast.makeText(context, "保存失败：${it.message ?: "未知错误"}", Toast.LENGTH_LONG).show()
                         }
                     showEditDialog = false
+                }
+            }
+        )
+    }
+
+    // 加仓 / 减仓：按增量记一笔交易流水，成本由仓储层按余额加权摊薄
+    if (showAdjustDialog && currentAsset != null) {
+        AdjustPositionDialog(
+            asset = currentAsset,
+            onDismiss = { showAdjustDialog = false },
+            onConfirm = { updatedAsset ->
+                scope.launch {
+                    val failure = runCatching {
+                        viewModel.adjustPosition(updatedAsset)
+                    }.exceptionOrNull()
+                    if (failure == null) {
+                        Toast.makeText(context, "已记录", Toast.LENGTH_SHORT).show()
+                    } else {
+                        AppLogger.e("调整持仓失败: ${failure.message}", failure, "AssetDetailScreen")
+                        Toast.makeText(
+                            context,
+                            "调整失败：${failure.message ?: "未知错误"}",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+                    // 成败都要关：否则按钮永久转圈且没有出口
+                    showAdjustDialog = false
                 }
             }
         )

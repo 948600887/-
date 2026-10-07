@@ -348,6 +348,7 @@ fun DividendDetailDialog(
     var showEditDialog by remember { mutableStateOf(false) }
     // 删除是撤不回的操作，手滑点到就永久丢一条分红记录 —— 必须先确认
     var pendingDeleteRecord by remember { mutableStateOf<Dividend?>(null) }
+    var deleteError by remember { mutableStateOf<String?>(null) }
 
     suspend fun loadRecords() {
         if (symbol.isBlank()) {
@@ -537,28 +538,46 @@ fun DividendDetailDialog(
 
     pendingDeleteRecord?.let { record ->
         AlertDialog(
-            onDismissRequest = { pendingDeleteRecord = null },
+            onDismissRequest = { pendingDeleteRecord = null; deleteError = null },
             title = { Text("删除分红记录", fontWeight = FontWeight.Bold) },
             text = {
                 Text(
                     "将删除 ${record.date} 的分红记录（每10股 ¥${record.amount.format(2)}），删除后无法恢复。"
                 )
+                deleteError?.let {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        "删除失败：$it",
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
             },
             confirmButton = {
                 TextButton(
                     onClick = {
                         coroutineScope.launch {
-                            withContext(Dispatchers.IO) {
-                                container.dividendRepository.deleteManualDividend(record.id, symbol)
+                            // 没兜底的话一次 DB 异常就会让确认框永远不消失，
+                            // 而 rememberCoroutineScope 不带 CoroutineExceptionHandler —— 直接崩 App。
+                            val error = runCatching {
+                                withContext(Dispatchers.IO) {
+                                    container.dividendRepository.deleteManualDividend(record.id, symbol)
+                                }
+                            }.onFailure {
+                                AppLogger.e("删除分红失败: ${it.message}", it, "DividendDetail")
+                            }.exceptionOrNull()
+                            if (error == null) {
+                                pendingDeleteRecord = null
+                                loadRecords()
+                            } else {
+                                deleteError = error.message ?: "删除失败"
                             }
-                            pendingDeleteRecord = null
-                            loadRecords()
                         }
                     }
                 ) { Text("删除", color = LossRed) }
             },
             dismissButton = {
-                TextButton(onClick = { pendingDeleteRecord = null }) { Text("取消") }
+                TextButton(onClick = { pendingDeleteRecord = null; deleteError = null }) { Text("取消") }
             }
         )
     }

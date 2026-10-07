@@ -208,6 +208,11 @@ object AssetSyncManager {
 
             if (isSuccess) {
                 successCount.incrementAndGet()
+            } else if (com.example.stockdiary.network.QuoteSuspendedException.isSuspended(lastError)) {
+                // 停牌不是同步失败：计进 failedCount 会让 PriceSyncWorker 走到
+                // 「同步多次失败，请检查网络」的通知，用户被一条根本不是故障的事骚扰。
+                // 价格保持上次的值不动（AssetRepository 也不会写入 0 价）。
+                AppLogger.i("跳过停牌标的: ${asset.name}（${lastError?.message}）", "AssetSyncManager")
             } else {
                 failedCount.incrementAndGet()
                 errorTypes.offer(SyncStrategy.classifyError(lastError))

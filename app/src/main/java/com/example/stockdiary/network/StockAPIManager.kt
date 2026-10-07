@@ -251,10 +251,15 @@ object TencentStockAPI : StockAPI {
                     val text = responseBody.use { body -> body.string() }
                     AppLogger.d("响应长度: ${text.length}", "TencentStockAPI")
 
-                    val stockData = parseTencentData(text, formattedCode)
+                    val suspended = booleanArrayOf(false)
+                    val stockData = parseTencentData(text, formattedCode, suspended)
                     if (stockData != null) {
                         AppLogger.d("成功解析股票: ${stockData.name} (${stockData.code}), 价格: ${stockData.price}", "TencentStockAPI")
                         return@withContext Result.success(stockData)
+                    } else if (suspended[0]) {
+                        // 响应里有这只票但报价无效＝停牌。这不是数据源故障，
+                        // 不能走「未获取到股票数据」那条会被累计失败次数的路径。
+                        return@withContext Result.failure(QuoteSuspendedException(formattedCode))
                     } else {
                         AppLogger.e("未获取到股票数据，请检查股票代码", tag = "TencentStockAPI")
                         return@withContext Result.failure(IOException("未获取到股票数据，请检查股票代码"))
@@ -285,7 +290,11 @@ object TencentStockAPI : StockAPI {
      * 36: 成交量(手) 37: 成交额(万) 38: 换手率 39: 市盈率 40: 未知 41: 最高价 42: 最低价
      * 43: 振幅 44: 流通市值 45: 总市值 46: 市净率 47: 涨停价 48: 跌停价
      */
-    private fun parseTencentData(responseText: String, @Suppress("UNUSED_PARAMETER") stockCode: String): SinaStockData? {
+    private fun parseTencentData(
+        responseText: String,
+        @Suppress("UNUSED_PARAMETER") stockCode: String,
+        suspended: BooleanArray = booleanArrayOf(false)
+    ): SinaStockData? {
         try {
             // 腾讯API返回格式: v_sh600000="1~浦发银行~600000~9.99~10.00~9.98~..."
             val pattern = Regex("v_([a-zA-Z0-9]+)=\"([^\"]*)\"")
@@ -326,7 +335,8 @@ object TencentStockAPI : StockAPI {
                     // 拿 0 当现价会让市值归零并按 -100% 展示，这里退到昨收、涨跌记 0。
                     val effectivePrice = if (price > 0) price else prevClose
                     if (effectivePrice <= 0) {
-                        AppLogger.w("丢弃无效报价: $code（现价=$price, 昨收=$prevClose）", "TencentStockAPI")
+                        suspended[0] = true
+                        AppLogger.w("无有效报价（疑似停牌）: $code（现价=$price, 昨收=$prevClose）", "TencentStockAPI")
                         return null
                     }
 

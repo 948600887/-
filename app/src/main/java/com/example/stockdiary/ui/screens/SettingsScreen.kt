@@ -283,7 +283,20 @@ fun SettingsScreen(
                     },
                     isSwitch = true,
                     switchChecked = reminderEnabled,
-                    onSwitchCheckedChange = { enabled -> viewModel.setReminderEnabled(enabled) }
+                    onSwitchCheckedChange = { enabled ->
+                        // 开启前先看通知权限：没授权也能把闹钟排上，但通知永远发不出来，
+                        // 界面上却显示"每天 09:00 提醒"，用户根本无从自查。
+                        if (enabled &&
+                            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                            ContextCompat.checkSelfPermission(
+                                context,
+                                Manifest.permission.POST_NOTIFICATIONS
+                            ) != PackageManager.PERMISSION_GRANTED
+                        ) {
+                            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                        }
+                        viewModel.setReminderEnabled(enabled)
+                    }
                 ),
                 SettingsItemData(
                     icon = Icons.Default.Schedule,

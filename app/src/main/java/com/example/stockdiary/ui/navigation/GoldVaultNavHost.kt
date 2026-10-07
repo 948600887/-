@@ -1,6 +1,7 @@
 package com.example.stockdiary.ui.navigation
 
 import android.app.Activity
+import android.content.Context
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.padding
@@ -40,6 +41,13 @@ private val screensByRoute = listOf(
 ).associateBy { it.route }
 
 private const val BACK_TO_EXIT_WINDOW_MS = 2000L
+
+/** 沿 ContextWrapper 链找到真正的 Activity（LocalContext 里拿到的往往是被包过的 Context） */
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is android.content.ContextWrapper -> baseContext.findActivity()
+    else -> null
+}
 
 @Composable
 fun GoldVaultNavHost() {
@@ -83,7 +91,10 @@ fun GoldVaultNavHost() {
         } else {
             val now = System.currentTimeMillis()
             if (now - lastBackPressAt < BACK_TO_EXIT_WINDOW_MS) {
-                (context as? Activity)?.finish()
+                // 不能用 `context as? Activity`：LocalContext.current 常被 ContextThemeWrapper
+                // 之类的装饰类包住，强转得到 null 后 finish() 静默失效，
+                // 用户连按两次返回键也退不出 App。沿 ContextWrapper 链解包才稳。
+                context.findActivity()?.finish()
             } else {
                 lastBackPressAt = now
                 Toast.makeText(context, "再按一次退出", Toast.LENGTH_SHORT).show()

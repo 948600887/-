@@ -162,8 +162,12 @@ class AssetDetailViewModel(private val container: AppContainer, private val asse
                 account = currentAsset.account,
                 assetType = currentAsset.type
             )
-        } else {
+        } else if (delta < 0) {
             repository.sellStockAsset(currentAsset, kotlin.math.abs(delta))
+        } else {
+            // 数量没变（用户只改了成本价）。此前落进「减仓」分支，
+            // 会用 0 数量写一条卖出流水，而用户真正改动的成本价反而不保存。
+            repository.updateAsset(updatedAsset)
         }
         _asset.value = repository.getAssetById(currentAsset.id)
     }

@@ -68,10 +68,19 @@ object FundAPI {
 
             val fundInfo = fetchFundInfo(fundCode)
             if (fundInfo != null) {
-                cache[fundCode] = CacheEntry(fundInfo, now)
+                // 用写入时刻而不是请求开始时刻：天天基金的响应常在 0.5~2MB，
+                // 弱网下耗时可观，拿请求开始时刻会把 5 分钟 TTL 白白吃掉一段。
+                cache[fundCode] = CacheEntry(fundInfo, System.currentTimeMillis())
                 AppLogger.d("获取基金数据成功: ${fundInfo.name}", TAG)
                 Result.success(fundInfo)
             } else {
+                // 刷新失败时宁可给上一轮的旧净值，也不要返回失败：
+                // 一次网络抖动就让持仓显示"未找到基金数据"，还会被计成同步失败。
+                val stale = cachedEntry?.data
+                if (stale != null) {
+                    AppLogger.w("基金数据刷新失败，回退旧缓存: $fundCode", TAG)
+                    return@withContext Result.success(stale.copy(isFromCache = true))
+                }
                 Result.failure(Exception("基金数据获取失败"))
             }
         } catch (e: CancellationException) {

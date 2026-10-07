@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.content.Context
 import com.example.stockdiary.common.Result
 import com.example.stockdiary.network.NetworkRetryHelper
+import com.example.stockdiary.network.QuoteSuspendedException
 import com.example.stockdiary.network.SinaStockAPI
 import com.example.stockdiary.network.TencentStockAPI
 import com.example.stockdiary.utils.AppLogger
@@ -212,13 +213,28 @@ class StockDataManager(
                         "${apiName}返回的价格无效（${stockData.price}），视为失败并尝试下一个数据源",
                         TAG
                     )
+                    // 别让下面那句 Exception("Unknown error") 盖掉真实原因：
+                    // 日志里只看到 Unknown error 会完全误导排查方向。
+                    lastError = IllegalStateException("${apiName}返回无效价格: ${stockData.price}")
                 }
             }
-            
+
+            val failure = result.exceptionOrNull() as? Exception
+                ?: lastError
+                ?: Exception("Unknown error")
+            lastError = failure
+
+            // 停牌不是数据源的故障：换源去问同一只停牌股还是没有报价，
+            // 但累计失败次数会在 3 次后把整个数据源禁用 30 分钟，
+            // 表现为"全市场行情同步停摆 + 日志只有一句所有数据源都失败"。
+            if (QuoteSuspendedException.isSuspended(failure)) {
+                AppLogger.w("$symbol 无有效报价（停牌/退市整理期），不计入数据源失败", TAG)
+                continue
+            }
+
             // 失败：记录错误
-            lastError = result.exceptionOrNull() as? Exception ?: Exception("Unknown error")
             recordFailure(apiName)
-            AppLogger.w("${apiName}获取数据失败: ${lastError.message}", TAG)
+            AppLogger.w("${apiName}获取数据失败: ${failure.message}", TAG)
         }
         
         // 6. 所有数据源都失败

@@ -369,13 +369,17 @@ fun AdjustPositionDialog(
     // 只有用户改过数量后才报错，避免刚打开空框就一片红
     var amountTouched by remember { mutableStateOf(false) }
     
-    val isValid by remember { 
-        derivedStateOf { 
-            amount.toDoubleOrNull() != null && 
-            amount.toDoubleOrNull() ?: 0.0 > 0 &&
-            (price.toDoubleOrNull() != null || price.isBlank()) &&
-            (action == "减仓" && amount.toDoubleOrNull() ?: 0.0 <= asset.balance || action == "加仓")
-        } 
+    // 原先这里用一长串 `?:` 混在 `&&`/`||` 里，优先级含糊且算完没人用（按钮没接）。
+    // 拆成具名条件，直接决定确认按钮是否可点、以及出错时给哪句提示。
+    val isValid by remember {
+        derivedStateOf {
+            val quantity = amount.toDoubleOrNull() ?: return@derivedStateOf false
+            val priceOk = price.isBlank() || price.toDoubleOrNull() != null
+            // 减仓数量等于持仓会把资产整条删掉（仓储层 quantity >= balance 即删除）。
+            // 那不是「减仓」，留给「删除资产」做，这里直接判为不合法。
+            val quantityOk = quantity > 0 && (action == "加仓" || quantity < asset.balance)
+            priceOk && quantityOk
+        }
     }
     
     Dialog(
@@ -493,18 +497,20 @@ fun AdjustPositionDialog(
                         modifier = Modifier.fillMaxWidth(),
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                         singleLine = true,
-                        isError = amountTouched && (
-                            amount.toDoubleOrNull() == null ||
-                                (action == "减仓" && (amount.toDoubleOrNull() ?: 0.0) > asset.balance)
-                            ),
+                        isError = amountTouched && !isValid,
                         supportingText = {
-                            if (amountTouched) {
-                                when {
-                                    amount.toDoubleOrNull() == null -> Text("请输入有效数字")
-                                    action == "减仓" && (amount.toDoubleOrNull() ?: 0.0) > asset.balance ->
-                                        Text("减仓数量不能超过持仓")
-                                    else -> {}
-                                }
+                            if (amountTouched && !isValid) {
+                                val quantity = amount.toDoubleOrNull()
+                                Text(
+                                    when {
+                                        quantity == null -> "请输入有效数字"
+                                        quantity <= 0 -> "数量必须大于 0"
+                                        action == "减仓" && quantity > asset.balance -> "减仓数量不能超过持仓"
+                                        action == "减仓" && quantity == asset.balance ->
+                                            "会清空该持仓（将删除资产）。若要清仓请用删除"
+                                        else -> "数量不合法"
+                                    }
+                                )
                             }
                         }
                     )
@@ -572,11 +578,11 @@ fun AdjustPositionDialog(
                         Button(
                             onClick = {
                                 if (isSaving.value) return@Button
-                                val quantity = amount.toDoubleOrNull()
-                                if (quantity == null || quantity <= 0) {
-                                    amountTouched = true
-                                    return@Button
-                                }
+                                // 先标记再校验：非法输入要立刻变红给出提示，
+                                // 不能点了按钮界面毫无反应，那看起来就是按钮坏了。
+                                amountTouched = true
+                                if (!isValid) return@Button
+                                val quantity = amount.toDouble()
                                 val delta = if (action == "加仓") quantity else -quantity
                                 val newBalance = asset.balance + delta
                                 // 减到负数 / 归零后再除以 0 会得到 Infinity 成本，

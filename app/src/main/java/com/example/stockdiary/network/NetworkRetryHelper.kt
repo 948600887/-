@@ -59,6 +59,11 @@ object NetworkRetryHelper {
     }
     
     private fun shouldRetry(exception: Exception): Boolean {
+        // 停牌：重试一万次这只票也没有报价，白白浪费请求额度
+        if (QuoteSuspendedException.isSuspended(exception)) {
+            AppLogger.w("标的停牌/无报价，不重试: ${exception.message}", TAG)
+            return false
+        }
         return when (exception) {
             is SocketTimeoutException -> {
                 AppLogger.w("网络超时，将重试", TAG)

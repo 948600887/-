@@ -216,32 +216,64 @@ fun DashboardScreen(
                     }
                 }
 
-                // 四类资产全被藏起来：列表区一片空白，必须给出口，否则用户以为资产丢了
-                if (assetsByType.isEmpty()) {
-                    item {
-                        Card(
-                            modifier = Modifier.fillMaxWidth(),
-                            colors = CardDefaults.cardColors(
-                                containerColor = MaterialTheme.colorScheme.surfaceVariant
-                            )
-                        ) {
-                            Column(
-                                modifier = Modifier.fillMaxWidth().padding(16.dp),
-                                horizontalAlignment = Alignment.CenterHorizontally
+                // 列表区一片空白时必须给出口，否则用户以为资产丢了。
+                // 但要分清两种「空」：
+                //   ① 有资产、被显示开关全藏了 → 给「显示全部资产」；
+                //   ② 只有负债、压根没有非负资产 → 说「全部隐藏」是骗人，
+                //      而且那个按钮对负债无效（点了界面纹丝不动）。
+                when {
+                    assetsOnly.isNotEmpty() && visibleAssetsOnly.isEmpty() -> {
+                        item {
+                            Card(
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = CardDefaults.cardColors(
+                                    containerColor = MaterialTheme.colorScheme.surfaceVariant
+                                )
                             ) {
-                                Text(
-                                    "当前未显示任何资产类别",
-                                    style = MaterialTheme.typography.titleSmall
+                                Column(
+                                    modifier = Modifier.fillMaxWidth().padding(16.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally
+                                ) {
+                                    Text(
+                                        "当前未显示任何资产类别",
+                                        style = MaterialTheme.typography.titleSmall
+                                    )
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text(
+                                        "你共有 ${assetsOnly.size} 项资产，但显示开关把它们全部隐藏了",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    Spacer(modifier = Modifier.height(12.dp))
+                                    Button(onClick = { viewModel.showAllAssetTypes() }) {
+                                        Text("显示全部资产")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    assetsOnly.isEmpty() && liabilities.isNotEmpty() -> {
+                        item {
+                            Card(
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = CardDefaults.cardColors(
+                                    containerColor = MaterialTheme.colorScheme.surfaceVariant
                                 )
-                                Spacer(modifier = Modifier.height(4.dp))
-                                Text(
-                                    "你共有 ${assetsOnly.size} 项资产，但显示开关把它们全部隐藏了",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                                Spacer(modifier = Modifier.height(12.dp))
-                                Button(onClick = { viewModel.showAllAssetTypes() }) {
-                                    Text("显示全部资产")
+                            ) {
+                                Column(
+                                    modifier = Modifier.fillMaxWidth().padding(16.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally
+                                ) {
+                                    Text(
+                                        "还没有记录任何资产",
+                                        style = MaterialTheme.typography.titleSmall
+                                    )
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text(
+                                        "目前已记录 ${liabilities.size} 项负债，点右下角 + 添加股票、基金或存款",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
                                 }
                             }
                         }

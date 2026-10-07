@@ -266,8 +266,13 @@ object NotificationHelper {
                 val alarmInfo = AlarmManager.AlarmClockInfo(triggerMillis, pendingIntent)
                 @Suppress("MissingPermission")
                 alarmManager.setAlarmClock(alarmInfo, pendingIntent)
+                true
+            } else {
+                // 拿不到 AlarmManager 就等于没排上闹钟，不能回报成功——
+                // 否则设置页显示"已开启"，用户却永远收不到提醒。
+                AppLogger.w("无法获取 AlarmManager，每日提醒未生效", "NotificationHelper")
+                false
             }
-            true
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -321,76 +326,93 @@ object NotificationHelper {
     // 提醒接收器
     class ReminderReceiver : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            try {
-                // 读取保存的提醒时间
-                val hour = intent.getIntExtra("reminder_hour", 9)
-                val minute = intent.getIntExtra("reminder_minute", 0)
-                
-                // 初始化通知管理器
-                val localNotificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
-                if (localNotificationManager != null) {
-                    // 创建通知通道（minSdk 26，无需版本判断）
-                    val channel = NotificationChannel(
-                        CHANNEL_ID_REMINDER,
-                        "每日提醒",
-                        NotificationManager.IMPORTANCE_DEFAULT
-                    ).apply {
-                        description = "每日资产查看提醒"
-                    }
-                    localNotificationManager.createNotificationChannel(channel)
+            // 读取保存的提醒时间
+            val hour = intent.getIntExtra("reminder_hour", 9)
+            val minute = intent.getIntExtra("reminder_minute", 0)
 
-                    // 显示每日提醒
-                    val notificationIntent = Intent(context, MainActivity::class.java)
-                    val pendingIntent = PendingIntent.getActivity(
-                        context,
-                        NOTIFICATION_ID_REMINDER,
-                        notificationIntent,
-                        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-                    )
+            // 先排明天的闹钟，再发今天这条通知。
+            //
+            // 顺序很重要：原先两段都在同一个 try 里、通知在前。Android 13 未授予
+            // POST_NOTIFICATIONS 时 notify() 会抛 SecurityException，
+            // 异常被外层 catch 吞掉 → 排下一天闹钟的那段被整段跳过 →
+            // 提醒只响一次就永久断链，而设置页开关依然显示"已开启"，用户完全查不出原因。
+            // 排期与通知互不依赖，必须各自独立兜底。
+            runCatching { scheduleNextDay(context, hour, minute) }
+                .onFailure { AppLogger.e("续期提醒失败: ${it.message}", it, "NotificationHelper") }
 
-                    val notification = NotificationCompat.Builder(context, CHANNEL_ID_REMINDER)
-                        .setContentTitle("金库提醒")
-                        .setContentText("记得查看今日股票行情和资产状况")
-                        .setSmallIcon(android.R.drawable.ic_dialog_info)
-                        .setContentIntent(pendingIntent)
-                        .setAutoCancel(true)
-                        .build()
+            runCatching { showReminderNotification(context) }
+                .onFailure { AppLogger.e("显示提醒失败: ${it.message}", it, "NotificationHelper") }
+        }
 
-                    localNotificationManager.notify(NOTIFICATION_ID_REMINDER, notification)
-                }
-
-                // 设置下一天的提醒（保留原始时间），Android 12+ 需先检查权限
-                if (canScheduleExactAlarms(context)) {
-                    val tomorrowScheduledTime = LocalDateTime.now().plusDays(1)
-                        .withHour(hour).withMinute(minute).withSecond(0).withNano(0)
-                    val tomorrowMillis = tomorrowScheduledTime
-                        .atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
-                    val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as? AlarmManager
-                    if (alarmManager != null) {
-                        val nextIntent = Intent(context, ReminderReceiver::class.java).apply {
-                            putExtra("reminder_hour", hour)
-                            putExtra("reminder_minute", minute)
-                        }
-                        val reminderPendingIntent = PendingIntent.getBroadcast(
-                            context,
-                            ALARM_REQUEST_CODE,
-                            nextIntent,
-                            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-                        )
-
-                        // 已通过 canScheduleExactAlarms() 检查 SCHEDULE_EXACT_ALARM 权限
-                        @Suppress("MissingPermission")
-                        val alarmInfo = AlarmManager.AlarmClockInfo(tomorrowMillis, reminderPendingIntent)
-                        @Suppress("MissingPermission")
-                        alarmManager.setAlarmClock(alarmInfo, reminderPendingIntent)
-                    }
-                }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                AppLogger.e("处理提醒失败: ${e.message}", e, "NotificationHelper")
-                // 处理提醒失败，不影响应用运行
+        private fun showReminderNotification(context: Context) {
+            // Android 13+ 未授权时 notify() 抛 SecurityException，这里先挡一道
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                !NotificationPermissionHelper.isGranted(context)
+            ) {
+                AppLogger.w("未授予通知权限，跳过每日提醒", "NotificationHelper")
+                return
             }
+
+            val localNotificationManager =
+                context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+                    ?: return
+
+            // 创建通知通道（minSdk 26，无需版本判断）
+            val channel = NotificationChannel(
+                CHANNEL_ID_REMINDER,
+                "每日提醒",
+                NotificationManager.IMPORTANCE_DEFAULT
+            ).apply {
+                description = "每日资产查看提醒"
+            }
+            localNotificationManager.createNotificationChannel(channel)
+
+            val notificationIntent = Intent(context, MainActivity::class.java)
+            val pendingIntent = PendingIntent.getActivity(
+                context,
+                NOTIFICATION_ID_REMINDER,
+                notificationIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+
+            val notification = NotificationCompat.Builder(context, CHANNEL_ID_REMINDER)
+                .setContentTitle("金库提醒")
+                .setContentText("记得查看今日股票行情和资产状况")
+                .setSmallIcon(android.R.drawable.ic_dialog_info)
+                .setContentIntent(pendingIntent)
+                .setAutoCancel(true)
+                .build()
+
+            localNotificationManager.notify(NOTIFICATION_ID_REMINDER, notification)
+        }
+
+        /** 设置下一天的提醒（保留原始时间），Android 12+ 需先检查权限 */
+        private fun scheduleNextDay(context: Context, hour: Int, minute: Int) {
+            if (!canScheduleExactAlarms(context)) return
+
+            val tomorrowScheduledTime = LocalDateTime.now().plusDays(1)
+                .withHour(hour).withMinute(minute).withSecond(0).withNano(0)
+            val tomorrowMillis = tomorrowScheduledTime
+                .atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
+            val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as? AlarmManager
+                ?: return
+
+            val nextIntent = Intent(context, ReminderReceiver::class.java).apply {
+                putExtra("reminder_hour", hour)
+                putExtra("reminder_minute", minute)
+            }
+            val reminderPendingIntent = PendingIntent.getBroadcast(
+                context,
+                ALARM_REQUEST_CODE,
+                nextIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+
+            // 已通过 canScheduleExactAlarms() 检查 SCHEDULE_EXACT_ALARM 权限
+            @Suppress("MissingPermission")
+            val alarmInfo = AlarmManager.AlarmClockInfo(tomorrowMillis, reminderPendingIntent)
+            @Suppress("MissingPermission")
+            alarmManager.setAlarmClock(alarmInfo, reminderPendingIntent)
         }
     }
 }

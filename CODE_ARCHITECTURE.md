@@ -35,14 +35,12 @@ com.example.stockdiary/
 │   ├── SnapshotWorker.kt           # 快照后台任务
 │   ├── DataExporter.kt             # 数据导出器
 │   ├── AssetRepository.kt          # 资产数据仓库
-│   ├── StockRepository.kt          # 股票数据仓库
 │   ├── DataManager.kt              # 数据管理器 (旧版，全局状态)
 │   ├── StockDataManager.kt         # 股票数据管理器
 │   ├── ApiManager.kt               # API 管理器
 │   ├── StockAPIManager.kt         # 股票 API 管理
 │   ├── StockData.kt               # 股票数据模型
 │   ├── StockBasicInfo.kt          # 股票基本信息
-│   ├── LocalDataSource.kt         # 本地数据源
 │   ├── ApiError.kt                # API 错误模型
 │   # --- 分红相关 ---
 │   ├── DividendApi.kt             # 分红 API 接口
@@ -54,8 +52,7 @@ com.example.stockdiary/
 │   ├── DividendYieldCalculator.kt # 分红收益率计算器
 │   ├── EastmoneyDividendApiService.kt # 东方财富分红 API
 │   ├── SinaDividendApiService.kt  # 新浪分红 API
-│   ├── TencentDividendApiService.kt  # 腾讯分红 API
-│   └── SecurityTypeService.kt     # 证券类型服务
+│   └── TencentDividendApiService.kt  # 腾讯分红 API
 │
 ├── network/                       # 🌐 网络层
 │   ├── SinaStockAPI.kt           # 新浪股票 API
@@ -170,17 +167,15 @@ MainActivity
             ├── SettingsScreen ───── SnapshotScheduler
             ├── HistoryScreen ────── SnapshotDao
             ├── PortfolioScreen ──── DataManager
-            │                         ├── StockRepository
             │                         └── StockAPIManager
             ├── MarketScreen ──────── DataManager
-            ├── StockDetailScreen ─── EnhancedStockDetailViewModel
+            ├── StockDetailScreen ─── AssetDetailViewModel
             ├── DividendScreen ────── DividendService
             │                         ├── DividendRepository
             │                         └── EastmoneyDividendApiService
             └── [其他Screen] ─────── DataManager
 
 DataManager (全局状态)
-    ├── StockRepository ──────── StockDatabase
     ├── StockAPIManager ──────── SinaStockAPI
     └── DividendService ──────── 各种 DividendApiService
 ```

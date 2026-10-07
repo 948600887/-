@@ -49,11 +49,20 @@ object SinaStockAPI : StockAPI {
     }
     
     override suspend fun getStockData(stockCode: String): Result<SinaStockData> {
+        suspendedCodes.clear()
         val result = getRealtimeData(listOf(stockCode))
         return result.mapCatching { map ->
-            map[stockCode] ?: throw IOException("无法获取股票数据: $stockCode")
+            map[stockCode] ?: if (stockCode in suspendedCodes) {
+                // 明确告诉上层「这是停牌，不是数据源坏了」，不要去累计失败次数
+                throw QuoteSuspendedException(stockCode)
+            } else {
+                throw IOException("无法获取股票数据: $stockCode")
+            }
         }
     }
+
+    /** 最近一次请求里被判定为无有效报价（停牌）的代码，供 [getStockData] 区分失败语义 */
+    private val suspendedCodes = mutableSetOf<String>()
     
     suspend fun getRealtimeData(
         stockCodes: List<String>,
@@ -143,7 +152,11 @@ object SinaStockAPI : StockAPI {
                                 }
                                 val text = String(bytes, Charset.forName("GBK"))
 
-                                val batchResult = parseRealtimeData(text, batch)
+                                val suspended = mutableSetOf<String>()
+                                val batchResult = parseRealtimeData(text, batch, suspended)
+                                if (suspended.isNotEmpty()) {
+                                    suspendedCodes.addAll(suspended)
+                                }
 
                                 batchResult.forEach { (code, data) ->
                                     cacheData(code, data)
@@ -357,7 +370,17 @@ object SinaStockAPI : StockAPI {
         return result
     }
     
-    private fun parseRealtimeData(text: String, @Suppress("UNUSED_PARAMETER") codes: List<String>): Map<String, SinaStockData> {
+    /**
+     * 解析新浪实时行情。
+     *
+     * @return 正常报价的映射。`suspended` 收集「响应里出现了、但报价无效」的代码
+     *   （停牌 / 退市整理期 / 集合竞价前）。它们不能混在失败里——见 [QuoteSuspendedException]。
+     */
+    private fun parseRealtimeData(
+        text: String,
+        @Suppress("UNUSED_PARAMETER") codes: List<String>,
+        suspended: MutableSet<String> = mutableSetOf()
+    ): Map<String, SinaStockData> {
         val result = mutableMapOf<String, SinaStockData>()
         
         try {
@@ -401,7 +424,10 @@ object SinaStockAPI : StockAPI {
                                 volume = volume
                             )
                         } else {
-                            AppLogger.w("丢弃无效报价: $code（现价=$current, 昨收=$close）", TAG)
+                            // 现价和昨收都是 0：这只标的当前根本没有报价。
+                            // 记为「停牌」而不是普通失败，否则会被计入数据源失败次数。
+                            suspended.add(code)
+                            AppLogger.w("无有效报价（疑似停牌）: $code（现价=$current, 昨收=$close）", TAG)
                         }
                     }
                 }

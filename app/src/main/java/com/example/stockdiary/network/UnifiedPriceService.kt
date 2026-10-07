@@ -75,7 +75,16 @@ object UnifiedPriceService {
             deferred.complete(failure)
             failure
         } finally {
-            pendingRequests.remove(cacheKey)
+            // 必须按「是不是自己」删除：无条件的 pendingRequests.remove(cacheKey)
+            // 会在并发下误删别人刚放进去的 deferred（例如期间被 clearCache 清过一次），
+            // 去重失效、同一标的重复打网络。
+            pendingRequests.remove(cacheKey, deferred)
+            // 走到这里只剩两条路：上面的 catch 抛了 CancellationException，
+            // 或 try 里抛了 Error。deferred 是没有父 Job 的独立 CompletableDeferred，
+            // 不会随本协程取消 —— 不显式收尾，其它作用域里 await() 它的协程会永久挂起。
+            if (!deferred.isCompleted) {
+                deferred.cancel()
+            }
         }
     }
     
@@ -138,16 +147,24 @@ object UnifiedPriceService {
             }
             
             val name = data.getOrNull(1)?.takeIf { it.isNotBlank() } ?: ""
-            val price = data.getOrNull(3)?.toDoubleOrNull() ?: 0.0
+            val rawPrice = data.getOrNull(3)?.toDoubleOrNull() ?: 0.0
             val yesterdayClose = data.getOrNull(4)?.toDoubleOrNull()
             val open = data.getOrNull(5)?.toDoubleOrNull()
             val volume = data.getOrNull(6)?.toLongOrNull()
             val high = data.getOrNull(33)?.toDoubleOrNull()
             val low = data.getOrNull(34)?.toDoubleOrNull()
             
+            // 停牌时腾讯返回的"现价"是 0、昨收正常。与 TencentStockAPI 保持一致：
+            // 退到昨收、涨跌记 0；两者都是 0 才算真的没有报价（返回 null，不写缓存）。
+            val price = if (rawPrice > 0) rawPrice else (yesterdayClose ?: 0.0)
+            if (price <= 0) {
+                AppLogger.w("无有效报价（疑似停牌）: $code（现价=$rawPrice, 昨收=$yesterdayClose）", TAG)
+                return null
+            }
+
             val change = calculateChange(price, yesterdayClose)
             val changePercent = calculateChangePercent(change, yesterdayClose)
-            
+
             StockData(
                 code = code,
                 name = name,
@@ -320,6 +337,9 @@ object UnifiedPriceService {
         priceCache.clear()
         pendingRequests.clear()
         CacheManager.invalidateAll()
+        // 基金净值走的是 FundAPI 自己的 5 分钟缓存（本类的 getFundPrice 委托给它）。
+        // 只清这里的 60 秒缓存而不清 FundAPI 那份，「清完缓存还是拿到旧净值」。
+        FundAPI.clearCache()
         AppLogger.i("价格缓存已清空 (${sizeBefore} 条)", TAG)
     }
     

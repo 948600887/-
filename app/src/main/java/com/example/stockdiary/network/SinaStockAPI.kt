@@ -401,6 +401,10 @@ object SinaStockAPI : StockAPI {
                         val high = fields[4].toDoubleOrNull() ?: 0.0
                         val low = fields[5].toDoubleOrNull() ?: 0.0
                         val volume = fields[8].toLongOrNull() ?: 0L
+                        // 新浪字段：9=成交额(元)，30=日期 yyyy-MM-dd，31=时间 HH:mm:ss
+                        val amount = fields.getOrNull(9)?.toDoubleOrNull() ?: 0.0
+                        val date = fields.getOrNull(30)?.trim() ?: ""
+                        val timeStr = fields.getOrNull(31)?.trim() ?: ""
 
                         // 停牌/集合竞价前/退市整理期：新浪返回的"现价"是 0，但昨收正常。
                         // 直接把 0 当价格会静默污染三层缓存（内存、PriceCacheManager 磁盘、调用方），
@@ -419,9 +423,16 @@ object SinaStockAPI : StockAPI {
                                 change = change,
                                 changePercent = changePercent,
                                 open = open,
+                                // 昨收必须带上：它会被写进磁盘缓存，断网时 App 完全靠那份缓存显示。
+                                // 先前这里没传，恢复出来的 prevClose 恒为 0，
+                                // 涨跌幅被重算成「price - 0」，界面上一片异常值。
+                                prevClose = close,
                                 high = high,
                                 low = low,
-                                volume = volume
+                                volume = volume,
+                                amount = amount,
+                                date = date,
+                                time = timeStr
                             )
                         } else {
                             // 现价和昨收都是 0：这只标的当前根本没有报价。

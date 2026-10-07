@@ -181,6 +181,12 @@ object PriceCacheManager {
                     jsonObject.put("high", cached.data.high)
                     jsonObject.put("low", cached.data.low)
                     jsonObject.put("volume", cached.data.volume)
+                    // 昨收必须落盘：断网时 App 只读这份缓存，丢了它涨跌幅会按
+                    // 「price - 0」重算，界面上一片 +100% 式的异常值。
+                    jsonObject.put("prevClose", cached.data.prevClose)
+                    jsonObject.put("amount", cached.data.amount)
+                    jsonObject.put("date", cached.data.date)
+                    jsonObject.put("time", cached.data.time)
                     jsonArray.put(jsonObject)
                 }
 
@@ -219,7 +225,11 @@ object PriceCacheManager {
                         open = jsonObject.optDouble("open", 0.0),
                         high = jsonObject.optDouble("high", 0.0),
                         low = jsonObject.optDouble("low", 0.0),
-                        volume = jsonObject.optLong("volume", 0L)
+                        volume = jsonObject.optLong("volume", 0L),
+                        prevClose = jsonObject.optDouble("prevClose", 0.0),
+                        amount = jsonObject.optDouble("amount", 0.0),
+                        date = jsonObject.optString("date", ""),
+                        time = jsonObject.optString("time", "")
                     )
 
                     memoryCache[code] = CachedPriceData(data, timestamp, source)

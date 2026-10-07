@@ -269,6 +269,9 @@ class SettingsViewModel(
         for (file in files) {
             if (!file.name.endsWith(".xml")) continue
             val name = file.name.removeSuffix(".xml")
+            // 别动 WorkManager 自己的偏好：里面存着「被强制停止后需要重排」的标记，
+            // 清掉它会漏掉一次后台任务重排。那不是用户数据，不该跟着一起清。
+            if (name.startsWith("androidx.work")) continue
             runCatching {
                 appContext.getSharedPreferences(name, Context.MODE_PRIVATE)
                     .edit().clear().commit()

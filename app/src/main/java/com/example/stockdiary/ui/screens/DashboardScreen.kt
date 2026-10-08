@@ -43,6 +43,7 @@ fun DashboardScreen(
     val realAnnualIncome by viewModel.realAnnualIncome.collectAsState()
     val incomeCalculationStatus by viewModel.incomeCalculationStatus.collectAsState()
     val existingAccounts by viewModel.existingAccounts.collectAsState()
+    val dividendProgress by viewModel.dividendProgress.collectAsState()
 
     var showAddDialog by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
@@ -184,6 +185,21 @@ fun DashboardScreen(
                 // 资产增值：本月 / 今年净资产增加额
                 item {
                     AssetGrowthCard(growth = growth)
+                }
+
+                // 收息进度：今年已收 / 全年预计（收入这一半的主角）
+                item {
+                    DividendProgressCard(progress = dividendProgress)
+                }
+
+                dividendProgress.nextPayout?.let { next ->
+                    item {
+                        NextPayoutCard(next = next)
+                    }
+                }
+
+                item {
+                    MonthlyCashFlowCard(progress = dividendProgress)
                 }
 
                 // 资产分布（分母用可见资产，保证百分比之和为 100%）

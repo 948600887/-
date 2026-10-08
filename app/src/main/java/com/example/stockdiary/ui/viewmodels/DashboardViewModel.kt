@@ -5,6 +5,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.example.stockdiary.data.AssetSyncManager
 import com.example.stockdiary.data.DividendIncomeLoader
+import com.example.stockdiary.data.DividendProgressCalculator
 import com.example.stockdiary.data.SortOrder
 import com.example.stockdiary.data.SyncProgress
 import com.example.stockdiary.data.SyncResult
@@ -13,6 +14,7 @@ import com.example.stockdiary.database.AssetSnapshot
 import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.di.AppContainer
 import com.example.stockdiary.utils.AppLogger
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -20,6 +22,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.CancellationException
 
 class DashboardViewModel(private val container: AppContainer) : ViewModel() {
@@ -70,6 +73,10 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
     private val _incomeCalculationStatus = MutableStateFlow<String?>(null)
     val incomeCalculationStatus: StateFlow<String?> = _incomeCalculationStatus.asStateFlow()
 
+    // 收息进度：今年已收 / 全年预计 / 月度现金流 / 下一笔到账
+    private val _dividendProgress = MutableStateFlow(DividendProgressCalculator.EMPTY)
+    val dividendProgress: StateFlow<DividendProgressCalculator.Progress> = _dividendProgress.asStateFlow()
+
     private val _hasInterestData = MutableStateFlow(false)
     val hasInterestData: StateFlow<Boolean> = _hasInterestData.asStateFlow()
 
@@ -101,6 +108,12 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
                 val result = incomeLoader.loadIncome(assetsOnly, forceRefresh = false, tag = "DashboardVM")
                 _realAnnualIncome.value = result.totalAnnualIncome
                 _estimatedDailyDividend.value = result.totalAnnualIncome / 365
+                _dividendProgress.value = withContext(Dispatchers.Default) {
+                    DividendProgressCalculator.calculate(
+                        assets = assetsOnly,
+                        recordsBySymbol = result.recordsBySymbol
+                    )
+                }
 
                 _incomeCalculationStatus.value = when {
                     result.totalAnnualIncome == 0.0 && !result.hasDividendData && !_hasInterestData.value -> "暂无分红/利息数据"
@@ -169,6 +182,12 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
                 val result = incomeLoader.loadIncome(assetsOnly, forceRefresh = false, tag = "DashboardVM")
                 _realAnnualIncome.value = result.totalAnnualIncome
                 _estimatedDailyDividend.value = result.totalAnnualIncome / 365
+                _dividendProgress.value = withContext(Dispatchers.Default) {
+                    DividendProgressCalculator.calculate(
+                        assets = assetsOnly,
+                        recordsBySymbol = result.recordsBySymbol
+                    )
+                }
                 _incomeCalculationStatus.value = null
             } catch (e: CancellationException) {
                 throw e

@@ -16,6 +16,8 @@ class DividendIncomeLoader(
 ) {
     data class IncomeResult(
         val dividendsBySymbol: Map<String, Double>,
+        /** 原始分红记录，供「收息进度 / 月度现金流 / 下一笔倒计时」使用 */
+        val recordsBySymbol: Map<String, List<DividendRecord>> = emptyMap(),
         val totalAnnualIncome: Double,
         val hasDividendData: Boolean
     )
@@ -27,6 +29,7 @@ class DividendIncomeLoader(
     ): IncomeResult = withContext(Dispatchers.IO) {
         val stockAssets = assets.filter { it.type == AssetType.STOCK || it.type == AssetType.FUND }
         val dividendsBySymbol = ConcurrentHashMap<String, Double>()
+        val recordsBySymbol = ConcurrentHashMap<String, List<DividendRecord>>()
         val hasDividendFlag = AtomicBoolean(false)
 
         coroutineScope {
@@ -43,6 +46,7 @@ class DividendIncomeLoader(
                     }
                     val ttmDividend = DividendYieldCalculator.getTTMDividend(dividends)
                     dividendsBySymbol[symbol] = ttmDividend
+                    recordsBySymbol[symbol] = dividends
                     if (ttmDividend > 0) hasDividendFlag.set(true)
                 }
             }.forEach { it.await() }
@@ -52,6 +56,7 @@ class DividendIncomeLoader(
 
         IncomeResult(
             dividendsBySymbol = dividendsBySymbol,
+            recordsBySymbol = recordsBySymbol,
             totalAnnualIncome = totalAnnualIncome,
             hasDividendData = hasDividendFlag.get()
         )

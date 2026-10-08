@@ -15,6 +15,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.stockdiary.data.AssetGrowthCalculator
 import com.example.stockdiary.data.SortOrder
 import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.ui.components.*
@@ -22,8 +23,6 @@ import com.example.stockdiary.ui.dialogs.AddAssetDialog
 import com.example.stockdiary.ui.theme.*
 import com.example.stockdiary.ui.viewmodels.DashboardViewModel
 import com.example.stockdiary.utils.AppLogger
-import com.example.stockdiary.utils.sumCostCny
-import com.example.stockdiary.utils.sumProfitCny
 import com.example.stockdiary.utils.sumTotalValueCny
 import kotlinx.coroutines.launch
 
@@ -66,17 +65,19 @@ fun DashboardScreen(
     }
 
     val totalAssets = remember(assetsOnly) { assetsOnly.sumTotalValueCny() }
-    val totalCost = remember(assetsOnly) { assetsOnly.sumCostCny() }
 
     // 分布图必须用「可见资产」做分母：分子是过滤后的，若分母用未过滤的总资产，
     // 用户把某类资产藏起来后各分类百分比之和会小于 100%，看起来像账算错了。
     val visibleTotalAssets = remember(visibleAssetsOnly) { visibleAssetsOnly.sumTotalValueCny() }
     val hasHiddenAssets = remember(visibleAssetsOnly, assetsOnly) { visibleAssetsOnly.size < assetsOnly.size }
 
-    val totalProfit = totalAssets - totalCost
-    val totalProfitPercent = if (totalCost > 0) (totalProfit / totalCost) * 100 else 0.0
     val totalLiabilities = remember(liabilities) { liabilities.sumTotalValueCny() }
     val netAssets = totalAssets - totalLiabilities
+
+    val snapshots by viewModel.snapshots.collectAsState()
+    val growth = remember(snapshots, netAssets) {
+        AssetGrowthCalculator.fromSnapshots(snapshots = snapshots, currentNetAssets = netAssets)
+    }
 
     val assetsByType by remember(visibleAssetsOnly, preferences.sortOrder) {
         derivedStateOf {
@@ -173,13 +174,16 @@ fun DashboardScreen(
                             totalAssets = totalAssets,
                             totalLiabilities = totalLiabilities,
                             netAssets = netAssets,
-                            profit = totalProfit,
-                            profitPercent = totalProfitPercent,
                             realAnnualIncome = realAnnualIncome,
                             dividendLoading = dividendLoading,
                             incomeCalculationStatus = incomeCalculationStatus
                         )
                     }
+                }
+
+                // 资产增值：本月 / 今年净资产增加额
+                item {
+                    AssetGrowthCard(growth = growth)
                 }
 
                 // 资产分布（分母用可见资产，保证百分比之和为 100%）

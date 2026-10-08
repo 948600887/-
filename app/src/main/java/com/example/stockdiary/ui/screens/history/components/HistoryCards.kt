@@ -26,6 +26,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.stockdiary.data.AssetGrowthCalculator
 import com.example.stockdiary.database.AssetSnapshot
 import com.example.stockdiary.ui.theme.AccentBlue
 import com.example.stockdiary.ui.theme.AccentOrange
@@ -85,7 +86,20 @@ fun HistoryPeriodSelector(
     }
 }
 
-fun LazyListScope.historyOverviewCard(latest: AssetSnapshot) {
+fun LazyListScope.historyOverviewCard(
+    latest: AssetSnapshot,
+    snapshots: List<AssetSnapshot>
+) {
+    // 「资产增值」口径：净资产相对历史基准的增加额，与资产页用同一个计算器，
+    // 基准取「本月 1 号之前」/「今年 1 月 1 号之前」的最后一条快照。
+    val growth = AssetGrowthCalculator.fromSnapshots(
+        snapshots = snapshots,
+        currentNetAssets = latest.netAssets,
+        today = latest.date
+    )
+    val monthDelta = growth.monthDelta
+    val yearDelta = growth.yearDelta
+
     item {
         Card(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
@@ -104,9 +118,16 @@ fun LazyListScope.historyOverviewCard(latest: AssetSnapshot) {
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    OverviewMetric("累计收益", latest.totalProfit.toProfitDisplay("¥"), latest.totalProfit.profitColor())
-                    OverviewMetric("累计收益率", "${if (latest.yieldRate >= 0) "+" else ""}${latest.yieldRate.format(2)}%", latest.yieldRate.profitColor())
-                    OverviewMetric("总成本", "¥${latest.totalCost.format(2)}")
+                    OverviewMetric(
+                        "本月新增",
+                        monthDelta?.toProfitDisplay("¥") ?: "—",
+                        monthDelta?.profitColor() ?: OnSurface
+                    )
+                    OverviewMetric(
+                        "今年新增",
+                        yearDelta?.toProfitDisplay("¥") ?: "—",
+                        yearDelta?.profitColor() ?: OnSurface
+                    )
                 }
             }
         }
@@ -155,7 +176,7 @@ fun LazyListScope.historyPeriodReturnCard(
             shape = RoundedCornerShape(12.dp)
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
-                Text("期间收益", fontSize = 12.sp, color = OnSurfaceVariant)
+                Text("期间增值", fontSize = 12.sp, color = OnSurfaceVariant)
                 Spacer(modifier = Modifier.height(4.dp))
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -168,7 +189,7 @@ fun LazyListScope.historyPeriodReturnCard(
                             fontSize = 24.sp, fontWeight = FontWeight.Bold,
                             color = periodChange.profitColor()
                         )
-                        Text("收益金额", fontSize = 11.sp, color = OnSurfaceVariant)
+                        Text("净资产增加", fontSize = 11.sp, color = OnSurfaceVariant)
                     }
                     Column(horizontalAlignment = Alignment.End) {
                         Text(
@@ -176,7 +197,7 @@ fun LazyListScope.historyPeriodReturnCard(
                             fontSize = 24.sp, fontWeight = FontWeight.Bold,
                             color = periodYield.profitColor()
                         )
-                        Text("收益率", fontSize = 11.sp, color = OnSurfaceVariant)
+                        Text("增幅", fontSize = 11.sp, color = OnSurfaceVariant)
                     }
                 }
                 Spacer(modifier = Modifier.height(4.dp))
@@ -241,7 +262,8 @@ fun LazyListScope.historyMonthlyReturnChart(monthlyReturns: List<MonthlyReturn>)
 }
 
 fun LazyListScope.historyAssetDistribution(latest: AssetSnapshot) {
-    if (latest.totalCost <= 0) return
+    if (latest.totalAssets <= 0) return
+    val totalForShare = if (latest.totalAssets > 0) latest.totalAssets else 1.0
     item {
         Spacer(modifier = Modifier.height(12.dp))
         Card(
@@ -262,17 +284,17 @@ fun LazyListScope.historyAssetDistribution(latest: AssetSnapshot) {
                     )
                     Spacer(modifier = Modifier.width(20.dp))
                     Column(modifier = Modifier.weight(1f)) {
-                        if (latest.stockCost > 0) {
-                            DistributionLegend("股票", latest.stockValue, latest.stockYieldRate, LossRed)
+                        if (latest.stockValue > 0) {
+                            DistributionLegend("股票", latest.stockValue, latest.stockValue / totalForShare * 100, LossRed)
                         }
-                        if (latest.fundCost > 0) {
-                            DistributionLegend("基金", latest.fundValue, latest.fundYieldRate, AccentOrange)
+                        if (latest.fundValue > 0) {
+                            DistributionLegend("基金", latest.fundValue, latest.fundValue / totalForShare * 100, AccentOrange)
                         }
-                        if (latest.cryptoCost > 0) {
-                            DistributionLegend("加密货币", latest.cryptoValue, latest.cryptoYieldRate, AccentBlue)
+                        if (latest.cryptoValue > 0) {
+                            DistributionLegend("加密货币", latest.cryptoValue, latest.cryptoValue / totalForShare * 100, AccentBlue)
                         }
-                        if (latest.bankDepositCost > 0) {
-                            DistributionLegend("银行存款", latest.bankDepositValue, latest.bankDepositYieldRate, PrimaryGreen)
+                        if (latest.bankDepositValue > 0) {
+                            DistributionLegend("银行存款", latest.bankDepositValue, latest.bankDepositValue / totalForShare * 100, PrimaryGreen)
                         }
                     }
                 }

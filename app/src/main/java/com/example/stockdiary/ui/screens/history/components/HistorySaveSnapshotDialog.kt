@@ -16,7 +16,6 @@ import androidx.compose.ui.unit.dp
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.ui.theme.ProfitGreen
 import com.example.stockdiary.utils.format
-import com.example.stockdiary.utils.toProfitDisplay
 
 @Composable
 fun HistorySaveSnapshotDialog(
@@ -30,9 +29,6 @@ fun HistorySaveSnapshotDialog(
     val totalValue = assetsOnly.sumOf { it.totalValue }
     val totalLiabilities = liabilities.sumOf { it.totalValue }
     val netAssets = totalValue - totalLiabilities
-    val totalCost = assetsOnly.sumOf { it.balance * it.purchasePrice }
-    val totalProfit = totalValue - totalCost
-    val yieldRate = if (totalCost > 0) totalProfit / totalCost * 100 else 0.0
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -46,9 +42,7 @@ fun HistorySaveSnapshotDialog(
                 if (totalLiabilities > 0) {
                     Text("负债: ¥${totalLiabilities.format(2)}", color = ProfitGreen)
                 }
-                Text("成本: ¥${totalCost.format(2)}")
-                Text("收益: ${totalProfit.toProfitDisplay("¥")}")
-                Text("收益率: ${if (yieldRate >= 0) "+" else ""}${yieldRate.format(2)}%")
+                Text("总资产: ¥${totalValue.format(2)}")
             }
         },
         confirmButton = {

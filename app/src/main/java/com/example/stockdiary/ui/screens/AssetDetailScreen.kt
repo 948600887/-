@@ -19,9 +19,6 @@ import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.data.DividendYieldCalculator
 import com.example.stockdiary.data.DividendIncomeCalculator
-import com.example.stockdiary.ui.components.CostCurveCard
-import com.example.stockdiary.ui.components.ReturnAttribution
-import com.example.stockdiary.ui.components.ReturnAttributionCard
 import com.example.stockdiary.ui.dialogs.AdjustPositionDialog
 import com.example.stockdiary.ui.dialogs.EditAssetDialog
 import com.example.stockdiary.ui.theme.*
@@ -29,8 +26,6 @@ import com.example.stockdiary.ui.viewmodels.AssetDetailViewModel
 import com.example.stockdiary.utils.AppLogger
 import com.example.stockdiary.utils.StockCodeManager
 import com.example.stockdiary.utils.format
-import com.example.stockdiary.utils.profitColor
-import com.example.stockdiary.utils.toProfitDisplay
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -43,7 +38,6 @@ fun AssetDetailScreen(
 ) {
     val asset by viewModel.asset.collectAsState()
     val dividends by viewModel.dividends.collectAsState()
-    val transactions by viewModel.transactions.collectAsState()
     val isLoading by viewModel.isLoading.collectAsState()
     val isDividendLoading by viewModel.isDividendLoading.collectAsState()
     val errorMessage by viewModel.errorMessage.collectAsState()
@@ -171,57 +165,14 @@ fun AssetDetailScreen(
                             Spacer(modifier = Modifier.height(12.dp))
                             DetailRow("账户", a.account)
                             DetailRow("持仓", "${a.balance.format(if (a.type == AssetType.STOCK) 0 else 2)}${if (a.type == AssetType.STOCK) "股" else "份"}")
-                            DetailRow("成本价", "¥${a.purchasePrice.format(2)}")
                             a.currentPrice?.let { price ->
                                 DetailRow("当前价", "¥${price.format(if (a.type == AssetType.FUND || StockCodeManager.isETF(a.symbol)) 3 else 2)}")
                             }
+                            DetailRow("当前市值", "¥${a.totalValue.format(2)}")
                             a.interestRate?.let { rate ->
                                 if (rate > 0) DetailRow("年利率", "${rate.format(2)}%")
                             }
                         }
-                    }
-                }
-
-                // 持仓价值卡片
-                item {
-                    Card(
-                        shape = RoundedCornerShape(12.dp),
-                        colors = CardDefaults.cardColors(containerColor = SurfaceContainer)
-                    ) {
-                        Column(modifier = Modifier.padding(16.dp)) {
-                            Text("持仓价值", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
-                            Spacer(modifier = Modifier.height(12.dp))
-                            DetailRow("总市值", "¥${a.totalValue.format(2)}")
-                            DetailRow("总成本", "¥${(a.balance * a.purchasePrice).format(2)}")
-                            val profit = a.profit
-                            DetailRow(
-                                "盈亏",
-                                profit.toProfitDisplay("¥"),
-                                profit.profitColor()
-                            )
-                            val profitPercent = if (a.balance * a.purchasePrice > 0)
-                                (profit / (a.balance * a.purchasePrice)) * 100 else 0.0
-                            DetailRow(
-                                "收益率",
-                                "${if (profitPercent >= 0) "+" else ""}${profitPercent.format(2)}%",
-                                profitPercent.profitColor()
-                            )
-                        }
-                    }
-                }
-
-                // 收益归因
-                item {
-                    val attribution = remember(a, dividends) {
-                        ReturnAttribution.calculate(a, dividends)
-                    }
-                    ReturnAttributionCard(attribution = attribution)
-                }
-
-                // 成本曲线（有交易记录时显示）
-                if (a.symbol != null && transactions.isNotEmpty()) {
-                    item {
-                        CostCurveCard(asset = a, transactions = transactions)
                     }
                 }
 
@@ -275,7 +226,7 @@ fun AssetDetailScreen(
                                 Text("编辑资产")
                             }
                             Button(
-                                // 加仓减仓此前只有弹窗没有入口，整条链路（含成本摊薄与流水记录）
+                                // 加仓减仓此前只有弹窗没有入口，整条链路（含参考价摊薄与流水记录）
                                 // 一直处于「写好了但谁也点不到」的状态。
                                 onClick = { showAdjustDialog = true },
                                 modifier = Modifier.weight(1f)
@@ -310,7 +261,7 @@ fun AssetDetailScreen(
         )
     }
 
-    // 加仓 / 减仓：按增量记一笔交易流水，成本由仓储层按余额加权摊薄
+    // 加仓 / 减仓：按增量记一笔交易流水，参考单价由仓储层按余额加权摊薄
     if (showAdjustDialog && currentAsset != null) {
         AdjustPositionDialog(
             asset = currentAsset,

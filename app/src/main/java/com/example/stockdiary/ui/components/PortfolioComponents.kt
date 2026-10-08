@@ -30,10 +30,6 @@ import com.example.stockdiary.ui.theme.*
 import com.example.stockdiary.utils.AppLogger
 import com.example.stockdiary.utils.StockCodeManager
 import com.example.stockdiary.utils.format
-import com.example.stockdiary.utils.costCny
-import com.example.stockdiary.utils.profitCny
-import com.example.stockdiary.utils.profitColor
-import com.example.stockdiary.utils.toProfitDisplay
 import com.example.stockdiary.utils.totalValueCny
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -42,8 +38,6 @@ import kotlinx.coroutines.withContext
 @Composable
 fun PortfolioOverviewCard(
     totalValue: Double,
-    totalProfit: Double,
-    totalProfitPercent: Double,
     estimatedAnnualDividend: Double,
     isDividendLoading: Boolean,
     dividendStatus: String?,
@@ -67,12 +61,6 @@ fun PortfolioOverviewCard(
             }
             Spacer(modifier = Modifier.height(8.dp))
             Text("¥${totalValue.format(2)}", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold, color = OnSurface)
-            Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                "${totalProfit.toProfitDisplay("¥")} (${totalProfitPercent.format(2)}%)",
-                style = MaterialTheme.typography.bodyMedium,
-                color = totalProfit.profitColor()
-            )
             Spacer(modifier = Modifier.height(12.dp))
             HorizontalDivider(color = Outline.copy(alpha = 0.3f))
             Spacer(modifier = Modifier.height(12.dp))
@@ -101,9 +89,6 @@ fun AccountGroup(
     onToggleSelection: (Asset) -> Unit = {}
 ) {
     val totalValue = assets.sumOf { it.totalValueCny }
-    val totalProfit = assets.sumOf { it.profitCny }
-    val totalCost = assets.sumOf { it.costCny }
-    val profitPercentage = if (totalCost > 0) (totalProfit / totalCost) * 100 else 0.0
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -122,11 +107,6 @@ fun AccountGroup(
                 }
                 Column(horizontalAlignment = Alignment.End) {
                     Text("¥${totalValue.format(2)}", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, color = OnSurface)
-                    Text(
-                        "${totalProfit.toProfitDisplay("¥")} (${profitPercentage.format(2)}%)",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = totalProfit.profitColor()
-                    )
                 }
                 Icon(
                     imageVector = if (isExpanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
@@ -164,14 +144,9 @@ fun StockAssetItem(
     isSelected: Boolean = false,
     onToggleSelection: () -> Unit = {}
 ) {
-    val profit = asset.profitCny
-    val costCny = asset.costCny
-    val profitPercent = if (costCny > 0) (profit / costCny) * 100 else 0.0
-    val currentPrice = asset.currentPrice ?: asset.purchasePrice
-    val change = currentPrice - asset.purchasePrice
-    val changePercentage = if (asset.purchasePrice > 0) (change / asset.purchasePrice) * 100 else 0.0
-    val changeColor = if (change >= 0) LossRed else ProfitGreen
+    val currentPrice = asset.currentPrice
     val pricePrecision = if (asset.type == AssetType.FUND || StockCodeManager.isETF(asset.symbol)) 3 else 2
+    val unitLabel = if (asset.type == AssetType.STOCK) "股" else "份"
 
     Card(
         modifier = Modifier.fillMaxWidth().clickable(onClick = onClick),
@@ -195,18 +170,18 @@ fun StockAssetItem(
             Column(modifier = Modifier.weight(1f)) {
                 Text(asset.name, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold, color = OnSurface, maxLines = 1)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text("¥${currentPrice.format(pricePrecision)}", style = MaterialTheme.typography.bodySmall, color = OnSurface)
-                    Text(
-                        "${if (change >= 0) "+" else ""}${changePercentage.format(2)}%",
-                        style = MaterialTheme.typography.bodySmall, color = changeColor, fontWeight = FontWeight.Medium
-                    )
+                    asset.symbol?.let {
+                        Text(it, style = MaterialTheme.typography.bodySmall, color = OnSurfaceVariant)
+                        Text("•", style = MaterialTheme.typography.bodySmall, color = OnSurfaceVariant)
+                    }
+                    Text("${asset.balance.format(0)}$unitLabel", style = MaterialTheme.typography.bodySmall, color = OnSurfaceVariant)
                 }
             }
             Column(modifier = Modifier.weight(1f), horizontalAlignment = Alignment.End) {
                 Text("¥${asset.totalValueCny.format(2)}", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold, color = OnSurface)
                 Text(
-                    "${profit.toProfitDisplay("¥")} (${profitPercent.format(1)}%)",
-                    style = MaterialTheme.typography.bodySmall, color = profit.profitColor(), fontWeight = FontWeight.Medium
+                    if (currentPrice != null) "¥${currentPrice.format(pricePrecision)}" else "价格待更新",
+                    style = MaterialTheme.typography.bodySmall, color = OnSurfaceVariant, fontWeight = FontWeight.Medium
                 )
             }
             if (!selectionMode) {
@@ -293,10 +268,7 @@ fun PortfolioSearchDialog(
 
 @Composable
 fun SearchAssetItem(asset: Asset, onClick: () -> Unit, onDividendClick: () -> Unit) {
-    val profit = asset.profit
-    val profitPercent = if (asset.balance > 0 && asset.purchasePrice > 0)
-        (profit / (asset.balance * asset.purchasePrice)) * 100 else 0.0
-    val profitColor = if (profit >= 0) LossRed else ProfitGreen
+    val pricePrecision = if (asset.type == AssetType.FUND || StockCodeManager.isETF(asset.symbol)) 3 else 2
 
     Card(
         modifier = Modifier.fillMaxWidth().clickable(onClick = onClick),
@@ -317,10 +289,10 @@ fun SearchAssetItem(asset: Asset, onClick: () -> Unit, onDividendClick: () -> Un
                 }
             }
             Column(modifier = Modifier.weight(1f), horizontalAlignment = Alignment.End) {
-                Text("¥${asset.totalValue.format(2)}", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold, color = OnSurface)
+                Text("¥${asset.totalValueCny.format(2)}", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold, color = OnSurface)
                 Text(
-                    "${if (profit >= 0) "+" else ""}¥${profit.format(2)} (${profitPercent.format(1)}%)",
-                    style = MaterialTheme.typography.bodySmall, color = profitColor, fontWeight = FontWeight.Medium
+                    asset.currentPrice?.let { "¥${it.format(pricePrecision)}" } ?: "价格待更新",
+                    style = MaterialTheme.typography.bodySmall, color = OnSurfaceVariant, fontWeight = FontWeight.Medium
                 )
             }
             IconButton(onClick = onDividendClick, modifier = Modifier.size(32.dp)) {

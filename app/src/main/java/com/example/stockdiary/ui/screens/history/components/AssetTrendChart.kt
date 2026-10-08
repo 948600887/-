@@ -181,6 +181,9 @@ fun AssetTrendChart(
         val idx = selectedPointIndex
         if (idx != null && idx in snapshots.indices) {
             val snapshot = snapshots[idx]
+            // 资产增值口径：与上一期快照比净资产的增量，不再展示基于成本的盈亏
+            val previous = if (idx > 0) snapshots[idx - 1] else null
+            val delta = previous?.let { snapshot.netAssets - it.netAssets }
             Card(
                 modifier = Modifier.fillMaxWidth().align(Alignment.BottomCenter).padding(horizontal = 16.dp),
                 colors = CardDefaults.cardColors(containerColor = SurfaceContainerLow.copy(alpha = 0.95f)),
@@ -194,15 +197,15 @@ fun AssetTrendChart(
                     Column {
                         Text(snapshot.date, fontSize = 13.sp, fontWeight = FontWeight.Medium, color = OnSurface)
                         Text(
-                            "收益: ${snapshot.totalProfit.toProfitDisplay("¥")}",
-                            fontSize = 11.sp, color = snapshot.totalProfit.profitColor()
+                            "总资产: ¥${snapshot.totalAssets.format(2)}",
+                            fontSize = 11.sp, color = OnSurfaceVariant
                         )
                     }
                     Column(horizontalAlignment = Alignment.End) {
                         Text("¥${snapshot.netAssets.format(2)}", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = OnSurface)
                         Text(
-                            "${if (snapshot.yieldRate >= 0) "+" else ""}${snapshot.yieldRate.format(2)}%",
-                            fontSize = 12.sp, color = snapshot.yieldRate.profitColor()
+                            delta?.toProfitDisplay("¥") ?: "起始",
+                            fontSize = 12.sp, color = delta?.profitColor() ?: OnSurface
                         )
                     }
                 }

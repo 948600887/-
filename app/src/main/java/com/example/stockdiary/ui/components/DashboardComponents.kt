@@ -17,6 +17,7 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.stockdiary.data.AssetGrowthCalculator
 import com.example.stockdiary.data.SortOrder
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
@@ -36,8 +37,6 @@ fun TotalAssetCard(
     totalAssets: Double,
     totalLiabilities: Double,
     netAssets: Double,
-    profit: Double,
-    profitPercent: Double,
     realAnnualIncome: Double,
     dividendLoading: Boolean,
     incomeCalculationStatus: String? = null
@@ -85,7 +84,7 @@ fun TotalAssetCard(
                         loading = dividendLoading
                     )
                     MetricColumn(
-                        label = "综合收益率",
+                        label = "年化收入率",
                         value = if (dividendLoading) null else "${realYield.format(2)}%",
                         loading = dividendLoading
                     )
@@ -102,9 +101,63 @@ fun TotalAssetCard(
 
             if (showProfit) {
                 if (showTotalAssets || showNetAssets) Spacer(modifier = Modifier.height(12.dp))
-                ProfitDisplay(profit = profit, profitPercent = profitPercent)
+                IncomeDisplay(
+                    annualIncome = realAnnualIncome,
+                    dividendLoading = dividendLoading
+                )
             }
         }
+    }
+}
+
+/**
+ * 资产增值卡片：本月新增 / 今年新增。
+ *
+ * 口径是「净资产相对历史快照的增加额」——因为已经没有成本数据，
+ * 无法剔除期间新投入的本金，所以它表达的是净资产的增长，不是纯投资收益。
+ */
+@Composable
+fun AssetGrowthCard(
+    growth: AssetGrowthCalculator.Growth,
+    modifier: Modifier = Modifier
+) {
+    Card(modifier = modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text(
+                text = "资产增值",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Bold
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceEvenly
+            ) {
+                GrowthMetric("本月新增", growth.monthDelta)
+                GrowthMetric("今年新增", growth.yearDelta)
+            }
+            if (!growth.hasBaseline) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "在「历史」页保存快照后，这里就能对比出本月 / 今年的增值",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = OnSurfaceVariant
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun GrowthMetric(label: String, delta: Double?) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(
+            text = delta?.toProfitDisplay("¥") ?: "—",
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.Bold,
+            color = delta?.profitColor() ?: OnSurface
+        )
+        Text(text = label, style = MaterialTheme.typography.labelSmall, color = OnSurfaceVariant)
     }
 }
 
@@ -365,20 +418,23 @@ private fun StatusHint(text: String) {
 }
 
 @Composable
-private fun ProfitDisplay(profit: Double, profitPercent: Double) {
-    val isProfit = profit >= 0
+private fun IncomeDisplay(annualIncome: Double, dividendLoading: Boolean) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         Icon(
-            imageVector = if (isProfit) Icons.AutoMirrored.Filled.TrendingUp else Icons.AutoMirrored.Filled.TrendingDown,
+            imageVector = Icons.AutoMirrored.Filled.TrendingUp,
             contentDescription = null,
-            tint = profit.profitColor(),
+            tint = Primary,
             modifier = Modifier.size(16.dp)
         )
         Spacer(modifier = Modifier.width(4.dp))
         Text(
-            text = "${profit.toProfitDisplay("¥")} (${profitPercent.format(2)}%)",
+            text = if (dividendLoading) {
+                "预计年度收入：计算中"
+            } else {
+                "预计年度收入 ¥${annualIncome.format(2)} · 月均 ¥${(annualIncome / 12).format(2)}"
+            },
             style = MaterialTheme.typography.bodyMedium,
-            color = profit.profitColor(),
+            color = Primary,
             fontWeight = FontWeight.Medium
         )
     }

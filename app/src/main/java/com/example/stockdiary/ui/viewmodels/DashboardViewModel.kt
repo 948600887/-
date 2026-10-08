@@ -9,6 +9,7 @@ import com.example.stockdiary.data.SortOrder
 import com.example.stockdiary.data.SyncProgress
 import com.example.stockdiary.data.SyncResult
 import com.example.stockdiary.database.Asset
+import com.example.stockdiary.database.AssetSnapshot
 import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.di.AppContainer
 import com.example.stockdiary.utils.AppLogger
@@ -16,6 +17,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.CancellationException
@@ -27,6 +29,11 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
     private val incomeLoader = DividendIncomeLoader(container.dividendRepository)
 
     val assets: StateFlow<List<Asset>> = repository.getAllAssets()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    // 「资产增值」卡片的基准数据：净资产要和本月/今年之前的快照对比
+    val snapshots: StateFlow<List<AssetSnapshot>> = repository.getAllSnapshots()
+        .map { it.sortedBy { snapshot -> snapshot.date } }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     private val _preferences = MutableStateFlow(preferencesManager.loadPreferences())

@@ -21,7 +21,6 @@ import com.example.stockdiary.ui.components.*
 import com.example.stockdiary.ui.dialogs.AddAssetDialog
 import com.example.stockdiary.ui.theme.*
 import com.example.stockdiary.ui.viewmodels.PortfolioViewModel
-import com.example.stockdiary.utils.sumCostCny
 import com.example.stockdiary.utils.sumTotalValueCny
 import kotlinx.coroutines.launch
 
@@ -59,9 +58,6 @@ fun PortfolioScreen(
     }
 
     val totalValue = remember(stockAssets) { stockAssets.sumTotalValueCny() }
-    val totalCost = remember(stockAssets) { stockAssets.sumCostCny() }
-    val totalProfit = totalValue - totalCost
-    val totalProfitPercent = if (totalCost > 0) (totalProfit / totalCost) * 100 else 0.0
 
     val filteredAssetsByAccount by remember {
         derivedStateOf {
@@ -212,8 +208,6 @@ fun PortfolioScreen(
                 item {
                     PortfolioOverviewCard(
                         totalValue = totalValue,
-                        totalProfit = totalProfit,
-                        totalProfitPercent = totalProfitPercent,
                         estimatedAnnualDividend = estimatedAnnualDividend,
                         isDividendLoading = dividendLoading,
                         dividendStatus = incomeCalculationStatus,

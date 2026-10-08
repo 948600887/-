@@ -33,7 +33,8 @@ data class Asset(
     init {
         require(name.isNotBlank()) { "资产名称不能为空" }
         require(balance >= 0) { "数量不能为负数" }
-        require(purchasePrice >= 0) { "成本价不能为负数" }
+        // purchasePrice 现在只作「参考单价」：无行情时的市值估算兜底，不再是成本
+        require(purchasePrice >= 0) { "参考单价不能为负数" }
     }
     val totalValue: Double
         get() = if (type.isLiability || type == AssetType.BANK_DEPOSIT) {

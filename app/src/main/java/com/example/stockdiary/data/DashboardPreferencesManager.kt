@@ -30,7 +30,7 @@ enum class SortOrder {
 enum class DashboardComponent(val key: String, val title: String) {
     TOTAL_ASSETS("total_assets", "总资产"),
     NET_ASSETS("net_assets", "净资产"),
-    PROFIT("profit", "盈亏"),
+    PROFIT("profit", "收入预估"),
     DISTRIBUTION("distribution", "资产分布"),
     BANK_DEPOSITS("bank_deposits", "银行存款"),
     STOCKS("stocks", "股票"),

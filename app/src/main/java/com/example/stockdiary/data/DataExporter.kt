@@ -12,11 +12,7 @@ import com.example.stockdiary.database.Transaction
 import com.example.stockdiary.database.TransactionType
 import com.example.stockdiary.utils.AppLogger
 import com.example.stockdiary.utils.ExchangeRateManager
-import com.example.stockdiary.utils.costCny
 import com.example.stockdiary.utils.format
-import com.example.stockdiary.utils.profitCny
-import com.example.stockdiary.utils.sumCostCny
-import com.example.stockdiary.utils.sumProfitCny
 import com.example.stockdiary.utils.sumTotalValueCny
 import com.example.stockdiary.utils.toFileTimestamp
 import com.example.stockdiary.utils.totalValueCny
@@ -49,7 +45,7 @@ class DataExporter(private val context: Context) {
             val file = File(exportDir, fileName)
             
             FileWriter(file).use { writer ->
-                writer.append("名称,类型,代码,账户,数量,成本价,当前价,总价值(原币),总价值(人民币),成本(人民币),盈亏(人民币),盈亏比例,币种,汇率,备注\n")
+                writer.append("名称,类型,代码,账户,数量,参考单价,当前价,总价值(原币),总价值(人民币),币种,汇率,备注\n")
 
                 assets.forEach { asset ->
                     writer.append(buildCsvRow(asset))
@@ -63,8 +59,6 @@ class DataExporter(private val context: Context) {
                 writer.append("总资产(人民币),${assetsOnly.sumTotalValueCny().format(2)}\n")
                 writer.append("总负债(人民币),${liabilities.sumTotalValueCny().format(2)}\n")
                 writer.append("净资产(人民币),${(assetsOnly.sumTotalValueCny() - liabilities.sumTotalValueCny()).format(2)}\n")
-                writer.append("总成本(人民币),${assetsOnly.sumCostCny().format(2)}\n")
-                writer.append("总盈亏(人民币),${assetsOnly.sumProfitCny().format(2)}\n")
                 writer.append("资产数量,${assets.size}\n")
             }
             
@@ -83,28 +77,17 @@ class DataExporter(private val context: Context) {
             val file = File(exportDir, fileName)
             
             FileWriter(file).use { writer ->
-                writer.append("日期,总资产,总负债,净资产,总成本,总收益,收益率,股票,股票成本,股票收益,基金,基金成本,基金收益,虚拟货币,虚拟货币成本,虚拟货币收益,银行存款,银行存款成本,银行存款收益\n")
+                writer.append("日期,总资产,总负债,净资产,股票,基金,虚拟货币,银行存款\n")
                 
                 snapshots.sortedBy { it.date }.forEach { snapshot ->
                     writer.append("${escapeCsv(snapshot.date)},")
                     writer.append("${snapshot.totalAssets.format(2)},")
                     writer.append("${snapshot.totalLiabilities.format(2)},")
                     writer.append("${snapshot.netAssets.format(2)},")
-                    writer.append("${snapshot.totalCost.format(2)},")
-                    writer.append("${snapshot.totalProfit.format(2)},")
-                    writer.append("${snapshot.yieldRate.format(2)},")
                     writer.append("${snapshot.stockValue.format(2)},")
-                    writer.append("${snapshot.stockCost.format(2)},")
-                    writer.append("${snapshot.stockProfit.format(2)},")
                     writer.append("${snapshot.fundValue.format(2)},")
-                    writer.append("${snapshot.fundCost.format(2)},")
-                    writer.append("${snapshot.fundProfit.format(2)},")
                     writer.append("${snapshot.cryptoValue.format(2)},")
-                    writer.append("${snapshot.cryptoCost.format(2)},")
-                    writer.append("${snapshot.cryptoProfit.format(2)},")
-                    writer.append("${snapshot.bankDepositValue.format(2)},")
-                    writer.append("${snapshot.bankDepositCost.format(2)},")
-                    writer.append("${snapshot.bankDepositProfit.format(2)}\n")
+                    writer.append("${snapshot.bankDepositValue.format(2)}\n")
                 }
             }
             
@@ -201,7 +184,7 @@ class DataExporter(private val context: Context) {
 
                 // 资产部分
                 writer.append("## 资产持仓\n")
-                writer.append("名称,类型,代码,账户,数量,成本价,当前价,总价值(原币),总价值(人民币),成本(人民币),盈亏(人民币),盈亏比例,币种,汇率,备注\n")
+                writer.append("名称,类型,代码,账户,数量,参考单价,当前价,总价值(原币),总价值(人民币),币种,汇率,备注\n")
                 assets.forEach { asset ->
                     writer.append(buildCsvRow(asset))
                     writer.append("\n")
@@ -237,9 +220,9 @@ class DataExporter(private val context: Context) {
 
                 // 快照部分
                 writer.append("## 历史快照\n")
-                writer.append("日期,总资产,总负债,净资产,总成本,总收益,收益率,股票,基金,虚拟货币,银行存款\n")
+                writer.append("日期,总资产,总负债,净资产,股票,基金,虚拟货币,银行存款\n")
                 snapshots.sortedBy { it.date }.forEach { snapshot ->
-                    writer.append("${escapeCsv(snapshot.date)},${snapshot.totalAssets.format(2)},${snapshot.totalLiabilities.format(2)},${snapshot.netAssets.format(2)},${snapshot.totalCost.format(2)},${snapshot.totalProfit.format(2)},${snapshot.yieldRate.format(2)},${snapshot.stockValue.format(2)},${snapshot.fundValue.format(2)},${snapshot.cryptoValue.format(2)},${snapshot.bankDepositValue.format(2)}\n")
+                    writer.append("${escapeCsv(snapshot.date)},${snapshot.totalAssets.format(2)},${snapshot.totalLiabilities.format(2)},${snapshot.netAssets.format(2)},${snapshot.stockValue.format(2)},${snapshot.fundValue.format(2)},${snapshot.cryptoValue.format(2)},${snapshot.bankDepositValue.format(2)}\n")
                 }
             }
 
@@ -265,8 +248,6 @@ class DataExporter(private val context: Context) {
                 val assetsOnly = assets.filter { !it.type.isLiability }
                 val liabilities = assets.filter { it.type.isLiability }
                 val totalAssets = assetsOnly.sumTotalValueCny()
-                val totalCost = assetsOnly.sumCostCny()
-                val totalProfit = assetsOnly.sumProfitCny()
                 val totalLiabilities = liabilities.sumTotalValueCny()
                 val netAssets = totalAssets - totalLiabilities
 
@@ -274,8 +255,6 @@ class DataExporter(private val context: Context) {
                 writer.append("  ¥${netAssets.format(2)}\n\n")
 
                 writer.append("【总资产】: ¥${totalAssets.format(2)}\n")
-                writer.append("【总成本】: ¥${totalCost.format(2)}\n")
-                writer.append("【总盈亏】: ¥${totalProfit.format(2)}\n")
                 writer.append("【总负债】: ¥${totalLiabilities.format(2)}\n\n")
                 
                 writer.append("━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
@@ -289,10 +268,6 @@ class DataExporter(private val context: Context) {
                             writer.append("      代码: ${asset.symbol ?: "-"}\n")
                             writer.append("      数量: ${asset.balance.format(2)}\n")
                             writer.append("      当前价值: ${asset.currency} ${asset.totalValue.format(2)} (¥${asset.totalValueCny.format(2)})\n")
-                            writer.append("      成本: ¥${asset.costCny.format(2)}\n")
-                            if (asset.type != AssetType.BANK_DEPOSIT) {
-                                writer.append("      盈亏: ¥${asset.profitCny.format(2)} (${asset.profitPercent.format(2)}%)\n")
-                            }
                             if (asset.currency != "CNY") {
                                 writer.append("      汇率: ${ExchangeRateManager.getRate(asset.currency).format(4)}\n")
                             }
@@ -338,9 +313,6 @@ class DataExporter(private val context: Context) {
             (asset.currentPrice ?: asset.purchasePrice).format(2),
             asset.totalValue.format(2),
             asset.totalValueCny.format(2),
-            asset.costCny.format(2),
-            asset.profitCny.format(2),
-            asset.profitPercent.format(2),
             escapeCsv(asset.currency),
             ExchangeRateManager.getRate(asset.currency).format(4),
             escapeCsv(asset.notes ?: "")

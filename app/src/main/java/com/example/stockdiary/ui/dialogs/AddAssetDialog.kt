@@ -385,7 +385,7 @@ fun AddAssetDialog(
                             modifier = Modifier.fillMaxWidth(),
                             singleLine = true,
                             // 没有代码的证券类资产永远拿不到行情：价格同步、持仓合并、导入回放、
-                            // 分红匹配全都按 symbol 走，留空意味着市值和盈亏恒为 PurchasePrice 的静态值。
+                            // 分红匹配全都按 symbol 走，留空意味着市值恒为参考单价的静态值。
                             isError = symbolRequired && "symbol" in touched && symbol.isBlank(),
                             supportingText = if (symbolRequired && "symbol" in touched && symbol.isBlank()) {
                                 { Text("请填写代码，否则无法同步行情价格") }
@@ -539,12 +539,12 @@ fun AddAssetDialog(
                         OutlinedTextField(
                             value = purchasePrice,
                             onValueChange = { purchasePrice = it; markTouched("price") },
-                            label = { Text("买入单价") },
+                            label = { Text("参考单价") },
                             placeholder = {
                                 if (autoPrice != null) {
                                     Text("自动填充：${autoPrice}")
                                 } else {
-                                    Text("可选，留空则不计算盈亏")
+                                    Text("可选，用于无行情时估算市值")
                                 }
                             },
                             modifier = Modifier.fillMaxWidth(),

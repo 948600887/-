@@ -133,7 +133,8 @@ fun HistoryScreen(
                         modifier = Modifier.fillMaxSize(),
                         contentPadding = PaddingValues(bottom = 24.dp)
                     ) {
-                        historyOverviewCard(latest = latest)
+                        // 传全量快照：本月/今年新增要拿「本周期之外」的历史快照做基准
+                        historyOverviewCard(latest = latest, snapshots = uiState.snapshots)
                         historyTrendChart(
                             snapshots = uiState.filteredSnapshots,
                             selectedPeriod = uiState.selectedPeriod,

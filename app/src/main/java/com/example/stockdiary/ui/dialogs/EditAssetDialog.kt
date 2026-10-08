@@ -213,8 +213,8 @@ fun EditAssetDialog(
                         OutlinedTextField(
                             value = purchasePriceInput,
                             onValueChange = { purchasePriceInput = it; touched = touched + "price" },
-                            label = { Text("买入单价") },
-                            placeholder = { Text("可选，留空则不计算盈亏") },
+                            label = { Text("参考单价") },
+                            placeholder = { Text("可选，用于无行情时估算市值") },
                             modifier = Modifier.fillMaxWidth(),
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                             singleLine = true,
@@ -450,7 +450,7 @@ fun AdjustPositionDialog(
                                 horizontalArrangement = Arrangement.SpaceBetween
                             ) {
                                 InfoItem("持有", "${asset.balance.format(0)}")
-                                InfoItem("成本", "${asset.purchasePrice.format(3)}")
+                                InfoItem("现价", "${(asset.currentPrice ?: asset.purchasePrice).format(3)}")
                             }
                         }
                     }
@@ -519,7 +519,7 @@ fun AdjustPositionDialog(
                         value = price,
                         onValueChange = { price = it },
                         label = { Text("成交单价（可选）") },
-                        placeholder = { Text("留空则使用当前成本价") },
+                        placeholder = { Text("留空则使用当前参考价") },
                         modifier = Modifier.fillMaxWidth(),
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                         singleLine = true
@@ -534,7 +534,7 @@ fun AdjustPositionDialog(
                         ) {
                             val delta = if (action == "加仓") amount.toDouble() else -amount.toDouble()
                             val newBalance = asset.balance + delta
-                            val tradePrice = price.toDoubleOrNull() ?: asset.purchasePrice
+                            val tradePrice = price.toDoubleOrNull() ?: (asset.currentPrice ?: asset.purchasePrice)
                             val tradeTotal = Math.abs(delta) * tradePrice
                             
                             Column(
@@ -585,7 +585,7 @@ fun AdjustPositionDialog(
                                 val quantity = amount.toDouble()
                                 val delta = if (action == "加仓") quantity else -quantity
                                 val newBalance = asset.balance + delta
-                                // 减到负数 / 归零后再除以 0 会得到 Infinity 成本，
+                                // 减到负数 / 归零后再除以 0 会得到 Infinity 参考单价，
                                 // Asset.init 的 require 会在主线程抛出。这里先挡住。
                                 if (newBalance <= 0) {
                                     amountTouched = true

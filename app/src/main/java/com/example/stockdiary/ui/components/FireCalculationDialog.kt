@@ -77,7 +77,7 @@ fun FireCalculationDialog(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text("基于实际收益率推算", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("基于年化收入率推算", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         Text(
                             "${realYield.format(2)}%",
                             fontSize = 16.sp,
@@ -103,11 +103,11 @@ fun FireCalculationDialog(
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
                             Column {
-                                Text("实际年化收益", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text("年化收入", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 Text("¥${annualDividend.format(0)}", fontSize = 16.sp, fontWeight = FontWeight.Bold)
                             }
                             Column(horizontalAlignment = Alignment.End) {
-                                Text("实际收益率", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text("年化收入率", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 Text("${realYield.format(2)}%", fontSize = 16.sp, fontWeight = FontWeight.Bold)
                             }
                         }

@@ -68,7 +68,7 @@ fun DashboardConfigSheet(
                 onCheckedChange = { onPreferencesChange(preferences.copy(showNetAssets = it)) }
             )
             SwitchPreference(
-                title = "显示盈亏",
+                title = "显示收入预估",
                 checked = preferences.showProfit,
                 onCheckedChange = { onPreferencesChange(preferences.copy(showProfit = it)) }
             )

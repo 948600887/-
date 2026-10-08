@@ -18,7 +18,6 @@ import androidx.compose.ui.unit.sp
 import com.example.stockdiary.ui.theme.OnSurface
 import com.example.stockdiary.ui.theme.OnSurfaceVariant
 import com.example.stockdiary.utils.format
-import com.example.stockdiary.utils.profitColor
 
 @Composable
 internal fun OverviewMetric(label: String, value: String, valueColor: Color = OnSurface) {
@@ -40,7 +39,7 @@ internal fun RiskMetric(label: String, value: String, valueColor: Color = OnSurf
 internal fun DistributionLegend(
     name: String,
     value: Double,
-    yieldRate: Double,
+    percent: Double,
     color: Color
 ) {
     Row(
@@ -57,10 +56,7 @@ internal fun DistributionLegend(
         }
         Column(horizontalAlignment = Alignment.End) {
             Text("¥${value.format(0)}", fontSize = 13.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Medium, color = OnSurface)
-            Text(
-                "${if (yieldRate >= 0) "+" else ""}${yieldRate.format(2)}%",
-                fontSize = 11.sp, color = yieldRate.profitColor()
-            )
+            Text("${percent.format(1)}%", fontSize = 11.sp, color = OnSurfaceVariant)
         }
     }
 }

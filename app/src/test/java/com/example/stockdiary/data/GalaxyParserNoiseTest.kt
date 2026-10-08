@@ -376,6 +376,110 @@ class GalaxyParserNoiseTest {
         }
     }
 
+    // ---------- 真实 OCR 输出：09-30 那一屏 ----------
+
+    /**
+     * 用户从预览页「查看识别原文」复制出来的真实数据，一字未改。
+     *
+     * 两个要命的形态：
+     * - 明细行的方向前缀「卖」被 OCR 认成了「更」（字形极近）。28 行里 6 行中招，
+     *   只有第 17 行认对了「卖」——这就是「除了第一行，其他都是日期未识别」的根因。
+     * - 买入金额 `-486.40` 被认成 `一486.40`，减号成了中文「一」。
+     */
+    private val realOcrLines0930 = listOf(
+        "23:14 63",
+        "人 对账单",
+        "中国银河证券**4625",
+        "|本月 近三月 近半年 今年 全部 自定义",
+        "操作 价格/数量 金额/费用0)",
+        "通用回购逆回购-GC001 1.210 -82,000.82",
+        "其09-30 14:51 820 0.82",
+        "证券卖出-中证红利 1.551 1,085.60",
+        "更 09-30 14:39 700 0.10",
+        "证券卖出-综指ETF 0.991 495.40",
+        "更09-30 13:35 500 0.10",
+        "证券卖出-中证红利 1.546 1,082.10",
+        "更 09-30 11:12 700 0.10",
+        "证券买入科创50 1.621 一486.40",
+        "更09-30 10:33 300 0.10",
+        "证券卖出-中证红利 1.541 1,078.60",
+        "卖09-30 09:53 700 0.10",
+        "证券卖出-中证红利 1.536 1,075.10",
+        "更09-30 09:39 700 0.10",
+        "通用回购逆回购购回-GC001 1.180 78,020.17",
+        "其09-30 780 0.00",
+        "通用回购逆回购-GCO01 1.180 -78,000.78",
+        "其09-29 14:51 780 0.78",
+        "证券卖出-中证红利 1.531 1,071.60",
+        "更09-29 14:15 700 0.10",
+        "证券卖出-综指ETF 0.986 492.90",
+        "n0n1フ·E4",
+        "△"
+    )
+
+    @Test
+    fun `真实识别原文里卖被认成更也能配上明细`() {
+        val result = parse(realOcrLines0930)
+
+        // 8 笔证券买卖（3 行逆回购跳过）
+        assertEquals(8, result.size)
+        // 只有明细被截图截断的最后一笔可以没有日期，其余 7 笔必须都有
+        assertEquals(
+            "除截断的那一笔外都应配上日期: ${result.map { it.date }}",
+            7,
+            result.count { it.date.isNotEmpty() }
+        )
+        // 逆回购（含字母 O 被认错的 GCO01）不能混进来
+        assertTrue("逆回购不该入库: ${result.map { it.name }}", result.none { it.name.contains("GC") })
+        // 顶部状态栏、tab 栏、表头都不能变成交易
+        assertTrue(result.none { it.name.contains("对账单") })
+    }
+
+    @Test
+    fun `真实识别原文里每笔的日期与数量都对`() {
+        val result = parse(realOcrLines0930)
+        val dated = result.filter { it.date.isNotEmpty() }
+
+        assertEquals("中证红利", dated[0].name)
+        assertEquals("2026-09-30", dated[0].date)
+        assertEquals(700.0, dated[0].quantity, 0.001)
+        assertEquals(1.551, dated[0].price, 0.001)
+        assertEquals(0.10, dated[0].fee, 0.001)
+        assertEquals(TransactionType.SELL.value, dated[0].type)
+
+        assertEquals("综指ETF", dated[1].name)
+        assertEquals(500.0, dated[1].quantity, 0.001)
+        assertEquals(0.991, dated[1].price, 0.001)
+
+        // 6 笔卖出的明细前缀都是「更」，方向仍要靠首行的「证券卖出」判定
+        assertEquals(6, dated.count { it.type == TransactionType.SELL.value })
+        assertTrue("方向不能靠明细行的前缀决定", dated.all { it.date.isNotEmpty() })
+    }
+
+    @Test
+    fun `减号被认成中文一也能解析成负数金额`() {
+        val result = parse(realOcrLines0930)
+        val kc50 = result.first { it.name == "科创50" }
+
+        assertEquals(1.621, kc50.price, 0.001)
+        assertEquals(300.0, kc50.quantity, 0.001)
+        assertEquals(TransactionType.BUY.value, kc50.type)
+        assertTrue(
+            "「一486.40」应还原成负数金额，不该被判列错位: ${kc50.errors}",
+            kc50.errors.none { it.contains("列错位") }
+        )
+    }
+
+    @Test
+    fun `明细被截图截断的那一笔留成待补全而不是消失`() {
+        val result = parse(realOcrLines0930)
+        val incomplete = result.filter { it.errors.contains(GalaxyStatementParser.ERR_DETAIL_MISSING) }
+
+        assertEquals(1, incomplete.size)
+        assertEquals("综指ETF", incomplete[0].name)
+        assertEquals(0.986, incomplete[0].price, 0.001)
+    }
+
     // ---------- 相邻两行被 OCR 粘成一行 ----------
 
     /**

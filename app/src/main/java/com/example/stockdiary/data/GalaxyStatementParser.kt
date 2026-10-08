@@ -55,9 +55,15 @@ object GalaxyStatementParser {
     /** 方向捕获组：命中即「买」或「卖」的首字，据此归一化成买卖方向 */
     private const val OP_DIR = """($OP_BUY|$OP_SELL)"""
 
+    /**
+     * 负号的各种形态。OCR 极高频地把减号认成中文「一」或全角破折号
+     * （真实截图里 `-486.40` 被认成 `一486.40`），金额会因此解析失败。
+     */
+    private const val SIGN = """[-－—一ー]?"""
+
     /** 首行（名称 + 价格 + 金额都在同一行；列合并后就是这种形态） */
     private val FIRST_LINE_WITH_NUMBERS_REGEX = Regex(
-        """($OP_PREFIX)?$OP_DIR\s*-?\s*(.+?)\s+([\d,]+\.?\d*)\s+(-?[\d,]+\.?\d*)\s*$"""
+        """($OP_PREFIX)?$OP_DIR\s*-?\s*(.+?)\s+($SIGN[\d,]+\.?\d*)\s+($SIGN[\d,]+\.?\d*)\s*$"""
     )
 
     /** 首行（只有操作 + 名称，价格/金额在另外的列里） */
@@ -88,7 +94,7 @@ object GalaxyStatementParser {
      * - 费用列可能整列缺失（此时按 0 处理并提示，不能因此丢掉整笔）
      */
     private val SECOND_LINE_REGEX = Regex(
-        """(?:(买|卖|其|更)\s*)?(\d{1,2})[-/月](\d{1,2})[日.。]?(?:\s+(\d{1,2})[:：](\d{2}))?\s+([\d,]+(?:\.\d+)?)(?:\s+([\d,]+\.?\d*))?"""
+        """(?:(买|卖|其|更)\s*)?(\d{1,2})[-/月](\d{1,2})[日.。]?(?:\s+(\d{1,2})[:：](\d{2}))?\s+([\d,]+(?:\.\d+)?)(?:\s+($SIGN[\d,]+\.?\d*))?"""
     )
 
     /** 找年份：截图顶部通常有"2026-09" */
@@ -108,6 +114,18 @@ object GalaxyStatementParser {
 
     /** 名称内部的空白 */
     private val INNER_BLANK_REGEX = Regex("""\s+""")
+
+    /** 被 OCR 认成负号的那些字形 */
+    private val NEGATIVE_GLYPH_REGEX = Regex("""[-－—一ー]""")
+
+    /**
+     * 把文本里的数字解析成 Double。
+     *
+     * 除了去千分位，还要把 OCR 认错的负号（中文「一」、全角破折号）还原成半角减号——
+     * 真实截图里 `-486.40` 被认成 `一486.40`，不归一化的话这笔金额直接解析失败。
+     */
+    private fun toNumber(raw: String): Double? =
+        raw.replace(NEGATIVE_GLYPH_REGEX, "-").replace(",", "").toDoubleOrNull()
 
     /** 首行之后最多向后看几行去找详情行 */
     private const val DETAIL_SEARCH_WINDOW = 4
@@ -214,7 +232,7 @@ object GalaxyStatementParser {
             }
 
             // ③ 常规形态：向后找紧跟的详情行
-            val hit = findDetail(normalized, i + 1 + consumed, matched.isBuy)
+            val hit = findDetail(normalized, i + 1 + consumed)
             if (hit.index >= 0) {
                 val detailMatch = SECOND_LINE_REGEX.find(normalized[hit.index])!!
                 result.add(buildTransaction(matched, detailMatch, hit.fallbackPrice, year, rowNo))
@@ -302,7 +320,7 @@ object GalaxyStatementParser {
      * - 详情行的方向前缀若与首行冲突（逆回购的明细是「其」），跳过继续找，
      *   否则证券买入会张冠李戴地用上逆回购的数量与费用。
      */
-    private fun findDetail(normalized: List<String>, from: Int, isBuy: Boolean): DetailHit {
+    private fun findDetail(normalized: List<String>, from: Int): DetailHit {
         var fallbackPrice: Double? = null
         var k = from
         while (k < normalized.size && k <= from + DETAIL_SEARCH_WINDOW) {
@@ -311,26 +329,31 @@ object GalaxyStatementParser {
                 return DetailHit(-1, fallbackPrice, blockedByAnchor = true)
             }
             val m = SECOND_LINE_REGEX.find(candidate)
-            if (m != null && !directionConflicts(m.groupValues[1], isBuy)) {
+            if (m != null && !isNonSecurityDetail(m.groupValues[1])) {
                 return DetailHit(k, fallbackPrice, blockedByAnchor = false)
             }
             // 列没合并成功时，价格会独占一行，且紧跟在名称行之后
             if (fallbackPrice == null && k == from && PURE_PRICE_REGEX.matches(candidate)) {
-                fallbackPrice = candidate.replace(",", "").toDoubleOrNull()
+                fallbackPrice = toNumber(candidate)
             }
             k++
         }
         return DetailHit(-1, fallbackPrice, blockedByAnchor = false)
     }
 
-    /** 详情行的方向前缀与首行的买卖方向是否矛盾（决定能不能配对） */
-    private fun directionConflicts(dir: String, isBuy: Boolean): Boolean = when (dir) {
-        "买" -> !isBuy
-        "卖" -> isBuy
-        // 「其」是逆回购等非证券交易的前缀，「更」是更正单，都不属于证券买卖
-        "其", "更" -> true
-        else -> false
-    }
+    /**
+     * 详情行的方向前缀是否说明「这不是证券买卖的明细」。
+     *
+     * 只挡「其」——那是逆回购等非证券交易的专用前缀，用上它会把数量与费用张冠李戴。
+     *
+     * 「买/卖/更」一律不挡，原因有两条：
+     * 1. 交易方向本来就由首行的「证券买入/证券卖出」决定（见 buildTransaction），
+     *    明细行的前缀只是辅助信息，它不影响最终方向。
+     * 2. OCR 把「卖」认成「更」是极高频的误识（两字形极近，真实截图里 6/7 的
+     *    卖出单都中招）。一旦据此拒绝配对，整张单子会全部失去日期——
+     *    这正是「除了第一行，其他都是日期未识别」的根因。
+     */
+    private fun isNonSecurityDetail(dir: String): Boolean = dir == "其"
 
     /**
      * 「列被拆开」形态的配对：连续多个首行挤在一起，它们的详情行被整体推到后面。
@@ -397,8 +420,8 @@ object GalaxyStatementParser {
                 return Anchor(
                     isBuy = m.groupValues[2].contains("买"),
                     name = name,
-                    price = m.groupValues[4].replace(",", "").toDoubleOrNull(),
-                    amount = m.groupValues[5].replace(",", "").toDoubleOrNull()
+                    price = toNumber(m.groupValues[4]),
+                    amount = toNumber(m.groupValues[5])
                 )
             }
         }
@@ -530,8 +553,8 @@ object GalaxyStatementParser {
         }
 
         val price = anchor.price ?: fallbackPrice ?: 0.0
-        val quantity = quantityStr.replace(",", "").toDoubleOrNull() ?: 0.0
-        val fee = feeStr.replace(",", "").toDoubleOrNull() ?: 0.0
+        val quantity = toNumber(quantityStr) ?: 0.0
+        val fee = toNumber(feeStr) ?: 0.0
 
         val errors = mutableListOf<String>()
         if (price <= 0) errors.add("价格识别异常：未识别到有效价格")

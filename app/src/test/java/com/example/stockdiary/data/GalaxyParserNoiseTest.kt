@@ -376,6 +376,91 @@ class GalaxyParserNoiseTest {
         }
     }
 
+    // ---------- 相邻两行被 OCR 粘成一行 ----------
+
+    /**
+     * 真实现象：预览里除了第一笔，其余全是「日期未识别」。
+     *
+     * 原因是 OCR 按列切块时把「上一笔的明细段」和「下一笔的首行段」拼成了一行，
+     * 于是每一笔的首行都能认出来（名称/价格/金额都在），但明细段配不上任何一笔。
+     */
+    @Test
+    fun `相邻两行被粘成一行时明细仍能配到每一笔`() {
+        val result = parse(
+            listOf(
+                "通用回购逆回购-GC001 1.210 -82,000.82",
+                "其 09-30 14:51 820 0.82 证券卖出-中证红利 1.551 1,085.60",
+                "卖 09-30 14:39 700 0.10 证券卖出-综指ETF 0.991 495.40",
+                "卖 09-30 13:35 500 0.10 证券卖出-中证红利 1.546 1,082.10",
+                "卖 09-30 11:12 700 0.10"
+            )
+        )
+        assertEquals(3, result.size)
+
+        // 关键：每一笔都要配上自己的日期与数量，一笔都不能落到「日期未识别」
+        result.forEach { tx ->
+            assertTrue(
+                "第 ${tx.rowNumber} 笔没配上明细: ${tx.errors}",
+                tx.date.startsWith("2026-09-30")
+            )
+            assertTrue(tx.quantity > 0)
+            assertTrue(tx.errors.none { it.contains(GalaxyStatementParser.ERR_DETAIL_MISSING) })
+        }
+
+        assertEquals("中证红利", result[0].name)
+        assertEquals(700.0, result[0].quantity, 0.001)
+        assertEquals(1.551, result[0].price, 0.001)
+
+        assertEquals("综指ETF", result[1].name)
+        assertEquals(500.0, result[1].quantity, 0.001)
+        assertEquals(TransactionType.SELL.value, result[1].type)
+
+        assertEquals("中证红利", result[2].name)
+        assertEquals(700.0, result[2].quantity, 0.001)
+        assertEquals(1.546, result[2].price, 0.001)
+        // 卖出方向靠「证券卖出」判定，不依赖金额正负
+        result.forEach { assertEquals(TransactionType.SELL.value, it.type) }
+    }
+
+    @Test
+    fun `首行与明细同在一行时价格不会取成数量`() {
+        // 这种行如果只按「行末两个数字」硬认，价格会被认成 700（其实是数量）。
+        val result = parse(
+            listOf("证券卖出-中证红利 1.551 1,085.60 卖 09-30 14:39 700 0.10")
+        )
+        assertEquals(1, result.size)
+        assertEquals("中证红利", result[0].name)
+        assertEquals(1.551, result[0].price, 0.001)
+        assertEquals(700.0, result[0].quantity, 0.001)
+        assertEquals(0.10, result[0].fee, 0.001)
+        assertEquals("2026-09-30", result[0].date)
+    }
+
+    @Test
+    fun `正常的首行加明细同行形态不会被拆坏`() {
+        // 明细在行尾，这是「两行并一行」的正常形态，不能当成混合行拆开
+        val result = parse(
+            listOf("证券买入-中证红利 1.546 -1,082.30 买 09-30 14:02 700 0.10")
+        )
+        assertEquals(1, result.size)
+        assertEquals("中证红利", result[0].name)
+        assertEquals("2026-09-30", result[0].date)
+        assertEquals(700.0, result[0].quantity, 0.001)
+        assertEquals(0.10, result[0].fee, 0.001)
+    }
+
+    @Test
+    fun `纯明细行不会被拆出多余的行`() {
+        val result = parse(
+            listOf(
+                "证券卖出-中证红利 1.551 1,085.60",
+                "卖 09-30 14:39 700 0.10"
+            )
+        )
+        assertEquals(1, result.size)
+        assertEquals(700.0, result[0].quantity, 0.001)
+    }
+
     // ---------- 裸方向词不能把界面元素当成交易 ----------
 
     @Test

@@ -154,7 +154,10 @@ object GalaxyStatementParser {
         logger: (String) -> Unit = {}
     ): List<BrokerageImportService.ParsedTransaction> {
         logger("GalaxyParser 收到 ${lines.size} 行, year=$year")
-        val normalized = lines.map { normalizeLine(it) }
+        val normalized = splitMergedLines(lines.map { normalizeLine(it) })
+        if (normalized.size > lines.size) {
+            logger("WARN 检测到相邻两行被粘在一起（${lines.size} → ${normalized.size} 行），已拆开")
+        }
         val result = mutableListOf<BrokerageImportService.ParsedTransaction>()
         var rowNo = 1
         var repoLines = 0
@@ -245,6 +248,41 @@ object GalaxyStatementParser {
         }
         logger("GalaxyParser 解析完成，共 ${result.size} 笔交易")
         return result
+    }
+
+    /**
+     * 把「上一笔的明细段 + 下一笔的首行段」粘在同一行的混合行拆开。
+     *
+     * OCR 按列切块时，偶尔会把相邻两行拼成一行，得到
+     * ```
+     * 卖 09-30 14:39 700 0.10 证券卖出-综指ETF 0.991 495.40
+     * ```
+     * 这种行直接解析的后果很有欺骗性：首行能从后半段被认出来（数量、金额都在），
+     * 但明细段在行首、配不上任何一笔，于是**整张单子的每一笔都变成「没有日期」**。
+     * 先拆回两行，后续配对就都正常了。
+     *
+     * 只在「明细段后面还跟着能当首行的内容」时才拆，
+     * 因此正常的「首行 + 明细」同行形态（明细在行尾）不受影响。
+     */
+    private fun splitMergedLines(lines: List<String>): List<String> {
+        val out = mutableListOf<String>()
+        for (line in lines) {
+            val detail = SECOND_LINE_REGEX.find(line)
+            if (detail == null) {
+                out.add(line)
+                continue
+            }
+            val before = line.substring(0, detail.range.first).trim()
+            val after = line.substring(detail.range.last + 1).trim()
+            if (after.isNotEmpty() && matchAnchor(after) != null) {
+                if (before.isNotEmpty()) out.add(before)
+                out.add(detail.value)
+                out.add(after)
+            } else {
+                out.add(line)
+            }
+        }
+        return out
     }
 
     private data class DetailHit(
@@ -391,8 +429,12 @@ object GalaxyStatementParser {
      */
     private fun isTrustworthyName(prefix: String, name: String): Boolean {
         if (name.isBlank()) return false
+        // 名称里混进日期时间，说明这行其实是详情行、或者多行被粘成了一行，
+        // 却被当成了首行——此时取到的「价格」会是明细行里的数量，属于静默错数，
+        // 所以这条不分带不带前缀，一律拒绝。
+        if (DATE_TIME_IN_NAME_REGEX.containsMatchIn(name)) return false
         if (prefix.isNotBlank()) return true
-        return !NOISE_NAME_REGEX.containsMatchIn(name) && !DATE_TIME_IN_NAME_REGEX.containsMatchIn(name)
+        return !NOISE_NAME_REGEX.containsMatchIn(name)
     }
 
     /** 去掉名称里的空白（OCR 常在名称中间插空格） */

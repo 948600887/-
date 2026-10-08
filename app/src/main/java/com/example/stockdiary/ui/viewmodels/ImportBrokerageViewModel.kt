@@ -44,8 +44,13 @@ class ImportBrokerageViewModel(
         val error: String? = null,
         val charsetName: String = "GBK",
         val ocrYear: Int? = null,
-        // OCR 识别出的完整原文（失败时用于弹窗展示与复制，便于用户反馈排查）
+        // OCR 识别出的完整原文（预览页可随时查看/复制，便于反馈识别问题）
         val ocrRawText: String? = null,
+        /**
+         * 重建出的「视觉行」（同一行的多列已合并）。解析结果不对时，
+         * 这一份比原始文本更能说明问题出在行还原还是行配对。
+         */
+        val ocrLines: List<String> = emptyList(),
         /**
          * 每行「你可能想找的是」候选代码列表（key = rowNumber）。
          * 只有无法自动回填的行才会有候选——已经匹配好的行不需要占空间。
@@ -113,6 +118,7 @@ class ImportBrokerageViewModel(
             _uiState.value = _uiState.value.copy(
                 uri = uri, source = Source.OCR, error = null, step = Step.SELECT_FILE,
                 transactions = emptyList(), commitResult = null, ocrRawText = null,
+                ocrLines = emptyList(),
                 suggestions = emptyMap(), autoFilledCount = 0, recognizing = true
             )
             try {
@@ -136,6 +142,9 @@ class ImportBrokerageViewModel(
                         recognizing = false,
                         transactions = filled,
                         ocrYear = result.year,
+                        // 保留原文与还原后的行：解析结果不对时，预览页能当场核对是哪一步的问题
+                        ocrRawText = result.recognizedText,
+                        ocrLines = result.lines,
                         autoFilledCount = filled.count {
                             it.symbol.isNotBlank() && it.symbolSource.isNotEmpty()
                         }

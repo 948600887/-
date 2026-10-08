@@ -183,6 +183,67 @@ private fun ErrorDialog(
     )
 }
 
+/**
+ * 展示 OCR 的中间产物，供用户核对与反馈。
+ *
+ * 分两段：「还原后的行」是真正喂给解析器的内容（同一行的多列已合并），
+ * 「原始文本」是 ML Kit 的输出。解析结果不对时，这两段能立刻区分是
+ * 「行还原错了」（比如相邻两行被粘在一起）还是「行配对错了」——
+ * 只看预览页的表格是看不出来的。
+ */
+@Composable
+private fun OcrRawTextDialog(
+    lines: List<String>,
+    rawText: String?,
+    onDismiss: () -> Unit
+) {
+    val clipboard = LocalClipboardManager.current
+    val numbered = lines.mapIndexed { index, line -> "${index + 1}. $line" }.joinToString("\n")
+    val bundle = buildString {
+        append("【还原后的行（共 ${lines.size} 行）】\n")
+        append(numbered)
+        if (!rawText.isNullOrBlank()) {
+            append("\n\n【ML Kit 原始文本】\n")
+            append(rawText)
+        }
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("识别原文") },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+            ) {
+                Text(
+                    "还原后的行（共 ${lines.size} 行）—— 解析器实际收到的内容：",
+                    fontWeight = FontWeight.Bold
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    numbered.ifEmpty { "（空）" },
+                    style = MaterialTheme.typography.bodySmall
+                )
+                if (!rawText.isNullOrBlank()) {
+                    Spacer(Modifier.height(12.dp))
+                    Text("ML Kit 原始文本：", fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.height(4.dp))
+                    Text(rawText, style = MaterialTheme.typography.bodySmall)
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { clipboard.setText(AnnotatedString(bundle)) }) {
+                Text("复制全部")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("关闭") }
+        }
+    )
+}
+
 @Composable
 private fun BottomActionBar(
     state: ImportBrokerageViewModel.UiState,
@@ -435,6 +496,15 @@ private fun PreviewStep(
     // 只认出名称/金额、没认到日期与数量的一笔。保留成异常行而不是丢掉，
     // 否则用户只会看到总数对不上，却不知道少的到底是哪一笔。
     val incompleteCount = txs.count { it.errors.contains(GalaxyStatementParser.ERR_DETAIL_MISSING) }
+    var showRawText by remember { mutableStateOf(false) }
+
+    if (showRawText) {
+        OcrRawTextDialog(
+            lines = state.ocrLines,
+            rawText = state.ocrRawText,
+            onDismiss = { showRawText = false }
+        )
+    }
 
     LazyColumn(modifier = Modifier.fillMaxWidth().padding(16.dp)) {
         item {
@@ -465,6 +535,11 @@ private fun PreviewStep(
                     style = MaterialTheme.typography.bodySmall,
                     color = Color(0xFF2E7D32)
                 )
+            }
+            if (state.ocrLines.isNotEmpty() || !state.ocrRawText.isNullOrBlank()) {
+                TextButton(onClick = { showRawText = true }) {
+                    Text("查看识别原文（还原 ${state.ocrLines.size} 行）")
+                }
             }
             Spacer(Modifier.height(8.dp))
         }

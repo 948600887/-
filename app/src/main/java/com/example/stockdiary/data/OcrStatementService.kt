@@ -17,7 +17,6 @@ import kotlinx.coroutines.withContext
 import java.time.LocalDate
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
-import kotlin.math.abs
 
 /**
  * 交割单截图 OCR 导入服务。
@@ -44,7 +43,13 @@ class OcrStatementService private constructor(private val context: Context) {
         val recognizedText: String,
         val year: Int,
         /** 年份是截图里读到的（true）还是按当前年份兜底的（false） */
-        val yearFromImage: Boolean
+        val yearFromImage: Boolean,
+        /**
+         * 重建出的「视觉行」（同一行的多列已合并）。
+         * 解析出问题时，这一份数据比原始文本更能说明问题出在行还原还是行配对，
+         * 预览页可以把它展示/复制出来。
+         */
+        val lines: List<String> = emptyList()
     )
 
     companion object {
@@ -64,14 +69,24 @@ class OcrStatementService private constructor(private val context: Context) {
 
         /**
          * 单次交给 ML Kit 的图像高度上限。超过就按高度分块，每块在原始分辨率下识别。
+         *
+         * 取 2400：普通手机截图（最长边普遍在 2400 以内）走单块整图识别这条最稳的路径，
+         * 不给它引入块边界；只有真正的长截图才会被切开。
          */
-        private const val MAX_BLOCK_HEIGHT = 1600
+        private const val MAX_BLOCK_HEIGHT = 2400
 
         /**
          * 相邻分块的重叠高度。避免块边界正好把一行切成两半，
          * 拼接时再按最长的重复前缀把重叠部分去掉。
          */
         private const val BLOCK_OVERLAP = 120
+
+        /**
+         * 判定两个文本片段属于同一视觉行的垂直区间重叠比例下限。
+         * 同一行的片段几乎完全重叠（≈1.0），相邻行几乎不重叠（≈0）；
+         * 取 0.6 给字号差异、上下标留出余量。
+         */
+        private const val SAME_ROW_OVERLAP_RATIO = 0.6f
 
         /**
          * 判断同一行内两个元素之间要不要插空格：间距超过「上一个元素平均字宽」的这个比例才插。
@@ -191,11 +206,25 @@ class OcrStatementService private constructor(private val context: Context) {
             )
         }
 
+        // 明细没配上的比例偏高时明确告警：这几乎总是行还原出了问题，
+        // 而不是截图本身没这段信息（否则这一笔连首行都认不出来）。
+        val incomplete = transactions.count {
+            it.errors.contains(GalaxyStatementParser.ERR_DETAIL_MISSING)
+        }
+        if (incomplete > 0) {
+            AppLogger.w(
+                "有 $incomplete/${transactions.size} 笔没配上明细行（缺日期/数量）。" +
+                    "还原后的行共 ${lines.size} 行，可导出「识别原文」核对",
+                "OcrStatement"
+            )
+        }
+
         OcrResult(
             transactions = transactions,
             recognizedText = fullText,
             year = year,
-            yearFromImage = yearFromImage != null
+            yearFromImage = yearFromImage != null,
+            lines = lines
         )
     }
 
@@ -260,9 +289,14 @@ class OcrStatementService private constructor(private val context: Context) {
             )
         }
 
+        AppLogger.i(
+            "长截图 ${bitmap.width}x${bitmap.height} 按高度分块识别（块高 $MAX_BLOCK_HEIGHT，重叠 $BLOCK_OVERLAP）",
+            "OcrStatement"
+        )
         val blockLines = mutableListOf<List<String>>()
         val texts = mutableListOf<String>()
         var lineCount = 0
+        var blockCount = 0
         var y = 0
         try {
             while (y < bitmap.height) {
@@ -273,6 +307,7 @@ class OcrStatementService private constructor(private val context: Context) {
                 val text = recognizeText(block)
                 blockLines.add(extractSortedLines(text))
                 texts.add(text.text)
+                blockCount++
                 lineCount += text.textBlocks.sumOf { it.lines.size }
                 if (y + h >= bitmap.height) break
                 y += maxOf(h - BLOCK_OVERLAP, 1)
@@ -280,7 +315,9 @@ class OcrStatementService private constructor(private val context: Context) {
         } finally {
             if (!bitmap.isRecycled) bitmap.recycle()
         }
-        return Recognized(mergeBlockLines(blockLines), texts.joinToString("\n"), lineCount)
+        val merged = mergeBlockLines(blockLines)
+        AppLogger.i("分块识别完成：$blockCount 块，还原出 ${merged.size} 行", "OcrStatement")
+        return Recognized(merged, texts.joinToString("\n"), lineCount)
     }
 
 
@@ -320,19 +357,20 @@ class OcrStatementService private constructor(private val context: Context) {
      * `证券买入-中证红利 1.546 -1,082.30` 这样的整行。
      */
     private fun extractSortedLines(text: Text): List<String> {
-        data class Fragment(val centerY: Int, val left: Int, val content: String)
+        data class Fragment(val top: Int, val bottom: Int, val left: Int, val content: String) {
+            val centerY: Int get() = (top + bottom) / 2
+        }
 
         val fragments = mutableListOf<Fragment>()
-        val heights = mutableListOf<Int>()
         for (block in text.textBlocks) {
             for (line in block.lines) {
                 val content = joinElements(line.elements)
                 if (content.isBlank()) continue
                 val box = line.boundingBox
-                if (box != null && box.height() > 0) heights.add(box.height())
                 fragments.add(
                     Fragment(
-                        centerY = if (box != null) (box.top + box.bottom) / 2 else 0,
+                        top = box?.top ?: 0,
+                        bottom = box?.bottom ?: 0,
                         left = box?.left ?: 0,
                         content = content
                     )
@@ -341,18 +379,25 @@ class OcrStatementService private constructor(private val context: Context) {
         }
         if (fragments.isEmpty()) return emptyList()
 
-        // 容差基准取行高的中位数。拿不到坐标时退化成最小值，等价于「每行各自成组」，
-        // 与旧行为一致，不会比原来更差。
-        val tolerance = if (heights.isEmpty()) 4 else maxOf(4, median(heights) / 2)
-
+        // 用「垂直区间重叠」判断两个片段是否属于同一视觉行，而不是比较中心点距离。
+        // 距离法依赖容差（= 行高中位数的一半），一旦 OCR 报出的行高偏大，
+        // 容差就跟着变大，相邻两行会被粘成一行——表现为「每一笔都配不上明细」。
+        // 区间重叠是相对判断：同一行的片段几乎完全重叠，相邻行几乎不重叠，不受行高绝对值影响。
         val rows = mutableListOf<MutableList<Fragment>>()
+        var anchorTop = 0
+        var anchorBottom = 0
         for (fragment in fragments.sortedBy { it.centerY }) {
-            val current = rows.lastOrNull()
-            val anchorY = current?.first()?.centerY
-            if (current != null && anchorY != null && abs(fragment.centerY - anchorY) <= tolerance) {
-                current.add(fragment)
+            val hasBox = fragment.bottom > fragment.top
+            // 拿不到坐标的片段一律自成一组，不去猜它属于哪一行
+            val sameRow = rows.isNotEmpty() &&
+                hasBox && anchorBottom > anchorTop &&
+                verticalOverlapRatio(fragment.top, fragment.bottom, anchorTop, anchorBottom) >= SAME_ROW_OVERLAP_RATIO
+            if (sameRow) {
+                rows.last().add(fragment)
             } else {
                 rows.add(mutableListOf(fragment))
+                anchorTop = fragment.top
+                anchorBottom = fragment.bottom
             }
         }
         return rows.map { row ->
@@ -360,9 +405,12 @@ class OcrStatementService private constructor(private val context: Context) {
         }
     }
 
-    private fun median(values: List<Int>): Int {
-        val sorted = values.sorted()
-        return sorted[sorted.size / 2]
+    /** 两个垂直区间重叠部分占「较矮者」的比例（0~1） */
+    private fun verticalOverlapRatio(aTop: Int, aBottom: Int, bTop: Int, bBottom: Int): Float {
+        val overlap = minOf(aBottom, bBottom) - maxOf(aTop, bTop)
+        if (overlap <= 0) return 0f
+        val shorter = minOf(aBottom - aTop, bBottom - bTop).coerceAtLeast(1)
+        return overlap.toFloat() / shorter
     }
 
     /**

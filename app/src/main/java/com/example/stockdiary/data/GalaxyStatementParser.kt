@@ -41,6 +41,15 @@ object GalaxyStatementParser {
      * 不这么做的话，这类行会连一条告警都不留地消失——用户看到的就是「凭空少一行」。
      */
     private const val OP_PREFIX = """证\s*[券卷劵]\s*"""
+
+    /**
+     * 「证券」前缀**可以不存在**。
+     *
+     * 银河 App 不同页面/字号下操作列的文案不一样：对账单页是「证券买入-中证红利」，
+     * 而成交明细页只有「买入-科创50」。真实长截图里两种格式还会同时出现。
+     * 硬要求「证券」二字，整页的交易会一笔不剩地消失。
+     */
+    private const val OP_PREFIX_OPT = """(?:$OP_PREFIX)?"""
     private const val OP_BUY = """买\s*[入人]"""
     private const val OP_SELL = """卖\s*[出入]"""
     /** 方向捕获组：命中即「买」或「卖」的首字，据此归一化成买卖方向 */
@@ -48,16 +57,26 @@ object GalaxyStatementParser {
 
     /** 首行（名称 + 价格 + 金额都在同一行；列合并后就是这种形态） */
     private val FIRST_LINE_WITH_NUMBERS_REGEX = Regex(
-        """$OP_PREFIX$OP_DIR\s*-?\s*(.+?)\s+([\d,]+\.?\d*)\s+(-?[\d,]+\.?\d*)\s*$"""
+        """($OP_PREFIX)?$OP_DIR\s*-?\s*(.+?)\s+([\d,]+\.?\d*)\s+(-?[\d,]+\.?\d*)\s*$"""
     )
 
     /** 首行（只有操作 + 名称，价格/金额在另外的列里） */
     private val FIRST_LINE_NAME_ONLY_REGEX = Regex(
-        """$OP_PREFIX$OP_DIR\s*-?\s*(\S.*?)\s*$"""
+        """($OP_PREFIX)?$OP_DIR\s*-?\s*(\S.*?)\s*$"""
     )
 
+    /**
+     * 裸方向词（没有「证券」前缀）时，名称里出现这些词说明这一行是 App 的导航/统计栏，
+     * 不是交易。典型的是成交明细页的 tab 栏「明细 买入 卖出 条件单 看行情」——
+     * 它含「买入」「卖出」，不设门槛就会被当成一笔交易塞进预览。
+     */
+    private val NOISE_NAME_REGEX = Regex("""条件单|看行情|明细|持仓|委托|撤单|自选|查询""")
+
+    /** 名称里混进日期时间，说明这行其实是详情行被误判成了首行 */
+    private val DATE_TIME_IN_NAME_REGEX = Regex("""\d{1,2}[-/月]\d{1,2}|\d{1,2}[:：]\d{2}""")
+
     /** 关键字独占一行（名称被 OCR 拆到下一行） */
-    private val OPERATION_ONLY_REGEX = Regex("""$OP_PREFIX$OP_DIR\s*[-—－]?\s*""")
+    private val OPERATION_ONLY_REGEX = Regex("""$OP_PREFIX_OPT$OP_DIR\s*[-—－]?\s*""")
 
     /**
      * 详情行：方向? 日期 时间? 数量 费用?
@@ -334,24 +353,46 @@ object GalaxyStatementParser {
      */
     private fun matchAnchor(line: String): Anchor? {
         FIRST_LINE_WITH_NUMBERS_REGEX.find(line)?.let { m ->
-            return Anchor(
-                isBuy = m.groupValues[1].contains("买"),
-                name = cleanName(m.groupValues[2]),
-                price = m.groupValues[3].replace(",", "").toDoubleOrNull(),
-                amount = m.groupValues[4].replace(",", "").toDoubleOrNull()
-            )
+            // group1=「证券」前缀(可空) group2=方向 group3=名称 group4=价格 group5=金额
+            val name = cleanName(m.groupValues[3])
+            if (isTrustworthyName(m.groupValues[1], name)) {
+                return Anchor(
+                    isBuy = m.groupValues[2].contains("买"),
+                    name = name,
+                    price = m.groupValues[4].replace(",", "").toDoubleOrNull(),
+                    amount = m.groupValues[5].replace(",", "").toDoubleOrNull()
+                )
+            }
         }
         FIRST_LINE_NAME_ONLY_REGEX.find(line)?.let { m ->
             // 名称后面若误粘了数字（价格只识别到一半），把它们摘掉
-            val raw = m.groupValues[2].replace(TRAILING_NUMBER_TOKEN_REGEX, "")
-            return Anchor(
-                isBuy = m.groupValues[1].contains("买"),
-                name = cleanName(raw),
-                price = null,
-                amount = null
-            )
+            val raw = m.groupValues[3].replace(TRAILING_NUMBER_TOKEN_REGEX, "")
+            val name = cleanName(raw)
+            if (isTrustworthyName(m.groupValues[1], name)) {
+                return Anchor(
+                    isBuy = m.groupValues[2].contains("买"),
+                    name = name,
+                    price = null,
+                    amount = null
+                )
+            }
         }
         return null
+    }
+
+    /**
+     * 名称可不可信。
+     *
+     * 带「证券」前缀的行直接采信——前缀本身就是很强的证据。
+     * 只有裸「买入/卖出」时才额外校验：银河成交明细页的 tab 栏
+     * 「明细 买入 卖出 条件单 看行情」同样含方向词，而详情行
+     * 「卖 09-22 13:00 700 0.10」也能被裸正则啃成「名称=09-22 13:00」。
+     * 这两类都必须挡在门外，否则会凭空多出假交易。
+     */
+    private fun isTrustworthyName(prefix: String, name: String): Boolean {
+        if (name.isBlank()) return false
+        if (prefix.isNotBlank()) return true
+        return !NOISE_NAME_REGEX.containsMatchIn(name) && !DATE_TIME_IN_NAME_REGEX.containsMatchIn(name)
     }
 
     /** 去掉名称里的空白（OCR 常在名称中间插空格） */

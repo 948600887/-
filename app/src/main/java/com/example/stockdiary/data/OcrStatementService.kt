@@ -53,10 +53,25 @@ class OcrStatementService private constructor(private val context: Context) {
         private var instance: OcrStatementService? = null
 
         /**
-         * 解码后的最长边上限。手机截图最长边通常在 2400 以内，会被完整保留（不降采样），
-         * 避免损失识别精度；只有明显超大的照片才会等比缩小，防止几十 MB 的位图把内存打满。
+         * 解码后的像素总量上限（约 48MB 位图）。
+         *
+         * 用「总像素」而不是「最长边」控制降采样：对账单经常被做成长截图，
+         * 它的最长边天然很大，按最长边卡会把整张压扁到认不出字——
+         * 1080×5888 的长截图按最长边 2400 卡会降到 270×1472，每个字只剩几像素。
+         * 长截图改用下面 [MAX_BLOCK_HEIGHT] 分块识别来保证精度，不靠降采样。
          */
-        private const val MAX_DECODE_EDGE = 2400
+        private const val MAX_DECODE_PIXELS = 12_000_000L
+
+        /**
+         * 单次交给 ML Kit 的图像高度上限。超过就按高度分块，每块在原始分辨率下识别。
+         */
+        private const val MAX_BLOCK_HEIGHT = 1600
+
+        /**
+         * 相邻分块的重叠高度。避免块边界正好把一行切成两半，
+         * 拼接时再按最长的重复前缀把重叠部分去掉。
+         */
+        private const val BLOCK_OVERLAP = 120
 
         /**
          * 判断同一行内两个元素之间要不要插空格：间距超过「上一个元素平均字宽」的这个比例才插。
@@ -76,6 +91,29 @@ class OcrStatementService private constructor(private val context: Context) {
 
         // 找年份：截图顶部通常有"2026-09"
         private val YEAR_REGEX = GalaxyStatementParser.YEAR_REGEX
+
+        /**
+         * 把各分块还原出的行按顺序拼回去。
+         *
+         * 块之间留了重叠，因此后一块开头会重复上一块末尾的一到几行；
+         * 取「最长的相同前缀」去掉它们——只比前缀、且要求整段相同，
+         * 不会误删两块交界处两笔内容恰好相同的独立交易。
+         */
+        internal fun mergeBlockLines(blockLines: List<List<String>>): List<String> {
+            val out = mutableListOf<String>()
+            for (lines in blockLines) {
+                var overlap = 0
+                val maxCheck = minOf(lines.size, out.size, 4)
+                for (k in maxCheck downTo 1) {
+                    if (out.subList(out.size - k, out.size) == lines.subList(0, k)) {
+                        overlap = k
+                        break
+                    }
+                }
+                out.addAll(lines.drop(overlap))
+            }
+            return out
+        }
     }
 
     /**
@@ -97,20 +135,20 @@ class OcrStatementService private constructor(private val context: Context) {
      */
     suspend fun recognizeAndParse(imageUri: Uri): OcrResult = withContext(Dispatchers.IO) {
         val bitmap = decodeBitmap(imageUri)
-        // 位图生命周期由 recognizeText 内部管理：必须在 ML Kit 回调（识别真正结束）后回收，
-        // 否则协程取消时 finally 提前 recycle，ML Kit 后台线程仍在读会抛
-        // "trying to use a recycled bitmap" 崩溃。
-        val text = recognizeText(bitmap)
+        // 位图生命周期由 recognizeAll / recognizeText 内部管理：必须在 ML Kit 回调
+        // （识别真正结束）后回收，否则协程取消时提前 recycle，ML Kit 后台线程仍在读
+        // 会抛 "trying to use a recycled bitmap" 崩溃。
+        val recognized = recognizeAll(bitmap)
 
-        val fullText = text.text
+        val fullText = recognized.text
         AppLogger.d("OCR 识别文本:\n$fullText", "OcrStatement")
-        AppLogger.i("OCR 识别 ${text.textBlocks.sumOf { it.lines.size }} 行文字", "OcrStatement")
+        AppLogger.i("OCR 识别 ${recognized.lineCount} 行文字", "OcrStatement")
 
         // 推断年份
         val yearFromImage = YEAR_REGEX.find(fullText)?.groupValues?.get(1)?.toIntOrNull()
         val year = yearFromImage ?: LocalDate.now().year
 
-        val lines = extractSortedLines(text)
+        val lines = recognized.lines
         AppLogger.i("排序后共 ${lines.size} 行，开始解析, year=$year", "OcrStatement")
         var transactions = GalaxyStatementParser.parse(lines, year, ::logParser)
 
@@ -185,7 +223,7 @@ class OcrStatementService private constructor(private val context: Context) {
         }
 
         val options = BitmapFactory.Options().apply {
-            inSampleSize = calculateInSampleSize(bounds.outWidth, bounds.outHeight, MAX_DECODE_EDGE)
+            inSampleSize = calculateInSampleSize(bounds.outWidth, bounds.outHeight)
             inPreferredConfig = Bitmap.Config.ARGB_8888
         }
         val pixelStream = context.contentResolver.openInputStream(uri)
@@ -195,13 +233,56 @@ class OcrStatementService private constructor(private val context: Context) {
         } ?: throw IllegalStateException("无法解码图片（内存不足或格式不支持）")
     }
 
-    /** 取最小的 2 的幂，使最长边不超过 [maxEdge]（inSampleSize 只认 2 的幂） */
-    private fun calculateInSampleSize(width: Int, height: Int, maxEdge: Int): Int {
+    /** 取最小的 2 的幂，使解码后的像素总量不超过 [MAX_DECODE_PIXELS]（inSampleSize 只认 2 的幂） */
+    private fun calculateInSampleSize(width: Int, height: Int): Int {
         var sample = 1
-        val longest = maxOf(width, height)
-        while (longest / sample > maxEdge) sample *= 2
+        val pixels = width.toLong() * height.toLong()
+        while (pixels / (sample.toLong() * sample) > MAX_DECODE_PIXELS) sample *= 2
         return sample
     }
+
+    /** 一次识别任务的产物：还原后的视觉行、原始文本、ML Kit 报告的行数 */
+    private data class Recognized(val lines: List<String>, val text: String, val lineCount: Int)
+
+    /**
+     * 识别整张图，必要时分块。
+     *
+     * 长截图整张丢给 ML Kit 会因为降采样而糊掉（见 [MAX_DECODE_PIXELS] 的说明），
+     * 所以超过 [MAX_BLOCK_HEIGHT] 就按高度切块分别识别，再按顺序把行拼回去。
+     */
+    private suspend fun recognizeAll(bitmap: Bitmap): Recognized {
+        if (bitmap.height <= MAX_BLOCK_HEIGHT) {
+            val text = recognizeText(bitmap)
+            return Recognized(
+                lines = extractSortedLines(text),
+                text = text.text,
+                lineCount = text.textBlocks.sumOf { it.lines.size }
+            )
+        }
+
+        val blockLines = mutableListOf<List<String>>()
+        val texts = mutableListOf<String>()
+        var lineCount = 0
+        var y = 0
+        try {
+            while (y < bitmap.height) {
+                val h = minOf(MAX_BLOCK_HEIGHT, bitmap.height - y)
+                // createBitmap 只对整图范围返回原对象，这里的块一定比原图矮
+                val block = Bitmap.createBitmap(bitmap, 0, y, bitmap.width, h)
+                // recognizeText 会在这一块的识别真正结束后回收它
+                val text = recognizeText(block)
+                blockLines.add(extractSortedLines(text))
+                texts.add(text.text)
+                lineCount += text.textBlocks.sumOf { it.lines.size }
+                if (y + h >= bitmap.height) break
+                y += maxOf(h - BLOCK_OVERLAP, 1)
+            }
+        } finally {
+            if (!bitmap.isRecycled) bitmap.recycle()
+        }
+        return Recognized(mergeBlockLines(blockLines), texts.joinToString("\n"), lineCount)
+    }
+
 
     private suspend fun recognizeText(bitmap: Bitmap): Text =
         suspendCancellableCoroutine { cont ->

@@ -222,6 +222,190 @@ class GalaxyParserNoiseTest {
         assertEquals(700.0, result[0].quantity, 0.001)
     }
 
+    // ---------- 真实截图形态：操作列没有「证券」二字 ----------
+
+    /**
+     * 取自真实长截图（1080×5888）：银河的成交明细页里，操作列只有「买入-科创50」
+     * 「卖出-中证红利」，没有「证券」二字，而且和另一个页面「证券买入-…」的格式
+     * 在同一张截图里并存。费用列则整列显示「--」（该页不展示费用）。
+     */
+    @Test
+    fun `操作列没有证券二字时也能解析`() {
+        val result = parse(
+            listOf(
+                "盈亏 (2026/07/01-至今)",
+                "10,282.60 7.35% 详情",
+                "上证 -3.47%",
+                "平均仓位 52.28% 交易股票数 6",
+                "成功率 64.38% 交易笔数 1021",
+                "盈利股票数 8 亏损股票数 4",
+                "持股天数 60 税费总额 142.09",
+                "操作 价格/数量 金额/费用",
+                "2026-09 -978.57 -0.56% 上证 -0.86%",
+                "通用回购逆回购-GC001 1.450 90,000.00",
+                "其 09-22 14:51 900 --",
+                "卖出-中证红利 1.556 1,089.20",
+                "卖 09-22 13:00 700 --",
+                "买入-科创50 1.770 531.00",
+                "买 09-22 13:00 300 --",
+                "卖出-中证红利 1.551 1,085.70",
+                "卖 09-22 09:41 700 --"
+            )
+        )
+        assertEquals(3, result.size)
+
+        assertEquals("中证红利", result[0].name)
+        assertEquals(TransactionType.SELL.value, result[0].type)
+        assertEquals(1.556, result[0].price, 0.001)
+        assertEquals(700.0, result[0].quantity, 0.001)
+        assertEquals("2026-09-22", result[0].date)
+
+        assertEquals("科创50", result[1].name)
+        assertEquals(TransactionType.BUY.value, result[1].type)
+        assertEquals(531.00, result[1].price * result[1].quantity, 0.01)
+
+        // 费用列整列是「--」：按 0 处理但必须提示，不能静默当 0
+        assertTrue(
+            "费用列为 -- 时要提示: ${result[0].errors}",
+            result[0].errors.any { it.contains("费用未识别") }
+        )
+    }
+
+    @Test
+    fun `同一张截图里两种操作列格式混用也能全部解析`() {
+        // 长截图前半是「卖出-中证红利」，后半切换成「证券买入-中证红利」
+        val result = parse(
+            listOf(
+                "卖出-中证红利 1.556 1,089.20",
+                "卖 09-22 13:00 700 --",
+                "证券买入-中证红利 1.546 -1,082.30",
+                "买 09-22 09:34 700 0.10"
+            )
+        )
+        assertEquals(2, result.size)
+        assertEquals("中证红利", result[0].name)
+        assertEquals("中证红利", result[1].name)
+        assertEquals(TransactionType.BUY.value, result[1].type)
+    }
+
+    /**
+     * 图 1（中国银河对账单 09-24 那一屏）的逐行还原。
+     * 三列是「操作 / 价格数量 / 金额费用」，价格与金额在独立列里。
+     * 其中：买入金额为负、卖出金额为正；有 3 行逆回购要跳过。
+     */
+    private val realScreenshot0924 = listOf(
+        "2026-09 -1,435.50 -0.83% 上证 -1.25%",
+        "通用回购逆回购-GC001 1.445 -80,000.80",
+        "其 09-24 14:51 800 0.80",
+        "证券买入-科创50 1.721 -516.40",
+        "买 09-24 14:02 300 0.10",
+        "证券卖出-中国电信 6.120 1,223.28",
+        "卖 09-24 13:08 200 0.72",
+        "证券买入-综指ETF 1.001 -500.60",
+        "买 09-24 11:27 500 0.10",
+        "证券买入-中证红利 1.541 -1,078.80",
+        "买 09-24 11:09 700 0.10",
+        "证券买入-综指ETF 1.006 -503.10",
+        "买 09-24 10:28 500 0.10",
+        "证券买入-中国电信 6.060 -2,424.23",
+        "买 09-24 09:47 400 0.23",
+        "证券买入-中证红利 1.546 -1,082.30",
+        "买 09-24 09:47 700 0.10",
+        "证券卖出-中证红利 1.551 1,085.60",
+        "卖 09-24 09:39 700 0.10",
+        "证券买入-科创50 1.744 -523.30",
+        "买 09-24 09:30 300 0.10",
+        "通用回购逆回购购回-GC001 1.345 83,012.23",
+        "其 09-24 830 0.00",
+        "通用回购逆回购-GC001 1.345 -83,000.83",
+        "其 09-23 14:51 830 0.83",
+        "证券买入-中证红利 1.546 -1,082.30",
+        "买 09-23 10:48 700 0.10",
+        "证券买入-综指ETF 1.011 -505.60",
+        "买 09-23 10:01 500 0.10"
+    )
+
+    @Test
+    fun `真实截图 09-24 那一屏 11 笔一笔不少`() {
+        val result = parse(realScreenshot0924)
+
+        assertEquals("11 笔证券买卖，一笔都不能少", 11, result.size)
+        assertEquals(9, result.count { it.type == TransactionType.BUY.value })
+        assertEquals(2, result.count { it.type == TransactionType.SELL.value })
+
+        // 逆回购（含带「购回」的那笔）不能混进来
+        assertTrue(
+            "逆回购不该入库: ${result.map { it.name }}",
+            result.none { it.name.contains("GC001") }
+        )
+    }
+
+    @Test
+    fun `真实截图里每笔都能配上正确的日期与数量`() {
+        val result = parse(realScreenshot0924)
+
+        val first = result[0]
+        assertEquals("科创50", first.name)
+        assertEquals("2026-09-24", first.date)
+        assertEquals(300.0, first.quantity, 0.001)
+        assertEquals(1.721, first.price, 0.001)
+        assertEquals(0.10, first.fee, 0.001)
+
+        // 卖出中国电信：金额为正，方向靠「证券卖出」判定而不是靠符号
+        val telecom = result[1]
+        assertEquals("中国电信", telecom.name)
+        assertEquals(TransactionType.SELL.value, telecom.type)
+        assertEquals(200.0, telecom.quantity, 0.001)
+        assertEquals(6.120, telecom.price, 0.001)
+        assertEquals(0.72, telecom.fee, 0.001)
+
+        // 所有笔都应有真实日期（没有一笔是靠兜底记录混进来的）
+        result.forEach { tx ->
+            assertTrue("第 ${tx.rowNumber} 笔日期异常: ${tx.date}", tx.date.startsWith("2026-09-"))
+        }
+    }
+
+    @Test
+    fun `真实截图里的手续费不会被交叉校验误判成列错位`() {
+        val result = parse(realScreenshot0924)
+        result.forEach { tx ->
+            assertTrue(
+                "第 ${tx.rowNumber} 笔被误判列错位: ${tx.errors}",
+                tx.errors.none { it.contains("列错位") }
+            )
+        }
+    }
+
+    // ---------- 裸方向词不能把界面元素当成交易 ----------
+
+    @Test
+    fun `App 的 tab 栏不会被当成一笔交易`() {
+        // 真实截图里，滚动到底部会露出成交明细页的 tab 栏。
+        // 它含「买入」「卖出」，若裸方向词不设门槛就会凭空多出一笔假交易。
+        val result = parse(
+            listOf(
+                "证券卖出-中国银行 5.970 1,193.29",
+                "卖 07-31 13:46 200 0.71",
+                "明细 买入 卖出 条件单 看行情",
+                "证券卖出-中证红利 1.566 1,096.10",
+                "卖 07-31 13:45 700 0.10"
+            )
+        )
+        assertEquals(2, result.size)
+        assertEquals("中国银行", result[0].name)
+        assertEquals(200.0, result[0].quantity, 0.001)
+        assertEquals("中证红利", result[1].name)
+        assertEquals(700.0, result[1].quantity, 0.001)
+    }
+
+    @Test
+    fun `日期时间不会被当成裸方向交易的名称`() {
+        // 「卖 09-22 13:00 700 0.10」能被裸正则啃成「名称=09-22 13:00、价格=700」，
+        // 单独出现时绝不能凭空产出一笔。
+        val result = parse(listOf("卖 09-22 13:00 700 0.10"))
+        assertEquals(0, result.size)
+    }
+
     // ---------- 逆回购 ----------
 
     @Test

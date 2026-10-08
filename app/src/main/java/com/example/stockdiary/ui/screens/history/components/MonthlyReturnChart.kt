@@ -133,7 +133,7 @@ fun MonthlyReturnChart(
                             color = OnSurface
                         )
                         Text(
-                            text = "收益: ${mr.returnAmount.toProfitDisplay("¥")}  (${if (mr.returnRate >= 0) "+" else ""}${mr.returnRate.format(2)}%)",
+                            text = "增值: ${mr.returnAmount.toProfitDisplay("¥")}  (${if (mr.returnRate >= 0) "+" else ""}${mr.returnRate.format(2)}%)",
                             fontSize = 15.sp,
                             fontWeight = FontWeight.Bold,
                             color = mr.returnAmount.profitColor()

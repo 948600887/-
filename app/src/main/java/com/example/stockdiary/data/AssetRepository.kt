@@ -127,7 +127,7 @@ class AssetRepository private constructor(
                 val previousSnapshot = snapshotDao.getLatestSnapshot()
                 val snapshot = AssetSnapshot.fromAssets(assets, date, previousSnapshot)
                 val snapshotId = snapshotDao.insertSnapshot(snapshot)
-                AppLogger.i("Snapshot created: ${snapshot.date}, netAssets=${snapshot.netAssets}, yield=${snapshot.yieldRate}%")
+                AppLogger.i("Snapshot created: ${snapshot.date}, netAssets=${snapshot.netAssets}, totalAssets=${snapshot.totalAssets}")
                 snapshot.copy(id = snapshotId)
             }
         } catch (e: CancellationException) {

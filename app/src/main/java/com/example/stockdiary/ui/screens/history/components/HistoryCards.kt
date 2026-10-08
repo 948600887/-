@@ -224,14 +224,14 @@ fun LazyListScope.historyRiskCard(stats: SnapshotStatistics) {
                 ) {
                     RiskMetric("最大回撤", "${stats.maxDrawdown.format(2)}%", ProfitGreen)
                     RiskMetric("波动率", "${stats.volatility.format(2)}%", OnSurface)
-                    RiskMetric("日均收益率", "${stats.avgDailyReturnPercent.format(2)}%", stats.avgDailyReturnPercent.profitColor())
+                    RiskMetric("日均增幅", "${stats.avgDailyReturnPercent.format(2)}%", stats.avgDailyReturnPercent.profitColor())
                 }
                 Spacer(modifier = Modifier.height(8.dp))
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceEvenly
                 ) {
-                    RiskMetric("日均收益额", stats.avgDailyReturnAmount.toProfitDisplay("¥"), stats.avgDailyReturnAmount.profitColor())
+                    RiskMetric("日均增值额", stats.avgDailyReturnAmount.toProfitDisplay("¥"), stats.avgDailyReturnAmount.profitColor())
                     RiskMetric("最高净资产", "¥${stats.maxValue.format(0)}", OnSurface)
                     RiskMetric("最低净资产", "¥${stats.minValue.format(0)}", OnSurface)
                 }
@@ -250,7 +250,7 @@ fun LazyListScope.historyMonthlyReturnChart(monthlyReturns: List<MonthlyReturn>)
             shape = RoundedCornerShape(12.dp)
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
-                Text("月度收益", fontSize = 12.sp, color = OnSurfaceVariant)
+                Text("月度增值", fontSize = 12.sp, color = OnSurfaceVariant)
                 Spacer(modifier = Modifier.height(12.dp))
                 MonthlyReturnChart(
                     monthlyReturns = monthlyReturns,

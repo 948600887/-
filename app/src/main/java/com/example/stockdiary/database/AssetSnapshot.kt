@@ -19,6 +19,8 @@ data class AssetSnapshot(
     val totalAssets: Double,
     val totalLiabilities: Double,
     val netAssets: Double,
+    // 以下三个字段是**历史遗留列**：App 去掉成本概念后界面已不再展示，
+    // 但它们是 Room 的列（历史快照数据里已有值），删列需要数据库迁移，故保留写入。
     val totalCost: Double = 0.0,
     val totalProfit: Double = 0.0,
     val yieldRate: Double = 0.0,
@@ -31,30 +33,6 @@ data class AssetSnapshot(
     val cryptoCost: Double = 0.0,
     val bankDepositCost: Double = 0.0
 ) {
-    val stockProfit: Double
-        get() = stockValue - stockCost
-    
-    val fundProfit: Double
-        get() = fundValue - fundCost
-    
-    val cryptoProfit: Double
-        get() = cryptoValue - cryptoCost
-    
-    val bankDepositProfit: Double
-        get() = bankDepositValue - bankDepositCost
-    
-    val stockYieldRate: Double
-        get() = if (stockCost > 0) (stockValue - stockCost) / stockCost * 100 else 0.0
-    
-    val fundYieldRate: Double
-        get() = if (fundCost > 0) (fundValue - fundCost) / fundCost * 100 else 0.0
-    
-    val cryptoYieldRate: Double
-        get() = if (cryptoCost > 0) (cryptoValue - cryptoCost) / cryptoCost * 100 else 0.0
-    
-    val bankDepositYieldRate: Double
-        get() = if (bankDepositCost > 0) (bankDepositValue - bankDepositCost) / bankDepositCost * 100 else 0.0
-    
     companion object {
         fun fromAssets(assets: List<Asset>, date: String, @Suppress("UNUSED_PARAMETER") previousSnapshot: AssetSnapshot? = null): AssetSnapshot {
             val assetsOnly = assets.filter { !it.type.isLiability }

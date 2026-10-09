@@ -15,6 +15,7 @@ import com.example.stockdiary.utils.AppLogger
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import com.example.stockdiary.data.SortOrder
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.ui.components.*
@@ -22,7 +23,11 @@ import com.example.stockdiary.ui.dialogs.AddAssetDialog
 import com.example.stockdiary.ui.theme.*
 import com.example.stockdiary.ui.viewmodels.PortfolioViewModel
 import com.example.stockdiary.utils.sumTotalValueCny
+import com.example.stockdiary.utils.totalValueCny
 import kotlinx.coroutines.launch
+
+/** 负债单独成组时使用的分组 key；真实账户名不会叫这个，不会与账户分组撞车 */
+private const val LIABILITY_GROUP_KEY = "负债"
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -38,6 +43,7 @@ fun PortfolioScreen(
     val incomeCalculationStatus by viewModel.incomeCalculationStatus.collectAsState()
     val errorMessage by viewModel.errorMessage.collectAsState()
     val existingAccounts by viewModel.existingAccounts.collectAsState()
+    val preferences by viewModel.preferences.collectAsState()
 
     var showAddDialog by remember { mutableStateOf(false) }
     var showSearchDialog by remember { mutableStateOf(false) }
@@ -51,27 +57,56 @@ fun PortfolioScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     val context = LocalContext.current
 
-    val stockAssets by remember {
-        derivedStateOf {
-            assets.filter { it.type == AssetType.STOCK || it.type == AssetType.FUND || it.type == AssetType.CRYPTO }
-        }
+    // 资产列表已从资产页并入这里：股票/基金/虚拟货币/银行存款 + 负债，一页看全。
+    // 显示开关沿用「设置 → 仪表盘显示」，关掉某类就整类不出现。
+    val visibleAssetTypes = remember(preferences) {
+        setOfNotNull(
+            AssetType.BANK_DEPOSIT.takeIf { preferences.showBankDeposits },
+            AssetType.STOCK.takeIf { preferences.showStocks },
+            AssetType.FUND.takeIf { preferences.showFunds },
+            AssetType.CRYPTO.takeIf { preferences.showCrypto }
+        )
     }
 
-    val totalValue = remember(stockAssets) { stockAssets.sumTotalValueCny() }
+    val visibleAssets by remember(assets, visibleAssetTypes, preferences.showLiabilities) {
+        derivedStateOf {
+            assets.filter {
+                it.type in visibleAssetTypes || (it.type.isLiability && preferences.showLiabilities)
+            }
+        }
+    }
+    val assetsOnly = remember(visibleAssets) { visibleAssets.filter { !it.type.isLiability } }
+    val liabilities = remember(visibleAssets) { visibleAssets.filter { it.type.isLiability } }
+
+    val totalAssets = remember(assetsOnly) { assetsOnly.sumTotalValueCny() }
+    val totalLiabilities = remember(liabilities) { liabilities.sumTotalValueCny() }
+    val netAssets = totalAssets - totalLiabilities
+
+    val sortedAssets = remember(assetsOnly, preferences.sortOrder) {
+        when (preferences.sortOrder) {
+            SortOrder.BY_TYPE -> assetsOnly.sortedBy { it.type.ordinal }
+            SortOrder.BY_VALUE_DESC -> assetsOnly.sortedByDescending { it.totalValueCny }
+            SortOrder.BY_VALUE_ASC -> assetsOnly.sortedBy { it.totalValueCny }
+            SortOrder.BY_NAME -> assetsOnly.sortedBy { it.name }
+        }
+    }
 
     val filteredAssetsByAccount by remember {
         derivedStateOf {
-            stockAssets.groupBy { it.account }
+            sortedAssets.groupBy { it.account }
         }
     }
 
-    LaunchedEffect(stockAssets) {
-        viewModel.loadDividendIncome(stockAssets)
+    LaunchedEffect(assetsOnly) {
+        viewModel.loadDividendIncome(assetsOnly)
     }
 
     // Set 的相等性是结构性的，用它做副作用 key 可以保证「账户集合没变」时不重跑，
     // 避免价格波动刷新列表就把用户刚收起的分组重新展开。
-    val accountKeys = remember(filteredAssetsByAccount) { filteredAssetsByAccount.keys.toSet() }
+    val accountKeys = remember(filteredAssetsByAccount, liabilities) {
+        filteredAssetsByAccount.keys.toSet() +
+            (if (liabilities.isNotEmpty()) setOf(LIABILITY_GROUP_KEY) else emptySet())
+    }
 
     // null = 还没初始化过（首屏）。初始化后只自动展开「新出现」的账户，
     // 用户手动收起的分组不会再被强行展开。
@@ -168,7 +203,7 @@ fun PortfolioScreen(
                         TextButton(
                             onClick = {
                                 if (selectedIds.isNotEmpty()) {
-                                    val selectedAssets = stockAssets.filter { it.id in selectedIds }
+                                    val selectedAssets = visibleAssets.filter { it.id in selectedIds }
                                     viewModel.batchSync(selectedAssets)
                                 }
                             },
@@ -192,12 +227,43 @@ fun PortfolioScreen(
         },
         modifier = modifier
     ) { padding ->
-        if (stockAssets.isEmpty()) {
-            Box(
-                modifier = Modifier.fillMaxSize().padding(padding).padding(16.dp),
-                contentAlignment = androidx.compose.ui.Alignment.Center
-            ) {
-                EmptyAssetCard(onAddAsset = { showAddDialog = true })
+        if (visibleAssets.isEmpty()) {
+            // 分清两种「空」：有资产但被显示开关全藏了 → 给恢复入口；
+            // 压根没有资产 → 引导添加。混为一谈会让用户以为数据丢了。
+            if (assets.isNotEmpty()) {
+                Box(
+                    modifier = Modifier.fillMaxSize().padding(padding).padding(16.dp),
+                    contentAlignment = androidx.compose.ui.Alignment.Center
+                ) {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                    ) {
+                        Column(
+                            modifier = Modifier.fillMaxWidth().padding(16.dp),
+                            horizontalAlignment = androidx.compose.ui.Alignment.CenterHorizontally
+                        ) {
+                            Text("当前未显示任何资产类别", style = MaterialTheme.typography.titleSmall)
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                "你共有 ${assets.size} 项记录，但显示开关把它们全部隐藏了",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Spacer(modifier = Modifier.height(12.dp))
+                            Button(onClick = { viewModel.showAllAssetTypes() }) {
+                                Text("显示全部资产")
+                            }
+                        }
+                    }
+                }
+            } else {
+                Box(
+                    modifier = Modifier.fillMaxSize().padding(padding).padding(16.dp),
+                    contentAlignment = androidx.compose.ui.Alignment.Center
+                ) {
+                    EmptyAssetCard(onAddAsset = { showAddDialog = true })
+                }
             }
         } else {
             LazyColumn(
@@ -207,12 +273,28 @@ fun PortfolioScreen(
             ) {
                 item {
                     PortfolioOverviewCard(
-                        totalValue = totalValue,
+                        totalAssets = totalAssets,
+                        totalLiabilities = totalLiabilities,
+                        netAssets = netAssets,
                         estimatedAnnualDividend = estimatedAnnualDividend,
                         isDividendLoading = dividendLoading,
                         dividendStatus = incomeCalculationStatus,
-                        stockCount = stockAssets.size
+                        assetCount = assetsOnly.size
                     )
+                }
+
+                item {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                    ) {
+                        Text("全部资产", style = MaterialTheme.typography.titleSmall)
+                        SortChip(
+                            currentSort = preferences.sortOrder,
+                            onSortChange = { viewModel.updateSortOrder(it) }
+                        )
+                    }
                 }
 
                 items(filteredAssetsByAccount.keys.sorted(), key = { it }) { account ->
@@ -243,6 +325,37 @@ fun PortfolioScreen(
                         }
                     )
                 }
+
+                // 负债单独成组：混进账户小计里会让「这个账户有多少钱」变得不可读
+                if (liabilities.isNotEmpty()) {
+                    item {
+                        AccountGroup(
+                            account = LIABILITY_GROUP_KEY,
+                            assets = liabilities,
+                            isExpanded = expandedAccounts.contains(LIABILITY_GROUP_KEY),
+                            onToggleExpand = {
+                                if (!selectionMode) {
+                                    expandedAccounts = if (expandedAccounts.contains(LIABILITY_GROUP_KEY)) {
+                                        expandedAccounts - LIABILITY_GROUP_KEY
+                                    } else {
+                                        expandedAccounts + LIABILITY_GROUP_KEY
+                                    }
+                                }
+                            },
+                            onAssetClick = { if (!selectionMode) onNavigateToAssetDetail(it.id) },
+                            onDividendClick = { selectedDividendAsset = it },
+                            selectionMode = selectionMode,
+                            selectedIds = selectedIds,
+                            onToggleSelection = {
+                                selectedIds = if (selectedIds.contains(it.id)) {
+                                    selectedIds - it.id
+                                } else {
+                                    selectedIds + it.id
+                                }
+                            }
+                        )
+                    }
+                }
             }
         }
     }
@@ -268,7 +381,7 @@ fun PortfolioScreen(
 
     if (showSearchDialog) {
         PortfolioSearchDialog(
-            assets = stockAssets,
+            assets = visibleAssets,
             onDismiss = { showSearchDialog = false },
             onAssetSelected = { asset ->
                 showSearchDialog = false

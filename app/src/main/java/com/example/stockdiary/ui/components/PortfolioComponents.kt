@@ -37,11 +37,13 @@ import kotlinx.coroutines.withContext
 
 @Composable
 fun PortfolioOverviewCard(
-    totalValue: Double,
+    totalAssets: Double,
+    totalLiabilities: Double,
+    netAssets: Double,
     estimatedAnnualDividend: Double,
     isDividendLoading: Boolean,
     dividendStatus: String?,
-    stockCount: Int
+    assetCount: Int
 ) {
     val monthlyDividend = if (estimatedAnnualDividend > 0) estimatedAnnualDividend / 12 else 0.0
 
@@ -57,10 +59,21 @@ fun PortfolioOverviewCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text("总资产", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, color = OnSurface)
-                Text("$stockCount 只", style = MaterialTheme.typography.bodySmall, color = OnSurfaceVariant)
+                Text("$assetCount 项", style = MaterialTheme.typography.bodySmall, color = OnSurfaceVariant)
             }
             Spacer(modifier = Modifier.height(8.dp))
-            Text("¥${totalValue.format(2)}", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold, color = OnSurface)
+            Text("¥${totalAssets.format(2)}", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold, color = OnSurface)
+            // 有负债时净资产比总资产更值得看，别让用户自己心算
+            if (totalLiabilities > 0) {
+                Spacer(modifier = Modifier.height(6.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text("净资产 ¥${netAssets.format(2)}", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium, color = OnSurface)
+                    Text("负债 ¥${totalLiabilities.format(2)}", style = MaterialTheme.typography.bodyMedium, color = ProfitGreen)
+                }
+            }
             Spacer(modifier = Modifier.height(12.dp))
             HorizontalDivider(color = Outline.copy(alpha = 0.3f))
             Spacer(modifier = Modifier.height(12.dp))
@@ -70,7 +83,7 @@ fun PortfolioOverviewCard(
             ) {
                 PortfolioMetricColumn("年度分红", if (isDividendLoading) "计算中" else "¥${estimatedAnnualDividend.format(0)}", isDividendLoading)
                 PortfolioMetricColumn("月均分红", if (isDividendLoading) "-" else "¥${monthlyDividend.format(0)}", false)
-                PortfolioMetricColumn(dividendStatus ?: "持有", if (dividendStatus != null) "" else "$stockCount", isDividendLoading && dividendStatus != null)
+                PortfolioMetricColumn(dividendStatus ?: "持有", if (dividendStatus != null) "" else "$assetCount", isDividendLoading && dividendStatus != null)
             }
         }
     }
@@ -103,7 +116,7 @@ fun AccountGroup(
             ) {
                 Column {
                     Text(account, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, color = OnSurface)
-                    Text("${assets.size} 只", style = MaterialTheme.typography.bodySmall, color = OnSurfaceVariant)
+                    Text("${assets.size} 项", style = MaterialTheme.typography.bodySmall, color = OnSurfaceVariant)
                 }
                 Column(horizontalAlignment = Alignment.End) {
                     Text("¥${totalValue.format(2)}", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, color = OnSurface)
@@ -144,6 +157,7 @@ fun StockAssetItem(
     isSelected: Boolean = false,
     onToggleSelection: () -> Unit = {}
 ) {
+    val isLiability = asset.type.isLiability
     val currentPrice = asset.currentPrice
     val pricePrecision = if (asset.type == AssetType.FUND || StockCodeManager.isETF(asset.symbol)) 3 else 2
     val unitLabel = if (asset.type == AssetType.STOCK) "股" else "份"
@@ -174,17 +188,26 @@ fun StockAssetItem(
                         Text(it, style = MaterialTheme.typography.bodySmall, color = OnSurfaceVariant)
                         Text("•", style = MaterialTheme.typography.bodySmall, color = OnSurfaceVariant)
                     }
-                    Text("${asset.balance.format(0)}$unitLabel", style = MaterialTheme.typography.bodySmall, color = OnSurfaceVariant)
+                    // 负债没有「持仓数量」的概念，balance 就是欠多少钱
+                    Text(
+                        if (isLiability) "负债" else "${asset.balance.format(0)}$unitLabel",
+                        style = MaterialTheme.typography.bodySmall, color = OnSurfaceVariant
+                    )
                 }
             }
             Column(modifier = Modifier.weight(1f), horizontalAlignment = Alignment.End) {
                 Text("¥${asset.totalValueCny.format(2)}", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold, color = OnSurface)
                 Text(
-                    if (currentPrice != null) "¥${currentPrice.format(pricePrecision)}" else "价格待更新",
+                    when {
+                        isLiability -> "待偿还"
+                        currentPrice != null -> "¥${currentPrice.format(pricePrecision)}"
+                        else -> "价格待更新"
+                    },
                     style = MaterialTheme.typography.bodySmall, color = OnSurfaceVariant, fontWeight = FontWeight.Medium
                 )
             }
-            if (!selectionMode) {
+            // 分红入口只对能分红的类型有意义，负债点了也是空列表
+            if (!selectionMode && !isLiability) {
                 IconButton(onClick = onDividendClick, modifier = Modifier.size(32.dp)) {
                     Icon(Icons.Filled.Savings, contentDescription = "分红", tint = Primary, modifier = Modifier.size(18.dp))
                 }

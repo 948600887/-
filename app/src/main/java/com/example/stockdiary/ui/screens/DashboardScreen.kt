@@ -31,14 +31,13 @@ import kotlinx.coroutines.launch
 fun DashboardScreen(
     viewModel: DashboardViewModel,
     modifier: Modifier = Modifier,
-    onNavigateToAssetDetail: (Long) -> Unit = {}
+    onNavigateToPortfolio: () -> Unit = {}
 ) {
     val assets by viewModel.assets.collectAsState()
     val preferences by viewModel.preferences.collectAsState()
     val isSyncing by viewModel.isSyncing.collectAsState()
     val isRefreshing by viewModel.isRefreshing.collectAsState()
     val syncResult by viewModel.syncResult.collectAsState()
-    val expandedTypes by viewModel.expandedTypes.collectAsState()
     val dividendLoading by viewModel.dividendLoading.collectAsState()
     val realAnnualIncome by viewModel.realAnnualIncome.collectAsState()
     val incomeCalculationStatus by viewModel.incomeCalculationStatus.collectAsState()
@@ -222,118 +221,14 @@ fun DashboardScreen(
                     }
                 }
 
-                // 排序 & 标题
+                // 资产明细列表已并入「持仓」页，这里只留总览与收入视角。
+                // 给一个能直接跳过去的按钮，不然用户得自己猜明细去哪了。
                 item {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
+                    OutlinedButton(
+                        onClick = onNavigateToPortfolio,
+                        modifier = Modifier.fillMaxWidth()
                     ) {
-                        Text("资产列表", style = MaterialTheme.typography.titleSmall)
-                        SortChip(
-                            currentSort = preferences.sortOrder,
-                            onSortChange = { viewModel.updateSortOrder(it) }
-                        )
-                    }
-                }
-
-                // 列表区一片空白时必须给出口，否则用户以为资产丢了。
-                // 但要分清两种「空」：
-                //   ① 有资产、被显示开关全藏了 → 给「显示全部资产」；
-                //   ② 只有负债、压根没有非负资产 → 说「全部隐藏」是骗人，
-                //      而且那个按钮对负债无效（点了界面纹丝不动）。
-                when {
-                    assetsOnly.isNotEmpty() && visibleAssetsOnly.isEmpty() -> {
-                        item {
-                            Card(
-                                modifier = Modifier.fillMaxWidth(),
-                                colors = CardDefaults.cardColors(
-                                    containerColor = MaterialTheme.colorScheme.surfaceVariant
-                                )
-                            ) {
-                                Column(
-                                    modifier = Modifier.fillMaxWidth().padding(16.dp),
-                                    horizontalAlignment = Alignment.CenterHorizontally
-                                ) {
-                                    Text(
-                                        "当前未显示任何资产类别",
-                                        style = MaterialTheme.typography.titleSmall
-                                    )
-                                    Spacer(modifier = Modifier.height(4.dp))
-                                    Text(
-                                        "你共有 ${assetsOnly.size} 项资产，但显示开关把它们全部隐藏了",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                    Spacer(modifier = Modifier.height(12.dp))
-                                    Button(onClick = { viewModel.showAllAssetTypes() }) {
-                                        Text("显示全部资产")
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    assetsOnly.isEmpty() && liabilities.isNotEmpty() -> {
-                        item {
-                            Card(
-                                modifier = Modifier.fillMaxWidth(),
-                                colors = CardDefaults.cardColors(
-                                    containerColor = MaterialTheme.colorScheme.surfaceVariant
-                                )
-                            ) {
-                                Column(
-                                    modifier = Modifier.fillMaxWidth().padding(16.dp),
-                                    horizontalAlignment = Alignment.CenterHorizontally
-                                ) {
-                                    Text(
-                                        "还没有记录任何资产",
-                                        style = MaterialTheme.typography.titleSmall
-                                    )
-                                    Spacer(modifier = Modifier.height(4.dp))
-                                    Text(
-                                        "目前已记录 ${liabilities.size} 项负债，点右下角 + 添加股票、基金或存款",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // 按类型分组
-                items(assetsByType.keys.toList(), key = { it.name }) { type ->
-                    val typeAssets = assetsByType[type] ?: emptyList()
-                    if (typeAssets.isNotEmpty()) {
-                        AssetTypeSection(
-                            type = type,
-                            assets = typeAssets,
-                            isExpanded = expandedTypes.contains(type),
-                            onToggleExpand = { viewModel.toggleExpand(type) }
-                        )
-
-                        if (expandedTypes.contains(type)) {
-                            Column {
-                                typeAssets.forEach { asset ->
-                                    key(asset.id) {
-                                        AssetItem(asset = asset, onClick = { onNavigateToAssetDetail(asset.id) })
-                                        Spacer(modifier = Modifier.height(8.dp))
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // 负债
-                if (preferences.showLiabilities && liabilities.isNotEmpty()) {
-                    item {
-                        Text("负债", style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(top = 8.dp))
-                    }
-                    items(liabilities, key = { it.id }) { asset ->
-                        LiabilityItem(
-                            asset = asset,
-                            onClick = { onNavigateToAssetDetail(asset.id) }
-                        )
+                        Text("去「持仓」看每个账户的明细")
                     }
                 }
             }

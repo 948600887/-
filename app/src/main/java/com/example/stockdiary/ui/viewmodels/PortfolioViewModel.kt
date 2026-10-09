@@ -4,7 +4,9 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.example.stockdiary.data.AssetSyncManager
+import com.example.stockdiary.data.DashboardPreferences
 import com.example.stockdiary.data.DividendIncomeLoader
+import com.example.stockdiary.data.SortOrder
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.di.AppContainer
@@ -43,6 +45,12 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
     private val _existingAccounts = MutableStateFlow<List<String>>(emptyList())
 
     val existingAccounts: StateFlow<List<String>> = _existingAccounts.asStateFlow()
+
+    // 资产列表已从资产页并入这里，显示开关与排序偏好随之接管
+    private val _preferences = MutableStateFlow(
+        container.dashboardPreferencesManager.loadPreferences()
+    )
+    val preferences: StateFlow<DashboardPreferences> = _preferences.asStateFlow()
 
     private var hasLoadedDividend = false
 
@@ -131,6 +139,24 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
 
     fun clearError() {
         _errorMessage.value = null
+    }
+
+    // 「设置 → 仪表盘显示」里把某类资产全关掉后，这里会整片空白，
+    // 而开关只在设置页 —— 必须给一个就地恢复的出口。
+    fun showAllAssetTypes() {
+        _preferences.value = _preferences.value.copy(
+            showBankDeposits = true,
+            showStocks = true,
+            showFunds = true,
+            showCrypto = true,
+            showLiabilities = true
+        )
+        container.dashboardPreferencesManager.savePreferences(_preferences.value)
+    }
+
+    fun updateSortOrder(sortOrder: SortOrder) {
+        _preferences.value = _preferences.value.copy(sortOrder = sortOrder)
+        container.dashboardPreferencesManager.savePreferences(_preferences.value)
     }
 
     fun batchDelete(assetIds: Set<Long>) {

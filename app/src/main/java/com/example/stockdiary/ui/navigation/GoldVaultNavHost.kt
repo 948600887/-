@@ -131,7 +131,7 @@ fun GoldVaultNavHost() {
             when (selectedScreen) {
                 Screen.Dashboard -> DashboardScreen(
                     viewModel = dashboardViewModel,
-                    onNavigateToAssetDetail = { currentDetailId = it },
+                    onNavigateToPortfolio = { selectedScreenRoute = Screen.Portfolio.route },
                     modifier = Modifier.padding(padding)
                 )
                 Screen.Portfolio -> PortfolioScreen(

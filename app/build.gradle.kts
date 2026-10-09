@@ -112,6 +112,8 @@ dependencies {
     // Other
     implementation("androidx.core:core-ktx:1.13.0")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.0")
+    // 提供 collectAsStateWithLifecycle：App 退到后台时停止收集 Flow，避免后台无谓的重组与数据库查询
+    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.0")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.0")
     implementation("androidx.activity:activity-compose:1.9.0")
     

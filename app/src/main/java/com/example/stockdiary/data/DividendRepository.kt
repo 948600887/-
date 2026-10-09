@@ -8,6 +8,8 @@ import com.example.stockdiary.database.Dividend
 import com.example.stockdiary.database.StockDatabase
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 import com.example.stockdiary.common.Result
@@ -25,6 +27,9 @@ class DividendRepository private constructor(
     
     private val cache = ConcurrentHashMap<String, CacheEntry>()
     private val cacheTTL = 24 * 60 * 60 * 1000L
+
+    /** 预取分红时的并发上限：与 AssetSyncManager.MAX_CONCURRENT_SYNC 一致，别把接口打爆 */
+    private val maxConcurrentFetch = 8
     
     private val cacheHits = AtomicInteger(0)
     private val cacheMisses = AtomicInteger(0)
@@ -444,13 +449,16 @@ class DividendRepository private constructor(
     }
     
     suspend fun preFetchDividends(symbols: List<String>, forceRefresh: Boolean = false) {
+        val semaphore = Semaphore(maxConcurrentFetch)
         coroutineScope {
             symbols.map { symbol ->
                 val normalized = StockCodeManager.normalizeSymbol(symbol)
                 val entry = cache[normalized]
                 if (forceRefresh || entry == null || !entry.isValid(cacheTTL)) {
                     async {
-                        getDividendsBySymbol(normalized, forceRefresh)
+                        semaphore.withPermit {
+                            getDividendsBySymbol(normalized, forceRefresh)
+                        }
                     }
                 } else null
             }.filterNotNull().forEach { it.await() }

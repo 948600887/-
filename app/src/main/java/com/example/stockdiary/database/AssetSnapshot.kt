@@ -50,15 +50,20 @@ data class AssetSnapshot(
 
             val totalCost = stockCost + fundCost + cryptoCost + bankDepositCost
 
+            // 同一份求和只算一次：原来 totalAssets/netAssets 各写一遍 sumOf，profit 也各写一遍
+            val assetValue = assetsOnly.sumOf { it.totalValueCny }
+            val liabilityValue = liabilities.sumOf { it.totalValueCny }
+            val totalProfit = assetsOnly.sumOf { it.profitCny }
+
             return AssetSnapshot(
                 date = date,
                 timestamp = System.currentTimeMillis(),
-                totalAssets = assetsOnly.sumOf { it.totalValueCny },
-                totalLiabilities = liabilities.sumOf { it.totalValueCny },
-                netAssets = assetsOnly.sumOf { it.totalValueCny } - liabilities.sumOf { it.totalValueCny },
+                totalAssets = assetValue,
+                totalLiabilities = liabilityValue,
+                netAssets = assetValue - liabilityValue,
                 totalCost = totalCost,
-                totalProfit = assetsOnly.sumOf { it.profitCny },
-                yieldRate = if (totalCost > 0) (assetsOnly.sumOf { it.profitCny } / totalCost * 100) else 0.0,
+                totalProfit = totalProfit,
+                yieldRate = if (totalCost > 0) (totalProfit / totalCost * 100) else 0.0,
                 stockValue = stocks.sumOf { it.totalValueCny },
                 fundValue = funds.sumOf { it.totalValueCny },
                 cryptoValue = cryptos.sumOf { it.totalValueCny },

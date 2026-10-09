@@ -10,6 +10,7 @@ import androidx.compose.material.icons.automirrored.filled.DriveFileMove
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.platform.LocalContext
 import com.example.stockdiary.utils.AppLogger
 import androidx.compose.ui.Alignment
@@ -36,14 +37,14 @@ fun PortfolioScreen(
     modifier: Modifier = Modifier,
     onNavigateToAssetDetail: (Long) -> Unit = {}
 ) {
-    val assets by viewModel.assets.collectAsState()
-    val isRefreshing by viewModel.isRefreshing.collectAsState()
-    val estimatedAnnualDividend by viewModel.estimatedAnnualDividend.collectAsState()
-    val dividendLoading by viewModel.dividendLoading.collectAsState()
-    val incomeCalculationStatus by viewModel.incomeCalculationStatus.collectAsState()
-    val errorMessage by viewModel.errorMessage.collectAsState()
-    val existingAccounts by viewModel.existingAccounts.collectAsState()
-    val preferences by viewModel.preferences.collectAsState()
+    val assets by viewModel.assets.collectAsStateWithLifecycle()
+    val isRefreshing by viewModel.isRefreshing.collectAsStateWithLifecycle()
+    val estimatedAnnualDividend by viewModel.estimatedAnnualDividend.collectAsStateWithLifecycle()
+    val dividendLoading by viewModel.dividendLoading.collectAsStateWithLifecycle()
+    val incomeCalculationStatus by viewModel.incomeCalculationStatus.collectAsStateWithLifecycle()
+    val errorMessage by viewModel.errorMessage.collectAsStateWithLifecycle()
+    val existingAccounts by viewModel.existingAccounts.collectAsStateWithLifecycle()
+    val preferences by viewModel.preferences.collectAsStateWithLifecycle()
 
     var showAddDialog by remember { mutableStateOf(false) }
     var showSearchDialog by remember { mutableStateOf(false) }

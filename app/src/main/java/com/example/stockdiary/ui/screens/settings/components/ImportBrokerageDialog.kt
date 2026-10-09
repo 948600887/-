@@ -43,7 +43,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.collectAsState
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -73,7 +73,7 @@ fun ImportBrokerageDialog(
     val viewModel: ImportBrokerageViewModel = viewModel(
         factory = ImportBrokerageViewModel.Factory(container)
     )
-    val state by viewModel.uiState.collectAsState()
+    val state by viewModel.uiState.collectAsStateWithLifecycle()
 
     // ViewModel 挂在宿主 Activity 的作用域上，对话框关掉后实例还活着——
     // 不复位的话下次打开会残留上一次的文件、映射和预览数据

@@ -38,7 +38,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -75,14 +75,14 @@ fun SettingsScreen(
 ) {
     val context = LocalContext.current
     val viewModel: SettingsViewModel = viewModel(factory = SettingsViewModel.Factory(container))
-    val uiState by viewModel.uiState.collectAsState()
-    val dashboardPrefs by viewModel.dashboardPreferences.collectAsState()
-    val autoPriceSyncEnabled by viewModel.autoPriceSyncEnabled.collectAsState()
-    val lastPriceSyncTime by viewModel.lastPriceSyncTime.collectAsState()
-    val reminderEnabled by viewModel.reminderEnabled.collectAsState()
-    val reminderHour by viewModel.reminderHour.collectAsState()
-    val reminderMinute by viewModel.reminderMinute.collectAsState()
-    val reminderError by viewModel.reminderError.collectAsState()
+    val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val dashboardPrefs by viewModel.dashboardPreferences.collectAsStateWithLifecycle()
+    val autoPriceSyncEnabled by viewModel.autoPriceSyncEnabled.collectAsStateWithLifecycle()
+    val lastPriceSyncTime by viewModel.lastPriceSyncTime.collectAsStateWithLifecycle()
+    val reminderEnabled by viewModel.reminderEnabled.collectAsStateWithLifecycle()
+    val reminderHour by viewModel.reminderHour.collectAsStateWithLifecycle()
+    val reminderMinute by viewModel.reminderMinute.collectAsStateWithLifecycle()
+    val reminderError by viewModel.reminderError.collectAsStateWithLifecycle()
     var currentTheme by remember { mutableStateOf(ThemeManager.getThemeMode(context)) }
 
     DisposableEffect(Unit) {
@@ -124,8 +124,16 @@ fun SettingsScreen(
     val assets = uiState.assets
     val snapshots = uiState.snapshots
     val assetCount = assets.size
-    val totalAssets = assets.filter { !it.type.isLiability }.sumOf { it.totalValue }
-    val totalLiabilities = assets.filter { it.type.isLiability }.sumOf { it.totalValue }
+    // 一次遍历同时累加资产与负债：原来每次重组都要 filter 两遍（列表上百条时是白花的开销）
+    val (totalAssets, totalLiabilities) = remember(assets) {
+        var assetSum = 0.0
+        var liabilitySum = 0.0
+        assets.forEach { asset ->
+            if (asset.type.isLiability) liabilitySum += asset.totalValue
+            else assetSum += asset.totalValue
+        }
+        assetSum to liabilitySum
+    }
 
     LaunchedEffect(uiState.errorMessage) {
         uiState.errorMessage?.let { message ->

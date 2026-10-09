@@ -9,6 +9,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -37,12 +38,12 @@ fun AssetDetailScreen(
     modifier: Modifier = Modifier,
     onNavigateBack: () -> Unit = {}
 ) {
-    val asset by viewModel.asset.collectAsState()
-    val dividends by viewModel.dividends.collectAsState()
-    val isLoading by viewModel.isLoading.collectAsState()
-    val isDividendLoading by viewModel.isDividendLoading.collectAsState()
-    val errorMessage by viewModel.errorMessage.collectAsState()
-    val isRefreshing by viewModel.isRefreshing.collectAsState()
+    val asset by viewModel.asset.collectAsStateWithLifecycle()
+    val dividends by viewModel.dividends.collectAsStateWithLifecycle()
+    val isLoading by viewModel.isLoading.collectAsStateWithLifecycle()
+    val isDividendLoading by viewModel.isDividendLoading.collectAsStateWithLifecycle()
+    val errorMessage by viewModel.errorMessage.collectAsStateWithLifecycle()
+    val isRefreshing by viewModel.isRefreshing.collectAsStateWithLifecycle()
 
     var showEditDialog by remember { mutableStateOf(false) }
     var showAdjustDialog by remember { mutableStateOf(false) }

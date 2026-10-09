@@ -3,6 +3,7 @@ package com.example.stockdiary.ui.screens.history.components
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -86,6 +87,39 @@ fun HistoryPeriodSelector(
     }
 }
 
+/**
+ * 历史页小节卡片的统一骨架。
+ *
+ * 原先「资产总览 / 期间增值 / 风险指标 / 月度增值 / 资产分布」5 张卡各抄一遍
+ * Card + SurfaceContainerLow + 12.dp 圆角 + 16.dp 内边距，改成一处定义后，
+ * 以后调卡片样式只动这里。
+ *
+ * @param titleGap 标题与内容之间的间距：大数字卡片用 4.dp，图表/指标网格用 12.dp
+ * @param spacerBefore 小节之间的 12.dp 留白；列表第一张卡不需要
+ */
+@Composable
+private fun SectionCard(
+    title: String,
+    titleGap: Dp = 12.dp,
+    spacerBefore: Boolean = true,
+    content: @Composable ColumnScope.() -> Unit
+) {
+    if (spacerBefore) {
+        Spacer(modifier = Modifier.height(12.dp))
+    }
+    Card(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+        colors = CardDefaults.cardColors(containerColor = SurfaceContainerLow),
+        shape = RoundedCornerShape(12.dp)
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text(title, fontSize = 12.sp, color = OnSurfaceVariant)
+            Spacer(modifier = Modifier.height(titleGap))
+            content()
+        }
+    }
+}
+
 fun LazyListScope.historyOverviewCard(
     latest: AssetSnapshot,
     snapshots: List<AssetSnapshot>
@@ -101,34 +135,26 @@ fun LazyListScope.historyOverviewCard(
     val yearDelta = growth.yearDelta
 
     item {
-        Card(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
-            colors = CardDefaults.cardColors(containerColor = SurfaceContainerLow),
-            shape = RoundedCornerShape(12.dp)
-        ) {
-            Column(modifier = Modifier.padding(16.dp)) {
-                Text("资产总览", fontSize = 12.sp, color = OnSurfaceVariant)
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    text = "¥${latest.netAssets.format(2)}",
-                    fontSize = 28.sp, fontWeight = FontWeight.Bold, color = OnSurface
+        SectionCard(title = "资产总览", titleGap = 4.dp, spacerBefore = false) {
+            Text(
+                text = "¥${latest.netAssets.format(2)}",
+                fontSize = 28.sp, fontWeight = FontWeight.Bold, color = OnSurface
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                OverviewMetric(
+                    "本月新增",
+                    monthDelta?.toProfitDisplay("¥") ?: "—",
+                    monthDelta?.profitColor() ?: OnSurface
                 )
-                Spacer(modifier = Modifier.height(12.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    OverviewMetric(
-                        "本月新增",
-                        monthDelta?.toProfitDisplay("¥") ?: "—",
-                        monthDelta?.profitColor() ?: OnSurface
-                    )
-                    OverviewMetric(
-                        "今年新增",
-                        yearDelta?.toProfitDisplay("¥") ?: "—",
-                        yearDelta?.profitColor() ?: OnSurface
-                    )
-                }
+                OverviewMetric(
+                    "今年新增",
+                    yearDelta?.toProfitDisplay("¥") ?: "—",
+                    yearDelta?.profitColor() ?: OnSurface
+                )
             }
         }
     }
@@ -169,72 +195,54 @@ fun LazyListScope.historyPeriodReturnCard(
     val periodLabel = if (firstLabel == lastLabel) firstLabel else "$firstLabel ~ $lastLabel"
 
     item {
-        Spacer(modifier = Modifier.height(12.dp))
-        Card(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
-            colors = CardDefaults.cardColors(containerColor = SurfaceContainerLow),
-            shape = RoundedCornerShape(12.dp)
-        ) {
-            Column(modifier = Modifier.padding(16.dp)) {
-                Text("期间增值", fontSize = 12.sp, color = OnSurfaceVariant)
-                Spacer(modifier = Modifier.height(4.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.Bottom
-                ) {
-                    Column {
-                        Text(
-                            text = periodChange.toProfitDisplay("¥"),
-                            fontSize = 24.sp, fontWeight = FontWeight.Bold,
-                            color = periodChange.profitColor()
-                        )
-                        Text("净资产增加", fontSize = 11.sp, color = OnSurfaceVariant)
-                    }
-                    Column(horizontalAlignment = Alignment.End) {
-                        Text(
-                            text = "${if (periodYield >= 0) "+" else ""}${periodYield.format(2)}%",
-                            fontSize = 24.sp, fontWeight = FontWeight.Bold,
-                            color = periodYield.profitColor()
-                        )
-                        Text("增幅", fontSize = 11.sp, color = OnSurfaceVariant)
-                    }
+        SectionCard(title = "期间增值", titleGap = 4.dp) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.Bottom
+            ) {
+                Column {
+                    Text(
+                        text = periodChange.toProfitDisplay("¥"),
+                        fontSize = 24.sp, fontWeight = FontWeight.Bold,
+                        color = periodChange.profitColor()
+                    )
+                    Text("净资产增加", fontSize = 11.sp, color = OnSurfaceVariant)
                 }
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(periodLabel, fontSize = 11.sp, color = OnSurfaceVariant)
+                Column(horizontalAlignment = Alignment.End) {
+                    Text(
+                        text = "${if (periodYield >= 0) "+" else ""}${periodYield.format(2)}%",
+                        fontSize = 24.sp, fontWeight = FontWeight.Bold,
+                        color = periodYield.profitColor()
+                    )
+                    Text("增幅", fontSize = 11.sp, color = OnSurfaceVariant)
+                }
             }
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(periodLabel, fontSize = 11.sp, color = OnSurfaceVariant)
         }
     }
 }
 
 fun LazyListScope.historyRiskCard(stats: SnapshotStatistics) {
     item {
-        Spacer(modifier = Modifier.height(12.dp))
-        Card(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
-            colors = CardDefaults.cardColors(containerColor = SurfaceContainerLow),
-            shape = RoundedCornerShape(12.dp)
-        ) {
-            Column(modifier = Modifier.padding(16.dp)) {
-                Text("风险指标", fontSize = 12.sp, color = OnSurfaceVariant)
-                Spacer(modifier = Modifier.height(12.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceEvenly
-                ) {
-                    RiskMetric("最大回撤", "${stats.maxDrawdown.format(2)}%", ProfitGreen)
-                    RiskMetric("波动率", "${stats.volatility.format(2)}%", OnSurface)
-                    RiskMetric("日均增幅", "${stats.avgDailyReturnPercent.format(2)}%", stats.avgDailyReturnPercent.profitColor())
-                }
-                Spacer(modifier = Modifier.height(8.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceEvenly
-                ) {
-                    RiskMetric("日均增值额", stats.avgDailyReturnAmount.toProfitDisplay("¥"), stats.avgDailyReturnAmount.profitColor())
-                    RiskMetric("最高净资产", "¥${stats.maxValue.format(0)}", OnSurface)
-                    RiskMetric("最低净资产", "¥${stats.minValue.format(0)}", OnSurface)
-                }
+        SectionCard(title = "风险指标") {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceEvenly
+            ) {
+                RiskMetric("最大回撤", "${stats.maxDrawdown.format(2)}%", ProfitGreen)
+                RiskMetric("波动率", "${stats.volatility.format(2)}%", OnSurface)
+                RiskMetric("日均增幅", "${stats.avgDailyReturnPercent.format(2)}%", stats.avgDailyReturnPercent.profitColor())
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceEvenly
+            ) {
+                RiskMetric("日均增值额", stats.avgDailyReturnAmount.toProfitDisplay("¥"), stats.avgDailyReturnAmount.profitColor())
+                RiskMetric("最高净资产", "¥${stats.maxValue.format(0)}", OnSurface)
+                RiskMetric("最低净资产", "¥${stats.minValue.format(0)}", OnSurface)
             }
         }
     }
@@ -243,20 +251,11 @@ fun LazyListScope.historyRiskCard(stats: SnapshotStatistics) {
 fun LazyListScope.historyMonthlyReturnChart(monthlyReturns: List<MonthlyReturn>) {
     if (monthlyReturns.isEmpty()) return
     item {
-        Spacer(modifier = Modifier.height(12.dp))
-        Card(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
-            colors = CardDefaults.cardColors(containerColor = SurfaceContainerLow),
-            shape = RoundedCornerShape(12.dp)
-        ) {
-            Column(modifier = Modifier.padding(16.dp)) {
-                Text("月度增值", fontSize = 12.sp, color = OnSurfaceVariant)
-                Spacer(modifier = Modifier.height(12.dp))
-                MonthlyReturnChart(
-                    monthlyReturns = monthlyReturns,
-                    modifier = Modifier.fillMaxWidth().height(160.dp)
-                )
-            }
+        SectionCard(title = "月度增值") {
+            MonthlyReturnChart(
+                monthlyReturns = monthlyReturns,
+                modifier = Modifier.fillMaxWidth().height(160.dp)
+            )
         }
     }
 }
@@ -265,37 +264,28 @@ fun LazyListScope.historyAssetDistribution(latest: AssetSnapshot) {
     if (latest.totalAssets <= 0) return
     val totalForShare = if (latest.totalAssets > 0) latest.totalAssets else 1.0
     item {
-        Spacer(modifier = Modifier.height(12.dp))
-        Card(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
-            colors = CardDefaults.cardColors(containerColor = SurfaceContainerLow),
-            shape = RoundedCornerShape(12.dp)
-        ) {
-            Column(modifier = Modifier.padding(16.dp)) {
-                Text("资产分布", fontSize = 12.sp, color = OnSurfaceVariant)
-                Spacer(modifier = Modifier.height(12.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    AssetDonutChart(
-                        latest = latest,
-                        modifier = Modifier.size(120.dp)
-                    )
-                    Spacer(modifier = Modifier.width(20.dp))
-                    Column(modifier = Modifier.weight(1f)) {
-                        if (latest.stockValue > 0) {
-                            DistributionLegend("股票", latest.stockValue, latest.stockValue / totalForShare * 100, LossRed)
-                        }
-                        if (latest.fundValue > 0) {
-                            DistributionLegend("基金", latest.fundValue, latest.fundValue / totalForShare * 100, AccentOrange)
-                        }
-                        if (latest.cryptoValue > 0) {
-                            DistributionLegend("加密货币", latest.cryptoValue, latest.cryptoValue / totalForShare * 100, AccentBlue)
-                        }
-                        if (latest.bankDepositValue > 0) {
-                            DistributionLegend("银行存款", latest.bankDepositValue, latest.bankDepositValue / totalForShare * 100, PrimaryGreen)
-                        }
+        SectionCard(title = "资产分布") {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                AssetDonutChart(
+                    latest = latest,
+                    modifier = Modifier.size(120.dp)
+                )
+                Spacer(modifier = Modifier.width(20.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    if (latest.stockValue > 0) {
+                        DistributionLegend("股票", latest.stockValue, latest.stockValue / totalForShare * 100, LossRed)
+                    }
+                    if (latest.fundValue > 0) {
+                        DistributionLegend("基金", latest.fundValue, latest.fundValue / totalForShare * 100, AccentOrange)
+                    }
+                    if (latest.cryptoValue > 0) {
+                        DistributionLegend("加密货币", latest.cryptoValue, latest.cryptoValue / totalForShare * 100, AccentBlue)
+                    }
+                    if (latest.bankDepositValue > 0) {
+                        DistributionLegend("银行存款", latest.bankDepositValue, latest.bankDepositValue / totalForShare * 100, PrimaryGreen)
                     }
                 }
             }

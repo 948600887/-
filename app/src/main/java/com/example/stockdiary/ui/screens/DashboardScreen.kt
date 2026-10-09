@@ -10,6 +10,7 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -33,16 +34,16 @@ fun DashboardScreen(
     modifier: Modifier = Modifier,
     onNavigateToPortfolio: () -> Unit = {}
 ) {
-    val assets by viewModel.assets.collectAsState()
-    val preferences by viewModel.preferences.collectAsState()
-    val isSyncing by viewModel.isSyncing.collectAsState()
-    val isRefreshing by viewModel.isRefreshing.collectAsState()
-    val syncResult by viewModel.syncResult.collectAsState()
-    val dividendLoading by viewModel.dividendLoading.collectAsState()
-    val realAnnualIncome by viewModel.realAnnualIncome.collectAsState()
-    val incomeCalculationStatus by viewModel.incomeCalculationStatus.collectAsState()
-    val existingAccounts by viewModel.existingAccounts.collectAsState()
-    val dividendProgress by viewModel.dividendProgress.collectAsState()
+    val assets by viewModel.assets.collectAsStateWithLifecycle()
+    val preferences by viewModel.preferences.collectAsStateWithLifecycle()
+    val isSyncing by viewModel.isSyncing.collectAsStateWithLifecycle()
+    val isRefreshing by viewModel.isRefreshing.collectAsStateWithLifecycle()
+    val syncResult by viewModel.syncResult.collectAsStateWithLifecycle()
+    val dividendLoading by viewModel.dividendLoading.collectAsStateWithLifecycle()
+    val realAnnualIncome by viewModel.realAnnualIncome.collectAsStateWithLifecycle()
+    val incomeCalculationStatus by viewModel.incomeCalculationStatus.collectAsStateWithLifecycle()
+    val existingAccounts by viewModel.existingAccounts.collectAsStateWithLifecycle()
+    val dividendProgress by viewModel.dividendProgress.collectAsStateWithLifecycle()
 
     var showAddDialog by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
@@ -74,7 +75,7 @@ fun DashboardScreen(
     val totalLiabilities = remember(liabilities) { liabilities.sumTotalValueCny() }
     val netAssets = totalAssets - totalLiabilities
 
-    val snapshots by viewModel.snapshots.collectAsState()
+    val snapshots by viewModel.snapshots.collectAsStateWithLifecycle()
     val growth = remember(snapshots, netAssets) {
         AssetGrowthCalculator.fromSnapshots(snapshots = snapshots, currentNetAssets = netAssets)
     }

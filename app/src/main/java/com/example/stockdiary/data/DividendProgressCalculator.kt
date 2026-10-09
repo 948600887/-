@@ -2,6 +2,8 @@ package com.example.stockdiary.data
 
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
+import com.example.stockdiary.database.amountFor
+import com.example.stockdiary.database.perTenSharesToAmount
 import java.time.LocalDate
 import java.time.temporal.ChronoUnit
 
@@ -28,19 +30,30 @@ object DividendProgressCalculator {
      * 一只三年没分红的标的，拿 2023 年那次派息去预告今年的到账日是自欺欺人。
      * 定 12 个月是为了和「全年预计」的 TTM 口径一致：**连 TTM 都统计不到的标的，
      * 就不该出现在预计里**。数据源自己排定的未来派息不受此限制（那是真数据，不是推算）。
+     *
+     * 判定用 `lastDate.isBefore(today - 12个月)`，与 `getTTMDividend` 的闭区间窗口对齐。
      */
     private const val STALE_MONTHS = 12L
 
     data class NextPayout(
         val assetName: String,
         val symbol: String?,
-        /** yyyy-MM-dd */
+        /** yyyy-MM-dd，除息日：决定你有没有资格拿这笔钱 */
         val date: String,
+        /**
+         * yyyy-MM-dd，分红发放日——钱真正到账的日子。
+         * 拿不到就是 null，此时界面退回显示 [date]（除息日）并注明。
+         */
+        val payDate: String? = null,
+        /** 距离**到账**的天数（没有 payDate 时按除息日算） */
         val daysUntil: Int,
         val amount: Double,
         /** true=按历史同期推算出的日期；false=数据源已排定的派息日 */
         val isEstimated: Boolean
-    )
+    ) {
+        /** 界面上要显示的日子：优先到账日 */
+        val displayDate: String get() = payDate ?: date
+    }
 
     data class MonthCash(
         val month: Int,
@@ -94,24 +107,25 @@ object DividendProgressCalculator {
         val monthlyScheduled = DoubleArray(13)
         var next: NextPayout? = null
 
-        assets.filter { it.type == AssetType.STOCK || it.type == AssetType.FUND }.forEach { asset ->
-            val symbol = asset.symbol ?: return@forEach
-            val records = recordsBySymbol[symbol] ?: return@forEach
-            if (records.isEmpty()) return@forEach
+        // 显式标签：外层遍历资产、内层遍历分红记录，两个都叫 @forEach 会让 return@forEach 产生歧义
+        assets.filter { it.type == AssetType.STOCK || it.type == AssetType.FUND }.forEach assetLoop@{ asset ->
+            val symbol = asset.symbol ?: return@assetLoop
+            val records = recordsBySymbol[symbol] ?: return@assetLoop
+            if (records.isEmpty()) return@assetLoop
 
             val balance = asset.balance
-            val ttmPerTenShares = DividendYieldCalculator.getTTMDividend(records)
-            yearProjected += ttmPerTenShares / 10.0 * balance
+            val ttmPerTenShares = DividendYieldCalculator.getTTMDividend(records, today)
+            yearProjected += perTenSharesToAmount(ttmPerTenShares, balance)
 
             // 已排定的未来派息：用于倒计时（数据源给的日期比推算更可信）
-            var earliestScheduled: Pair<String, Double>? = null
+            // 三元组 = 除息日 / 到账日 / 金额
+            var earliestScheduled: Triple<String, String?, Double>? = null
 
-            records.forEach { record ->
+            records.forEach recordLoop@{ record ->
                 val date = record.exDividendDate.take(10)
-                if (date.length != 10) return@forEach
-                val month = date.substring(5, 7).toIntOrNull() ?: return@forEach
-                val perShare = record.dividendPerShare.toDoubleOrNull() ?: 0.0
-                val amount = perShare / 10.0 * balance
+                if (date.length != 10) return@recordLoop
+                val month = date.substring(5, 7).toIntOrNull() ?: return@recordLoop
+                val amount = record.amountFor(balance)
 
                 when {
                     date >= yearStart && date <= todayStr -> {
@@ -121,19 +135,23 @@ object DividendProgressCalculator {
                     }
                     date > todayStr && date.startsWith("$year-") -> {
                         monthlyScheduled[month] += amount
-                        if (earliestScheduled == null || date < earliestScheduled!!.first) {
-                            earliestScheduled = date to amount
+                        // 比谁更早，要比「到账日」——用户关心的是钱什么时候进来
+                        val payDate = record.paymentDate
+                        val sortKey = payDate ?: date
+                        if (earliestScheduled == null || sortKey < earliestScheduled!!.first) {
+                            earliestScheduled = Triple(date, payDate, amount)
                         }
                     }
                 }
             }
 
-            val candidate = earliestScheduled?.let { (date, amount) ->
+            val candidate = earliestScheduled?.let { (date, payDate, amount) ->
                 NextPayout(
                     assetName = asset.name,
                     symbol = symbol,
                     date = date,
-                    daysUntil = daysBetween(today, date),
+                    payDate = payDate,
+                    daysUntil = daysBetween(today, payDate ?: date),
                     amount = amount,
                     isEstimated = false
                 )
@@ -170,25 +188,43 @@ object DividendProgressCalculator {
         val lastRecord = records.sortedByDescending { it.exDividendDate.take(10) }.firstOrNull()
             ?: return null
 
-        // 新鲜度闸门：与 TTM 同一判定（严格晚于 12 个月前才算新鲜）
+        // 新鲜度闸门：与 TTM 同一判定 —— 窗口是 [今天-12个月, 今天]，
+        // 所以只有「严格早于 12 个月前」才算陈旧（边界那天 TTM 算得到，这里就还能推）
         // 这里不打印日志 —— 计算器保持纯函数，才好吃单测
         val lastDate = parseDate(lastRecord.exDividendDate.take(10)) ?: return null
-        if (!lastDate.isAfter(today.minusMonths(STALE_MONTHS))) return null
+        if (lastDate.isBefore(today.minusMonths(STALE_MONTHS))) return null
 
         val predicted = DividendIncomeCalculator.predictNextDividendDate(records) ?: return null
         val base = parseDate(predicted) ?: return null
         val date = if (!base.isBefore(today)) base else base.plusYears(1)
 
-        val amount = (lastRecord.dividendPerShare.toDoubleOrNull() ?: 0.0) / 10.0 * balance
+        val amount = lastRecord.amountFor(balance)
+        // 到账日 = 推算出的除息日 + 这只标的历史上「除息→到账」的天数
+        val payDate = paymentLagDays(lastRecord)?.let { date.plusDays(it) }
 
         return NextPayout(
             assetName = assetName,
             symbol = symbol,
             date = date.toString(),
-            daysUntil = daysBetween(today, date.toString()),
+            payDate = payDate?.toString(),
+            daysUntil = daysBetween(today, (payDate ?: date).toString()),
             amount = amount,
             isEstimated = true
         )
+    }
+
+    /**
+     * 这只标的历史上「除息日 → 到账日」隔了多少天。
+     *
+     * 业界（Dividend Wealth 的 forecast）用的是每只标的自己的 ex→pay 间隔，
+     * 而不是拍一个通用值——不同公司/基金差得挺多。
+     * 派息到账通常在 0~60 天内，超出这个范围说明数据源的日期对不上，宁可不用。
+     */
+    private fun paymentLagDays(record: DividendRecord): Long? {
+        val pay = record.paymentDate?.let { parseDate(it) } ?: return null
+        val ex = parseDate(record.exDividendDate.take(10)) ?: return null
+        val days = ChronoUnit.DAYS.between(ex, pay)
+        return if (days in 0..60) days else null
     }
 
     private fun parseDate(value: String): LocalDate? = try {

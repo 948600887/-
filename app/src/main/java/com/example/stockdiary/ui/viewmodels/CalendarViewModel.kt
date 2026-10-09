@@ -11,6 +11,7 @@ import com.example.stockdiary.data.DividendRepository
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.database.SnapshotDao
+import com.example.stockdiary.database.perTenSharesToAmount
 import com.example.stockdiary.di.AppContainer
 import com.example.stockdiary.utils.AppLogger
 import kotlinx.coroutines.CancellationException
@@ -310,7 +311,10 @@ class CalendarViewModel(
                             try {
                                 val date = LocalDate.parse(dateStr)
                                 dividendDates.add(date)
-                                val totalAmount = dayRecords.sumOf { it.dividendPerShare.toDoubleOrNull() ?: 0.0 } / 10.0 * asset.balance
+                                val totalAmount = perTenSharesToAmount(
+                                    dayRecords.sumOf { it.dividendPerShare.toDoubleOrNull() ?: 0.0 },
+                                    asset.balance
+                                )
                                 if (totalAmount > 0) {
                                     data[date] = (data[date] ?: 0.0) + totalAmount
                                 }

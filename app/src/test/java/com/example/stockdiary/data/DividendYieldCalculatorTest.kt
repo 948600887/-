@@ -106,6 +106,19 @@ class DividendYieldCalculatorTest {
     }
 
     @Test
+    fun `getTTMDividend 12个月边界那天要算进去`() {
+        // 窗口是闭区间 [今天-12个月, 今天]，用 isAfter 严格大于会漏掉边界那一天
+        val today = LocalDate.of(2026, 10, 9)
+        val edge = today.minusMonths(12)          // 2025-10-09，正好在边界上
+        val justBefore = edge.minusDays(1)        // 早一天，该被排除
+        val records = listOf(
+            DividendRecord(edge.toString(), "10.0", edge.toString(), "2025"),
+            DividendRecord(justBefore.toString(), "20.0", justBefore.toString(), "2025")
+        )
+        assertEquals(10.0, DividendYieldCalculator.getTTMDividend(records, today), 0.01)
+    }
+
+    @Test
     fun `getTTMDividend ignores old dividends`() {
         val oldDividends = listOf(
             DividendRecord("2020-01-01", "100.0", "2020-01-01", "2020")

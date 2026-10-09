@@ -18,17 +18,19 @@ object DividendYieldCalculator {
      */
     fun calculateTTMDividendYield(
         dividends: List<DividendRecord>,
-        currentPrice: Double
+        currentPrice: Double,
+        today: LocalDate = LocalDate.now()
     ): Double {
         if (currentPrice <= 0 || dividends.isEmpty()) return 0.0
-        
+
         // 获取最近12个月的分红记录
-        val twelveMonthsAgo = LocalDate.now().minusMonths(12)
-        
+        // 含边界：正好 12 个月前那天也算在 TTM 内（isAfter 严格大于会漏掉它）
+        val twelveMonthsAgo = today.minusMonths(12)
+
         val recentDividends = dividends.filter { dividend ->
             try {
                 val date = parseDate(dividend.exDividendDate)
-                date != null && date.isAfter(twelveMonthsAgo)
+                date != null && !date.isBefore(twelveMonthsAgo)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -62,16 +64,19 @@ object DividendYieldCalculator {
     /**
      * 获取最近12个月（TTM）的年度分红总额（每十股）
      * 正确处理一年内多次分红的情况，将所有 TTM 内的分红累加
+     *
+     * 窗口是 **[今天-12个月, 今天]** 闭区间：正好落在边界那天要算进去，
+     * 用 isAfter 严格大于会把那天漏掉一天。
      */
-    fun getTTMDividend(dividends: List<DividendRecord>): Double {
+    fun getTTMDividend(dividends: List<DividendRecord>, today: LocalDate = LocalDate.now()): Double {
         if (dividends.isEmpty()) return 0.0
-        
-        val twelveMonthsAgo = LocalDate.now().minusMonths(12)
+
+        val twelveMonthsAgo = today.minusMonths(12)
         return dividends
             .filter { dividend ->
                 try {
                     val date = parseDate(dividend.exDividendDate)
-                    date != null && date.isAfter(twelveMonthsAgo)
+                    date != null && !date.isBefore(twelveMonthsAgo) && !date.isAfter(today)
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {

@@ -26,6 +26,8 @@ import com.example.stockdiary.data.DividendRecord
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.database.Dividend
+import com.example.stockdiary.database.amountFor
+import com.example.stockdiary.database.perTenSharesToAmount
 import com.example.stockdiary.di.LocalAppContainer
 import com.example.stockdiary.ui.theme.*
 import com.example.stockdiary.utils.AppLogger
@@ -420,7 +422,7 @@ fun DividendDetailDialog(
                     }
                 } else {
                     val totalPerShare = records.sumOf { it.amount }
-                    val totalAmount = totalPerShare / 10.0 * asset.balance
+                    val totalAmount = perTenSharesToAmount(totalPerShare, asset.balance)
                     Card(
                         colors = CardDefaults.cardColors(containerColor = PrimaryContainer.copy(alpha = 0.5f)),
                         shape = RoundedCornerShape(8.dp)
@@ -458,7 +460,7 @@ fun DividendDetailDialog(
                             items = records,
                             key = { it.id }
                         ) { record ->
-                            val amount = record.amount / 10.0 * asset.balance
+                            val amount = record.amountFor(asset.balance)
                             Card(
                                 modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
                                 colors = CardDefaults.cardColors(containerColor = SurfaceContainerLow),
@@ -470,7 +472,12 @@ fun DividendDetailDialog(
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     Column {
-                                        Text(record.date, fontSize = 13.sp, fontWeight = FontWeight.Medium, color = OnSurface)
+                                        Text(
+                                            // 除息日只说明「有没有资格拿」，钱到账通常还要等 1~4 周，
+                                            // 有发放日就一并标出来，免得被当成到账日
+                                            record.date + (record.payDate?.let { " · 到账 ${it.take(5)}" } ?: ""),
+                                            fontSize = 13.sp, fontWeight = FontWeight.Medium, color = OnSurface
+                                        )
                                         Text(
                                             "每10$unitWord ¥${record.amount.format(2)}",
                                             fontSize = 11.sp, color = OnSurfaceVariant

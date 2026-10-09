@@ -48,7 +48,8 @@ object DividendIncomeCalculator {
     }
 
     /**
-     * 计算组合的综合收益率（分红+利息）
+     * 计算组合的年化收入率（分红 + 利息）占总资产的比例。
+     * 注：App 已去掉成本概念，这里不是「收益率」，是「收入率」。
      */
     fun calculatePortfolioYield(
         assets: List<com.example.stockdiary.database.Asset>,
@@ -69,17 +70,6 @@ object DividendIncomeCalculator {
     fun calculateAnnualDividendIncome(asset: Asset, dividendPerShare: Double): Double {
         if (asset.type != AssetType.STOCK && asset.type != AssetType.FUND) return 0.0
         return asset.balance * dividendPerShare / 10.0
-    }
-
-    /**
-     * 计算股息率（基于成本价）
-     * @param dividendPerShare 每十股分红
-     * @param costPrice 成本价
-     * @return 股息率百分比
-     */
-    fun calculateDividendYieldByCost(dividendPerShare: Double, costPrice: Double): Double {
-        if (costPrice <= 0) return 0.0
-        return (dividendPerShare / 10.0 / costPrice) * 100
     }
 
     /**

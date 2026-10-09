@@ -25,38 +25,8 @@ class AssetTest {
     }
     
     @Test
-    fun `Asset profit calculates correctly`() {
-        val asset = Asset(
-            id = 1,
-            name = "贵州茅台",
-            type = AssetType.STOCK,
-            symbol = "sh600519",
-            account = "招商证券",
-            balance = 100.0,
-            purchasePrice = 1800.0,
-            currentPrice = 2000.0
-        )
-        
-        assertEquals(20000.0, asset.profit, 0.01)
-    }
-    
-    @Test
-    fun `Asset profit percent calculates correctly`() {
-        val asset = Asset(
-            id = 1,
-            name = "贵州茅台",
-            type = AssetType.STOCK,
-            symbol = "sh600519",
-            account = "招商证券",
-            balance = 100.0,
-            purchasePrice = 1800.0,
-            currentPrice = 2000.0
-        )
-        
-        assertEquals(11.11, asset.profitPercent, 0.5)
-    }
-    
-    @Test
+    // 以下两个用例随「去成本」改造一起删除：
+    // Asset.profit / profitPercent 已从实体上移除，界面不再展示盈亏
     fun `Bank deposit totalValue equals balance`() {
         val asset = Asset(
             id = 1,
@@ -80,19 +50,6 @@ class AssetTest {
         )
         
         assertEquals(500000.0, asset.totalValue, 0.01)
-    }
-    
-    @Test
-    fun `Liability profit is always zero`() {
-        val asset = Asset(
-            id = 1,
-            name = "信用卡",
-            type = AssetType.CREDIT_CARD,
-            account = "招商银行",
-            balance = 10000.0
-        )
-        
-        assertEquals(0.0, asset.profit, 0.01)
     }
     
     @Test
@@ -218,23 +175,6 @@ class AssetTypeTest {
 class FormatTest {
     
     @Test
-    fun `profit calculation with loss`() {
-        val asset = Asset(
-            id = 1,
-            name = "股票",
-            type = AssetType.STOCK,
-            symbol = "sh600000",
-            account = "券商",
-            balance = 100.0,
-            purchasePrice = 100.0,
-            currentPrice = 90.0
-        )
-        
-        assertEquals(-1000.0, asset.profit, 0.01)
-        assertEquals(-10.0, asset.profitPercent, 0.01)
-    }
-    
-    @Test
     fun `zero balance asset`() {
         val asset = Asset(
             id = 1,
@@ -246,12 +186,10 @@ class FormatTest {
             purchasePrice = 100.0,
             currentPrice = 90.0
         )
-        
+
         assertEquals(0.0, asset.totalValue, 0.01)
-        assertEquals(0.0, asset.profit, 0.01)
-        assertEquals(0.0, asset.profitPercent, 0.01)
     }
-    
+
     @Test
     fun `crypto asset calculation`() {
         val asset = Asset(
@@ -264,9 +202,7 @@ class FormatTest {
             purchasePrice = 300000.0,
             currentPrice = 450000.0
         )
-        
+
         assertEquals(675000.0, asset.totalValue, 0.01)
-        assertEquals(225000.0, asset.profit, 0.01)
-        assertEquals(50.0, asset.profitPercent, 0.01)
     }
 }

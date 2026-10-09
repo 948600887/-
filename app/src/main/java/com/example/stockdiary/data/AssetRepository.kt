@@ -105,7 +105,6 @@ class AssetRepository private constructor(
             assetDao.deleteAllAssets()
             snapshotDao.deleteAllSnapshotDetails()
             snapshotDao.deleteAllSnapshots()
-            db.portfolioDao().deleteAll()
             db.dividendDao().deleteAll()
             db.transactionDao().deleteAllTransactions()
         }

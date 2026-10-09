@@ -20,6 +20,7 @@ import com.example.stockdiary.ui.theme.LossRed
 import com.example.stockdiary.ui.theme.OnSurface
 import com.example.stockdiary.ui.theme.OnSurfaceVariant
 import com.example.stockdiary.ui.theme.Outline
+import com.example.stockdiary.database.amountFor
 import com.example.stockdiary.utils.format
 import com.example.stockdiary.utils.shareUnitWord
 import java.time.LocalDate
@@ -45,12 +46,14 @@ fun DividendDayDetail(
     }
 
     // 预计算每个分红的金额（避免两次计算）
+    // 找不到对应持仓时给出 null 而不是拿 1 份兜底 —— 兜底会凭空变出一个「每份」的假金额，
+    // 界面上显示「—」比显示一个错的数诚实
     val details = dayDividendDetails.map { (sym, record) ->
         val asset = assetMap[sym]
-        val amount = (record.dividendPerShare.toDoubleOrNull() ?: 0.0) / 10.0 * (asset?.balance ?: 1.0)
+        val amount = asset?.let { record.amountFor(it.balance) }
         Triple(sym, record, amount)
     }
-    val totalDividend = details.sumOf { it.third }
+    val totalDividend = details.sumOf { it.third ?: 0.0 }
 
     HorizontalDivider(
         modifier = Modifier.padding(vertical = 12.dp),
@@ -92,10 +95,10 @@ fun DividendDayDetail(
                 )
             }
             Text(
-                text = "+¥${amount.format(2)}",
+                text = amount?.let { "+¥${it.format(2)}" } ?: "—",
                 fontSize = 14.sp,
                 fontWeight = FontWeight.Bold,
-                color = LossRed
+                color = if (amount == null) OnSurfaceVariant else LossRed
             )
         }
         Spacer(modifier = Modifier.height(4.dp))

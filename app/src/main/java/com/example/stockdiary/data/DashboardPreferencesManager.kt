@@ -30,6 +30,11 @@ enum class SortOrder {
 enum class DashboardComponent(val key: String, val title: String) {
     TOTAL_ASSETS("total_assets", "总资产"),
     NET_ASSETS("net_assets", "净资产"),
+    /**
+     * 「收入预估」卡片。
+     * key 沿用旧名 profit —— 它是 SharedPreferences 的键，改了老用户的显示开关会失效。
+     * 显示名已经从「盈亏」改成「收入预估」，界面上不再出现盈亏字样。
+     */
     PROFIT("profit", "收入预估"),
     DISTRIBUTION("distribution", "资产分布"),
     BANK_DEPOSITS("bank_deposits", "银行存款"),

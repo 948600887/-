@@ -134,7 +134,9 @@ class FundDividendApiService {
                                     exDividendDate = exDate,
                                     dividendPerShare = dividendPerShare.toString(),
                                     announceDate = regDate,
-                                    fiscalYear = fiscalYear
+                                    fiscalYear = fiscalYear,
+                                    // 钱真正到账的日子，比除息日通常晚 1~4 周
+                                    paymentDate = parsePayDate(cells, headerIndices.payDateIndex)
                                 )
                             )
                         }
@@ -200,13 +202,15 @@ class FundDividendApiService {
     private data class FundDividendHeaderIndices(
         val exDateIndex: Int,
         val regDateIndex: Int,
-        val dividendIndex: Int
+        val dividendIndex: Int,
+        val payDateIndex: Int
     )
 
     private fun parseFundDividendHeaders(table: org.jsoup.nodes.Element): FundDividendHeaderIndices {
         var exDateIndex = -1
         var regDateIndex = -1
         var dividendIndex = -1
+        var payDateIndex = -1
 
         val headerRows = table.select("tr")
         for (row in headerRows) {
@@ -216,6 +220,8 @@ class FundDividendApiService {
                 when {
                     exDateIndex < 0 && text.contains("除息日") -> exDateIndex = index
                     regDateIndex < 0 && text.contains("权益登记日") -> regDateIndex = index
+                    // 先匹配更具体的「分红发放日」，避免被下面泛化的「分红」抢走
+                    payDateIndex < 0 && (text.contains("分红发放日") || text.contains("派息日")) -> payDateIndex = index
                     dividendIndex < 0 && (text.contains("每10份分红") || text.contains("每份分红") || text.contains("每10份派") || text.contains("每份派") || text.contains("分红")) -> dividendIndex = index
                 }
             }
@@ -230,8 +236,19 @@ class FundDividendApiService {
             AppLogger.d("未识别分红金额列，使用默认索引 3", TAG)
             dividendIndex = 3
         }
+        if (payDateIndex < 0) {
+            AppLogger.d("未识别分红发放日列，使用默认索引 4", TAG)
+            payDateIndex = 4
+        }
 
-        return FundDividendHeaderIndices(exDateIndex, regDateIndex, dividendIndex)
+        return FundDividendHeaderIndices(exDateIndex, regDateIndex, dividendIndex, payDateIndex)
+    }
+
+    /** 取「分红发放日」单元格文本，格式不对就当没有 */
+    private fun parsePayDate(cells: org.jsoup.select.Elements, index: Int): String? {
+        if (index < 0) return null
+        val text = cells.getOrNull(index)?.text()?.trim().orEmpty()
+        return if (text.matches(Regex("\\d{4}-\\d{2}-\\d{2}"))) text else null
     }
 
     /**

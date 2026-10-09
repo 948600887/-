@@ -5,6 +5,7 @@ import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
 import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.database.StockDatabase
+import com.example.stockdiary.database.amountFor
 import com.example.stockdiary.utils.AppLogger
 import com.example.stockdiary.utils.NotificationHelper
 import kotlinx.coroutines.flow.first
@@ -176,8 +177,10 @@ class PriceSyncWorker(
             if (symbols.isEmpty()) return
 
             val db = StockDatabase.getInstance(context)
+            // 到账日优先：除息日只是「有没有资格」的界点，钱真正到账是 payDate。
+            // 数据源没给 payDate 时才退回除息日。
             val todayDividends = db.dividendDao().getBySymbols(symbols)
-                .filter { it.date == today }
+                .filter { (it.payDate ?: it.date) == today }
             if (todayDividends.isEmpty()) return
 
             val assetMap = assets.associateBy { it.symbol }
@@ -188,10 +191,10 @@ class PriceSyncWorker(
             var newCount = 0
             for (dividend in todayDividends) {
                 val asset = assetMap[dividend.symbol] ?: continue
-                val key = "${dividend.symbol}_${dividend.date}"
+                val key = "${dividend.symbol}_${dividend.payDate ?: dividend.date}"
                 if (prefs.getBoolean(key, false)) continue
 
-                val amount = dividend.amount / 10.0 * asset.balance
+                val amount = dividend.amountFor(asset.balance)
                 totalAmount += amount
                 newCount++
                 editor.putBoolean(key, true)

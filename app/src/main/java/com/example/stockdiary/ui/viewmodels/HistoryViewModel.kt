@@ -186,9 +186,9 @@ data class SnapshotStatistics(
     val minValue: Double,
     val totalSnapshots: Int,
     val maxDrawdown: Double,
-    /** 日均收益率（百分比） */
+    /** 日均增幅（百分比）：净资产相对上一期快照的日均变化，不是收益率 */
     val avgDailyReturnPercent: Double,
-    /** 日均收益金额 */
+    /** 日均增值额 */
     val avgDailyReturnAmount: Double,
     val volatility: Double
 )

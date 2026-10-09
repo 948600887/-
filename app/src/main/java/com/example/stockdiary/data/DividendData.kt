@@ -22,7 +22,13 @@ data class DividendRecord(
     val exDividendDate: String,      // 除权除息日
     val dividendPerShare: String,    // 每十股分红（元）
     val announceDate: String,        // 公告日期
-    val fiscalYear: String           // 财年
+    val fiscalYear: String,          // 财年
+    /**
+     * 分红发放日（钱真正到账的日子），通常为除息日之后 1~4 周。
+     * 只有部分数据源给得出（天天基金的「分红发放日」列）；拿不到就是 null，
+     * 界面/通知退回用除息日，并在文案上说清那是除息日。
+     */
+    val paymentDate: String? = null
 )
 
 /**

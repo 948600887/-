@@ -156,8 +156,13 @@ fun NextPayoutCard(
                     maxLines = 1
                 )
                 Text(
-                    "${next.date}${if (next.isEstimated) "（按历史同期推算）" else ""}",
+                    "${next.displayDate}${if (next.isEstimated) "（按历史同期推算）" else ""}",
                     style = MaterialTheme.typography.bodySmall,
+                    color = OnSurfaceVariant
+                )
+                Text(
+                    if (next.payDate != null) "到账日" else "除息日（数据源未提供到账日）",
+                    style = MaterialTheme.typography.labelSmall,
                     color = OnSurfaceVariant
                 )
             }
@@ -168,7 +173,11 @@ fun NextPayoutCard(
                     fontWeight = FontWeight.Bold,
                     color = Primary
                 )
-                Text("天后到账", style = MaterialTheme.typography.labelSmall, color = OnSurfaceVariant)
+                Text(
+                    if (next.payDate != null) "天后到账" else "天后除息",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = OnSurfaceVariant
+                )
                 if (next.amount > 0) {
                     Spacer(modifier = Modifier.height(2.dp))
                     Text(

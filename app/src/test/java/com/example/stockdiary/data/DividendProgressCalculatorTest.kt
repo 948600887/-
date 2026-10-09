@@ -157,14 +157,27 @@ class DividendProgressCalculatorTest {
     }
 
     @Test
-    fun `正好12个月算陈旧不再推算，与TTM口径一致`() {
+    fun `正好12个月仍在TTM窗口内，闸门不杀它`() {
+        // TTM 窗口是闭区间 [今天-12个月, 今天]，边界那天必须算进去；
+        // 新鲜度闸门用同一把尺子，所以边界那天也还能推算下一笔
         val edgeDate = today.minusMonths(12)
         val assets = listOf(asset("长江电力", "600900", 1000.0))
         val records = mapOf("600900" to listOf(record(edgeDate.toString(), 5.0)))
 
         val progress = DividendProgressCalculator.calculate(assets, records, today)
 
-        // 边界那天连 TTM 都统计不到（TTM 用 isAfter 严格大于），所以也不该进预计
+        assertEquals(500.0, progress.yearProjected, 0.001)
+        assertNotNull(progress.nextPayout)
+    }
+
+    @Test
+    fun `早于12个月哪怕只早一天也会被闸门拦下`() {
+        val justStale = today.minusMonths(12).minusDays(1)
+        val assets = listOf(asset("长江电力", "600900", 1000.0))
+        val records = mapOf("600900" to listOf(record(justStale.toString(), 5.0)))
+
+        val progress = DividendProgressCalculator.calculate(assets, records, today)
+
         assertEquals(0.0, progress.yearProjected, 0.001)
         assertNull(progress.nextPayout)
     }
@@ -200,6 +213,51 @@ class DividendProgressCalculatorTest {
         val next = progress.nextPayout
         assertEquals(scheduledDate.toString(), next?.date)
         assertFalse(next?.isEstimated ?: true)
+    }
+
+    @Test
+    fun `下一笔显示到账日而不是除息日`() {
+        // 除息日只是「有没有资格」的界点，钱真正到账要晚几天
+        val exDate = today.plusDays(10)
+        val payDate = exDate.plusDays(5)
+        val assets = listOf(asset("长江电力", "600900", 1000.0))
+        val records = mapOf(
+            "600900" to listOf(
+                record(exDate.toString(), 5.0).copy(paymentDate = payDate.toString())
+            )
+        )
+
+        val progress = DividendProgressCalculator.calculate(assets, records, today)
+
+        val next = progress.nextPayout
+        assertEquals(exDate.toString(), next?.date)          // 资格日
+        assertEquals(payDate.toString(), next?.displayDate)   // 界面显示到账日
+        assertEquals(15, next?.daysUntil)                     // 倒计时按到账日算
+    }
+
+    @Test
+    fun `推算下一笔时会沿用该标的历史的除息到到账间隔`() {
+        // 历史上除息 → 到账隔了 7 天，推算出的那笔也应该加同样的天数
+        val lastEx = today.minusMonths(4)
+        val lastPay = lastEx.plusDays(7)
+        val assets = listOf(asset("长江电力", "600900", 1000.0))
+        val records = mapOf(
+            "600900" to listOf(
+                record(lastEx.toString(), 5.0).copy(paymentDate = lastPay.toString())
+            )
+        )
+
+        val progress = DividendProgressCalculator.calculate(assets, records, today)
+
+        val next = progress.nextPayout
+        assertNotNull(next?.payDate)
+        assertEquals(
+            7,
+            java.time.temporal.ChronoUnit.DAYS.between(
+                java.time.LocalDate.parse(next!!.date),
+                java.time.LocalDate.parse(next.payDate!!)
+            )
+        )
     }
 
     @Test

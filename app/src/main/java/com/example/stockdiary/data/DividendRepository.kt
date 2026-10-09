@@ -103,7 +103,8 @@ class DividendRepository private constructor(
                             exDividendDate = dbDiv.date,
                             dividendPerShare = dbDiv.amount.toString(),
                             announceDate = "",
-                            fiscalYear = dbDiv.date.take(4)
+                            fiscalYear = dbDiv.date.take(4),
+                            paymentDate = dbDiv.payDate
                         )
                     }
                 } else {
@@ -134,12 +135,13 @@ class DividendRepository private constructor(
 
         val dbRecords = dividendDao.getBySymbol(normalizedSymbol)
         if (dbRecords.isNotEmpty()) {
-            val records = dbRecords.map { dbDiv ->
+            val records =                 dbRecords.map { dbDiv ->
                 DividendRecord(
                     exDividendDate = dbDiv.date,
                     dividendPerShare = dbDiv.amount.toString(),
                     announceDate = "",
-                    fiscalYear = dbDiv.date.take(4)
+                    fiscalYear = dbDiv.date.take(4),
+                    paymentDate = dbDiv.payDate
                 )
             }
             cache[normalizedSymbol] = CacheEntry(records, System.currentTimeMillis(), lastFullFetch = 0L)  // 数据库恢复的缓存不标记为全量拉取
@@ -249,7 +251,8 @@ class DividendRepository private constructor(
                         exDividendDate = divData.date,
                         dividendPerShare = divData.dividendPerShare.toString(),
                         announceDate = divData.reportDate ?: "",
-                        fiscalYear = divData.date.substring(0, 4)
+                        fiscalYear = divData.date.substring(0, 4),
+                        paymentDate = divData.paymentDate
                     )
                 }
             } else {
@@ -273,7 +276,8 @@ class DividendRepository private constructor(
                         exDividendDate = divData.date,
                         dividendPerShare = divData.dividendPerShare.toString(),
                         announceDate = divData.reportDate ?: "",
-                        fiscalYear = divData.date.substring(0, 4)
+                        fiscalYear = divData.date.substring(0, 4),
+                        paymentDate = divData.paymentDate
                     )
                 }
             } else {
@@ -424,6 +428,7 @@ class DividendRepository private constructor(
                         name = "",
                         amount = record.dividendPerShare.toDoubleOrNull() ?: 0.0,
                         date = record.exDividendDate,
+                        payDate = record.paymentDate,
                         isManual = false
                     )
                 } else {

@@ -123,7 +123,7 @@ fun FireCalculationDialog(
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Column {
-                        Text("月度收益", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("月度收入", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         Text("¥${monthlyDividend.format(0)}", fontSize = 18.sp, fontWeight = FontWeight.Bold)
                     }
                     Column(horizontalAlignment = Alignment.End) {

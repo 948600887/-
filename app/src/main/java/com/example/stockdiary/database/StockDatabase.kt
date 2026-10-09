@@ -14,19 +14,17 @@ import com.example.stockdiary.utils.AppLogger
         Asset::class,
         AssetSnapshot::class,
         AssetSnapshotDetail::class,
-        Portfolio::class,
         Dividend::class,
         Transaction::class,
         StockBasic::class
     ],
-    version = 12,
+    version = 14,
     exportSchema = false
 )
 @TypeConverters(Converters::class)
 abstract class StockDatabase : RoomDatabase() {
     abstract fun assetDao(): AssetDao
     abstract fun snapshotDao(): SnapshotDao
-    abstract fun portfolioDao(): PortfolioDao
     abstract fun dividendDao(): DividendDao
     abstract fun transactionDao(): TransactionDao
     abstract fun stockBasicDao(): StockBasicDao
@@ -160,6 +158,32 @@ abstract class StockDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * 删除废弃的 portfolio 表。
+         *
+         * 这张表在 MIGRATION_8_9 里已经把数据全量并进 assets，之后代码零引用，
+         * 留着只是让 Room schema 里挂一张没人用的表。
+         */
+        private val MIGRATION_12_13 = object : Migration(12, 13) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("DROP TABLE IF EXISTS portfolio")
+                AppLogger.d("废弃的 portfolio 表已删除", "StockDatabase")
+            }
+        }
+
+        /**
+         * 分红表新增 payDate（分红发放日）。
+         *
+         * 除息日只说明「你有没有资格拿」，钱真正到账往往还要等 1~4 周。
+         * 以前 App 把除息日当成到账日，日历和通知都会提前报。
+         */
+        private val MIGRATION_13_14 = object : Migration(13, 14) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE dividend ADD COLUMN payDate TEXT")
+                AppLogger.d("分红表 payDate 字段迁移完成", "StockDatabase")
+            }
+        }
+
         @JvmStatic
         fun getInstance(context: Context): StockDatabase {
             return INSTANCE ?: synchronized(this) {
@@ -179,7 +203,9 @@ abstract class StockDatabase : RoomDatabase() {
                         MIGRATION_8_9,
                         MIGRATION_9_10,
                         MIGRATION_10_11,
-                        MIGRATION_11_12
+                        MIGRATION_11_12,
+                        MIGRATION_12_13,
+                        MIGRATION_13_14
                     )
                     .build()
                     .also { INSTANCE = it }

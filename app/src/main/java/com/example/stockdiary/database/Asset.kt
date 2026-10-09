@@ -43,25 +43,7 @@ data class Asset(
             balance * (currentPrice ?: purchasePrice)
         }
     
-    val profit: Double
-        get() = if (type.isLiability) {
-            0.0
-        } else {
-            totalValue - (balance * purchasePrice)
-        }
-    
-    val profitPercent: Double
-        get() = if (type.isLiability || purchasePrice <= 0 || balance <= 0) {
-            0.0
-        } else {
-            ((currentPrice ?: purchasePrice) - purchasePrice) / purchasePrice * 100
-        }
-    
-    val change: Double
-        get() = if (currentPrice != null && currentPrice > 0 && !type.isLiability) {
-            (currentPrice - purchasePrice) * balance
-        } else 0.0
-    
-    val changePercent: Double
-        get() = profitPercent
+    // 以下四个派生属性（profit / profitPercent / change / changePercent）
+    // 随「去成本」改造一起删除：界面不再展示盈亏与当日涨跌，全项目零引用。
+    // purchasePrice 保留 —— 它现在是**无行情时的市值兜底价**，不是成本。
 }

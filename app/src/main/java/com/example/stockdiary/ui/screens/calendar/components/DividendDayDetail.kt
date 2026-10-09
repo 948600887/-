@@ -21,6 +21,7 @@ import com.example.stockdiary.ui.theme.OnSurface
 import com.example.stockdiary.ui.theme.OnSurfaceVariant
 import com.example.stockdiary.ui.theme.Outline
 import com.example.stockdiary.utils.format
+import com.example.stockdiary.utils.shareUnitWord
 import java.time.LocalDate
 
 @Composable
@@ -85,7 +86,7 @@ fun DividendDayDetail(
                     color = OnSurface
                 )
                 Text(
-                    text = "每十股派息: ¥${(record.dividendPerShare.toDoubleOrNull() ?: 0.0).format(2)}",
+                    text = "每十${asset?.shareUnitWord ?: "份"}派息: ¥${(record.dividendPerShare.toDoubleOrNull() ?: 0.0).format(2)}",
                     fontSize = 12.sp,
                     color = OnSurfaceVariant
                 )

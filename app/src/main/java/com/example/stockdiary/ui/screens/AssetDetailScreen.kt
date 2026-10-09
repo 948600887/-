@@ -26,6 +26,7 @@ import com.example.stockdiary.ui.viewmodels.AssetDetailViewModel
 import com.example.stockdiary.utils.AppLogger
 import com.example.stockdiary.utils.StockCodeManager
 import com.example.stockdiary.utils.format
+import com.example.stockdiary.utils.shareUnitWord
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -199,7 +200,7 @@ fun AssetDetailScreen(
                                 } else {
                                     val ttm = shareBonus
                                     if (ttm != null) {
-                                        DetailRow("TTM每十股分红", "¥${ttm.format(2)}")
+                                        DetailRow("TTM每十${a.shareUnitWord}分红", "¥${ttm.format(2)}")
                                         DetailRow("股息率", "${DividendYieldCalculator.calculateTTMDividendYield(dividends, a.currentPrice ?: a.purchasePrice).format(2)}%")
                                         val annualIncome = DividendIncomeCalculator.calculateAnnualIncome(a, ttm)
                                         DetailRow("年化收益", "¥${annualIncome.format(2)}")

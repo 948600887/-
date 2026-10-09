@@ -19,6 +19,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.stockdiary.data.DividendRecord
@@ -30,6 +31,7 @@ import com.example.stockdiary.ui.theme.*
 import com.example.stockdiary.utils.AppLogger
 import com.example.stockdiary.utils.StockCodeManager
 import com.example.stockdiary.utils.format
+import com.example.stockdiary.utils.shareUnitWord
 import com.example.stockdiary.utils.totalValueCny
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -333,6 +335,8 @@ fun DividendDetailDialog(
     val container = LocalAppContainer.current
     val symbol = remember(asset) { StockCodeManager.normalizeSymbol(asset.symbol ?: "") }
     val coroutineScope = rememberCoroutineScope()
+    // 股票写「股」，基金/ETF 写「份」——ETF 是场内基金，之前被写成「股」是错的
+    val unitWord = asset.shareUnitWord
 
     var isLoading by remember { mutableStateOf(true) }
     var records by remember { mutableStateOf<List<Dividend>>(emptyList()) }
@@ -421,18 +425,30 @@ fun DividendDetailDialog(
                         colors = CardDefaults.cardColors(containerColor = PrimaryContainer.copy(alpha = 0.5f)),
                         shape = RoundedCornerShape(8.dp)
                     ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth().padding(12.dp),
-                            horizontalArrangement = Arrangement.SpaceEvenly
-                        ) {
-                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                Text("${records.size}次", fontWeight = FontWeight.Bold, color = OnSurface)
-                                Text("分红次数", fontSize = 11.sp, color = OnSurfaceVariant)
+                        Column(modifier = Modifier.fillMaxWidth().padding(12.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceEvenly
+                            ) {
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    Text("${records.size}次", fontWeight = FontWeight.Bold, color = OnSurface)
+                                    Text("分红次数", fontSize = 11.sp, color = OnSurfaceVariant)
+                                }
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    Text("¥${totalAmount.format(2)}", fontWeight = FontWeight.Bold, color = LossRed)
+                                    Text("累计分红", fontSize = 11.sp, color = OnSurfaceVariant)
+                                }
                             }
-                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                Text("¥${totalAmount.format(2)}", fontWeight = FontWeight.Bold, color = LossRed)
-                                Text("累计分红", fontSize = 11.sp, color = OnSurfaceVariant)
-                            }
+                            Spacer(modifier = Modifier.height(8.dp))
+                            // 分红是按「除息日当天持有的份额」发的，App 只存了当前份额，
+                            // 所以这里只能拿当前份额去折算历史分红 —— 必须讲清楚它不是真实到账金额。
+                            Text(
+                                text = "按当前 ${asset.balance.format(0)} $unitWord 估算，非实际到账",
+                                fontSize = 10.sp,
+                                color = OnSurfaceVariant,
+                                textAlign = TextAlign.Center,
+                                modifier = Modifier.fillMaxWidth()
+                            )
                         }
                     }
                     Spacer(modifier = Modifier.height(12.dp))
@@ -456,7 +472,7 @@ fun DividendDetailDialog(
                                     Column {
                                         Text(record.date, fontSize = 13.sp, fontWeight = FontWeight.Medium, color = OnSurface)
                                         Text(
-                                            "每10股 ¥${record.amount.format(2)}",
+                                            "每10$unitWord ¥${record.amount.format(2)}",
                                             fontSize = 11.sp, color = OnSurfaceVariant
                                         )
                                     }
@@ -517,6 +533,7 @@ fun DividendDetailDialog(
         DividendEditDialog(
             symbol = symbol,
             assetName = asset.name,
+            unitWord = unitWord,
             existing = editingRecord,
             onDismiss = { showEditDialog = false },
             onSave = {
@@ -537,7 +554,7 @@ fun DividendDetailDialog(
             title = { Text("删除分红记录", fontWeight = FontWeight.Bold) },
             text = {
                 Text(
-                    "将删除 ${record.date} 的分红记录（每10股 ¥${record.amount.format(2)}），删除后无法恢复。"
+                    "将删除 ${record.date} 的分红记录（每10$unitWord ¥${record.amount.format(2)}），删除后无法恢复。"
                 )
                 deleteError?.let {
                     Spacer(modifier = Modifier.height(8.dp))
@@ -582,6 +599,7 @@ fun DividendDetailDialog(
 private fun DividendEditDialog(
     symbol: String,
     assetName: String,
+    unitWord: String = "股",
     existing: Dividend?,
     onDismiss: () -> Unit,
     onSave: (Dividend) -> Unit
@@ -606,7 +624,7 @@ private fun DividendEditDialog(
                 OutlinedTextField(
                     value = amountText,
                     onValueChange = { amountText = it },
-                    label = { Text("每10股分红 (元)") },
+                    label = { Text("每10${unitWord}分红 (元)") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
@@ -623,7 +641,7 @@ private fun DividendEditDialog(
                     when {
                         !datePattern.matches(date) -> error = "日期格式错误"
                         parsedAmount == null || parsedAmount < 0 -> error = "分红金额必须大于等于0"
-                        parsedAmount > 100 -> error = "每10股分红超过100元，请检查单位"
+                        parsedAmount > 100 -> error = "每10${unitWord}分红超过100元，请检查单位"
                         else -> {
                             error = null
                             onSave(

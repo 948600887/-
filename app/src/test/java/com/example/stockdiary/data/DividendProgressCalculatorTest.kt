@@ -4,6 +4,7 @@ import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -141,6 +142,64 @@ class DividendProgressCalculatorTest {
         assertEquals(500.0, progress.yearProjected, 0.001)
         assertEquals(1.0, progress.ratio, 0.001)
         assertEquals(0.0, progress.remaining, 0.001)
+    }
+
+    @Test
+    fun `超过12个月没派息的标的不推算下一笔`() {
+        // 510210 的真实场景：最后一次派息在 2023 年，2026 年早已过了两年多
+        val staleDate = today.minusMonths(34)
+        val assets = listOf(asset("综指ETF", "sh510210", 1000.0))
+        val records = mapOf("sh510210" to listOf(record(staleDate.toString(), 0.63)))
+
+        val progress = DividendProgressCalculator.calculate(assets, records, today)
+
+        assertNull(progress.nextPayout)
+    }
+
+    @Test
+    fun `正好12个月算陈旧不再推算，与TTM口径一致`() {
+        val edgeDate = today.minusMonths(12)
+        val assets = listOf(asset("长江电力", "600900", 1000.0))
+        val records = mapOf("600900" to listOf(record(edgeDate.toString(), 5.0)))
+
+        val progress = DividendProgressCalculator.calculate(assets, records, today)
+
+        // 边界那天连 TTM 都统计不到（TTM 用 isAfter 严格大于），所以也不该进预计
+        assertEquals(0.0, progress.yearProjected, 0.001)
+        assertNull(progress.nextPayout)
+    }
+
+    @Test
+    fun `11个月前刚派息的标的仍然推算下一笔`() {
+        val recentDate = today.minusMonths(11)
+        val assets = listOf(asset("长江电力", "600900", 1000.0))
+        val records = mapOf("600900" to listOf(record(recentDate.toString(), 5.0)))
+
+        val progress = DividendProgressCalculator.calculate(assets, records, today)
+
+        val next = progress.nextPayout
+        assertNotNull(next)
+        assertTrue(next!!.isEstimated)
+        assertTrue(next.date >= today.toString())
+    }
+
+    @Test
+    fun `新鲜度闸门不拦数据源已排定的未来派息`() {
+        // 数据源明确给出未来某天要派息，这是真数据不是推算，闸门不该误杀
+        val scheduledDate = today.plusDays(20)
+        val assets = listOf(asset("长江电力", "600900", 1000.0))
+        val records = mapOf(
+            "600900" to listOf(
+                record(today.minusMonths(30).toString(), 5.0), // 很久没派了
+                record(scheduledDate.toString(), 3.0)          // 但已经排定了下一笔
+            )
+        )
+
+        val progress = DividendProgressCalculator.calculate(assets, records, today)
+
+        val next = progress.nextPayout
+        assertEquals(scheduledDate.toString(), next?.date)
+        assertFalse(next?.isEstimated ?: true)
     }
 
     @Test

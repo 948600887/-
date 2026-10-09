@@ -16,8 +16,20 @@ import java.time.temporal.ChronoUnit
  * - 全年预计 = TTM（最近 12 个月）每十股分红 × 持仓数量 ÷ 10
  * - 今年已收 = 除息日落在「今年 1 月 1 日 ~ 今天」之间的记录 × 持仓数量 ÷ 10
  * - 月度柱图只认**今年**的记录：已过的是实收，未来的已排定派息是预计
+ * - 下一笔：优先数据源已排定的未来派息；没有才按历史同期推算，
+ *   且**最后一次派息距今超过 12 个月就不再推算**（见 [STALE_MONTHS]）
  */
 object DividendProgressCalculator {
+
+    /**
+     * 新鲜度闸门：最后一次派息距今超过这个月数，就不再外推「下一笔」。
+     *
+     * 业界（Dividend Wealth 的 quality gate）会把陈旧的外推行直接丢掉——
+     * 一只三年没分红的标的，拿 2023 年那次派息去预告今年的到账日是自欺欺人。
+     * 定 12 个月是为了和「全年预计」的 TTM 口径一致：**连 TTM 都统计不到的标的，
+     * 就不该出现在预计里**。数据源自己排定的未来派息不受此限制（那是真数据，不是推算）。
+     */
+    private const val STALE_MONTHS = 12L
 
     data class NextPayout(
         val assetName: String,
@@ -155,12 +167,19 @@ object DividendProgressCalculator {
         balance: Double,
         today: LocalDate
     ): NextPayout? {
+        val lastRecord = records.sortedByDescending { it.exDividendDate.take(10) }.firstOrNull()
+            ?: return null
+
+        // 新鲜度闸门：与 TTM 同一判定（严格晚于 12 个月前才算新鲜）
+        // 这里不打印日志 —— 计算器保持纯函数，才好吃单测
+        val lastDate = parseDate(lastRecord.exDividendDate.take(10)) ?: return null
+        if (!lastDate.isAfter(today.minusMonths(STALE_MONTHS))) return null
+
         val predicted = DividendIncomeCalculator.predictNextDividendDate(records) ?: return null
         val base = parseDate(predicted) ?: return null
         val date = if (!base.isBefore(today)) base else base.plusYears(1)
 
-        val lastRecord = records.sortedByDescending { it.exDividendDate.take(10) }.firstOrNull()
-        val amount = (lastRecord?.dividendPerShare?.toDoubleOrNull() ?: 0.0) / 10.0 * balance
+        val amount = (lastRecord.dividendPerShare.toDoubleOrNull() ?: 0.0) / 10.0 * balance
 
         return NextPayout(
             assetName = assetName,

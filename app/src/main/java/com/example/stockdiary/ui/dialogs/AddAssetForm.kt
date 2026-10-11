@@ -1,8 +1,17 @@
 package com.example.stockdiary.ui.dialogs
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
@@ -24,6 +33,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
@@ -42,7 +53,13 @@ import com.example.stockdiary.utils.StockCodeManager.CodeCategory
  *
  * 原先这些都内联在 AddAssetDialog 单个 660 行的 composable 里，任何一个字段的改动
  * 都要在几百行里翻找。这里按职责拆开：每个字段一个 composable、参数显式传入，
- * 提交构造 [buildAssetFromInput] 抽成纯函数（可直接单测，见 AddAssetFormTest）。
+ * 提交构造 [buildAssetFromInput] 与校验 [validateAssetInput] 都抽成纯函数（可直接单测）。
+ *
+ * 字段构件的约定：
+ * - [error] 由外部统一算好传入（来自 validateAssetInput），构件自己不再重复判断，
+ *   免得「按钮能点但字段标红」这类两处逻辑漂移。
+ * - [focusRequester] + [onNext] 把键盘串起来：输完一个字段能直接跳下一个，
+ *   而不是每填一项都要手点屏幕。
  */
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -126,17 +143,23 @@ internal fun AssetTypePicker(
 internal fun AssetNameField(
     name: String,
     onNameChange: (String) -> Unit,
-    showError: Boolean
+    error: String?,
+    focusRequester: FocusRequester,
+    onNext: () -> Unit
 ) {
     OutlinedTextField(
         value = name,
         onValueChange = onNameChange,
         label = { Text("资产名称") },
         placeholder = { Text("例如：贵州茅台、易方达消费精选") },
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .focusRequester(focusRequester),
         singleLine = true,
-        isError = showError && name.isBlank(),
-        supportingText = if (showError && name.isBlank()) { { Text("必填") } } else null
+        isError = error != null,
+        supportingText = error?.let { { Text(it) } },
+        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
+        keyboardActions = KeyboardActions(onNext = { onNext() })
     )
 }
 
@@ -147,8 +170,9 @@ internal fun AssetSymbolField(
     onSymbolChange: (String) -> Unit,
     selectedType: AssetType,
     isLoading: Boolean,
-    required: Boolean,
-    showError: Boolean
+    error: String?,
+    focusRequester: FocusRequester,
+    onNext: () -> Unit
 ) {
     OutlinedTextField(
         value = symbol,
@@ -165,18 +189,17 @@ internal fun AssetSymbolField(
                 else -> Text("输入代码自动识别：600519/510050/007467...")
             }
         },
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .focusRequester(focusRequester),
         singleLine = true,
-        // 没有代码的证券类资产永远拿不到行情：价格同步、持仓合并、导入回放、
-        // 分红匹配全都按 symbol 走，留空意味着市值恒为参考单价的静态值。
-        isError = required && showError && symbol.isBlank(),
-        supportingText = if (required && showError && symbol.isBlank()) {
-            { Text("请填写代码，否则无法同步行情价格") }
-        } else null,
+        isError = error != null,
+        supportingText = error?.let { { Text(it) } },
         keyboardOptions = KeyboardOptions(
             keyboardType = KeyboardType.Ascii,
             imeAction = ImeAction.Next
         ),
+        keyboardActions = KeyboardActions(onNext = { onNext() }),
         trailingIcon = {
             if (isLoading) {
                 CircularProgressIndicator(
@@ -249,7 +272,9 @@ internal fun AssetAccountField(
     expanded: Boolean,
     onExpandedChange: (Boolean) -> Unit,
     filteredAccounts: List<String>,
-    showError: Boolean
+    error: String?,
+    focusRequester: FocusRequester,
+    onNext: () -> Unit
 ) {
     ExposedDropdownMenuBox(
         expanded = expanded && filteredAccounts.isNotEmpty(),
@@ -265,10 +290,13 @@ internal fun AssetAccountField(
             placeholder = { Text("选择或输入：招商证券、支付宝等") },
             modifier = Modifier
                 .fillMaxWidth()
+                .focusRequester(focusRequester)
                 .menuAnchor(),
             singleLine = true,
-            isError = showError && account.isBlank(),
-            supportingText = if (showError && account.isBlank()) { { Text("必填") } } else null,
+            isError = error != null,
+            supportingText = error?.let { { Text(it) } },
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
+            keyboardActions = KeyboardActions(onNext = { onNext() }),
             trailingIcon = {
                 ExposedDropdownMenuDefaults.TrailingIcon(
                     expanded = expanded && filteredAccounts.isNotEmpty()
@@ -300,34 +328,26 @@ internal fun AssetBalanceField(
     balance: String,
     onBalanceChange: (String) -> Unit,
     selectedType: AssetType,
-    showError: Boolean
+    error: String?,
+    focusRequester: FocusRequester,
+    onNext: () -> Unit
 ) {
     OutlinedTextField(
         value = balance,
         onValueChange = onBalanceChange,
-        label = {
-            when (selectedType) {
-                AssetType.STOCK -> Text("持股数量")
-                AssetType.FUND -> Text("持有份额")
-                AssetType.CRYPTO -> Text("持有数量")
-                AssetType.BANK_DEPOSIT -> Text("存款金额")
-                else -> Text("数量/金额")
-            }
-        },
+        label = { Text(balanceLabel(selectedType)) },
         placeholder = { Text("请输入数字") },
-        modifier = Modifier.fillMaxWidth(),
-        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+        modifier = Modifier
+            .fillMaxWidth()
+            .focusRequester(focusRequester),
+        keyboardOptions = KeyboardOptions(
+            keyboardType = KeyboardType.Decimal,
+            imeAction = ImeAction.Next
+        ),
+        keyboardActions = KeyboardActions(onNext = { onNext() }),
         singleLine = true,
-        isError = showError && balance.toDoubleOrNull() == null,
-        supportingText = {
-            if (showError) {
-                when {
-                    balance.toDoubleOrNull() == null -> Text("请输入有效数字")
-                    balance.toDouble() < 0 -> Text("数量不能为负数")
-                    else -> {}
-                }
-            }
-        }
+        isError = error != null,
+        supportingText = error?.let { { Text(it) } }
     )
 }
 
@@ -337,31 +357,39 @@ internal fun AssetPriceField(
     purchasePrice: String,
     onPriceChange: (String) -> Unit,
     autoPrice: Double?,
-    showError: Boolean
+    error: String?,
+    focusRequester: FocusRequester,
+    onNext: () -> Unit
 ) {
     OutlinedTextField(
         value = purchasePrice,
         onValueChange = onPriceChange,
         label = { Text("参考单价") },
-        placeholder = {
-            if (autoPrice != null) {
-                Text("自动填充：${autoPrice}")
-            } else {
-                Text("可选，用于无行情时估算市值")
-            }
-        },
-        modifier = Modifier.fillMaxWidth(),
-        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+        placeholder = { Text("可选，用于无行情时估算市值") },
+        modifier = Modifier
+            .fillMaxWidth()
+            .focusRequester(focusRequester),
+        keyboardOptions = KeyboardOptions(
+            keyboardType = KeyboardType.Decimal,
+            imeAction = ImeAction.Next
+        ),
+        keyboardActions = KeyboardActions(onNext = { onNext() }),
         singleLine = true,
-        isError = showError && purchasePrice.isNotBlank() && purchasePrice.toDoubleOrNull() == null,
-        supportingText = {
-            if (showError && purchasePrice.isNotBlank()) {
-                when {
-                    purchasePrice.toDoubleOrNull() == null -> Text("请输入有效数字")
-                    purchasePrice.toDouble() < 0 -> Text("价格不能为负数")
-                    else -> {}
+        isError = error != null,
+        // 自动填充价原先写在 placeholder 里：用户一填值提示就消失了，等于白给。
+        // 改到 supportingText 常驻，且让位于错误提示。
+        supportingText = when {
+            error != null -> { { Text(error) } }
+            autoPrice != null && autoPrice > 0 -> {
+                {
+                    Text(
+                        "已按行情价 $autoPrice 自动填充，可手动修改",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
             }
+            else -> null
         }
     )
 }
@@ -371,26 +399,26 @@ internal fun AssetPriceField(
 internal fun AssetInterestRateField(
     interestRate: String,
     onRateChange: (String) -> Unit,
-    showError: Boolean
+    error: String?,
+    focusRequester: FocusRequester,
+    onNext: () -> Unit
 ) {
     OutlinedTextField(
         value = interestRate,
         onValueChange = onRateChange,
         label = { Text("年利率 (%)") },
         placeholder = { Text("例如：3.5") },
-        modifier = Modifier.fillMaxWidth(),
-        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+        modifier = Modifier
+            .fillMaxWidth()
+            .focusRequester(focusRequester),
+        keyboardOptions = KeyboardOptions(
+            keyboardType = KeyboardType.Decimal,
+            imeAction = ImeAction.Next
+        ),
+        keyboardActions = KeyboardActions(onNext = { onNext() }),
         singleLine = true,
-        isError = showError && interestRate.toDoubleOrNull() == null,
-        supportingText = {
-            if (showError) {
-                when {
-                    interestRate.toDoubleOrNull() == null -> Text("必填，请输入有效数字")
-                    interestRate.toDouble() < 0 -> Text("利率不能为负数")
-                    else -> {}
-                }
-            }
-        }
+        isError = error != null,
+        supportingText = error?.let { { Text(it) } }
     )
 }
 
@@ -398,14 +426,21 @@ internal fun AssetInterestRateField(
 @Composable
 internal fun AssetNotesField(
     notes: String,
-    onNotesChange: (String) -> Unit
+    onNotesChange: (String) -> Unit,
+    focusRequester: FocusRequester,
+    onDone: () -> Unit
 ) {
     OutlinedTextField(
         value = notes,
         onValueChange = onNotesChange,
         label = { Text("备注（可选）") },
         placeholder = { Text("添加备注信息，如买入日期、用途等") },
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .focusRequester(focusRequester),
+        // 表单最后一项：回车收起键盘而不是换行，方便直接点「添加」
+        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+        keyboardActions = KeyboardActions(onDone = { onDone() }),
         minLines = 2,
         maxLines = 4
     )
@@ -418,45 +453,51 @@ internal fun AddAssetActions(
     isSaving: Boolean,
     saveError: String?
 ) {
-    HorizontalDivider()
-    Surface(
-        color = MaterialTheme.colorScheme.surfaceVariant,
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp),
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
+    // 注意：这里必须是 Column。原先 SaveError 的 Text 和按钮 Row 并列放在同一个
+    // Surface 里，而 Surface 内部是 Box —— 两者会从左上角重叠，错误文字直接压在
+    // 「取消/添加」按钮上。
+    Column(modifier = Modifier.fillMaxWidth()) {
+        HorizontalDivider()
+        Surface(
+            color = MaterialTheme.colorScheme.surfaceVariant,
+            modifier = Modifier.fillMaxWidth()
         ) {
-            OutlinedButton(
-                onClick = onDismiss,
-                modifier = Modifier.weight(1f)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                Text("取消")
-            }
-            Button(
-                onClick = onConfirmClick,
-                enabled = !isSaving,
-                modifier = Modifier.weight(1f)
-            ) {
-                if (isSaving) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(16.dp),
-                        strokeWidth = 2.dp,
-                        color = MaterialTheme.colorScheme.onPrimary
-                    )
-                } else {
-                    Text("添加")
+                OutlinedButton(
+                    onClick = onDismiss,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text("取消")
+                }
+                Button(
+                    onClick = onConfirmClick,
+                    enabled = !isSaving,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    if (isSaving) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            strokeWidth = 2.dp,
+                            color = MaterialTheme.colorScheme.onPrimary
+                        )
+                    } else {
+                        Text("添加")
+                    }
                 }
             }
         }
 
         if (saveError != null) {
             Text(
-                "保存失败：$saveError",
+                saveError,
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.error
+                color = MaterialTheme.colorScheme.error,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
             )
         }
     }
@@ -470,6 +511,7 @@ internal fun AddAssetActions(
  *
  * 注意：[Asset] 的 init 里有 require(...) 校验，参数非法时会抛 IllegalArgumentException，
  * 由调用方 try/catch 兜住（别让主线程抛出去崩掉整个 App）。
+ * 正常路径下不会抛——[validateAssetInput] 已按同一套口径挡在前面。
  */
 fun buildAssetFromInput(
     selectedType: AssetType,

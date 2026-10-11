@@ -16,6 +16,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.CancellationException
 
@@ -144,18 +145,19 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
     // 「设置 → 仪表盘显示」里把某类资产全关掉后，这里会整片空白，
     // 而开关只在设置页 —— 必须给一个就地恢复的出口。
     fun showAllAssetTypes() {
-        _preferences.value = _preferences.value.copy(
+        // update{} 原子读-改-写，与 UiState 的处理保持一致
+        _preferences.update { state -> state.copy(
             showBankDeposits = true,
             showStocks = true,
             showFunds = true,
             showCrypto = true,
             showLiabilities = true
-        )
+        ) }
         container.dashboardPreferencesManager.savePreferences(_preferences.value)
     }
 
     fun updateSortOrder(sortOrder: SortOrder) {
-        _preferences.value = _preferences.value.copy(sortOrder = sortOrder)
+        _preferences.update { state -> state.copy(sortOrder = sortOrder) }
         container.dashboardPreferencesManager.savePreferences(_preferences.value)
     }
 

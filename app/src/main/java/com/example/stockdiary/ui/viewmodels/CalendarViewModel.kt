@@ -269,8 +269,6 @@ class CalendarViewModel(
         })
     } catch (e: CancellationException) {
         throw e
-    } catch (e: CancellationException) {
-        throw e
     } catch (e: Exception) {
         Result.failure(e)
     }
@@ -342,8 +340,6 @@ class CalendarViewModel(
 
             CalendarResult(data, dividendDates, dividends)
         })
-    } catch (e: CancellationException) {
-        throw e
     } catch (e: CancellationException) {
         throw e
     } catch (e: Exception) {

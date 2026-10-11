@@ -194,7 +194,8 @@ object DividendProgressCalculator {
         val lastDate = parseDate(lastRecord.exDividendDate.take(10)) ?: return null
         if (lastDate.isBefore(today.minusMonths(STALE_MONTHS))) return null
 
-        val predicted = DividendIncomeCalculator.predictNextDividendDate(records) ?: return null
+        // 透传 today：否则预测会退回用真实系统时钟，与这里的 TTM / 已收口径不一致
+        val predicted = DividendIncomeCalculator.predictNextDividendDate(records, today) ?: return null
         val base = parseDate(predicted) ?: return null
         val date = if (!base.isBefore(today)) base else base.plusYears(1)
 

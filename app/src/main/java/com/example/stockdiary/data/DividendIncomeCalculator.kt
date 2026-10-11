@@ -219,7 +219,15 @@ object DividendIncomeCalculator {
     /**
      * 获取下一个分红日期（基于历史分红记录）
      */
-    fun predictNextDividendDate(historicalDividends: List<DividendRecord>): String? {
+    /**
+     * @param today 参考「今天」。默认取真实当前日期；调用方若已有统一的 today
+     *        （如 [DividendProgressCalculator]），务必透传，否则预测结果会依赖真实系统时钟，
+     *        既无法单测，也会和调用方自己的口径不一致。
+     */
+    fun predictNextDividendDate(
+        historicalDividends: List<DividendRecord>,
+        today: LocalDate = LocalDate.now()
+    ): String? {
         if (historicalDividends.isEmpty()) return null
 
         // 按日期排序
@@ -227,7 +235,7 @@ object DividendIncomeCalculator {
         val lastDividend = sortedDividends.firstOrNull() ?: return null
 
         // 简单预测：如果上次分红在6个月内，预测明年同期；否则预测今年同期
-        val currentYear = LocalDate.now().year
+        val currentYear = today.year
         
         // 解析上次分红日期
         val lastDate = try {

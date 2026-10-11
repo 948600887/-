@@ -119,11 +119,16 @@ dependencies {
 
     // Other
     implementation("androidx.core:core-ktx:1.13.0")
-    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.0")
+    // ⚠️ 这四个版本必须和 compose-bom:2024.02.00（Compose 1.6.1 全套）严格对齐。
+    // 曾经 lifecycle 用 2.8.0 / activity-compose 用 1.9.0：它们会把 compose-runtime 顶到 1.6.5，
+    // 而 BOM 把 compose-ui 钉在 1.6.1 —— runtime 与 ui 不同版本会让 CompositionLocal 传递链断掉，
+    // 启动即崩 "CompositionLocal LocalLifecycleOwner not present"（DashboardScreen 首屏就用
+    // collectAsStateWithLifecycle）。改其中任何一个，都要回头确认 compose runtime 没被拉高。
+    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.7.0")
     // 提供 collectAsStateWithLifecycle：App 退到后台时停止收集 Flow，避免后台无谓的重组与数据库查询
-    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.0")
-    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.0")
-    implementation("androidx.activity:activity-compose:1.9.0")
+    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.7.0")
+    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.7.0")
+    implementation("androidx.activity:activity-compose:1.8.2")
     
     // WorkManager
     implementation("androidx.work:work-runtime-ktx:2.9.0")

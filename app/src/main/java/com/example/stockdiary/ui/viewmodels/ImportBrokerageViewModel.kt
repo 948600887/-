@@ -15,6 +15,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.nio.charset.Charset
 import kotlinx.coroutines.CancellationException
@@ -88,24 +89,24 @@ class ImportBrokerageViewModel(
     /** CSV 文件被选中后：解析，自动探测编码与列映射，进入映射步骤 */
     fun onFileSelected(uri: Uri) {
         viewModelScope.launch(Dispatchers.IO) {
-            _uiState.value = _uiState.value.copy(
+            _uiState.update { state -> state.copy(
                 uri = uri, source = Source.CSV, step = Step.MAPPING, error = null,
                 transactions = emptyList(), commitResult = null
-            )
+            ) }
             try {
                 val result = service.parse(uri)
-                _uiState.value = _uiState.value.copy(
+                _uiState.update { state -> state.copy(
                     parseResult = result,
                     charsetName = result.charset.name()
-                )
+                ) }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 AppLogger.e("交割单解析失败: ${e.message}", e, "ImportVM")
-                _uiState.value = _uiState.value.copy(
+                _uiState.update { state -> state.copy(
                     step = Step.SELECT_FILE,
                     error = "解析失败: ${e.message ?: "未知错误"}"
-                )
+                ) }
             }
         }
     }
@@ -115,29 +116,29 @@ class ImportBrokerageViewModel(
         viewModelScope.launch(Dispatchers.IO) {
             // 停留在选择页展示进度条，不要直接跳 PREVIEW：
             // OCR 通常要 1~3 秒，先跳过去会闪一个「共 0 行」的空预览页。
-            _uiState.value = _uiState.value.copy(
+            _uiState.update { state -> state.copy(
                 uri = uri, source = Source.OCR, error = null, step = Step.SELECT_FILE,
                 transactions = emptyList(), commitResult = null, ocrRawText = null,
                 ocrLines = emptyList(),
                 suggestions = emptyMap(), autoFilledCount = 0, recognizing = true
-            )
+            ) }
             try {
                 val result = ocrService.recognizeAndParse(uri)
                 if (result.transactions.isEmpty()) {
                     // OCR 成功但没匹配到交易 — 把完整原文存起来，用可滚动弹窗展示 + 复制按钮排障
-                    _uiState.value = _uiState.value.copy(
+                    _uiState.update { state -> state.copy(
                         step = Step.SELECT_FILE,
                         recognizing = false,
                         error = "未识别到交易记录。当前解析规则适配【中国银河证券】对账单截图，" +
                             "请确认截图内容完整、清晰，且包含「证券买入-名称 价格 金额」与" +
                             "「买/卖 日期 数量 费用」两行结构。\n\n可点「复制原文」把 OCR 原文发出来，便于定位格式差异。",
                         ocrRawText = result.recognizedText
-                    )
+                    ) }
                 } else {
                     // 截图没有证券代码：先用「记忆/持仓/历史流水/证券库」把能自动回填的都填上，
                     // 用户只需处理剩下的少数行（且每记一次都写进记忆，下次连这步也省了）
                     val filled = service.autoFillSymbols(result.transactions)
-                    _uiState.value = _uiState.value.copy(
+                    _uiState.update { state -> state.copy(
                         step = Step.PREVIEW,
                         recognizing = false,
                         transactions = filled,
@@ -148,7 +149,7 @@ class ImportBrokerageViewModel(
                         autoFilledCount = filled.count {
                             it.symbol.isNotBlank() && it.symbolSource.isNotEmpty()
                         }
-                    )
+                    ) }
                     // 自动回填的行也要跑一遍查重，与库内重复的照样标黄跳过
                     filled.filter { it.symbol.isNotBlank() && it.symbolSource.isNotEmpty() }
                         .forEach { tx ->
@@ -170,11 +171,11 @@ class ImportBrokerageViewModel(
                     else ->
                         "OCR 识别失败: ${e.javaClass.simpleName}: ${e.message ?: "未知错误"}"
                 }
-                _uiState.value = _uiState.value.copy(
+                _uiState.update { state -> state.copy(
                     step = Step.SELECT_FILE,
                     recognizing = false,
                     error = msg
-                )
+                ) }
             }
         }
     }
@@ -199,15 +200,15 @@ class ImportBrokerageViewModel(
                     feeCol = oldMapping?.feeCol?.takeIf { it < headers.size } ?: result.mapping.feeCol,
                     accountCol = oldMapping?.accountCol?.takeIf { it < headers.size } ?: result.mapping.accountCol
                 )
-                _uiState.value = _uiState.value.copy(
+                _uiState.update { state -> state.copy(
                     parseResult = result.copy(mapping = clamped),
                     charsetName = charset.name()
-                )
+                ) }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 AppLogger.e("重新解析失败: ${e.message}", e, "ImportVM")
-                _uiState.value = _uiState.value.copy(error = "重新解析失败: ${e.message}")
+                _uiState.update { state -> state.copy(error = "重新解析失败: ${e.message}") }
             }
         }
     }
@@ -228,7 +229,7 @@ class ImportBrokerageViewModel(
             "账户" -> mapping.copy(accountCol = idx)
             else -> mapping
         }
-        _uiState.value = _uiState.value.copy(parseResult = current.copy(mapping = newMapping))
+        _uiState.update { state -> state.copy(parseResult = current.copy(mapping = newMapping)) }
     }
 
     /** 确认列映射 → mapRows → 进入预览 */
@@ -237,19 +238,19 @@ class ImportBrokerageViewModel(
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 val mapped = service.autoFillSymbols(service.mapRows(parsed))
-                _uiState.value = _uiState.value.copy(
+                _uiState.update { state -> state.copy(
                     transactions = mapped,
                     step = Step.PREVIEW,
                     autoFilledCount = mapped.count {
                         it.symbol.isNotBlank() && it.symbolSource.isNotEmpty()
                     }
-                )
+                ) }
                 refreshSuggestions()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 AppLogger.e("转换交易记录失败: ${e.message}", e, "ImportVM")
-                _uiState.value = _uiState.value.copy(error = "转换失败: ${e.message}")
+                _uiState.update { state -> state.copy(error = "转换失败: ${e.message}") }
             }
         }
     }
@@ -259,7 +260,7 @@ class ImportBrokerageViewModel(
         val txs = _uiState.value.transactions.map {
             if (it.rowNumber == rowNumber) it.copy(skip = !it.skip) else it
         }
-        _uiState.value = _uiState.value.copy(transactions = txs)
+        _uiState.update { state -> state.copy(transactions = txs) }
     }
 
     /**
@@ -327,7 +328,7 @@ class ImportBrokerageViewModel(
         if (targets.isEmpty()) return
 
         val targetRows = targets.map { it.rowNumber }.toSet()
-        _uiState.value = _uiState.value.copy(
+        _uiState.update { state -> state.copy(
             transactions = _uiState.value.transactions.map { tx ->
                 if (tx.rowNumber !in targetRows) tx
                 else tx.copy(
@@ -336,7 +337,7 @@ class ImportBrokerageViewModel(
                     errors = tx.errors.filterNot { isSymbolNote(it) }
                 )
             }
-        )
+        ) }
         // 联动填上的行同样要查一次重，避免把已导入过的流水重复写一遍
         targetRows.forEach { row ->
             runCatching { validateSymbolRow(row) }
@@ -354,7 +355,7 @@ class ImportBrokerageViewModel(
         }
         if (pending.isEmpty()) {
             if (_uiState.value.suggestions.isNotEmpty()) {
-                _uiState.value = _uiState.value.copy(suggestions = emptyMap())
+                _uiState.update { state -> state.copy(suggestions = emptyMap()) }
             }
             return
         }
@@ -366,7 +367,7 @@ class ImportBrokerageViewModel(
             val cands = cache.getOrPut(key) { service.suggestSymbols(tx.name) }
             if (cands.isNotEmpty()) next[tx.rowNumber] = cands
         }
-        _uiState.value = _uiState.value.copy(suggestions = next)
+        _uiState.update { state -> state.copy(suggestions = next) }
     }
 
     /**
@@ -407,7 +408,7 @@ class ImportBrokerageViewModel(
         val txs = _uiState.value.transactions.map {
             if (it.rowNumber == rowNumber) transform(it) else it
         }
-        _uiState.value = _uiState.value.copy(transactions = txs)
+        _uiState.update { state -> state.copy(transactions = txs) }
     }
 
     /** 确认提交：CSV 与 OCR 两条路径统一走 BrokerageImportService.commit */
@@ -432,35 +433,35 @@ class ImportBrokerageViewModel(
             }
         } catch (e: Exception) {
             AppLogger.e("提交前校验异常: ${e.message}", e, "ImportVM")
-            _uiState.value = _uiState.value.copy(error = "提交前校验失败: ${e.message}")
+            _uiState.update { state -> state.copy(error = "提交前校验失败: ${e.message}") }
             return
         }
-        _uiState.value = _uiState.value.copy(transactions = preValidated)
+        _uiState.update { state -> state.copy(transactions = preValidated) }
 
         val txs = preValidated
         viewModelScope.launch(Dispatchers.IO) {
-            _uiState.value = _uiState.value.copy(step = Step.COMMITTING, committing = true)
+            _uiState.update { state -> state.copy(step = Step.COMMITTING, committing = true) }
             try {
                 val result = service.commit(txs)
-                _uiState.value = _uiState.value.copy(
+                _uiState.update { state -> state.copy(
                     committing = false, commitResult = result, step = Step.RESULT
-                )
+                ) }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 AppLogger.e("交割单提交失败: ${e.message}", e, "ImportVM")
-                _uiState.value = _uiState.value.copy(
+                _uiState.update { state -> state.copy(
                     committing = false,
                     step = Step.PREVIEW,
                     error = "提交失败: ${e.message}"
-                )
+                ) }
             }
         }
     }
 
     /** 返回映射步骤重新调整（仅 CSV 流程） */
     fun backToMapping() {
-        _uiState.value = _uiState.value.copy(step = Step.MAPPING, transactions = emptyList())
+        _uiState.update { state -> state.copy(step = Step.MAPPING, transactions = emptyList()) }
     }
 
     /** 重置整个流程 */
@@ -471,7 +472,7 @@ class ImportBrokerageViewModel(
     }
 
     fun clearError() {
-        _uiState.value = _uiState.value.copy(error = null)
+        _uiState.update { state -> state.copy(error = null) }
     }
 
     class Factory(private val container: AppContainer) : ViewModelProvider.Factory {

@@ -64,10 +64,11 @@ class CalendarViewModelTest {
     private val divRepo = mockk<DividendRepository>(relaxed = true)
     private val snapshotDao = mockk<SnapshotDao>(relaxed = true)
     private val prefsMgr = mockk<DashboardPreferencesManager>(relaxed = true)
-    // DividendIncomeUseCase 本身用挂起 lambda 注入，正好用来造一个「慢一拍」的桩：
-    // 让 loadDividendIncome 的写入晚于 generateCalendarData，避开 uiState 的读改写竞态
+    // DividendIncomeUseCase 本身用挂起 lambda 注入，直接用真实对象做桩。
+    // 刻意**不加**延后：这样 loadDividendIncome 会先于 generateCalendarData 完成写入，
+    // 正好是原先会把 realAnnualIncome 覆盖掉的顺序 —— 用例仍通过即证明 uiState 的
+    // 原子更新（update{}）确实修好了那处竞态。
     private val useCase = DividendIncomeUseCase { _assets, _forceRefresh, _tag ->
-        kotlinx.coroutines.delay(1000)
         DividendIncomeLoader.IncomeResult(
             dividendsBySymbol = emptyMap(),
             recordsBySymbol = emptyMap(),

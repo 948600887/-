@@ -25,6 +25,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.CancellationException
@@ -145,7 +146,7 @@ class SettingsViewModel(
         viewModelScope.launch {
             try {
                 assetRepository.getAllAssets().collect { assets ->
-                    _uiState.value = _uiState.value.copy(assets = assets)
+                    _uiState.update { state -> state.copy(assets = assets) }
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -156,7 +157,7 @@ class SettingsViewModel(
         viewModelScope.launch {
             try {
                 snapshotDao.getAllSnapshots().collect { snapshots ->
-                    _uiState.value = _uiState.value.copy(snapshots = snapshots)
+                    _uiState.update { state -> state.copy(snapshots = snapshots) }
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -167,7 +168,7 @@ class SettingsViewModel(
         viewModelScope.launch {
             try {
                 transactionDao.getAllFlow().collect { transactions ->
-                    _uiState.value = _uiState.value.copy(transactions = transactions)
+                    _uiState.update { state -> state.copy(transactions = transactions) }
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -191,7 +192,7 @@ class SettingsViewModel(
 
     fun exportData(context: Context, type: ExportType) {
         viewModelScope.launch(Dispatchers.IO) {
-            _uiState.value = _uiState.value.copy(isExporting = true, exportResult = null)
+            _uiState.update { state -> state.copy(isExporting = true, exportResult = null) }
             try {
                 val currentState = _uiState.value
                 val uri = when (type) {
@@ -223,31 +224,31 @@ class SettingsViewModel(
                         }
                         context.startActivity(Intent.createChooser(shareIntent, title))
                     }
-                    _uiState.value = _uiState.value.copy(isExporting = false, exportResult = Result.success("导出成功"))
+                    _uiState.update { state -> state.copy(isExporting = false, exportResult = Result.success("导出成功")) }
                 } else {
-                    _uiState.value = _uiState.value.copy(isExporting = false, exportResult = Result.failure("导出失败"))
+                    _uiState.update { state -> state.copy(isExporting = false, exportResult = Result.failure("导出失败")) }
                 }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 AppLogger.e("导出失败: ${e.message}", e, "SettingsVM")
-                _uiState.value = _uiState.value.copy(isExporting = false, exportResult = Result.failure(e))
+                _uiState.update { state -> state.copy(isExporting = false, exportResult = Result.failure(e)) }
             }
         }
     }
 
     fun deleteAllData() {
         viewModelScope.launch(Dispatchers.IO) {
-            _uiState.value = _uiState.value.copy(isDeleting = true, deleteResult = null)
+            _uiState.update { state -> state.copy(isDeleting = true, deleteResult = null) }
             try {
                 assetRepository.deleteAllData()
                 clearAllPreferences()
-                _uiState.value = _uiState.value.copy(isDeleting = false, deleteResult = Result.success(Unit))
+                _uiState.update { state -> state.copy(isDeleting = false, deleteResult = Result.success(Unit)) }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 AppLogger.e("删除数据失败: ${e.message}", e, "SettingsVM")
-                _uiState.value = _uiState.value.copy(isDeleting = false, deleteResult = Result.failure(e))
+                _uiState.update { state -> state.copy(isDeleting = false, deleteResult = Result.failure(e)) }
             }
         }
     }
@@ -285,32 +286,32 @@ class SettingsViewModel(
 
     fun checkDataSourceHealth() {
         viewModelScope.launch(Dispatchers.IO) {
-            _uiState.value = _uiState.value.copy(isCheckingHealth = true)
+            _uiState.update { state -> state.copy(isCheckingHealth = true) }
             try {
                 val health = dataSourceHealthChecker.checkAllHealth()
-                _uiState.value = _uiState.value.copy(isCheckingHealth = false, dataSourceHealth = health)
+                _uiState.update { state -> state.copy(isCheckingHealth = false, dataSourceHealth = health) }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 AppLogger.e("检查数据源健康失败: ${e.message}", e, "SettingsVM")
-                _uiState.value = _uiState.value.copy(
+                _uiState.update { state -> state.copy(
                     isCheckingHealth = false,
                     errorMessage = "检查数据源状态失败"
-                )
+                ) }
             }
         }
     }
 
     fun clearExportResult() {
-        _uiState.value = _uiState.value.copy(exportResult = null)
+        _uiState.update { state -> state.copy(exportResult = null) }
     }
 
     fun clearDeleteResult() {
-        _uiState.value = _uiState.value.copy(deleteResult = null)
+        _uiState.update { state -> state.copy(deleteResult = null) }
     }
 
     fun clearErrorMessage() {
-        _uiState.value = _uiState.value.copy(errorMessage = null)
+        _uiState.update { state -> state.copy(errorMessage = null) }
     }
 
     fun saveDashboardPreferences(preferences: DashboardPreferences) {

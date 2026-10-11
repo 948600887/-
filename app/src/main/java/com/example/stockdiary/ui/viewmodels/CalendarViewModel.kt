@@ -20,6 +20,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.time.LocalDate
@@ -54,13 +55,13 @@ class CalendarViewModel(
 
     init {
         val prefs = dashboardPreferencesManager.loadPreferences()
-        _uiState.value = _uiState.value.copy(monthlyExpense = prefs.monthlyExpense)
+        _uiState.update { state -> state.copy(monthlyExpense = prefs.monthlyExpense) }
 
         viewModelScope.launch {
             assetRepository.getAllAssets()
                 .map { assets -> assets.filter { it.type in supportedTypes } }
                 .collect { assets ->
-                    _uiState.value = _uiState.value.copy(assets = assets)
+                    _uiState.update { state -> state.copy(assets = assets) }
                     generateCalendarData(assets)
                     loadDividendIncome(assets)
                 }
@@ -72,7 +73,7 @@ class CalendarViewModel(
         viewModelScope.launch {
             try {
                 val result = dividendIncomeUseCase.load(assets, forceRefresh = false, tag = "CalendarVM")
-                _uiState.value = _uiState.value.copy(realAnnualIncome = result.totalAnnualIncome)
+                _uiState.update { state -> state.copy(realAnnualIncome = result.totalAnnualIncome) }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -82,7 +83,7 @@ class CalendarViewModel(
     }
 
     fun updateMonthlyExpense(expense: String) {
-        _uiState.value = _uiState.value.copy(monthlyExpense = expense)
+        _uiState.update { state -> state.copy(monthlyExpense = expense) }
         viewModelScope.launch {
             try {
                 val current = dashboardPreferencesManager.loadPreferences()
@@ -97,7 +98,7 @@ class CalendarViewModel(
 
     fun selectTab(tab: String) {
         if (_uiState.value.selectedTab == tab) return
-        _uiState.value = _uiState.value.copy(selectedTab = tab)
+        _uiState.update { state -> state.copy(selectedTab = tab) }
         viewModelScope.launch {
             generateCalendarData(_uiState.value.assets)
         }
@@ -105,14 +106,14 @@ class CalendarViewModel(
 
     fun selectMonth(month: YearMonth) {
         if (_uiState.value.currentMonth == month) return
-        _uiState.value = _uiState.value.copy(currentMonth = month)
+        _uiState.update { state -> state.copy(currentMonth = month) }
         viewModelScope.launch {
             generateCalendarData(_uiState.value.assets)
         }
     }
 
     fun selectDate(date: LocalDate?) {
-        _uiState.value = _uiState.value.copy(selectedDate = date)
+        _uiState.update { state -> state.copy(selectedDate = date) }
     }
 
     fun refresh() {
@@ -122,21 +123,21 @@ class CalendarViewModel(
     }
 
     fun clearError() {
-        _uiState.value = _uiState.value.copy(errorMessage = null)
+        _uiState.update { state -> state.copy(errorMessage = null) }
     }
 
     private suspend fun generateCalendarData(assets: List<Asset>, forceRefresh: Boolean = false) {
         if (assets.isEmpty()) {
-            _uiState.value = _uiState.value.copy(
+            _uiState.update { state -> state.copy(
                 isLoading = false,
                 calendarData = emptyMap(),
                 dividendDates = emptySet(),
                 dividends = emptyList(),
                 errorMessage = null
-            )
+            ) }
             return
         }
-        _uiState.value = _uiState.value.copy(isLoading = true, errorMessage = null)
+        _uiState.update { state -> state.copy(isLoading = true, errorMessage = null) }
         val requestState = _uiState.value
         // 顶层兜底：内部虽返回 Result，但 withContext 链路上的意外异常不能让 viewModelScope 崩溃
         val result = try {
@@ -151,7 +152,7 @@ class CalendarViewModel(
             throw e
         } catch (e: Exception) {
             AppLogger.e("生成日历数据异常: ${e.message}", e, "CalendarVM")
-            _uiState.value = _uiState.value.copy(isLoading = false, errorMessage = "日历数据加载失败，请重试")
+            _uiState.update { state -> state.copy(isLoading = false, errorMessage = "日历数据加载失败，请重试") }
             return
         }
         val currentState = _uiState.value
@@ -159,18 +160,20 @@ class CalendarViewModel(
             return
         }
         result.onSuccess { calendarResult ->
-            _uiState.value = currentState.copy(
+            // 用 update{} 原子读-改-写：不能直接拿上面读到的 currentState 去 copy，
+            // 期间 loadDividendIncome 等协程可能已经写过 uiState，那会把它们的更新整体冲掉
+            _uiState.update { state -> state.copy(
                 isLoading = false,
                 calendarData = calendarResult.calendarData,
                 dividendDates = calendarResult.dividendDates,
                 dividends = calendarResult.dividends,
                 errorMessage = null
-            )
+            ) }
         }.onFailure { e ->
-            _uiState.value = currentState.copy(
+            _uiState.update { state -> state.copy(
                 isLoading = false,
                 errorMessage = "日历数据生成失败"
-            )
+            ) }
             AppLogger.e("生成日历数据失败: ${e.message}", e, "CalendarViewModel")
         }
     }

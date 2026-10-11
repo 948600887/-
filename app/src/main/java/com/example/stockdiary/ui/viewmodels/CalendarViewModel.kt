@@ -5,7 +5,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.example.stockdiary.data.AssetRepository
 import com.example.stockdiary.data.DashboardPreferencesManager
-import com.example.stockdiary.data.DividendIncomeLoader
+import com.example.stockdiary.data.DividendIncomeUseCase
 import com.example.stockdiary.data.DividendRecord
 import com.example.stockdiary.data.DividendRepository
 import com.example.stockdiary.database.Asset
@@ -29,7 +29,8 @@ class CalendarViewModel(
     private val assetRepository: AssetRepository,
     private val dividendRepository: DividendRepository,
     private val snapshotDao: SnapshotDao,
-    private val dashboardPreferencesManager: DashboardPreferencesManager
+    private val dashboardPreferencesManager: DashboardPreferencesManager,
+    private val dividendIncomeUseCase: DividendIncomeUseCase
 ) : ViewModel() {
 
     data class UiState(
@@ -49,7 +50,6 @@ class CalendarViewModel(
     private val _uiState = MutableStateFlow(UiState())
     val uiState: StateFlow<UiState> = _uiState.asStateFlow()
 
-    private val incomeLoader = DividendIncomeLoader(dividendRepository)
     private val supportedTypes = listOf(AssetType.STOCK, AssetType.FUND, AssetType.BANK_DEPOSIT)
 
     init {
@@ -71,7 +71,7 @@ class CalendarViewModel(
         if (assets.isEmpty()) return
         viewModelScope.launch {
             try {
-                val result = incomeLoader.loadIncome(assets, forceRefresh = false, tag = "CalendarVM")
+                val result = dividendIncomeUseCase.load(assets, forceRefresh = false, tag = "CalendarVM")
                 _uiState.value = _uiState.value.copy(realAnnualIncome = result.totalAnnualIncome)
             } catch (e: CancellationException) {
                 throw e
@@ -354,7 +354,8 @@ class CalendarViewModel(
                 assetRepository = container.assetRepository,
                 dividendRepository = container.dividendRepository,
                 snapshotDao = container.database.snapshotDao(),
-                dashboardPreferencesManager = container.dashboardPreferencesManager
+                dashboardPreferencesManager = container.dashboardPreferencesManager,
+                dividendIncomeUseCase = container.dividendIncomeUseCase
             ) as T
         }
     }

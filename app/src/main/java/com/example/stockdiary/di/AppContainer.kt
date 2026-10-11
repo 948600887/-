@@ -6,6 +6,8 @@ import com.example.stockdiary.data.AssetRepository
 import com.example.stockdiary.data.DashboardPreferencesManager
 import com.example.stockdiary.data.DataExporter
 import com.example.stockdiary.data.BrokerageImportService
+import com.example.stockdiary.data.DividendIncomeLoader
+import com.example.stockdiary.data.DividendIncomeUseCase
 import com.example.stockdiary.data.DividendRepository
 import com.example.stockdiary.data.OcrStatementService
 import com.example.stockdiary.data.PriceSyncPreferencesManager
@@ -19,6 +21,13 @@ import com.example.stockdiary.utils.CrashRecoveryManager
 class AppContainer(val context: Context) {
     val assetRepository: AssetRepository by lazy { AssetRepository.getInstance(context) }
     val dividendRepository: DividendRepository by lazy { DividendRepository.getInstance(context) }
+    // 跨 VM 共享的单一入口：分红收入抓取经此收口，进程内 in-flight 单飞，避免多屏重复抓同一份数据
+    private val dividendIncomeLoader by lazy { DividendIncomeLoader(dividendRepository) }
+    val dividendIncomeUseCase: DividendIncomeUseCase by lazy {
+        DividendIncomeUseCase { assets, forceRefresh, tag ->
+            dividendIncomeLoader.loadIncome(assets, forceRefresh, tag)
+        }
+    }
     val dashboardPreferencesManager: DashboardPreferencesManager by lazy { DashboardPreferencesManager.getInstance(context) }
     val priceSyncPreferencesManager: PriceSyncPreferencesManager by lazy { PriceSyncPreferencesManager.getInstance(context) }
     val database: StockDatabase by lazy { StockDatabase.getInstance(context) }

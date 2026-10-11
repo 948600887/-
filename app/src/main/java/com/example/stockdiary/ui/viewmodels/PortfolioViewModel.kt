@@ -5,7 +5,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.example.stockdiary.data.AssetSyncManager
 import com.example.stockdiary.data.DashboardPreferences
-import com.example.stockdiary.data.DividendIncomeLoader
+import com.example.stockdiary.data.DividendIncomeUseCase
 import com.example.stockdiary.data.SortOrder
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
@@ -22,7 +22,7 @@ import kotlinx.coroutines.CancellationException
 class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
 
     private val repository = container.assetRepository
-    private val incomeLoader = DividendIncomeLoader(container.dividendRepository)
+    private val incomeUseCase = container.dividendIncomeUseCase
 
     val assets: StateFlow<List<Asset>> = repository.getAllAssets()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
@@ -71,7 +71,7 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
         viewModelScope.launch {
             if (!hasLoadedDividend) _dividendLoading.value = true
             try {
-                val result = incomeLoader.loadIncome(stockAssets, forceRefresh = false, tag = "PortfolioVM")
+                val result = incomeUseCase.load(stockAssets, forceRefresh = false, tag = "PortfolioVM")
                 _estimatedAnnualDividend.value = result.totalAnnualIncome
                 _incomeCalculationStatus.value = if (result.totalAnnualIncome == 0.0 && !result.hasDividendData) {
                     "暂无分红数据"
@@ -108,7 +108,7 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
             }
 
             try {
-                val result = incomeLoader.loadIncome(stockAssets, forceRefresh = false, tag = "PortfolioVM")
+                val result = incomeUseCase.load(stockAssets, forceRefresh = false, tag = "PortfolioVM")
                 _estimatedAnnualDividend.value = result.totalAnnualIncome
                 _incomeCalculationStatus.value = null
             } catch (e: CancellationException) {
@@ -198,7 +198,7 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
                     onProgress = { },
                     forceRefresh = true
                 )
-                val result = incomeLoader.loadIncome(assets, forceRefresh = false, tag = "PortfolioVM")
+                val result = incomeUseCase.load(assets, forceRefresh = false, tag = "PortfolioVM")
                 _estimatedAnnualDividend.value = result.totalAnnualIncome
             } catch (e: CancellationException) {
                 throw e

@@ -1,333 +1,35 @@
 package com.example.stockdiary.ui.components
 
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import com.example.stockdiary.ui.theme.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.ExpandLess
-import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Savings
-import androidx.compose.material.icons.filled.Search
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.example.stockdiary.data.DividendRecord
 import com.example.stockdiary.database.Asset
-import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.database.Dividend
 import com.example.stockdiary.database.amountFor
 import com.example.stockdiary.database.perTenSharesToAmount
 import com.example.stockdiary.di.LocalAppContainer
-import com.example.stockdiary.ui.theme.*
 import com.example.stockdiary.utils.AppLogger
 import com.example.stockdiary.utils.StockCodeManager
 import com.example.stockdiary.utils.format
 import com.example.stockdiary.utils.shareUnitWord
-import com.example.stockdiary.utils.totalValueCny
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-
-@Composable
-fun PortfolioOverviewCard(
-    totalAssets: Double,
-    totalLiabilities: Double,
-    netAssets: Double,
-    estimatedAnnualDividend: Double,
-    isDividendLoading: Boolean,
-    dividendStatus: String?,
-    assetCount: Int
-) {
-    val monthlyDividend = if (estimatedAnnualDividend > 0) estimatedAnnualDividend / 12 else 0.0
-
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(12.dp),
-        colors = CardDefaults.cardColors(containerColor = PrimaryContainer)
-    ) {
-        Column(modifier = Modifier.padding(16.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text("总资产", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, color = OnSurface)
-                Text("$assetCount 项", style = MaterialTheme.typography.bodySmall, color = OnSurfaceVariant)
-            }
-            Spacer(modifier = Modifier.height(8.dp))
-            Text("¥${totalAssets.format(2)}", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold, color = OnSurface)
-            // 有负债时净资产比总资产更值得看，别让用户自己心算
-            if (totalLiabilities > 0) {
-                Spacer(modifier = Modifier.height(6.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text("净资产 ¥${netAssets.format(2)}", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium, color = OnSurface)
-                    Text("负债 ¥${totalLiabilities.format(2)}", style = MaterialTheme.typography.bodyMedium, color = ProfitGreen)
-                }
-            }
-            Spacer(modifier = Modifier.height(12.dp))
-            HorizontalDivider(color = Outline.copy(alpha = 0.3f))
-            Spacer(modifier = Modifier.height(12.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceEvenly
-            ) {
-                PortfolioMetricColumn("年度分红", if (isDividendLoading) "计算中" else "¥${estimatedAnnualDividend.format(0)}", isDividendLoading)
-                PortfolioMetricColumn("月均分红", if (isDividendLoading) "-" else "¥${monthlyDividend.format(0)}", false)
-                PortfolioMetricColumn(dividendStatus ?: "持有", if (dividendStatus != null) "" else "$assetCount", isDividendLoading && dividendStatus != null)
-            }
-        }
-    }
-}
-
-@Composable
-fun AccountGroup(
-    account: String,
-    assets: List<Asset>,
-    isExpanded: Boolean,
-    onToggleExpand: () -> Unit,
-    onAssetClick: (Asset) -> Unit,
-    onDividendClick: (Asset) -> Unit,
-    selectionMode: Boolean = false,
-    selectedIds: Set<Long> = emptySet(),
-    onToggleSelection: (Asset) -> Unit = {}
-) {
-    val totalValue = assets.sumOf { it.totalValueCny }
-
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(12.dp),
-        colors = CardDefaults.cardColors(containerColor = SurfaceContainer)
-    ) {
-        Column {
-            Row(
-                modifier = Modifier.fillMaxWidth().clickable(onClick = onToggleExpand).padding(16.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column {
-                    Text(account, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, color = OnSurface)
-                    Text("${assets.size} 项", style = MaterialTheme.typography.bodySmall, color = OnSurfaceVariant)
-                }
-                Column(horizontalAlignment = Alignment.End) {
-                    Text("¥${totalValue.format(2)}", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, color = OnSurface)
-                }
-                Icon(
-                    imageVector = if (isExpanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
-                    contentDescription = if (isExpanded) "收起" else "展开",
-                    tint = OnSurfaceVariant
-                )
-            }
-            if (isExpanded) {
-                Column(modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 16.dp)) {
-                    HorizontalDivider(modifier = Modifier.fillMaxWidth(), color = Outline.copy(alpha = 0.3f))
-                    Spacer(modifier = Modifier.height(12.dp))
-                    assets.forEachIndexed { index, asset ->
-                        StockAssetItem(
-                            asset = asset,
-                            onClick = { if (selectionMode) onToggleSelection(asset) else onAssetClick(asset) },
-                            onDividendClick = { onDividendClick(asset) },
-                            selectionMode = selectionMode,
-                            isSelected = selectedIds.contains(asset.id),
-                            onToggleSelection = { onToggleSelection(asset) }
-                        )
-                        if (index < assets.size - 1) Spacer(modifier = Modifier.height(8.dp))
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-fun StockAssetItem(
-    asset: Asset,
-    onClick: () -> Unit,
-    onDividendClick: () -> Unit,
-    selectionMode: Boolean = false,
-    isSelected: Boolean = false,
-    onToggleSelection: () -> Unit = {}
-) {
-    val isLiability = asset.type.isLiability
-    val currentPrice = asset.currentPrice
-    val pricePrecision = if (asset.type == AssetType.FUND || StockCodeManager.isETF(asset.symbol)) 3 else 2
-    val unitLabel = if (asset.type == AssetType.STOCK) "股" else "份"
-
-    Card(
-        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick),
-        shape = RoundedCornerShape(8.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = if (isSelected) PrimaryContainer.copy(alpha = 0.4f) else SurfaceContainerLow
-        )
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(12.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            if (selectionMode) {
-                Checkbox(
-                    checked = isSelected,
-                    onCheckedChange = { onToggleSelection() },
-                    modifier = Modifier.padding(end = 8.dp)
-                )
-            }
-            Column(modifier = Modifier.weight(1f)) {
-                Text(asset.name, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold, color = OnSurface, maxLines = 1)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    asset.symbol?.let {
-                        Text(it, style = MaterialTheme.typography.bodySmall, color = OnSurfaceVariant)
-                        Text("•", style = MaterialTheme.typography.bodySmall, color = OnSurfaceVariant)
-                    }
-                    // 负债没有「持仓数量」的概念，balance 就是欠多少钱
-                    Text(
-                        if (isLiability) "负债" else "${asset.balance.format(0)}$unitLabel",
-                        style = MaterialTheme.typography.bodySmall, color = OnSurfaceVariant
-                    )
-                }
-            }
-            Column(modifier = Modifier.weight(1f), horizontalAlignment = Alignment.End) {
-                Text("¥${asset.totalValueCny.format(2)}", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold, color = OnSurface)
-                Text(
-                    when {
-                        isLiability -> "待偿还"
-                        currentPrice != null -> "¥${currentPrice.format(pricePrecision)}"
-                        else -> "价格待更新"
-                    },
-                    style = MaterialTheme.typography.bodySmall, color = OnSurfaceVariant, fontWeight = FontWeight.Medium
-                )
-            }
-            // 分红入口只对能分红的类型有意义，负债点了也是空列表
-            if (!selectionMode && !isLiability) {
-                IconButton(onClick = onDividendClick, modifier = Modifier.size(32.dp)) {
-                    Icon(Icons.Filled.Savings, contentDescription = "分红", tint = Primary, modifier = Modifier.size(18.dp))
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun PortfolioMetricColumn(label: String, value: String, isLoading: Boolean) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        if (isLoading) {
-            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = Primary)
-        } else {
-            Text(value, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, color = OnSurface)
-        }
-        Text(label, style = MaterialTheme.typography.labelSmall, color = OnSurfaceVariant)
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun PortfolioSearchDialog(
-    assets: List<Asset>,
-    onDismiss: () -> Unit,
-    onAssetSelected: (Asset) -> Unit,
-    onDividendSelected: (Asset) -> Unit
-) {
-    var searchQuery by remember { mutableStateOf("") }
-
-    val filteredAssets by remember(assets, searchQuery) {
-        derivedStateOf {
-            if (searchQuery.isBlank()) assets
-            else assets.filter { it.name.contains(searchQuery, ignoreCase = true) || (it.symbol?.contains(searchQuery, ignoreCase = true) == true) }
-        }
-    }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = {
-            Column {
-                Text("搜索持仓", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = OnSurface)
-                Spacer(modifier = Modifier.height(8.dp))
-                OutlinedTextField(
-                    value = searchQuery,
-                    onValueChange = { searchQuery = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    placeholder = { Text("输入名称或代码") },
-                    trailingIcon = {
-                        if (searchQuery.isNotEmpty()) {
-                            IconButton(onClick = { searchQuery = "" }) {
-                                Icon(Icons.Filled.Close, contentDescription = "清除", tint = OnSurfaceVariant)
-                            }
-                        }
-                    },
-                    singleLine = true,
-                    colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = Primary, unfocusedBorderColor = Outline)
-                )
-            }
-        },
-        text = {
-            LazyColumn(modifier = Modifier.fillMaxWidth().heightIn(max = 400.dp)) {
-                items(items = filteredAssets, key = { it.id }) { asset ->
-                    SearchAssetItem(asset = asset, onClick = { onAssetSelected(asset) }, onDividendClick = { onDividendSelected(asset) })
-                    Spacer(modifier = Modifier.height(4.dp))
-                }
-                if (filteredAssets.isEmpty() && searchQuery.isNotBlank()) {
-                    item {
-                        Box(modifier = Modifier.fillMaxWidth().padding(32.dp), contentAlignment = Alignment.Center) {
-                            Text("没有找到匹配的持仓", style = MaterialTheme.typography.bodyMedium, color = OnSurfaceVariant)
-                        }
-                    }
-                }
-            }
-        },
-        confirmButton = {},
-        dismissButton = { TextButton(onClick = onDismiss) { Text("关闭") } },
-        modifier = Modifier.fillMaxWidth()
-    )
-}
-
-@Composable
-fun SearchAssetItem(asset: Asset, onClick: () -> Unit, onDividendClick: () -> Unit) {
-    val pricePrecision = if (asset.type == AssetType.FUND || StockCodeManager.isETF(asset.symbol)) 3 else 2
-
-    Card(
-        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick),
-        shape = RoundedCornerShape(8.dp),
-        colors = CardDefaults.cardColors(containerColor = SurfaceContainerLow)
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(12.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(asset.name, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold, color = OnSurface, maxLines = 1)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text(asset.symbol ?: "", style = MaterialTheme.typography.bodySmall, color = OnSurfaceVariant)
-                    Text("•", style = MaterialTheme.typography.bodySmall, color = OnSurfaceVariant)
-                    Text("${asset.balance.format(0)}${if (asset.type == AssetType.STOCK) "股" else "份"}", style = MaterialTheme.typography.bodySmall, color = OnSurfaceVariant)
-                }
-            }
-            Column(modifier = Modifier.weight(1f), horizontalAlignment = Alignment.End) {
-                Text("¥${asset.totalValueCny.format(2)}", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold, color = OnSurface)
-                Text(
-                    asset.currentPrice?.let { "¥${it.format(pricePrecision)}" } ?: "价格待更新",
-                    style = MaterialTheme.typography.bodySmall, color = OnSurfaceVariant, fontWeight = FontWeight.Medium
-                )
-            }
-            IconButton(onClick = onDividendClick, modifier = Modifier.size(32.dp)) {
-                Icon(Icons.Filled.Savings, contentDescription = "分红", tint = Primary, modifier = Modifier.size(18.dp))
-            }
-        }
-    }
-}
 
 @Composable
 fun DividendDetailDialog(

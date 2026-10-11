@@ -67,6 +67,14 @@ android {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
     }
+
+    testOptions {
+        // JVM 单测中 Android 框架方法默认抛 "Method ... not mocked"。
+        // AppLogger 走 android.util.Log，而 ViewModel 里有无条件日志调用
+        // （如 CalendarViewModel 生成日历后的 AppLogger.d），一旦炸掉会连带整条协程链失败。
+        // 这里改为返回默认值，让日志在单测里退化为空操作。
+        unitTests.isReturnDefaultValues = true
+    }
 }
 
 tasks.withType<Test>().configureEach {
@@ -133,6 +141,9 @@ dependencies {
     
     // Testing
     testImplementation("junit:junit:4.13.2")
+    // JVM 单测驱动 viewModelScope（Dispatchers.Main 接管）+ MockK 伪造 final 类 / AppContainer
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.7.3")
+    testImplementation("io.mockk:mockk:1.13.11")
     androidTestImplementation("androidx.test.ext:junit:1.1.5")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.5.1")
     androidTestImplementation("androidx.compose.ui:ui-test-junit4:1.5.1")

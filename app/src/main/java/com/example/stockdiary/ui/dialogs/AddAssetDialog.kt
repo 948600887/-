@@ -13,7 +13,6 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.ImeAction
@@ -297,7 +296,7 @@ fun AddAssetDialog(
                     verticalArrangement = Arrangement.spacedBy(20.dp)
                 ) {
                     // 资产类型
-                    SectionHeader("资产类型")
+                    DialogSectionHeader("资产类型")
 
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Row(
@@ -306,7 +305,7 @@ fun AddAssetDialog(
                         ) {
                             // 证券：合并股票+基金，输入代码后自动识别
                             val isSecuritiesSelected = selectedType == AssetType.STOCK || selectedType == AssetType.FUND
-                            TypeChip(
+                            DialogTypeChip(
                                 type = AssetType.STOCK,
                                 selected = isSecuritiesSelected,
                                 onClick = {
@@ -320,7 +319,7 @@ fun AddAssetDialog(
                                 customLabel = "证券",
                                 modifier = Modifier.weight(1f)
                             )
-                            TypeChip(
+                            DialogTypeChip(
                                 type = AssetType.BANK_DEPOSIT,
                                 selected = selectedType == AssetType.BANK_DEPOSIT,
                                 onClick = {
@@ -337,7 +336,7 @@ fun AddAssetDialog(
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                             listOf(AssetType.CRYPTO, AssetType.CREDIT_CARD, AssetType.LOAN).forEach { type ->
-                                TypeChip(
+                                DialogTypeChip(
                                     type = type,
                                     selected = selectedType == type,
                                     onClick = {
@@ -353,7 +352,7 @@ fun AddAssetDialog(
                     }
 
                     // 基本信息
-                    SectionHeader("基本信息")
+                    DialogSectionHeader("基本信息")
 
                     OutlinedTextField(
                         value = name,
@@ -500,7 +499,7 @@ fun AddAssetDialog(
                     }
 
                     // 交易信息
-                    SectionHeader("交易信息")
+                    DialogSectionHeader("交易信息")
 
                     OutlinedTextField(
                         value = balance,
@@ -586,7 +585,7 @@ fun AddAssetDialog(
                     }
 
                     // 备注
-                    SectionHeader("备注")
+                    DialogSectionHeader("备注")
                     OutlinedTextField(
                         value = notes,
                         onValueChange = { notes = it },
@@ -695,107 +694,8 @@ fun AddAssetDialog(
     }
 }
 
-@Composable
-private fun SectionHeader(text: String) = DialogSectionHeader(text)
 
-@Composable
-private fun TypeChip(
-    type: AssetType,
-    selected: Boolean,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-    customLabel: String? = null
-) = DialogTypeChip(type, selected, onClick, modifier, customLabel)
 
-@Composable
-private fun FundInfoCard(info: FundAPI.FundInfo) {
-    // 场外基金净值显示到4位小数（如 1.2345）
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f)
-        )
-    ) {
-        Column(
-            modifier = Modifier.padding(12.dp)
-        ) {
-            Text(
-                text = info.name,
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold
-            )
-            Spacer(modifier = Modifier.height(8.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                InfoItem("净值", "${info.price.format(4)}")
-                if (info.changePercent != null) {
-                    InfoItem(
-                        label = "涨跌",
-                        value = "${info.changePercent.format(2)}%",
-                        color = if (info.changePercent >= 0) LossRed else ProfitGreen
-                    )
-                }
-            }
-        }
-    }
-}
 
-@Composable
-private fun StockInfoCard(info: SinaStockData, category: CodeCategory? = null) {
-    // ETF/LOF/场内基金价格显示到厘（3位小数），股票显示到分（2位小数）
-    val priceDigits = if (category == CodeCategory.ETF || category == CodeCategory.LOF || category == CodeCategory.EXCHANGE_FUND) 3 else 2
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f)
-        )
-    ) {
-        Column(
-            modifier = Modifier.padding(12.dp)
-        ) {
-            Text(
-                text = info.name,
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold
-            )
-            Spacer(modifier = Modifier.height(8.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                InfoItem("现价", "${info.price.format(priceDigits)}")
-                InfoItem(
-                    label = "涨跌",
-                    value = "${info.changePercent.format(2)}%",
-                    color = if (info.changePercent >= 0) LossRed else ProfitGreen
-                )
-            }
-        }
-    }
-}
 
-@Composable
-private fun ErrorCard(message: String) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.errorContainer
-        )
-    ) {
-        Text(
-            text = message,
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onErrorContainer,
-            modifier = Modifier.padding(12.dp)
-        )
-    }
-}
 
-@Composable
-private fun InfoItem(
-    label: String,
-    value: String,
-    color: Color? = null
-) = DialogInfoItem(label, value, color)

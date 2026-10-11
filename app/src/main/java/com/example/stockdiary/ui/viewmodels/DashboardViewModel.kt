@@ -4,7 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.example.stockdiary.data.AssetSyncManager
-import com.example.stockdiary.data.DividendIncomeLoader
+import com.example.stockdiary.data.DividendIncomeUseCase
 import com.example.stockdiary.data.DividendProgressCalculator
 import com.example.stockdiary.data.SortOrder
 import com.example.stockdiary.data.SyncProgress
@@ -29,7 +29,7 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
 
     private val repository = container.assetRepository
     private val preferencesManager = container.dashboardPreferencesManager
-    private val incomeLoader = DividendIncomeLoader(container.dividendRepository)
+    private val incomeUseCase = container.dividendIncomeUseCase
 
     val assets: StateFlow<List<Asset>> = repository.getAllAssets()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
@@ -99,7 +99,7 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
                 val bankDeposits = assetsOnly.filter { it.type == AssetType.BANK_DEPOSIT }
                 _hasInterestData.value = bankDeposits.any { (it.interestRate ?: 0.0) > 0 }
 
-                val result = incomeLoader.loadIncome(assetsOnly, forceRefresh = false, tag = "DashboardVM")
+                val result = incomeUseCase.load(assetsOnly, forceRefresh = false, tag = "DashboardVM")
                 _realAnnualIncome.value = result.totalAnnualIncome
                 _estimatedDailyDividend.value = result.totalAnnualIncome / 365
                 _dividendProgress.value = withContext(Dispatchers.Default) {
@@ -173,7 +173,7 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
             }
 
             try {
-                val result = incomeLoader.loadIncome(assetsOnly, forceRefresh = false, tag = "DashboardVM")
+                val result = incomeUseCase.load(assetsOnly, forceRefresh = false, tag = "DashboardVM")
                 _realAnnualIncome.value = result.totalAnnualIncome
                 _estimatedDailyDividend.value = result.totalAnnualIncome / 365
                 _dividendProgress.value = withContext(Dispatchers.Default) {

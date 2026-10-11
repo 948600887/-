@@ -257,7 +257,7 @@ object GalaxyStatementParser {
             // ⑤ 仍然配不上也不丢：留一条待补全记录。
             //    静默丢行是最糟的失败模式——用户只会觉得「少了一笔」却无从下手。
             logger("WARN 首行匹配但未找到详情行，已保留为待补全记录: $anchorText")
-            result.add(buildIncomplete(matched, year, rowNo))
+            result.add(buildIncomplete(matched, rowNo))
             rowNo++
             i += 1 + consumed
         }
@@ -509,7 +509,6 @@ object GalaxyStatementParser {
      */
     private fun buildIncomplete(
         anchor: Anchor,
-        year: Int,
         rowNo: Int
     ): BrokerageImportService.ParsedTransaction {
         val errors = mutableListOf<String>(ERR_DETAIL_MISSING)

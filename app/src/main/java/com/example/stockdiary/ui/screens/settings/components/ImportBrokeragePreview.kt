@@ -12,6 +12,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -26,7 +28,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import com.example.stockdiary.data.BrokerageImportService
 import com.example.stockdiary.data.GalaxyStatementParser
@@ -136,6 +140,7 @@ internal fun PreviewTransactionRow(
     showSymbolInput: Boolean,
     viewModel: ImportBrokerageViewModel
 ) {
+    val focusManager = LocalFocusManager.current
     val bg = when {
         tx.errors.isNotEmpty() -> Color(0xFFFFCDD2) // 红
         tx.isDuplicate -> Color(0xFFFFF59D)        // 黄
@@ -180,7 +185,12 @@ internal fun PreviewTransactionRow(
                         )
                     },
                     singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier.fillMaxWidth(),
+                    // 这里不串 Next：缺失代码的行在列表里是零散分布的，
+                    // 下一个输入框可能根本不在当前已组合的范围内，跨行请求焦点会失败。
+                    // 给个 Done 把键盘收起来，露出后面的行让用户自己点，反而更顺。
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                    keyboardActions = KeyboardActions(onDone = { focusManager.clearFocus() })
                 )
                 if (tx.symbol.isNotBlank() && tx.symbolSource.isNotEmpty()) {
                     Spacer(Modifier.height(2.dp))

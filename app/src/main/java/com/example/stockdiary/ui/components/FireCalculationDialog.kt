@@ -2,6 +2,8 @@ package com.example.stockdiary.ui.components
 
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Savings
@@ -9,10 +11,14 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.stockdiary.database.Asset
+import com.example.stockdiary.ui.dialogs.sanitizeDecimalInput
 import com.example.stockdiary.ui.theme.LossRed
 import com.example.stockdiary.utils.format
 
@@ -24,6 +30,7 @@ fun FireCalculationDialog(
     onDismiss: () -> Unit,
     onExpenseChange: (String) -> Unit
 ) {
+    val focusManager = LocalFocusManager.current
     val totalValue = assets.sumOf { it.totalValue }
     val annualDividend = realAnnualIncome
     val monthlyDividend = annualDividend / 12
@@ -55,11 +62,14 @@ fun FireCalculationDialog(
 
                 OutlinedTextField(
                     value = monthlyExpense,
-                    onValueChange = onExpenseChange,
+                    onValueChange = { onExpenseChange(sanitizeDecimalInput(it)) },
                     label = { Text("月度生活费 (元)") },
-                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
-                        keyboardType = androidx.compose.ui.text.input.KeyboardType.Number
+                    keyboardOptions = KeyboardOptions(
+                        keyboardType = KeyboardType.Number,
+                        imeAction = ImeAction.Done
                     ),
+                    keyboardActions = KeyboardActions(onDone = { focusManager.clearFocus() }),
+                    singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
                 Spacer(modifier = Modifier.height(8.dp))

@@ -1,8 +1,16 @@
 package com.example.stockdiary.ui.components
 
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
+import com.example.stockdiary.ui.dialogs.sanitizeDecimalInput
 import com.example.stockdiary.ui.theme.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -315,7 +323,22 @@ private fun DividendEditDialog(
 ) {
     var date by remember { mutableStateOf(existing?.date ?: "") }
     var amountText by remember { mutableStateOf(existing?.amount?.toString() ?: "") }
-    var error by remember { mutableStateOf<String?>(null) }
+    // 编辑已有记录时，原值本来就是合法的，不该一打开就飘红
+    var dateTouched by remember { mutableStateOf(existing != null) }
+    var amountTouched by remember { mutableStateOf(existing != null) }
+    var submitAttempted by remember { mutableStateOf(false) }
+
+    val errors by remember(date, amountText, unitWord) {
+        derivedStateOf { validateDividendInput(date, amountText, unitWord) }
+    }
+    val dateError = if (dateTouched || submitAttempted) errors.date?.message else null
+    val amountError = if (amountTouched || submitAttempted) errors.amount?.message else null
+    // 金额偏大只提醒、不拦：茅台这类高价股每10股派 300 多元是真实存在的
+    val amountHint = if (amountError == null) dividendAmountHint(amountText, unitWord) else null
+
+    val dateFocus = remember { FocusRequester() }
+    val amountFocus = remember { FocusRequester() }
+    val focusManager = LocalFocusManager.current
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -325,45 +348,65 @@ private fun DividendEditDialog(
                 Text(assetName, style = MaterialTheme.typography.bodySmall, color = OnSurfaceVariant)
                 OutlinedTextField(
                     value = date,
-                    onValueChange = { date = it },
+                    onValueChange = { date = it; dateTouched = true },
                     label = { Text("除息日 (yyyy-MM-dd)") },
                     singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier.fillMaxWidth().focusRequester(dateFocus),
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
+                    keyboardActions = KeyboardActions(onNext = { amountFocus.requestFocus() }),
+                    isError = dateError != null,
+                    supportingText = { dateError?.let { Text(it) } }
                 )
                 OutlinedTextField(
                     value = amountText,
-                    onValueChange = { amountText = it },
+                    onValueChange = {
+                        amountText = sanitizeDecimalInput(it)
+                        amountTouched = true
+                    },
                     label = { Text("每10${unitWord}分红 (元)") },
                     singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier.fillMaxWidth().focusRequester(amountFocus),
+                    keyboardOptions = KeyboardOptions(
+                        keyboardType = KeyboardType.Decimal,
+                        imeAction = ImeAction.Done
+                    ),
+                    keyboardActions = KeyboardActions(
+                        onDone = {
+                            focusManager.clearFocus()
+                            submitAttempted = true
+                            if (errors.isValid) {
+                                onSave(buildDividend(existing, symbol, assetName, amountText, date))
+                            } else {
+                                when (errors.firstField) {
+                                    "date" -> dateFocus.requestFocus()
+                                    "amount" -> amountFocus.requestFocus()
+                                }
+                            }
+                        }
+                    ),
+                    isError = amountError != null,
+                    supportingText = {
+                        if (amountError != null) {
+                            Text(amountError)
+                        } else if (amountHint != null) {
+                            Text(amountHint, color = OnSurfaceVariant)
+                        }
+                    }
                 )
-                if (error != null) {
-                    Text(error ?: "", color = LossRed, fontSize = 12.sp)
-                }
             }
         },
         confirmButton = {
             TextButton(
                 onClick = {
-                    val parsedAmount = amountText.toDoubleOrNull()
-                    val datePattern = Regex("^\\d{4}-\\d{2}-\\d{2}$")
-                    when {
-                        !datePattern.matches(date) -> error = "日期格式错误"
-                        parsedAmount == null || parsedAmount < 0 -> error = "分红金额必须大于等于0"
-                        parsedAmount > 100 -> error = "每10${unitWord}分红超过100元，请检查单位"
-                        else -> {
-                            error = null
-                            onSave(
-                                Dividend(
-                                    id = existing?.id ?: 0,
-                                    symbol = symbol,
-                                    name = assetName,
-                                    amount = parsedAmount,
-                                    date = date
-                                )
-                            )
+                    submitAttempted = true
+                    if (!errors.isValid) {
+                        when (errors.firstField) {
+                            "date" -> dateFocus.requestFocus()
+                            "amount" -> amountFocus.requestFocus()
                         }
+                        return@TextButton
                     }
+                    onSave(buildDividend(existing, symbol, assetName, amountText, date))
                 }
             ) { Text("保存") }
         },
@@ -372,3 +415,18 @@ private fun DividendEditDialog(
         }
     )
 }
+
+/** 组装待保存的 Dividend。调用方必须先确认 [validateDividendInput] 通过。 */
+private fun buildDividend(
+    existing: Dividend?,
+    symbol: String,
+    assetName: String,
+    amountText: String,
+    date: String
+): Dividend = Dividend(
+    id = existing?.id ?: 0,
+    symbol = symbol,
+    name = assetName,
+    amount = amountText.toDouble(),
+    date = date
+)

@@ -1,13 +1,16 @@
 package com.example.stockdiary.ui.viewmodels
 
+import android.content.Context
 import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.example.stockdiary.data.AssetRepository
+import com.example.stockdiary.data.AssetSyncManager
 import com.example.stockdiary.data.HoldingSnapshotParser
 import com.example.stockdiary.data.HoldingSnapshotService
 import com.example.stockdiary.data.ImageTextRecognizer
+import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.di.AppContainer
 import com.example.stockdiary.utils.AppLogger
 import kotlinx.coroutines.CancellationException
@@ -28,6 +31,7 @@ import kotlinx.coroutines.withContext
  * 而且持仓页带证券代码，不需要走「名称→代码」回填。
  */
 class HoldingSnapshotViewModel(
+    private val context: Context,
     private val repository: AssetRepository,
     private val service: HoldingSnapshotService,
     private val recognizer: ImageTextRecognizer
@@ -48,7 +52,11 @@ class HoldingSnapshotViewModel(
         val error: String? = null,
         /** 识别原文：解析结果不对时用来排障 */
         val recognizedText: String? = null,
-        val lines: List<String> = emptyList()
+        val lines: List<String> = emptyList(),
+        /** 行情同步进行中 */
+        val syncing: Boolean = false,
+        /** 同步进度与结果文案 */
+        val syncMessage: String? = null
     )
 
     private val _uiState = MutableStateFlow(UiState())
@@ -144,6 +152,68 @@ class HoldingSnapshotViewModel(
         }
     }
 
+    /**
+     * 同步行情，把刚导入的持仓市值填上。
+     *
+     * ## 为什么必须由用户点，而不是导入后自动跑
+     *
+     * 截图里**没有价格**，参考单价刻意留 0（给个假数字会凭空造出市值），
+     * 所以导入完市值是空的，得等一次行情同步。但这件事不能替用户决定：
+     * 他点「导入 14 条」时预期的是写一次库，不是发起一次网络请求。
+     *
+     * ## 为什么只同步本次涉及的代码
+     *
+     * 不做全量。用户刚导完这十几条，没必要顺带把他另外几百条持仓也拉一遍——
+     * 那是「持仓页刷新」那个按钮的职责。
+     */
+    fun syncPrices() {
+        if (_uiState.value.syncing) return
+        val symbols = _uiState.value.preview?.items?.map { it.symbol }.orEmpty()
+        if (symbols.isEmpty()) return
+
+        viewModelScope.launch {
+            _uiState.update { state -> state.copy(syncing = true, syncMessage = "正在同步行情…") }
+            try {
+                // 存款/负债没有行情可查，过滤掉，别白发请求
+                val assets = withContext(Dispatchers.IO) {
+                    repository.getAssetsBySymbols(symbols).filter {
+                        it.type == AssetType.STOCK || it.type == AssetType.FUND
+                    }
+                }
+                if (assets.isEmpty()) {
+                    _uiState.update { state ->
+                        state.copy(syncing = false, syncMessage = "这次导入的持仓没有可查的行情")
+                    }
+                    return@launch
+                }
+
+                val result = AssetSyncManager.syncAllAssets(
+                    context = context,
+                    repository = repository,
+                    assets = assets,
+                    onProgress = { progress ->
+                        _uiState.update { state -> state.copy(syncMessage = progress.message) }
+                    },
+                    forceRefresh = true
+                )
+
+                val message = buildString {
+                    append("同步完成：成功 ${result.successCount}")
+                    if (result.failedCount > 0) append("，失败 ${result.failedCount}")
+                    if (result.truncatedByTimeLimit) append("（已到时间上限，剩下的下次再同步）")
+                }
+                _uiState.update { state -> state.copy(syncing = false, syncMessage = message) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                AppLogger.e("持仓导入后同步行情失败: ${e.message}", e, "HoldingSnapshotVM")
+                _uiState.update { state ->
+                    state.copy(syncing = false, syncMessage = "同步失败：${e.message ?: "未知错误"}")
+                }
+            }
+        }
+    }
+
     fun clearError() {
         _uiState.update { state -> state.copy(error = null) }
     }
@@ -165,6 +235,7 @@ class HoldingSnapshotViewModel(
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T {
             return HoldingSnapshotViewModel(
+                context = container.context,
                 repository = container.assetRepository,
                 service = container.holdingSnapshotService,
                 recognizer = container.imageTextRecognizer

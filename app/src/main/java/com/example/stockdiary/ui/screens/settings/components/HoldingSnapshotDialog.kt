@@ -12,6 +12,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.Upload
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
@@ -102,7 +103,7 @@ fun HoldingSnapshotDialog(
 
                         HoldingSnapshotViewModel.Step.COMMITTING -> SnapshotCommittingStep()
 
-                        HoldingSnapshotViewModel.Step.RESULT -> SnapshotResultStep(state)
+                        HoldingSnapshotViewModel.Step.RESULT -> SnapshotResultStep(state, viewModel)
                     }
                 }
             }
@@ -434,10 +435,17 @@ private fun SnapshotCommittingStep() {
 }
 
 @Composable
-private fun SnapshotResultStep(state: HoldingSnapshotViewModel.UiState) {
+private fun SnapshotResultStep(
+    state: HoldingSnapshotViewModel.UiState,
+    viewModel: HoldingSnapshotViewModel
+) {
     val result = state.result
+    // 没有可查行情的持仓（理论上不会走到这——截图里全是证券）就不给按钮，
+    // 免得点了什么也没发生
+    val canSync = state.preview?.items?.isNotEmpty() == true
+
     Column(
-        modifier = Modifier.fillMaxSize().padding(24.dp),
+        modifier = Modifier.fillMaxSize().padding(24.dp).verticalScroll(rememberScrollState()),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
@@ -457,11 +465,48 @@ private fun SnapshotResultStep(state: HoldingSnapshotViewModel.UiState) {
         )
         Spacer(Modifier.height(12.dp))
         Text(
-            "新导入持仓的市值要等行情同步完成后才会显示——" +
-                "持仓截图里没有价格信息，参考单价留空是为了不凭空造出市值。",
+            "持仓截图里没有价格信息，参考单价留空是为了不凭空造出市值。" +
+                "点下面的按钮拉一次行情，市值才会显示出来。",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = TextAlign.Center
         )
+
+        if (canSync) {
+            Spacer(Modifier.height(20.dp))
+            if (state.syncing) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(18.dp),
+                        strokeWidth = 2.dp
+                    )
+                    Spacer(Modifier.width(10.dp))
+                    Text(
+                        state.syncMessage ?: "正在同步行情…",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+            } else {
+                OutlinedButton(onClick = viewModel::syncPrices) {
+                    Icon(
+                        Icons.Default.Sync,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text("同步行情")
+                }
+                // 同步完的结果留在原地，用户看得见成功几条、失败几条
+                state.syncMessage?.let { message ->
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        message,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center
+                    )
+                }
+            }
+        }
     }
 }

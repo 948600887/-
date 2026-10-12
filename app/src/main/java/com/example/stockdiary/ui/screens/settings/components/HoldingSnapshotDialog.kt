@@ -35,6 +35,7 @@ import com.example.stockdiary.di.AppContainer
 import com.example.stockdiary.ui.theme.LossRed
 import com.example.stockdiary.ui.theme.ProfitGreen
 import com.example.stockdiary.ui.viewmodels.HoldingSnapshotViewModel
+import com.example.stockdiary.utils.StockCodeManager
 import com.example.stockdiary.utils.format
 
 /**
@@ -96,7 +97,7 @@ fun HoldingSnapshotDialog(
                 Box(modifier = Modifier.fillMaxSize().padding(padding)) {
                     when (state.step) {
                         HoldingSnapshotViewModel.Step.SELECT_IMAGE ->
-                            SelectSnapshotStep(state, viewModel) { imageLauncher.launch("image/*") }
+                            SelectSnapshotStep(state) { imageLauncher.launch("image/*") }
 
                         HoldingSnapshotViewModel.Step.PREVIEW ->
                             SnapshotPreviewStep(state, viewModel)
@@ -127,7 +128,6 @@ fun HoldingSnapshotDialog(
 @Composable
 private fun SelectSnapshotStep(
     state: HoldingSnapshotViewModel.UiState,
-    viewModel: HoldingSnapshotViewModel,
     onPickImage: () -> Unit
 ) {
     Column(
@@ -209,8 +209,13 @@ private fun SnapshotPreviewStep(
                     )
                     Spacer(Modifier.height(6.dp))
                     Text(
-                        "新增 ${preview.newItems.size} · 覆盖 ${preview.updatedItems.size} · " +
-                            "未变 ${preview.unchangedItems.size}",
+                        buildString {
+                            append("新增 ${preview.newItems.size} · 覆盖 ${preview.updatedItems.size} · ")
+                            append("未变 ${preview.unchangedItems.size}")
+                            if (preview.conflictItems.isNotEmpty()) {
+                                append(" · 待你处理 ${preview.conflictItems.size}")
+                            }
+                        },
                         style = MaterialTheme.typography.bodySmall
                     )
                     preview.dataDate?.let { date ->
@@ -328,6 +333,8 @@ private fun SnapshotItemRow(item: HoldingSnapshotService.SnapshotItem) {
             "覆盖 ${item.existing?.balance?.format(2)} → ${item.quantity.format(2)}" to
                 MaterialTheme.colorScheme.tertiary
         HoldingSnapshotService.ItemStatus.UNCHANGED -> "未变" to MaterialTheme.colorScheme.onSurfaceVariant
+        // 库里同代码有多条，不敢替用户决定改哪一条
+        HoldingSnapshotService.ItemStatus.CONFLICT -> "待你处理" to LossRed
     }
 
     Card(
@@ -342,8 +349,10 @@ private fun SnapshotItemRow(item: HoldingSnapshotService.SnapshotItem) {
             ) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(item.name, fontWeight = FontWeight.Medium)
+                    // 显示截图上的裸码：库里存的是 sh601988 这种带市场前缀的形态，
+                    // 直接拿它给用户对照截图，会让人以为代码读错了
                     Text(
-                        item.symbol,
+                        StockCodeManager.extractPureCode(item.symbol),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -378,6 +387,19 @@ private fun SnapshotItemRow(item: HoldingSnapshotService.SnapshotItem) {
                     Spacer(Modifier.width(0.dp))
                 }
                 Text(statusText, style = MaterialTheme.typography.bodySmall, color = statusColor)
+            }
+            // 冲突必须说清楚为什么跳过：什么都不写的话，用户只会看到
+            // 「这行没进去」，以为是解析失败
+            if (item.status == HoldingSnapshotService.ItemStatus.CONFLICT) {
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "库里有 ${item.matchedAccounts.size} 条同名持仓（" +
+                        item.matchedAccounts.joinToString("、") +
+                        "），这张快照只有一个总数，分不清该改哪一条 → 已跳过，" +
+                        "请在持仓页手动合并或删除多余的。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error
+                )
             }
         }
     }
@@ -463,6 +485,26 @@ private fun SnapshotResultStep(
                 "未变 ${result?.skipped ?: 0} 条",
             style = MaterialTheme.typography.bodyLarge
         )
+        // 跳过不是「没做」，是「不敢替你做」。不报出来就等于静默丢数据
+        val conflicts = result?.conflicts ?: 0
+        if (conflicts > 0) {
+            Spacer(Modifier.height(8.dp))
+            Row {
+                Icon(
+                    Icons.Default.Info,
+                    contentDescription = null,
+                    tint = LossRed,
+                    modifier = Modifier.size(16.dp)
+                )
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    "有 $conflicts 条因为库里同名持仓不唯一而跳过，" +
+                        "请在持仓页手动处理后再导入一次。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error
+                )
+            }
+        }
         Spacer(Modifier.height(12.dp))
         Text(
             "持仓截图里没有价格信息，参考单价留空是为了不凭空造出市值。" +

@@ -282,6 +282,15 @@ class HoldingSnapshotParserTest {
     }
 
     @Test
+    fun 负数数量要当成没读懂_不能让它一路走到落库() {
+        // Asset 构造器里有 require(balance >= 0)：负数会在写库时把整次导入打断，
+        // 而且弹出来的「数量不能为负数」说不清是哪一行。这里提前判掉
+        val r = HoldingSnapshotParser.parse(noise + listOf("黄金LOF", "-156", "164701"))
+        assertTrue(r.holdings.isEmpty())
+        assertEquals(1, r.incomplete.size)
+    }
+
+    @Test
     fun 空输入不炸() {
         val r = HoldingSnapshotParser.parse(emptyList())
         assertTrue(r.holdings.isEmpty())

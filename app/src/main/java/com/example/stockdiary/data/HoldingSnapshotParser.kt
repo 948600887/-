@@ -133,7 +133,10 @@ object HoldingSnapshotParser {
                 val rawQuantity = inline?.second ?: pendingRawQuantity
                 val name = pendingName
 
-                if (name != null && quantity != null) {
+                // quantity >= 0 是硬要求：Asset 构造器里有 require(balance >= 0)，
+                // 负数会在落库时抛异常，把整次导入打断成一句「数量不能为负数」，
+                // 用户根本看不出是哪一行的问题。这里提前判掉，让它走 incomplete 报出来。
+                if (name != null && quantity != null && quantity.isFinite() && quantity >= 0.0) {
                     holdings.add(
                         ParsedHolding(
                             name = name,

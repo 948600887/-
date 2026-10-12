@@ -2,6 +2,7 @@ package com.example.stockdiary.data
 
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
+import com.example.stockdiary.utils.StockCodeManager
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.mockk
@@ -14,7 +15,8 @@ import org.junit.Test
 /**
  * 持仓快照对齐的回归。AssetRepository 是需 Context 的 final 类，用 MockK 伪造。
  *
- * 重点在三条用户拍板的规则：同代码合并、已存在则覆盖数量、未变不写库。
+ * 重点在几条用户拍板的规则：同代码合并、已存在则覆盖数量、未变不写库，
+ * 以及「同代码在库里有多个账户各持一份」时不替用户做决定。
  */
 class HoldingSnapshotServiceTest {
 
@@ -41,6 +43,13 @@ class HoldingSnapshotServiceTest {
             incomplete = emptyList()
         )
 
+    /**
+     * 造一条**库里已有**的资产。
+     *
+     * 这里刻意走一次 [StockCodeManager.normalizeSymbol]：库里存的从来不是截图上的裸码，
+     * 而是带市场前缀的形态（600519 → sh600519）。测试如果不按这个形态造数据，
+     * 就永远测不到「规范化」这件事，也就复现不了每次导入都造重复资产那个 bug。
+     */
     private fun assetOf(
         id: Long,
         symbol: String,
@@ -51,7 +60,7 @@ class HoldingSnapshotServiceTest {
         id = id,
         name = name,
         type = AssetType.FUND,
-        symbol = symbol,
+        symbol = StockCodeManager.normalizeSymbol(symbol),
         account = account,
         balance = balance,
         purchasePrice = 0.0
@@ -157,12 +166,12 @@ class HoldingSnapshotServiceTest {
 
         assertEquals(2, result.inserted)
         val bySymbol = captured.captured.associateBy { it.symbol }
-        assertEquals(AssetType.STOCK, bySymbol.getValue("601988").type)
-        assertEquals(AssetType.FUND, bySymbol.getValue("510210").type)
+        assertEquals(AssetType.STOCK, bySymbol.getValue("sh601988").type)
+        assertEquals(AssetType.FUND, bySymbol.getValue("sh510210").type)
         // 参考单价必须留 0：它是「无行情时的市值兜底价」，
         // 塞个假数字会让总市值凭空多出来
-        assertEquals(0.0, bySymbol.getValue("601988").purchasePrice, 0.001)
-        assertEquals("中国结算", bySymbol.getValue("601988").account)
+        assertEquals(0.0, bySymbol.getValue("sh601988").purchasePrice, 0.001)
+        assertEquals("中国结算", bySymbol.getValue("sh601988").account)
     }
 
     @Test
@@ -211,7 +220,98 @@ class HoldingSnapshotServiceTest {
 
         assertEquals(1, result.inserted)
         assertEquals(1, result.updated)
-        assertEquals(listOf("601988"), captured.captured.map { it.symbol })
+        assertEquals(listOf("sh601988"), captured.captured.map { it.symbol })
+    }
+
+    // ---------- 代码形态：裸码必须规范化 ----------
+
+    @Test
+    fun 查库用的是带市场前缀的规范化代码() = runBlocking {
+        coEvery { repo.getAssetsBySymbols(any()) } returns emptyList()
+
+        service.buildPreview(parsed(holding("601988", "中国银行", 900.0)))
+
+        // 截图给的是裸码 601988，库存形态是 sh601988。
+        // 拿裸码去查一条都匹配不上，表现为「每次导入都在造重复资产」
+        coVerify { repo.getAssetsBySymbols(listOf("sh601988")) }
+    }
+
+    @Test
+    fun 规范化后能匹配到库里已有的持仓_不再重复新建() = runBlocking {
+        coEvery { repo.getAssetsBySymbols(any()) } returns
+            listOf(assetOf(7L, "601988", "中国银行", balance = 500.0))
+
+        val preview = service.buildPreview(parsed(holding("601988", "中国银行", 900.0)))
+
+        assertEquals(0, preview.newItems.size)
+        assertEquals(1, preview.updatedItems.size)
+        assertEquals(400.0, preview.updatedItems[0].delta, 0.001)
+    }
+
+    @Test
+    fun 深市代码的带前缀形态也不会漏() = runBlocking {
+        coEvery { repo.getAssetsBySymbols(any()) } returns emptyList()
+
+        service.buildPreview(parsed(holding("159919", "沪深300ETF", 1000.0)))
+
+        coVerify { repo.getAssetsBySymbols(listOf("sz159919")) }
+    }
+
+    // ---------- 同代码在多个账户各持一份 ----------
+
+    private val duplicatedInTwoAccounts: List<Asset> = listOf(
+        assetOf(1L, "601988", "中国银行", balance = 600.0, account = "券商A"),
+        assetOf(2L, "601988", "中国银行", balance = 300.0, account = "券商B")
+    )
+
+    @Test
+    fun 多账户合计正好等于快照数量时什么都不用做() = runBlocking {
+        coEvery { repo.getAssetsBySymbols(any()) } returns duplicatedInTwoAccounts
+
+        val preview = service.buildPreview(parsed(holding("601988", "中国银行", 900.0)))
+
+        assertEquals(1, preview.unchangedItems.size)
+        assertEquals(0, preview.pendingCount)
+    }
+
+    @Test
+    fun 多账户合计对不上时判冲突而不是挑一条覆盖() = runBlocking {
+        coEvery { repo.getAssetsBySymbols(any()) } returns duplicatedInTwoAccounts
+
+        val preview = service.buildPreview(parsed(holding("601988", "中国银行", 2000.0)))
+
+        assertEquals(1, preview.conflictItems.size)
+        assertEquals(listOf("券商A", "券商B"), preview.conflictItems[0].matchedAccounts)
+        // 冲突是「没法处理」，不是「处理完了」——混进 pendingCount 会让界面
+        // 显示「导入 1 条」却一条都没导
+        assertEquals(0, preview.pendingCount)
+    }
+
+    @Test
+    fun 冲突项落库时一条都不动但会报出来() = runBlocking {
+        coEvery { repo.getAssetsBySymbols(any()) } returns duplicatedInTwoAccounts
+
+        val preview = service.buildPreview(parsed(holding("601988", "中国银行", 2000.0)))
+        val result = service.commit(preview, account = "中国结算")
+
+        assertEquals(1, result.conflicts)
+        assertEquals(0, result.inserted)
+        assertEquals(0, result.updated)
+        coVerify(exactly = 0) { repo.insertAssets(any()) }
+        coVerify(exactly = 0) { repo.updateBalance(any(), any()) }
+    }
+
+    // ---------- 长截图 ----------
+
+    @Test
+    fun 代码过多时分片查询_不撞SQLite的变量个数上限() = runBlocking {
+        coEvery { repo.getAssetsBySymbols(any()) } returns emptyList()
+
+        val many = (0 until 1200).map { holding("6%05d".format(it), "股票$it", 100.0) }
+        service.buildPreview(parsed(*many.toTypedArray()))
+
+        // SQLite 的 IN 子句变量上限是 999，1200 条按 500 一片要查 3 次
+        coVerify(exactly = 3) { repo.getAssetsBySymbols(any()) }
     }
 
     @Test

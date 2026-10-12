@@ -181,6 +181,87 @@ class HoldingSnapshotParserTest {
         assertEquals(262.0, r.holdings[0].quantity, 0.001)
     }
 
+    // ---------- 真实几何：数量与冻结列天然同行 ----------
+
+    /**
+     * 按真实截图量出来的垂直位置（见 HoldingSnapshotParser 类注释）分组：
+     * 名称一行、数量跟着冻结列的横杠一行、代码一行。这是行聚合**最可能**产出的形态。
+     */
+    private val realScreenshotWithDash = noise + listOf(
+        "黄金LOF", "262 -", "160719",
+        "国投白银LOF", "1264 -", "161226",
+        "黄金LOF", "156 -", "164701",
+        "R东方1", "100 -", "400264",
+        "全球芯片", "44 -", "501225",
+        "海外科技", "195 -", "501312",
+        "华电REIT", "1 -", "508016",
+        "北京亦庄", "1 -", "508080",
+        "恒泰租住", "1 -", "508085",
+        "综指ETF", "1.44万 -", "510210",
+        "中证红利", "2.17万 -", "515080",
+        "科创50", "9300 -", "588000",
+        "中国电信", "1400 -", "601728",
+        "中国银行", "900 -", "601988"
+    )
+
+    @Test
+    fun 数量跟着冻结横杠同行时也要认() {
+        val r = HoldingSnapshotParser.parse(noise + listOf("黄金LOF", "156 -", "164701"))
+        assertEquals(1, r.holdings.size)
+        assertEquals("黄金LOF", r.holdings[0].name)
+        assertEquals("164701", r.holdings[0].symbol)
+        assertEquals(156.0, r.holdings[0].quantity, 0.001)
+        assertTrue("不该有没读懂的行: ${r.incomplete}", r.incomplete.isEmpty())
+    }
+
+    @Test
+    fun 数量跟横杠同行时中文单位照样展开() {
+        val r = HoldingSnapshotParser.parse(noise + listOf("综指ETF", "1.44万 -", "510210"))
+        assertEquals(14400.0, r.holdings[0].quantity, 0.001)
+        assertEquals("1.44万", r.holdings[0].rawQuantity)
+    }
+
+    @Test
+    fun 真实截图十四条在数量跟横杠同行的形态下也全部解析出来() {
+        val r = HoldingSnapshotParser.parse(realScreenshotWithDash)
+        assertEquals(14, r.holdings.size)
+        assertTrue("不该有没读懂的行: ${r.incomplete}", r.incomplete.isEmpty())
+    }
+
+    @Test
+    fun 两种行分组形态必须给出同样的结果() {
+        // 数量并进名称、并进代码、自己一行、跟着横杠一行——四种分组都只是 OCR 的排布差异，
+        // 解析结果必须完全一致，否则「同样的截图导两次得到不同的持仓」
+        val a = HoldingSnapshotParser.parse(realScreenshot).holdings
+        val b = HoldingSnapshotParser.parse(realScreenshotWithDash).holdings
+        assertEquals(
+            a.map { Triple(it.name, it.symbol, it.quantity) },
+            b.map { Triple(it.name, it.symbol, it.quantity) }
+        )
+    }
+
+    @Test
+    fun 横杠并进名称行时名称要干净() {
+        // 名字后面不能留个 "-"：预览页要显示它，脏字符会让人以为名称读错了
+        val r = HoldingSnapshotParser.parse(noise + listOf("黄金LOF -", "156", "164701"))
+        assertEquals("黄金LOF", r.holdings[0].name)
+        assertEquals(156.0, r.holdings[0].quantity, 0.001)
+    }
+
+    @Test
+    fun 名称里的连字符不能被当成冻结横杠() {
+        // 只认**独立成 token** 的横杠，否则「华泰-创新」会被削成「华泰」
+        assertEquals("华泰-创新", HoldingSnapshotParser.stripQuantity("华泰-创新 100"))
+        assertEquals("黄金LOF", HoldingSnapshotParser.stripQuantity("黄金LOF 262 -"))
+    }
+
+    @Test
+    fun 真的填了冻结数量时取的是持有数量() {
+        // 表头顺序是「持有数量 | 其中冻结数量」，横杠换成真数字时也不能把它当持仓数
+        val r = HoldingSnapshotParser.parse(noise + listOf("黄金LOF", "500 100", "164701"))
+        assertEquals(500.0, r.holdings[0].quantity, 0.001)
+    }
+
     // ---------- 残缺输入 ----------
 
     @Test

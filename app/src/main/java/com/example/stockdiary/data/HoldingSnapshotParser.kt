@@ -16,9 +16,20 @@ import com.example.stockdiary.utils.StockCodeManager
  * 161226
  * ```
  *
- * 每条持仓占**两行**：名称在上、6 位代码在下（左对齐）。数量在右侧，
- * 垂直位置**正好夹在名称与代码中间**——所以 OCR 行聚合时它可能落到名称行、
- * 可能落到代码行，也可能因为差半个行高而单独成行。三种都得认（见 [parse]）。
+ * 每条持仓的名称在**上**、6 位代码在**下**（都左对齐），数量在中间列。
+ * 对真实截图（1080×3113）做墨迹投影量出来的垂直位置：
+ *
+ * ```
+ * 名称「R东方1」  y 1358–1393
+ * 数量「100」      y 1386–1413   ← 与名称仅重叠 26%，够不上 0.6 的同行阈值
+ * 冻结「-」        y 1396–1401   ← 与数量几乎完全重合
+ * 代码「400264」   y 1416–1440
+ * ```
+ *
+ * 于是行聚合出来的形态很可能是「名称 / `100 -` / 代码」三行——
+ * 数量与冻结列天然同行，见 [isPureQuantity] 的说明。
+ * 数量究竟是并进名称行、并进代码行、还是自己一行，取决于 OCR 把它的
+ * 垂直中心算到了哪边，三种都得认（见 [parse]）。
  *
  * ## 为什么要单独写一个解析器
  *
@@ -218,21 +229,46 @@ object HoldingSnapshotParser {
     }
 
     /**
-     * 判断这一行整体就是个数量（"262" / "1.44万" / "-"）。
+     * 判断这一行是「只有数量」的行（"262" / "1.44万" / "-" / "156 -"）。
      *
      * 不能写成「去掉数量后为空」——裸数字串前面没有空白，
      * [stripQuantity] 的尾部数字规则匹配不到它，会原样留下，判定就永远为假。
-     * 所以直接从「整行是不是单个数量 token」入手。
+     * 所以直接从 token 本身入手：**允许夹带冻结列的横杠，但不允许出现文字**。
+     *
+     * ## 「156 -」为什么必须认（真实截图实测）
+     *
+     * 中国结算持仓页一行有四列：名称（左，偏上）、代码（左，偏下）、持有数量（中）、
+     * 其中冻结数量（右）。对真实截图（1080×3113）做墨迹投影量出来的垂直位置是：
+     *
+     * ```
+     * 名称「R东方1」  y 1358–1393
+     * 数量「100」      y 1386–1413   ← 与名称只重叠 26%，够不上 0.6 的同行阈值
+     * 冻结「-」        y 1396–1401   ← 与数量几乎完全重合
+     * 代码「400264」   y 1416–1440
+     * ```
+     *
+     * 也就是说：**数量与冻结横杠天然同处一行**，行聚合把它们拼成 "100 -" 是拼对了；
+     * 名称、数量、代码则是三条独立的行。若这里要求「整行只有一个 token」，
+     * 真机上只要 ML Kit 认出了那个孤零零的 "-"，14 条持仓会**一条都进不来**
+     * （全变成「有代码没数量」）。认不认那个横杠取决于 OCR，不能赌。
      */
     internal fun isPureQuantity(line: String): Boolean {
         val t = line.trim()
         if (t.isEmpty()) return false
         if (t.all { it in "-—–" }) return true
         val tokens = t.split(' ', '\t').filter { it.isNotBlank() }
-        if (tokens.size != 1) return false
-        // 6 位代码已在 parse() 里先行拦截，这里再挡一次，避免把代码当数量
-        if (SIX_DIGIT.matches(tokens[0])) return false
-        return firstQuantityToken(t) != null
+        if (tokens.isEmpty()) return false
+
+        var hasQuantity = false
+        for (token in tokens) {
+            // 6 位代码已在 parse() 里先行拦截，这里再挡一次，避免把代码当数量
+            if (SIX_DIGIT.matches(token)) return false
+            // 冻结列的横杠：跳过，但它自己不算数量
+            if (token.all { it in "-—–" }) continue
+            if (parseChineseQuantity(token) == null) return false
+            hasQuantity = true
+        }
+        return hasQuantity
     }
 
     /** 取行里的数量（数值, 原始写法）；没有则 null */
@@ -277,15 +313,23 @@ object HoldingSnapshotParser {
         return t.toDoubleOrNull()
     }
 
-    /** 去掉数量与单位，留下名称 */
+    /**
+     * 去掉数量、单位与冻结列的横杠，留下名称。
+     *
+     * 顺序要紧：**先剥横杠，再剥尾部裸数字**。
+     * "黄金LOF 262 -" 若先剥数字，末尾是 "-"，那条「以数字结尾」的规则匹配不上，
+     * 262 会留在名称里变成「黄金LOF 262」。
+     */
     internal fun stripQuantity(line: String): String {
         var s = line
         // 先去掉带单位的部分，再去掉裸数字
         for (unit in CHINESE_UNITS.keys) {
             s = s.replace(Regex("""[\d.]+${Regex.escape(unit)}"""), " ")
         }
+        // 冻结列落到本行的横杠：只认**独立成 token** 的横杠，
+        // 否则「华泰-XX」「1-3月」这类名字里的连字符会被误伤
+        s = s.replace(Regex("""(^|\s)[-—–]+(?=\s|$)"""), " ")
         s = s.replace(Regex("""\s\d[\d,]*\.?\d*\s*$"""), " ")
-        s = s.replace(Regex("""^\s*-\s*$"""), " ")
         return s.trim()
     }
 

@@ -15,6 +15,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccountBalance
+import androidx.compose.material.icons.filled.AccountBalanceWallet
 import androidx.compose.material.icons.filled.SyncAlt
 import androidx.compose.material.icons.filled.Android
 import androidx.compose.material.icons.filled.CloudSync
@@ -58,6 +59,7 @@ import com.example.stockdiary.ui.screens.settings.components.DashboardConfigShee
 import com.example.stockdiary.ui.screens.settings.components.DataSourceStatusDialog
 import com.example.stockdiary.ui.screens.settings.components.ExportDataDialog
 import com.example.stockdiary.ui.screens.settings.components.ImportBrokerageDialog
+import com.example.stockdiary.ui.screens.settings.components.HoldingSnapshotDialog
 import com.example.stockdiary.ui.screens.settings.components.ReminderTimePickerDialog
 import com.example.stockdiary.ui.screens.settings.components.SettingsItem
 import com.example.stockdiary.ui.screens.settings.components.SettingsSection
@@ -106,6 +108,7 @@ fun SettingsScreen(
     var showDataSourceDialog by remember { mutableStateOf(false) }
     var showExportDialog by remember { mutableStateOf(false) }
     var showImportDialog by remember { mutableStateOf(false) }
+    var showHoldingSnapshotDialog by remember { mutableStateOf(false) }
     var showApiSelectionDialog by remember { mutableStateOf(false) }
     var showReminderTimePicker by remember { mutableStateOf(false) }
     var currentPriceApi by remember { mutableStateOf(com.example.stockdiary.data.ApiManager.getPriceApi(context)) }
@@ -211,6 +214,12 @@ fun SettingsScreen(
                     title = "导入交割单",
                     subtitle = "从券商 CSV 或对账单截图批量导入交易",
                     onClick = { showImportDialog = true }
+                ),
+                SettingsItemData(
+                    icon = Icons.Default.AccountBalanceWallet,
+                    title = "导入持仓截图",
+                    subtitle = "中国结算「一码通持有查询」，直接得到当前持仓",
+                    onClick = { showHoldingSnapshotDialog = true }
                 ),
                 SettingsItemData(
                     icon = Icons.Default.CloudSync,
@@ -435,6 +444,13 @@ fun SettingsScreen(
         ImportBrokerageDialog(
             container = container,
             onDismiss = { showImportDialog = false }
+        )
+    }
+
+    if (showHoldingSnapshotDialog) {
+        HoldingSnapshotDialog(
+            container = container,
+            onDismiss = { showHoldingSnapshotDialog = false }
         )
     }
 

@@ -9,6 +9,8 @@ import com.example.stockdiary.data.BrokerageImportService
 import com.example.stockdiary.data.DividendIncomeLoader
 import com.example.stockdiary.data.DividendIncomeUseCase
 import com.example.stockdiary.data.DividendRepository
+import com.example.stockdiary.data.HoldingSnapshotService
+import com.example.stockdiary.data.ImageTextRecognizer
 import com.example.stockdiary.data.OcrStatementService
 import com.example.stockdiary.data.PriceSyncPreferencesManager
 import com.example.stockdiary.database.StockDatabase
@@ -34,6 +36,9 @@ class AppContainer(val context: Context) {
     val dataExporter: DataExporter by lazy { DataExporter.getInstance(context) }
     val brokerageImportService: BrokerageImportService by lazy { BrokerageImportService.getInstance(context) }
     val ocrStatementService: OcrStatementService by lazy { OcrStatementService.getInstance(context) }
+    /** 「图片→视觉行」的通用能力，持仓快照导入与交割单导入共用同一份实现 */
+    val imageTextRecognizer: ImageTextRecognizer by lazy { ImageTextRecognizer.getInstance(context) }
+    val holdingSnapshotService: HoldingSnapshotService by lazy { HoldingSnapshotService(assetRepository) }
     val crashRecoveryManager: CrashRecoveryManager by lazy { CrashRecoveryManager.getInstance() }
 }
 

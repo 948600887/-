@@ -1,0 +1,467 @@
+package com.example.stockdiary.ui.screens.settings.components
+
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Upload
+import androidx.compose.material3.*
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewmodel.compose.viewModel
+import com.example.stockdiary.data.HoldingSnapshotService
+import com.example.stockdiary.di.AppContainer
+import com.example.stockdiary.ui.theme.LossRed
+import com.example.stockdiary.ui.theme.ProfitGreen
+import com.example.stockdiary.ui.viewmodels.HoldingSnapshotViewModel
+import com.example.stockdiary.utils.format
+
+/**
+ * 持仓截图导入全屏 Dialog：选图 → 预览核对 → 完成。
+ *
+ * 适配「中国结算 · 一码通持有查询」的持仓列表截图。
+ * 比交割单导入少一步列映射（截图格式固定），也不用回填证券代码（持仓页本来就有）。
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun HoldingSnapshotDialog(
+    container: AppContainer,
+    onDismiss: () -> Unit
+) {
+    val viewModel: HoldingSnapshotViewModel = viewModel(
+        factory = HoldingSnapshotViewModel.Factory(container)
+    )
+    val state by viewModel.uiState.collectAsStateWithLifecycle()
+
+    // ViewModel 挂在宿主 Activity 作用域上，关掉对话框后实例还活着——不复位会残留上次的预览
+    DisposableEffect(Unit) {
+        onDispose { viewModel.reset() }
+    }
+
+    val imageLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.GetContent()
+    ) { uri -> if (uri != null) viewModel.onImageSelected(uri) }
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Surface(modifier = Modifier.fillMaxSize()) {
+            Scaffold(
+                topBar = {
+                    TopAppBar(
+                        title = {
+                            val title = when (state.step) {
+                                HoldingSnapshotViewModel.Step.SELECT_IMAGE -> "导入持仓截图"
+                                HoldingSnapshotViewModel.Step.PREVIEW -> "核对持仓"
+                                HoldingSnapshotViewModel.Step.COMMITTING -> "正在导入…"
+                                HoldingSnapshotViewModel.Step.RESULT -> "导入完成"
+                            }
+                            Text(title, fontWeight = FontWeight.Bold)
+                        },
+                        navigationIcon = {
+                            IconButton(onClick = onDismiss) {
+                                Icon(Icons.Default.Close, contentDescription = "关闭")
+                            }
+                        }
+                    )
+                },
+                bottomBar = {
+                    if (state.step == HoldingSnapshotViewModel.Step.PREVIEW) {
+                        SnapshotBottomBar(state, viewModel)
+                    }
+                }
+            ) { padding ->
+                Box(modifier = Modifier.fillMaxSize().padding(padding)) {
+                    when (state.step) {
+                        HoldingSnapshotViewModel.Step.SELECT_IMAGE ->
+                            SelectSnapshotStep(state, viewModel) { imageLauncher.launch("image/*") }
+
+                        HoldingSnapshotViewModel.Step.PREVIEW ->
+                            SnapshotPreviewStep(state, viewModel)
+
+                        HoldingSnapshotViewModel.Step.COMMITTING -> SnapshotCommittingStep()
+
+                        HoldingSnapshotViewModel.Step.RESULT -> SnapshotResultStep(state)
+                    }
+                }
+            }
+        }
+    }
+
+    state.error?.let { message ->
+        AlertDialog(
+            onDismissRequest = { viewModel.clearError() },
+            title = { Text("没能导入", fontWeight = FontWeight.Bold) },
+            text = { Text(message) },
+            confirmButton = {
+                TextButton(onClick = { viewModel.clearError() }) { Text("知道了") }
+            }
+        )
+    }
+}
+
+// ---------------- 第一步：选图 ----------------
+
+@Composable
+private fun SelectSnapshotStep(
+    state: HoldingSnapshotViewModel.UiState,
+    viewModel: HoldingSnapshotViewModel,
+    onPickImage: () -> Unit
+) {
+    Column(
+        modifier = Modifier.fillMaxSize().padding(24.dp).verticalScroll(rememberScrollState()),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        if (state.recognizing) {
+            CircularProgressIndicator()
+            Spacer(Modifier.height(16.dp))
+            Text("正在识别截图…", style = MaterialTheme.typography.bodyLarge)
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "通常需要 1~3 秒",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        } else {
+            Icon(
+                Icons.Default.Upload,
+                contentDescription = null,
+                modifier = Modifier.size(48.dp),
+                tint = MaterialTheme.colorScheme.primary
+            )
+            Spacer(Modifier.height(16.dp))
+            Text("选择持仓截图", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(12.dp))
+            Text(
+                "支持「中国结算 · 一码通持有查询」的持仓列表。" +
+                    "每条有两行（名称在上、代码在下），超出屏幕时请用长截图，识别会自动分块。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(Modifier.height(20.dp))
+            Button(onClick = onPickImage) {
+                Icon(Icons.Default.Upload, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("选择截图")
+            }
+            if (state.knownAccounts.isNotEmpty()) {
+                Spacer(Modifier.height(24.dp))
+                Text(
+                    "已有账户：${state.knownAccounts.joinToString("、")}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+    }
+}
+
+// ---------------- 第二步：预览核对 ----------------
+
+@Composable
+private fun SnapshotPreviewStep(
+    state: HoldingSnapshotViewModel.UiState,
+    viewModel: HoldingSnapshotViewModel
+) {
+    val preview = state.preview ?: return
+    val focusManager = LocalFocusManager.current
+
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        item {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f)
+                )
+            ) {
+                Column(modifier = Modifier.padding(12.dp)) {
+                    Text(
+                        "共读到 ${preview.items.size} 条持仓",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        "新增 ${preview.newItems.size} · 覆盖 ${preview.updatedItems.size} · " +
+                            "未变 ${preview.unchangedItems.size}",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    preview.dataDate?.let { date ->
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            "数据日期 $date",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "覆盖只改数量，不会动你已经整理过的名称和账户。" +
+                            "导入后市值要等行情同步完成才会显示。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+
+        // 没读懂的行单独提示：多半是截图被裁在中间，让用户知道少了什么而不是静默丢
+        if (preview.incomplete.isNotEmpty()) {
+            item {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.4f)
+                    )
+                ) {
+                    Row(modifier = Modifier.padding(12.dp)) {
+                        Icon(
+                            Icons.Default.Info,
+                            contentDescription = null,
+                            tint = LossRed,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Column {
+                            Text(
+                                "有 ${preview.incomplete.size} 处没读懂",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                preview.incomplete.joinToString("\n"),
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                "通常是截图被裁掉了半截，补一张完整的再导一次。",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        item {
+            Column {
+                Text("导入到账户", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = state.account,
+                    onValueChange = viewModel::onAccountChange,
+                    label = { Text("账户名") },
+                    placeholder = { Text("不填则记为「默认账户」") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                    keyboardActions = KeyboardActions(onDone = { focusManager.clearFocus() }),
+                    supportingText = {
+                        Text(
+                            "只用于新建的持仓；已存在的持仓保持它原来的账户不变",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                )
+                if (state.knownAccounts.isNotEmpty()) {
+                    Spacer(Modifier.height(8.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        state.knownAccounts.take(4).forEach { name ->
+                            SuggestionChip(
+                                onClick = { viewModel.onAccountChange(name) },
+                                label = { Text(name, fontSize = 12.sp) }
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        item {
+            Text(
+                "逐条核对",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Bold
+            )
+        }
+
+        items(preview.items, key = { it.symbol }) { item ->
+            SnapshotItemRow(item)
+        }
+    }
+}
+
+@Composable
+private fun SnapshotItemRow(item: HoldingSnapshotService.SnapshotItem) {
+    val (statusText, statusColor) = when (item.status) {
+        HoldingSnapshotService.ItemStatus.NEW -> "新增" to ProfitGreen
+        HoldingSnapshotService.ItemStatus.UPDATE ->
+            "覆盖 ${item.existing?.balance?.format(2)} → ${item.quantity.format(2)}" to
+                MaterialTheme.colorScheme.tertiary
+        HoldingSnapshotService.ItemStatus.UNCHANGED -> "未变" to MaterialTheme.colorScheme.onSurfaceVariant
+    }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.Top
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(item.name, fontWeight = FontWeight.Medium)
+                    Text(
+                        item.symbol,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Column(horizontalAlignment = Alignment.End) {
+                    // 数量给完整数字。截图里写的是「1.44万」，
+                    // 这里必须让用户看见 14400 本身——差一万倍就藏在这一步
+                    val shown = formatQuantity(item.quantity)
+                    Text(shown, fontWeight = FontWeight.Bold)
+                    if (item.rawQuantity != shown) {
+                        Text(
+                            "原文 ${item.rawQuantity}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+            Spacer(Modifier.height(6.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                // 同代码多来源（不同券商托管）时说明一下，否则用户会奇怪数量怎么比截图某一行大
+                if (item.sources.size > 1) {
+                    Text(
+                        "由 ${item.sources.size} 条合并（${item.sources.joinToString(" + ") { it.quantity.format(0) }}）",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                } else {
+                    Spacer(Modifier.width(0.dp))
+                }
+                Text(statusText, style = MaterialTheme.typography.bodySmall, color = statusColor)
+            }
+        }
+    }
+}
+
+/** 持仓数量的显示口径：整数就整着写，有小数才带两位（基金份额可能是小数）。 */
+private fun formatQuantity(value: Double): String =
+    value.format(if (value % 1.0 == 0.0) 0 else 2)
+
+@Composable
+private fun SnapshotBottomBar(
+    state: HoldingSnapshotViewModel.UiState,
+    viewModel: HoldingSnapshotViewModel
+) {
+    val preview = state.preview
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(16.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            OutlinedButton(
+                onClick = viewModel::reset,
+                modifier = Modifier.weight(1f)
+            ) {
+                Text("重选")
+            }
+            Button(
+                onClick = viewModel::commit,
+                enabled = (preview?.pendingCount ?: 0) > 0,
+                modifier = Modifier.weight(1f)
+            ) {
+                val count = preview?.pendingCount ?: 0
+                Text(if (count > 0) "导入 $count 条" else "没有需要导入的")
+            }
+        }
+    }
+}
+
+// ---------------- 第三 / 四步 ----------------
+
+@Composable
+private fun SnapshotCommittingStep() {
+    Column(
+        modifier = Modifier.fillMaxSize(),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        CircularProgressIndicator()
+        Spacer(Modifier.height(16.dp))
+        Text("正在写入…", style = MaterialTheme.typography.bodyLarge)
+    }
+}
+
+@Composable
+private fun SnapshotResultStep(state: HoldingSnapshotViewModel.UiState) {
+    val result = state.result
+    Column(
+        modifier = Modifier.fillMaxSize().padding(24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Icon(
+            Icons.Default.Info,
+            contentDescription = null,
+            modifier = Modifier.size(48.dp),
+            tint = ProfitGreen
+        )
+        Spacer(Modifier.height(16.dp))
+        Text("导入完成", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(12.dp))
+        Text(
+            "新增 ${result?.inserted ?: 0} 条 · 覆盖 ${result?.updated ?: 0} 条 · " +
+                "未变 ${result?.skipped ?: 0} 条",
+            style = MaterialTheme.typography.bodyLarge
+        )
+        Spacer(Modifier.height(12.dp))
+        Text(
+            "新导入持仓的市值要等行情同步完成后才会显示——" +
+                "持仓截图里没有价格信息，参考单价留空是为了不凭空造出市值。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center
+        )
+    }
+}

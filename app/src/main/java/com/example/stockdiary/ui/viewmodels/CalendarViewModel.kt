@@ -199,26 +199,18 @@ class CalendarViewModel(
                 return@withContext CalendarResult(data, emptySet(), emptyList())
             }
 
-            val snapshots = snapshotDao.getAllSnapshotsSync()
-            val monthSnapshots = snapshots.filter { snapshot ->
-                try {
-                    val date = LocalDate.parse(snapshot.date)
-                    date.year == month.year && date.monthValue == month.monthValue
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    false
+            // 只 parse 一次：筛当月和取日期用的是同一个 LocalDate。
+            // 原先 filter 里 parse 一遍、下面的循环再 parse 一遍同一批字符串。
+            val monthSnapshots = snapshotDao.getAllSnapshotsSync().mapNotNull { snapshot ->
+                val date = runCatching { LocalDate.parse(snapshot.date) }.getOrNull()
+                if (date != null && date.year == month.year && date.monthValue == month.monthValue) {
+                    date to snapshot.netAssets
+                } else {
+                    null
                 }
             }
-            for (snapshot in monthSnapshots) {
-                try {
-                    val date = LocalDate.parse(snapshot.date)
-                    data[date] = snapshot.netAssets
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    // ignore
-                }
+            for ((date, netAssets) in monthSnapshots) {
+                data[date] = netAssets
             }
 
             val symbols = assets.mapNotNull { it.symbol }
@@ -230,29 +222,25 @@ class CalendarViewModel(
             for (asset in assets) {
                 val symbol = asset.symbol ?: continue
                 try {
-                    val records = dividendRepository.getDividendsBySymbol(symbol)
-                    val monthDividends = records.filter { record ->
-                        try {
-                            val date = LocalDate.parse(record.exDividendDate)
-                            date.year == month.year && date.monthValue == month.monthValue
-                        } catch (e: CancellationException) {
-                            throw e
-                        } catch (e: Exception) {
-                            false
-                        }
+                val records = dividendRepository.getDividendsBySymbol(symbol)
+                // 照样只 parse 一次：筛当月和记分红日用的是同一个 LocalDate。
+                // 原先 filter 里 parse 一遍、下面记日期时又 parse 一遍同样的记录。
+                val monthEntries = records.mapNotNull { record ->
+                    val date = runCatching { LocalDate.parse(record.exDividendDate) }.getOrNull()
+                    if (date == null) {
+                        AppLogger.w("解析分红日期失败: ${record.exDividendDate}", "CalendarViewModel")
+                        return@mapNotNull null
                     }
-                    if (monthDividends.isNotEmpty()) {
-                        dividends.add(symbol to monthDividends)
-                        monthDividends.forEach { record ->
-                            try {
-                                dividendDates.add(LocalDate.parse(record.exDividendDate))
-                            } catch (e: CancellationException) {
-                                throw e
-                            } catch (e: Exception) {
-                                AppLogger.w("解析分红日期失败: ${record.exDividendDate}", "CalendarViewModel")
-                            }
-                        }
+                    if (date.year == month.year && date.monthValue == month.monthValue) {
+                        date to record
+                    } else {
+                        null
                     }
+                }
+                if (monthEntries.isNotEmpty()) {
+                    dividends.add(symbol to monthEntries.map { it.second })
+                    monthEntries.forEach { (date, _) -> dividendDates.add(date) }
+                }
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {

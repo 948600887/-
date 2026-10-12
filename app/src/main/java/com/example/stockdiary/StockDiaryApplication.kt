@@ -14,7 +14,6 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.first
 import java.time.LocalDate
-import java.time.format.DateTimeFormatter
 import kotlinx.coroutines.CancellationException
 
 class StockDiaryApplication : Application() {
@@ -84,18 +83,19 @@ class StockDiaryApplication : Application() {
 
             if (snapshots.isEmpty()) {
                 AppLogger.i("无历史快照，创建今日快照", "StockDiaryApplication")
-                repository.createSnapshot(LocalDate.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd")))
+                // LocalDate.toString() 本身就是 yyyy-MM-dd，不必再走 DateTimeFormatter
+                repository.createSnapshot(LocalDate.now().toString())
                 return
             }
 
             val latestDateStr = snapshots.lastOrNull()?.date ?: return
-            val latestDate = LocalDate.parse(latestDateStr, DateTimeFormatter.ofPattern("yyyy-MM-dd"))
+            val latestDate = LocalDate.parse(latestDateStr)
             val today = LocalDate.now()
 
             if (latestDate.isBefore(today)) {
                 var currentDate = latestDate.plusDays(1)
                 while (!currentDate.isAfter(today)) {
-                    val dateStr = currentDate.format(DateTimeFormatter.ofPattern("yyyy-MM-dd"))
+                    val dateStr = currentDate.toString()
                     AppLogger.i("补全缺失快照: $dateStr", "StockDiaryApplication")
                     try {
                         repository.createSnapshot(dateStr)

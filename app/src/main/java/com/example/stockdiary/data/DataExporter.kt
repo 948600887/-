@@ -282,7 +282,8 @@ class DataExporter(private val context: Context) {
                         writer.append("  ${type.icon} ${type.displayName}\n")
                         typeAssets.forEach { asset ->
                             writer.append("    - ${asset.name}\n")
-                            writer.append("      金额: ¥${asset.totalValue.format(2)}\n")
+                            // 跟资产详情那节保持一致：先给原币金额，再给折算后的人民币
+                            writer.append("      金额: ${asset.currency} ${asset.totalValue.format(2)} (¥${asset.totalValueCny.format(2)})\n")
                             asset.notes?.let { writer.append("      备注: $it\n") }
                             writer.append("\n")
                         }

@@ -21,6 +21,7 @@ import com.example.stockdiary.database.Asset
 import com.example.stockdiary.ui.dialogs.sanitizeDecimalInput
 import com.example.stockdiary.ui.theme.LossRed
 import com.example.stockdiary.utils.format
+import com.example.stockdiary.utils.totalValueCny
 
 @Composable
 fun FireCalculationDialog(
@@ -31,7 +32,9 @@ fun FireCalculationDialog(
     onExpenseChange: (String) -> Unit
 ) {
     val focusManager = LocalFocusManager.current
-    val totalValue = assets.sumOf { it.totalValue }
+    // FIRE 的分子（年分红）是人民币口径，分母（总资产）也必须折算成人民币，
+    // 否则外币资产会把覆盖率算歪。
+    val totalValue = assets.sumOf { it.totalValueCny }
     val annualDividend = realAnnualIncome
     val monthlyDividend = annualDividend / 12
     val expense = monthlyExpense.toDoubleOrNull() ?: 5000.0

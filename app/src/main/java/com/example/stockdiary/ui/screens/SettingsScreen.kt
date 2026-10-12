@@ -66,6 +66,7 @@ import com.example.stockdiary.ui.theme.ThemeManager
 import com.example.stockdiary.ui.viewmodels.SettingsViewModel
 import com.example.stockdiary.utils.format
 import com.example.stockdiary.utils.sumTotalValueCny
+import com.example.stockdiary.utils.totalValueCny
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -128,9 +129,10 @@ fun SettingsScreen(
     val (totalAssets, totalLiabilities) = remember(assets) {
         var assetSum = 0.0
         var liabilitySum = 0.0
+        // 折算成人民币再累加：多币种资产的原币金额直接相加没有意义
         assets.forEach { asset ->
-            if (asset.type.isLiability) liabilitySum += asset.totalValue
-            else assetSum += asset.totalValue
+            if (asset.type.isLiability) liabilitySum += asset.totalValueCny
+            else assetSum += asset.totalValueCny
         }
         assetSum to liabilitySum
     }

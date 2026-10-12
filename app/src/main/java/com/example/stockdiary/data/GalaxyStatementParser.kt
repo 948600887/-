@@ -233,8 +233,8 @@ object GalaxyStatementParser {
 
             // ③ 常规形态：向后找紧跟的详情行
             val hit = findDetail(normalized, i + 1 + consumed)
-            if (hit.index >= 0) {
-                val detailMatch = SECOND_LINE_REGEX.find(normalized[hit.index])!!
+            val detailMatch = hit.detailMatch
+            if (hit.index >= 0 && detailMatch != null) {
                 result.add(buildTransaction(matched, detailMatch, hit.fallbackPrice, year, rowNo))
                 logger("第 ${i + 1}/${hit.index + 1} 行配对成功: $anchorText | ${normalized[hit.index]}")
                 rowNo++
@@ -309,7 +309,15 @@ object GalaxyStatementParser {
         /** 列没合并成功时，从独占一行的文本里兜底取到的价格 */
         val fallbackPrice: Double?,
         /** 是被下一个首行挡住才停下的（说明出现了「列被拆开」的形态） */
-        val blockedByAnchor: Boolean
+        val blockedByAnchor: Boolean,
+        /**
+         * 命中那一行上 [SECOND_LINE_REGEX] 的匹配结果。
+         *
+         * 由 [findDetail] 顺手带回：它判定命中时本来就要 find 一次，
+         * 调用方再对同一字符串跑同一遍正则纯属浪费；
+         * 而且带着结果回来就不用拿着下标去 `find(...)!!` 赌它非空了。
+         */
+        val detailMatch: MatchResult? = null
     )
 
     /**
@@ -330,7 +338,7 @@ object GalaxyStatementParser {
             }
             val m = SECOND_LINE_REGEX.find(candidate)
             if (m != null && !isNonSecurityDetail(m.groupValues[1])) {
-                return DetailHit(k, fallbackPrice, blockedByAnchor = false)
+                return DetailHit(k, fallbackPrice, blockedByAnchor = false, detailMatch = m)
             }
             // 列没合并成功时，价格会独占一行，且紧跟在名称行之后
             if (fallbackPrice == null && k == from && PURE_PRICE_REGEX.matches(candidate)) {
@@ -401,7 +409,9 @@ object GalaxyStatementParser {
         val out = mutableListOf<BrokerageImportService.ParsedTransaction>()
         var rowNo = startRowNo
         anchors.forEachIndexed { idx, (_, a) ->
-            val m = SECOND_LINE_REGEX.find(normalized[details[idx]])!!
+            // 理论上不可能为空（下标是按 containsMatchIn 收进来的），
+            // 但这里处理的是 OCR 出来的文本，宁可跳过这一行也别整份解析崩掉
+            val m = SECOND_LINE_REGEX.find(normalized[details[idx]]) ?: return@forEachIndexed
             out.add(buildTransaction(a, m, null, year, rowNo, "明细行位置异常，请核对"))
             rowNo++
         }

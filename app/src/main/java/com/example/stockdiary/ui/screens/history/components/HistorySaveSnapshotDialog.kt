@@ -16,6 +16,7 @@ import androidx.compose.ui.unit.dp
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.ui.theme.ProfitGreen
 import com.example.stockdiary.utils.format
+import com.example.stockdiary.utils.totalValueCny
 
 @Composable
 fun HistorySaveSnapshotDialog(
@@ -26,8 +27,10 @@ fun HistorySaveSnapshotDialog(
 ) {
     val assetsOnly = assets.filter { !it.type.isLiability }
     val liabilities = assets.filter { it.type.isLiability }
-    val totalValue = assetsOnly.sumOf { it.totalValue }
-    val totalLiabilities = liabilities.sumOf { it.totalValue }
+    // 一律折算成人民币：多币种资产的原币金额不能直接相加，
+    // 否则「净资产 = 总资产 - 总负债」是拿美元减日元。
+    val totalValue = assetsOnly.sumOf { it.totalValueCny }
+    val totalLiabilities = liabilities.sumOf { it.totalValueCny }
     val netAssets = totalValue - totalLiabilities
 
     AlertDialog(

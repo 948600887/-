@@ -2,6 +2,8 @@ package com.example.stockdiary.data
 
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
+import com.example.stockdiary.utils.ExchangeRateManager
+import com.example.stockdiary.utils.totalValueCny
 import java.time.LocalDate
 import kotlin.math.pow
 import kotlinx.coroutines.CancellationException
@@ -15,17 +17,24 @@ object DividendIncomeCalculator {
     /**
      * 计算单个资产的年化收入（分红+利息）
      */
+    /**
+     * 计算单个资产的年化收入（分红+利息）。
+     *
+     * 返回值统一为**人民币口径**：利息随本金币种而来、每股分红随标的币种而来，
+     * 组合层要把它们相加再除以总资产，分子分母不同币种的话比值毫无意义。
+     */
     fun calculateAnnualIncome(asset: com.example.stockdiary.database.Asset, dividendPerShare: Double = 0.0): Double {
         return if (asset.type == com.example.stockdiary.database.AssetType.BANK_DEPOSIT) {
             // 银行存款：计算利息
             val rate = asset.interestRate ?: 0.0
-            asset.totalValue * (rate / 100)
+            asset.totalValueCny * (rate / 100)
         } else {
             // 股票/基金：计算分红（dividendPerShare 为每十股分红）
             if (asset.type != com.example.stockdiary.database.AssetType.STOCK && asset.type != com.example.stockdiary.database.AssetType.FUND) {
                 0.0
             } else {
-                asset.balance * dividendPerShare / 10.0
+                // 每股分红与标的同币种，折成人民币后再乘份额
+                asset.balance * ExchangeRateManager.toCny(dividendPerShare, asset.currency) / 10.0
             }
         }
     }
@@ -55,7 +64,7 @@ object DividendIncomeCalculator {
         assets: List<com.example.stockdiary.database.Asset>,
         dividendsBySymbol: Map<String, Double> = emptyMap()
     ): Double {
-        val totalValue = assets.filter { !it.type.isLiability }.sumOf { it.totalValue }
+        val totalValue = assets.filter { !it.type.isLiability }.sumOf { it.totalValueCny }
         if (totalValue <= 0) return 0.0
         val totalIncome = calculateTotalAnnualIncome(assets, dividendsBySymbol)
         return (totalIncome / totalValue) * 100
@@ -69,7 +78,7 @@ object DividendIncomeCalculator {
      */
     fun calculateAnnualDividendIncome(asset: Asset, dividendPerShare: Double): Double {
         if (asset.type != AssetType.STOCK && asset.type != AssetType.FUND) return 0.0
-        return asset.balance * dividendPerShare / 10.0
+        return asset.balance * ExchangeRateManager.toCny(dividendPerShare, asset.currency) / 10.0
     }
 
     /**
@@ -93,11 +102,11 @@ object DividendIncomeCalculator {
     ): Double {
         if (holdings.isEmpty()) return 0.0
 
-        val totalValue = holdings.sumOf { it.asset.totalValue }
+        val totalValue = holdings.sumOf { it.asset.totalValueCny }
         if (totalValue <= 0) return 0.0
 
         val totalDividendIncome = holdings.sumOf { 
-            it.asset.balance * it.annualDividendPerShare / 10.0 
+            it.asset.balance * ExchangeRateManager.toCny(it.annualDividendPerShare, it.asset.currency) / 10.0 
         }
 
         return (totalDividendIncome / totalValue) * 100
@@ -108,7 +117,7 @@ object DividendIncomeCalculator {
      */
     fun calculateTotalAnnualDividend(holdings: List<HoldingDividendInfo>): Double {
         return holdings.sumOf { 
-            it.asset.balance * it.annualDividendPerShare / 10.0 
+            it.asset.balance * ExchangeRateManager.toCny(it.annualDividendPerShare, it.asset.currency) / 10.0 
         }
     }
 

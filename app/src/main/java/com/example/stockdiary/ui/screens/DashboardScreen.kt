@@ -25,6 +25,7 @@ import com.example.stockdiary.ui.theme.*
 import com.example.stockdiary.ui.viewmodels.DashboardViewModel
 import com.example.stockdiary.utils.AppLogger
 import com.example.stockdiary.utils.sumTotalValueCny
+import com.example.stockdiary.utils.totalValueCny
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -84,8 +85,10 @@ fun DashboardScreen(
         derivedStateOf {
             val sorted = when (preferences.sortOrder) {
                 SortOrder.BY_TYPE -> visibleAssetsOnly.toList()
-                SortOrder.BY_VALUE_DESC -> visibleAssetsOnly.sortedByDescending { it.totalValue }
-                SortOrder.BY_VALUE_ASC -> visibleAssetsOnly.sortedBy { it.totalValue }
+                // 按折算后的人民币排：原币金额跨币种没有可比性
+                // （100 美元和 100 日元按数字一样大，实际差了 150 倍）
+                SortOrder.BY_VALUE_DESC -> visibleAssetsOnly.sortedByDescending { it.totalValueCny }
+                SortOrder.BY_VALUE_ASC -> visibleAssetsOnly.sortedBy { it.totalValueCny }
                 SortOrder.BY_NAME -> visibleAssetsOnly.sortedBy { it.name }
             }
             sorted.groupBy { it.type }

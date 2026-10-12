@@ -25,9 +25,11 @@ import com.example.stockdiary.ui.dialogs.EditAssetDialog
 import com.example.stockdiary.ui.theme.*
 import com.example.stockdiary.ui.viewmodels.AssetDetailViewModel
 import com.example.stockdiary.utils.AppLogger
+import com.example.stockdiary.utils.ExchangeRateManager
 import com.example.stockdiary.utils.StockCodeManager
 import com.example.stockdiary.utils.format
 import com.example.stockdiary.utils.shareUnitWord
+import com.example.stockdiary.utils.totalValueCny
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -167,10 +169,12 @@ fun AssetDetailScreen(
                             Spacer(modifier = Modifier.height(12.dp))
                             DetailRow("账户", a.account)
                             DetailRow("持仓", "${a.balance.format(if (a.type == AssetType.STOCK) 0 else 2)}${if (a.type == AssetType.STOCK) "股" else "份"}")
+                            // 价格/市值都带 ¥ 符号，那就必须是人民币口径：
+                            // 原币价格要按资产币种折算，不能直接套 ¥
                             a.currentPrice?.let { price ->
-                                DetailRow("当前价", "¥${price.format(if (a.type == AssetType.FUND || StockCodeManager.isETF(a.symbol)) 3 else 2)}")
+                                DetailRow("当前价", "¥${ExchangeRateManager.toCny(price, a.currency).format(if (a.type == AssetType.FUND || StockCodeManager.isETF(a.symbol)) 3 else 2)}")
                             }
-                            DetailRow("当前市值", "¥${a.totalValue.format(2)}")
+                            DetailRow("当前市值", "¥${a.totalValueCny.format(2)}")
                             a.interestRate?.let { rate ->
                                 if (rate > 0) DetailRow("年利率", "${rate.format(2)}%")
                             }

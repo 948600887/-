@@ -15,7 +15,6 @@ import com.example.stockdiary.database.TransactionType
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import java.time.LocalDate
-import java.time.format.DateTimeFormatter
 import kotlinx.coroutines.CancellationException
 
 class AssetRepository private constructor(
@@ -284,7 +283,7 @@ class AssetRepository private constructor(
         fee: Double = 0.0
     ) {
         val db = StockDatabase.getInstance(context)
-        val date = LocalDate.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd"))
+        val date = LocalDate.now().toString()
         // 避免同一天同价位同数量的重复交易记录
         val existing = db.transactionDao().findDuplicate(symbol, type, quantity, price, date)
         if (existing != null) {

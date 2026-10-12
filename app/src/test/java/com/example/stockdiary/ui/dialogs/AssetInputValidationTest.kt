@@ -84,6 +84,55 @@ class AssetInputValidationTest {
         assertEquals("不能为负数", errors(type = AssetType.BANK_DEPOSIT, symbol = "", rate = "-1").rate?.message)
     }
 
+    // ---------- 编辑场景：利率留空 = 沿用原值 ----------
+
+    @Test
+    fun 编辑时存款利率留空合法_沿用原值() {
+        val e = validateAssetInput(
+            selectedType = AssetType.BANK_DEPOSIT,
+            name = "三年定存",
+            symbol = "",
+            account = "招商银行",
+            balance = "50000",
+            purchasePrice = "",
+            interestRate = "",
+            rateRequired = false
+        )
+        assertNull(e.rate)
+        assertTrue(e.isValid)
+    }
+
+    @Test
+    fun 编辑时利率填了非法值仍然报错() {
+        val e = validateAssetInput(
+            selectedType = AssetType.BANK_DEPOSIT,
+            name = "三年定存",
+            symbol = "",
+            account = "招商银行",
+            balance = "50000",
+            purchasePrice = "",
+            interestRate = "-1",
+            rateRequired = false
+        )
+        assertEquals("不能为负数", e.rate?.message)
+    }
+
+    @Test
+    fun 新增时利率留空仍然非法_默认必填() {
+        // 不传 rateRequired 就走默认 true，保证新增资产的既有行为不变
+        val e = validateAssetInput(
+            selectedType = AssetType.BANK_DEPOSIT,
+            name = "三年定存",
+            symbol = "",
+            account = "招商银行",
+            balance = "50000",
+            purchasePrice = "",
+            interestRate = ""
+        )
+        assertEquals("必填，请输入有效数字", e.rate?.message)
+        assertFalse(e.isValid)
+    }
+
     @Test
     fun 非存款类型完全不校验利率() {
         // 界面上利率字段对非存款根本不显示，填了脏值也不该拦住提交

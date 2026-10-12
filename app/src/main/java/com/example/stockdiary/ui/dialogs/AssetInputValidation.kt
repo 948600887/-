@@ -79,7 +79,12 @@ fun validateAssetInput(
     account: String,
     balance: String,
     purchasePrice: String,
-    interestRate: String
+    interestRate: String,
+    /**
+     * 利率是否必填。新增资产时必须填（没有利率算不出到期收益）；
+     * 编辑已有资产时留空表示「沿用原值」，所以传 false。
+     */
+    rateRequired: Boolean = true
 ): AssetInputErrors {
     val isDeposit = selectedType == AssetType.BANK_DEPOSIT
     val balanceValue = balance.toDoubleOrNull()
@@ -114,10 +119,16 @@ fun validateAssetInput(
             else -> null
         },
 
-        // 存款的利率必填：没有利率就算不出到期收益
+        // 存款的利率：新增时必填（没有利率就算不出到期收益），
+        // 编辑时留空是合法的——asset.copy() 会回落到原有利率，等于「不改这一项」。
         rate = when {
             !isDeposit -> null
-            rateValue == null -> FieldError("年利率", "必填，请输入有效数字")
+            interestRate.isBlank() -> if (rateRequired) {
+                FieldError("年利率", "必填，请输入有效数字")
+            } else {
+                null
+            }
+            rateValue == null -> FieldError("年利率", "请输入有效数字")
             rateValue < 0 -> FieldError("年利率", "不能为负数")
             else -> null
         }

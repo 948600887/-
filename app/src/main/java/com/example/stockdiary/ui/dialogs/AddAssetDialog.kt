@@ -312,7 +312,7 @@ fun AddAssetDialog(
                 modifier = Modifier.fillMaxSize()
             ) {
                 // 头部
-                AddAssetHeader(onDismiss = onDismiss)
+                AssetFormHeader(title = "添加资产", onDismiss = onDismiss)
 
                 // 内容区域
                 Column(
@@ -447,10 +447,10 @@ fun AddAssetDialog(
                 }
 
                 // 底部按钮
-                AddAssetActions(
+                AssetFormActions(
                     onDismiss = onDismiss,
                     onConfirmClick = {
-                        if (isSaving) return@AddAssetActions
+                        if (isSaving) return@AssetFormActions
                         // 点保存时把所有字段标记为"已碰过"：否则按钮直接灰着、
                         // 界面上却没有一处红字，用户不知道该改哪一项。
                         touched = allFields
@@ -459,7 +459,7 @@ fun AddAssetDialog(
                             // 滚到第一个出错的字段：requestFocus 会让 TextField 进入可视区，
                             // 否则标红的那一项很可能还在滚动区外，用户压根看不见。
                             errors.firstField?.let { focusField(it) }
-                            return@AddAssetActions
+                            return@AssetFormActions
                         }
                         isSaving = true
                         saveError = null
@@ -482,7 +482,7 @@ fun AddAssetDialog(
                             // 别把 loader 留在转圈状态——那会让"添加"按钮永久禁用且没有任何提示
                             isSaving = false
                             saveError = e.message ?: "资产数据不合法"
-                            return@AddAssetActions
+                            return@AssetFormActions
                         }
                         onConfirm(asset)
                     },

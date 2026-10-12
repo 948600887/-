@@ -64,7 +64,10 @@ import com.example.stockdiary.utils.StockCodeManager.CodeCategory
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-internal fun AddAssetHeader(onDismiss: () -> Unit) {
+internal fun AssetFormHeader(
+    title: String,
+    onDismiss: () -> Unit
+) {
     Surface(
         color = MaterialTheme.colorScheme.surfaceVariant,
         modifier = Modifier.fillMaxWidth()
@@ -77,7 +80,7 @@ internal fun AddAssetHeader(onDismiss: () -> Unit) {
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                text = "添加资产",
+                text = title,
                 style = MaterialTheme.typography.titleLarge,
                 fontWeight = FontWeight.Bold,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -180,9 +183,13 @@ internal fun AssetSymbolField(
         label = {
             when (selectedType) {
                 AssetType.CRYPTO -> Text("交易对")
+                AssetType.FUND -> Text("基金代码")
+                AssetType.STOCK -> Text("股票代码")
                 else -> Text("代码")
             }
         },
+        // 编辑弹窗复用本构件时不会传占位符语义，placeholder 只保留「自动识别」提示：
+        // 编辑场景没有自动查询，但这句提示本身无害，且两处文案保持一致更省事。
         placeholder = {
             when (selectedType) {
                 AssetType.CRYPTO -> Text("例如：BTC/USDT")
@@ -297,10 +304,16 @@ internal fun AssetAccountField(
             supportingText = error?.let { { Text(it) } },
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
             keyboardActions = KeyboardActions(onNext = { onNext() }),
-            trailingIcon = {
-                ExposedDropdownMenuDefaults.TrailingIcon(
-                    expanded = expanded && filteredAccounts.isNotEmpty()
-                )
+            // 没有任何历史账户时（编辑弹窗就没有下拉数据源）不显示下拉箭头，
+            // 否则一个点不开的箭头只会让人以为是坏了
+            trailingIcon = if (filteredAccounts.isEmpty()) {
+                null
+            } else {
+                {
+                    ExposedDropdownMenuDefaults.TrailingIcon(
+                        expanded = expanded && filteredAccounts.isNotEmpty()
+                    )
+                }
             }
         )
 
@@ -447,15 +460,16 @@ internal fun AssetNotesField(
 }
 
 @Composable
-internal fun AddAssetActions(
+internal fun AssetFormActions(
     onDismiss: () -> Unit,
     onConfirmClick: () -> Unit,
     isSaving: Boolean,
-    saveError: String?
+    saveError: String?,
+    confirmLabel: String = "添加"
 ) {
-    // 注意：这里必须是 Column。原先 SaveError 的 Text 和按钮 Row 并列放在同一个
+    // 注意：这里必须是 Column。原先 saveError 的 Text 和按钮 Row 并列放在同一个
     // Surface 里，而 Surface 内部是 Box —— 两者会从左上角重叠，错误文字直接压在
-    // 「取消/添加」按钮上。
+    // 「取消/添加」按钮上。添加页与编辑页都中过这一招。
     Column(modifier = Modifier.fillMaxWidth()) {
         HorizontalDivider()
         Surface(
@@ -486,7 +500,7 @@ internal fun AddAssetActions(
                             color = MaterialTheme.colorScheme.onPrimary
                         )
                     } else {
-                        Text("添加")
+                        Text(confirmLabel)
                     }
                 }
             }

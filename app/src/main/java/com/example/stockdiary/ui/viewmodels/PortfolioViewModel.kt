@@ -7,6 +7,7 @@ import com.example.stockdiary.data.AssetSyncManager
 import com.example.stockdiary.data.DashboardPreferences
 import com.example.stockdiary.data.DividendIncomeUseCase
 import com.example.stockdiary.data.SortOrder
+import com.example.stockdiary.data.SyncProgress
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.di.AppContainer
@@ -19,8 +20,31 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineExceptionHandler
 
 class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
+
+    /**
+     * 刷新路径的兜底异常处理。
+     *
+     * `viewModelScope` 用的是 SupervisorJob：子协程失败不会牵连兄弟，
+     * 但失败本身仍会向上抛。没有 handler 的话，它会一路抛到线程默认的
+     * UncaughtExceptionHandler —— 也就是用户看到的「闪退」。
+     *
+     * 刷新的失败原因千奇百怪（网络、解析、某个标的的数据特别），
+     * 任何一个都不值得让整个 App 死掉：记录日志、提示用户、保持界面可用。
+     *
+     * 这是**兜底**不是修因。真因仍要靠日志定位，所以这里必须把堆栈打全。
+     */
+    private val refreshExceptionHandler = CoroutineExceptionHandler { _, throwable ->
+        AppLogger.e(
+            "刷新过程发生未捕获异常: ${throwable.message}",
+            throwable,
+            "PortfolioVM"
+        )
+        _errorMessage.value = "刷新没能完成：${throwable.message ?: "未知错误"}"
+        _isRefreshing.value = false
+    }
 
     private val repository = container.assetRepository
     private val incomeUseCase = container.dividendIncomeUseCase
@@ -30,6 +54,13 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
 
     private val _isRefreshing = MutableStateFlow(false)
     val isRefreshing: StateFlow<Boolean> = _isRefreshing.asStateFlow()
+
+    /**
+     * 同步进度。刷新要跑完上百个标的，没有进度的话用户只看到转圈，
+     * 「运行一段时间」到底是在干活还是卡死了，完全无从判断。
+     */
+    private val _syncProgress = MutableStateFlow<SyncProgress?>(null)
+    val syncProgress: StateFlow<SyncProgress?> = _syncProgress.asStateFlow()
 
     private val _estimatedAnnualDividend = MutableStateFlow(0.0)
     val estimatedAnnualDividend: StateFlow<Double> = _estimatedAnnualDividend.asStateFlow()
@@ -94,7 +125,7 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
             return
         }
 
-        viewModelScope.launch {
+        viewModelScope.launch(refreshExceptionHandler) {
             if (!hasLoadedDividend) _dividendLoading.value = true
             try {
                 val result = incomeUseCase.load(stockAssets, forceRefresh = false, tag = "PortfolioVM")
@@ -123,19 +154,26 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
     }
 
     fun refresh() {
-        viewModelScope.launch {
+        viewModelScope.launch(refreshExceptionHandler) {
             _isRefreshing.value = true
+            _errorMessage.value = null
             val stockAssets = assets.value.filter {
                 it.type == AssetType.STOCK || it.type == AssetType.FUND
             }
+            // 阶段日志：闪退发生在「运行一段时间后」，只有知道走到哪一步才能定位
+            AppLogger.i(
+                "刷新开始：待同步 ${stockAssets.size} 项，分红预取 ${stockAssets.mapNotNull { it.symbol }.size} 个代码",
+                "PortfolioVM"
+            )
             try {
                 AssetSyncManager.syncAllAssets(
                     context = container.context,
                     repository = repository,
                     assets = stockAssets,
-                    onProgress = { },
+                    onProgress = { progress -> _syncProgress.value = progress },
                     forceRefresh = true
                 )
+                AppLogger.i("价格同步完成，开始计算分红", "PortfolioVM")
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -146,6 +184,10 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
                 val result = incomeUseCase.load(stockAssets, forceRefresh = false, tag = "PortfolioVM")
                 _estimatedAnnualDividend.value = result.totalAnnualIncome
                 _incomeCalculationStatus.value = null
+                AppLogger.i(
+                    "刷新完成：年度分红 ${result.totalAnnualIncome}",
+                    "PortfolioVM"
+                )
 
                 // 手动刷新说明用户想看最新数，抓到就更新缓存
                 val symbols = stockAssets.mapNotNull { it.symbol }.toSet()
@@ -163,6 +205,7 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
                 _errorMessage.value = "刷新失败"
             } finally {
                 _isRefreshing.value = false
+                _syncProgress.value = null
             }
         }
     }
@@ -234,8 +277,9 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
     }
 
     fun batchSync(assets: List<Asset>) {
-        viewModelScope.launch {
+        viewModelScope.launch(refreshExceptionHandler) {
             _isRefreshing.value = true
+            AppLogger.i("批量同步开始：${assets.size} 项", "PortfolioVM")
             try {
                 AssetSyncManager.syncAllAssets(
                     context = container.context,

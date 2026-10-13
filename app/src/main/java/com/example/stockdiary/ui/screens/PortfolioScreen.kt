@@ -114,6 +114,7 @@ fun PortfolioScreen(
 ) {
     val assets by viewModel.assets.collectAsStateWithLifecycle()
     val isRefreshing by viewModel.isRefreshing.collectAsStateWithLifecycle()
+    val syncProgress by viewModel.syncProgress.collectAsStateWithLifecycle()
     val estimatedAnnualDividend by viewModel.estimatedAnnualDividend.collectAsStateWithLifecycle()
     val dividendLoading by viewModel.dividendLoading.collectAsStateWithLifecycle()
     val incomeCalculationStatus by viewModel.incomeCalculationStatus.collectAsStateWithLifecycle()
@@ -279,7 +280,23 @@ fun PortfolioScreen(
         snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             TopAppBar(
-                title = { Text("持仓管理") },
+                title = {
+                    // 刷新要跑完上百个标的，只显示转圈的话用户无从判断是在干活还是卡死。
+                    // 把「已完成 / 总数」露出来，等待就有了预期
+                    val progress = syncProgress
+                    if (isRefreshing && progress != null && progress.total > 0) {
+                        Column {
+                            Text("持仓管理", style = MaterialTheme.typography.titleMedium)
+                            Text(
+                                "${progress.current} / ${progress.total}  ${progress.message}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    } else {
+                        Text("持仓管理")
+                    }
+                },
                 actions = {
                     if (selectionMode) {
                         TextButton(

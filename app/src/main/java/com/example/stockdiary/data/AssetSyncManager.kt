@@ -121,9 +121,17 @@ object AssetSyncManager {
                     // ETF/LOF/场内基金用股票API获取价格，场外基金用基金API
                     val pureCode = StockCodeManager.extractDigits(fundCode)
                     val category = StockCodeManager.classifyCode(pureCode)
-                    val isExchangeTraded = category == StockCodeManager.CodeCategory.ETF ||
-                        category == StockCodeManager.CodeCategory.LOF ||
-                        category == StockCodeManager.CodeCategory.EXCHANGE_FUND
+
+                    // fund_ 前缀是「场外份额」的**显式标记**，优先级高于代码前缀。
+                    // 基金E账户导入的 fund_163415 就是 LOF 的场外份额：
+                    // 按代码前缀判会认为是场内、去调股票 API 拿场内价，
+                    // 而场外申赎是按净值成交的，用场内价会有折溢价误差
+                    val isOffExchange = symbol.startsWith("fund_", ignoreCase = true)
+                    val isExchangeTraded = !isOffExchange && (
+                        category == StockCodeManager.CodeCategory.ETF ||
+                            category == StockCodeManager.CodeCategory.LOF ||
+                            category == StockCodeManager.CodeCategory.EXCHANGE_FUND
+                        )
 
                     if (isExchangeTraded) {
                         // 场内交易基金：使用股票API（新浪等），symbol 已带市场前缀

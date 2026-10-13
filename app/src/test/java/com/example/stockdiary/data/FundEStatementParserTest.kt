@@ -140,6 +140,94 @@ class FundEStatementParserTest {
         assertEquals(7949.17, rows.sumOf { it.quantity }, 0.001)
     }
 
+    @Test
+    fun 表头与数据之间的空行不能把数据区截断() {
+        // 官方只要在表头和数据之间加一个空行（很常见的排版），
+        // 旧逻辑就会 break，一条都读不到，而提示是「没找到基金代码这一列」——指错方向
+        val withGap: List<List<String>> = privacyHead + listOf(header) +
+            listOf(emptyList<String>()) +
+            listOf(row("1.0", "004502", "中银如意宝货币A", "10025.31"))
+
+        assertEquals(1, FundEStatementParser.parse(withGap).holdings.size)
+    }
+
+    @Test
+    fun 数据中间的空行也照常跳过() {
+        val withHole: List<List<String>> = privacyHead + listOf(header) +
+            listOf(
+                row("1.0", "004502", "中银如意宝货币A", "10025.31"),
+                emptyList<String>(),
+                row("2.0", "003537", "招商招利宝货币A", "10020.68"),
+                emptyList<String>(),
+                listOf("总记录数： 2 笔"),
+                listOf("免责声明：……")
+            )
+
+        val r = FundEStatementParser.parse(withHole)
+        assertEquals(2, r.holdings.size)
+        assertTrue(r.problems.isEmpty())
+    }
+
+    /** 造一条指定结算币种的数据行（导出里这一列给的是中文名） */
+    private fun rowWithCurrency(
+        no: String,
+        code: String,
+        name: String,
+        share: String,
+        currency: String,
+        nav: String = "1.5000"
+    ): List<String> = row(no, code, name, share, nav).toMutableList().also { it[13] = currency }
+
+    @Test
+    fun 结算币种要读出来() {
+        // 实测这份全是人民币。但官方说明明确写了「不同结算币种对应的资产情况」，
+        // QDII 完全可能美元结算——不读就会把美元净值按人民币数值汇总
+        val r = FundEStatementParser.parse(
+            table(rowWithCurrency("1.0", "000041", "华夏全球股票QDII", "1000.00", "美元"))
+        )
+        assertEquals(1, r.holdings.size)
+        assertEquals("USD", r.holdings[0].currency)
+        assertEquals(1.5, r.holdings[0].nav ?: 0.0, 1e-9)
+    }
+
+    @Test
+    fun 币种认不出来时报问题_不静默当成人民币() {
+        val r = FundEStatementParser.parse(
+            table(rowWithCurrency("1.0", "000041", "某离岸基金", "1000.00", "离岸人民币"))
+        )
+        assertTrue("认不出的币种不该进持仓", r.holdings.isEmpty())
+        assertEquals(1, r.problems.size)
+        assertTrue(r.problems[0].contains("离岸人民币"))
+    }
+
+    @Test
+    fun 结算币种列缺失时按人民币处理且不打扰用户() {
+        // 老版本导出可能没有这一列。缺列是「没有信息」，不是「信息异常」，
+        // 按 CNY 走即可，报一条问题只会让用户以为导入失败了
+        val noCurrency = header.filter { it.trim() != "结算币种" }
+        val rowNoCurrency = row("1.0", "004502", "中银如意宝货币A", "10025.31").dropLast(1)
+
+        val r = FundEStatementParser.parse(privacyHead + listOf(noCurrency) + listOf(rowNoCurrency))
+
+        assertEquals(1, r.holdings.size)
+        assertEquals("CNY", r.holdings[0].currency)
+        assertTrue(r.problems.isEmpty())
+    }
+
+    @Test
+    fun 同一代码多渠道币种一致时才能合并() {
+        // 币种不一致还合并，市值就会把美元和人民币加在一起
+        val holdings = FundEStatementParser.parse(
+            table(
+                rowWithCurrency("1.0", "000041", "华夏全球股票QDII", "600.00", "美元"),
+                rowWithCurrency("2.0", "000041", "华夏全球股票QDII", "400.00", "美元")
+            )
+        ).holdings
+
+        assertEquals(2, holdings.size)
+        assertEquals(setOf("USD"), holdings.map { it.currency }.toSet())
+    }
+
     // ---------- 数值与日期 ----------
 
     @Test

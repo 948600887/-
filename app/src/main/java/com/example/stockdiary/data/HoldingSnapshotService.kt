@@ -78,7 +78,12 @@ class HoldingSnapshotService(
          * 净值日期。与 [Preview.dataDate] 不一致时界面要提示——
          * 实测 QDII 的净值会比其它基金更旧，不能让用户以为全是同一天的数。
          */
-        val navDate: String? = null
+        val navDate: String? = null,
+        /**
+         * 结算币种代码。为 null 表示同一代码的多条来源币种不一致，
+         * 这时不该猜一个用——界面要标出来让用户自己处理。
+         */
+        val currency: String? = null
     ) {
         /** 数量变化量；新建时就是全部数量 */
         val delta: Double
@@ -157,7 +162,11 @@ class HoldingSnapshotService(
                 sources = rows,
                 matchedAccounts = matched.map { it.account },
                 nav = latestNav?.nav,
-                navDate = latestNav?.navDate
+                navDate = latestNav?.navDate,
+                // 同代码多渠道合并时取币种：正常情况下都一样。
+                // 万一不一致（同一只基金在不同渠道以不同币种结算），
+                // 取不到共识就不该静默用一个——交给预览页标出来
+                currency = rows.map { it.currency }.distinct().singleOrNull()
             )
         }
 
@@ -226,7 +235,10 @@ class HoldingSnapshotService(
                         // 参考单价留 0：它是「无行情时的市值兜底价」，
                         // 给个假数字会让市值凭空多出来。有净值就走 currentPrice，没净值等行情同步。
                         purchasePrice = 0.0,
-                        currentPrice = item.nav?.takeIf { it > 0.0 }
+                        currentPrice = item.nav?.takeIf { it > 0.0 },
+                        // 结算币种必须按导入数据写：默认 CNY 会让一只美元结算的 QDII
+                        // 被按人民币数值直接汇总。null（多来源币种不一致）时不猜，留默认
+                        currency = item.currency ?: "CNY"
                     )
                 )
 

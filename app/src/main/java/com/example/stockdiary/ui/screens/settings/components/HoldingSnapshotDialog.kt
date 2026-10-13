@@ -36,6 +36,7 @@ import com.example.stockdiary.di.AppContainer
 import com.example.stockdiary.ui.theme.LossRed
 import com.example.stockdiary.ui.theme.ProfitGreen
 import com.example.stockdiary.ui.viewmodels.HoldingSnapshotViewModel
+import com.example.stockdiary.utils.ExchangeRateManager
 import com.example.stockdiary.utils.StockCodeManager
 import com.example.stockdiary.utils.format
 
@@ -456,6 +457,15 @@ private fun SnapshotItemRow(
                             },
                             style = MaterialTheme.typography.bodySmall,
                             color = if (stale) LossRed else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    // 非人民币必须显式标出来：项目的多币种还没有界面入口，
+                    // 用户看不到币种就无从判断这个市值是怎么折算的
+                    item.currency?.takeIf { it != "CNY" }?.let { code ->
+                        Text(
+                            "结算币种 ${ExchangeRateManager.getDisplayName(code)}（$code）",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = LossRed
                         )
                     }
                 }

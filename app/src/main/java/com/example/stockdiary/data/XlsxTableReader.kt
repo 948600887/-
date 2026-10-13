@@ -123,17 +123,26 @@ object XlsxTableReader {
     private fun parseSheet(bytes: ByteArray, sharedStrings: List<String>): List<List<String>> {
         val rows = ArrayList<List<String>>()
         var cells: MutableMap<Int, String>? = null
+        var nextColumn = 1
 
         val parser = newParser(bytes)
         var event = parser.eventType
         while (event != XmlPullParser.END_DOCUMENT) {
             when (event) {
                 XmlPullParser.START_TAG -> when (parser.name) {
-                    "row" -> cells = LinkedHashMap()
-                    "c" -> cells?.put(
-                        columnIndex(parser.getAttributeValue(null, "r")),
-                        cellValue(parser, sharedStrings)
-                    )
+                    "row" -> {
+                        cells = LinkedHashMap()
+                        // 行内列号游标：`r` 属性缺失时按出现顺序递增。
+                        // 有些导出工具会省略 `r`，若此时一律返回第 1 列，
+                        // 整行的单元格会互相覆盖，按列名定位全部失败
+                        nextColumn = 1
+                    }
+                    "c" -> {
+                        val declared = columnIndex(parser.getAttributeValue(null, "r"))
+                        val column = if (declared > 0) declared else nextColumn
+                        nextColumn = column + 1
+                        cells?.put(column, cellValue(parser, sharedStrings))
+                    }
                 }
                 XmlPullParser.END_TAG -> if (parser.name == "row" && cells != null) {
                     rows.add(sparseToList(cells!!))
@@ -176,15 +185,18 @@ object XlsxTableReader {
         }
     }
 
-    /** "B6" → 2 */
+    /**
+     * "B6" → 2。没有列字母（`r` 缺失或格式异常）时返回 0，
+     * 由调用方按行内游标递补——见 [parseSheet]。
+     */
     private fun columnIndex(ref: String?): Int {
-        if (ref.isNullOrBlank()) return 1
+        if (ref.isNullOrBlank()) return 0
         var index = 0
         for (ch in ref) {
             if (ch !in 'A'..'Z') break
             index = index * 26 + (ch - 'A' + 1)
         }
-        return if (index <= 0) 1 else index
+        return index
     }
 
     private fun sparseToList(cells: Map<Int, String>): List<String> {

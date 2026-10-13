@@ -74,7 +74,15 @@ data class ParsedHolding(
      * 基金E账户的数据是 T-3 的，而且**个别基金可能更旧**（实测有一只是 09/30，其余是 10/08）。
      * 预览页要拿它跟数据日期比，不一致就提示——否则用户会以为这份持仓全是同一天的数。
      */
-    val navDate: String? = null
+    val navDate: String? = null,
+    /**
+     * 结算币种代码（CNY / USD / …）。基金E账户导出的「结算币种」列给的是中文名，
+     * 由 [FundEStatementParser] 转成代码。
+     *
+     * **净值与份额都是这个币种**。不读它会默认 CNY，于是一只美元结算的 QDII
+     * 会被按人民币数值直接汇总——错得无声无息。
+     */
+    val currency: String = "CNY"
 ) {
     /** 按代码前缀推断的类别：ETF / LOF / 股票 / 场内基金…… */
     val category: StockCodeManager.CodeCategory get() = StockCodeManager.classifyCode(symbol)

@@ -44,5 +44,19 @@ object ExchangeRateManager {
 
     fun getDisplayName(currency: String): String = displayNames[currency.uppercase()] ?: currency.uppercase()
 
+    /**
+     * 中文币种名 → 货币代码。
+     *
+     * 基金E账户导出的「结算币种」列给的是中文名（「人民币」「美元」…），
+     * 而库里存的是代码。认不出的返回 null，由调用方决定怎么办——
+     * 这里**不**默认返回 CNY：把「离岸人民币」之类静默当成人民币，
+     * 会让外币净值按人民币数值直接汇总，错得无声无息。
+     */
+    fun codeOfDisplayName(name: String): String? {
+        val trimmed = name.trim()
+        if (trimmed.isEmpty()) return null
+        return displayNames.entries.firstOrNull { it.value == trimmed }?.key
+    }
+
     fun supportedCurrencies(): List<String> = rates.keys.toList()
 }

@@ -1,5 +1,7 @@
 package com.example.stockdiary.data
 
+import com.example.stockdiary.utils.ExchangeRateManager
+
 /**
  * 「基金E账户」导出表解析器（纯函数，输入二维表，可直接 JVM 单测）。
  *
@@ -49,6 +51,7 @@ object FundEStatementParser {
     private const val COL_SHARE = "持有份额"
     private const val COL_NAV = "基金净值"
     private const val COL_NAV_DATE = "净值日期"
+    private const val COL_CURRENCY = "结算币种"
 
     /**
      * 场外基金的存库前缀。
@@ -88,6 +91,7 @@ object FundEStatementParser {
         val shareCol = header.indexOf(COL_SHARE)
         val navCol = header.indexOf(COL_NAV)
         val navDateCol = header.indexOf(COL_NAV_DATE)
+        val currencyCol = header.indexOf(COL_CURRENCY)
 
         if (shareCol < 0) {
             return Result(
@@ -103,13 +107,15 @@ object FundEStatementParser {
 
         for (i in headerIndex + 1 until rows.size) {
             val row = rows[i]
-            val first = row.firstOrNull()?.trim().orEmpty()
 
-            if (first.isEmpty()) {
-                // 空行是数据区的结束；非空的空首列只是这一行没序号，跳过继续
-                if (row.all { it.isBlank() }) break
-                continue
-            }
+            // 空行一律跳过，**不当成数据区结束**。
+            // 官方只要在表头与数据之间加一个空行（很常见的排版），
+            // 这里若 break 就会一条都读不到，而用户看到的提示是
+            // 「没找到基金代码这一列」——完全指错方向。
+            // 真正的结束标志是首列不再是数字（表尾的「总记录数」「免责声明」）
+            if (row.all { it.isBlank() }) continue
+
+            val first = row.firstOrNull()?.trim().orEmpty()
             // 序号必须是数字。
             // 「总记录数：136 笔」「数据来源：…」「免责声明：…」都在这里被挡住——
             // 它们是表尾的说明，继续往下读只会把免责声明当成一条持仓
@@ -121,10 +127,12 @@ object FundEStatementParser {
             val shareText = row.getOrNull(shareCol)?.trim().orEmpty()
             val navText = row.getOrNull(navCol)?.trim().orEmpty()
             val navDateRaw = row.getOrNull(navDateCol)?.trim().orEmpty()
+            val currencyRaw = row.getOrNull(currencyCol)?.trim().orEmpty()
 
             val quantity = parseNumber(shareText)
             val nav = parseNumber(navText)
             val navDate = normalizeDate(navDateRaw)
+            val currency = ExchangeRateManager.codeOfDisplayName(currencyRaw)
 
             when {
                 !SIX_DIGIT.matches(code) ->
@@ -138,6 +146,11 @@ object FundEStatementParser {
                 quantity == null || quantity <= 0.0 ->
                     problems.add("第 $lineNo 行份额读不出来：$shareText")
 
+                // 币种认不出来时不能默认成 CNY：那会让外币净值按人民币数值汇总，
+                // 错得无声无息。报出来让用户自己判断
+                currencyRaw.isNotBlank() && currency == null ->
+                    problems.add("第 $lineNo 行结算币种没认出来：$currencyRaw（代码 $code）")
+
                 else -> {
                     holdings.add(
                         ParsedHolding(
@@ -147,7 +160,8 @@ object FundEStatementParser {
                             lineNumber = lineNo,
                             rawQuantity = shareText,
                             nav = nav?.takeIf { it > 0.0 },
-                            navDate = navDate
+                            navDate = navDate,
+                            currency = currency ?: "CNY"
                         )
                     )
                     if (navDate != null) {

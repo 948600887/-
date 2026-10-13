@@ -1,9 +1,9 @@
 package com.example.stockdiary.data
 
+import com.example.stockdiary.network.NetworkClient
 import com.example.stockdiary.utils.AppLogger
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.jsoup.Jsoup
 import kotlinx.coroutines.CancellationException
@@ -21,8 +21,10 @@ class FundDividendApiService {
         private const val MAX_DIVIDEND_PER_TEN_SHARES = 100.0
     }
 
-    // 使用独立的 OkHttpClient，避免 NetworkClient 任何配置可能带来的副作用
-    private val client = OkHttpClient.Builder()
+    // 复用统一客户端：通过 defaultClient.newBuilder() 派生，共享底层 ConnectionPool/Dispatcher
+    // （连接池复用，避免每 API 类各建一个连接池的浪费）；defaultClient 不带 BaseUrlInterceptor，
+    // 不会干扰天天基金 fhsp 页面的完整 https URL 请求。仅保留基金页面所需的长超时。
+    private val client = NetworkClient.defaultClient.newBuilder()
         .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
         .readTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
         .build()
@@ -207,39 +209,29 @@ class FundDividendApiService {
     )
 
     private fun parseFundDividendHeaders(table: org.jsoup.nodes.Element): FundDividendHeaderIndices {
-        var exDateIndex = -1
-        var regDateIndex = -1
-        var dividendIndex = -1
-        var payDateIndex = -1
+        // 顺序敏感：payDate 必须先于 dividend，否则「分红发放日」会被泛化的「分红」抢走该列。
+        // 与旧 when 分支顺序（除息日→权益登记日→分红发放日→分红）保持一致。
+        val idx = DividendHtmlParser.resolveHeaderIndices(
+            table,
+            listOf(
+                DividendHtmlParser.ColumnSpec("exDate", listOf("除息日"), 2),
+                DividendHtmlParser.ColumnSpec("regDate", listOf("权益登记日"), 1),
+                DividendHtmlParser.ColumnSpec("payDate", listOf("分红发放日", "派息日"), 4),
+                DividendHtmlParser.ColumnSpec(
+                    "dividend",
+                    listOf("每10份分红", "每份分红", "每10份派", "每份派", "分红"),
+                    3
+                )
+            )
+        )
+        val exDateIndex = idx["exDate"] ?: -1
+        val regDateIndex = idx["regDate"] ?: -1
+        val dividendIndex = idx["dividend"] ?: -1
+        val payDateIndex = idx["payDate"] ?: -1
 
-        val headerRows = table.select("tr")
-        for (row in headerRows) {
-            val cells = row.select("th, td")
-            for ((index, cell) in cells.withIndex()) {
-                val text = cell.text().trim()
-                when {
-                    exDateIndex < 0 && text.contains("除息日") -> exDateIndex = index
-                    regDateIndex < 0 && text.contains("权益登记日") -> regDateIndex = index
-                    // 先匹配更具体的「分红发放日」，避免被下面泛化的「分红」抢走
-                    payDateIndex < 0 && (text.contains("分红发放日") || text.contains("派息日")) -> payDateIndex = index
-                    dividendIndex < 0 && (text.contains("每10份分红") || text.contains("每份分红") || text.contains("每10份派") || text.contains("每份派") || text.contains("分红")) -> dividendIndex = index
-                }
-            }
-        }
-
-        // 天天基金标准表头回退：年份=0, 权益登记日=1, 除息日=2, 每10份分红=3, 分红发放日=4
-        if (exDateIndex < 0) {
-            AppLogger.d("未识别除息日列，使用默认索引 2", TAG)
-            exDateIndex = 2
-        }
-        if (dividendIndex < 0) {
-            AppLogger.d("未识别分红金额列，使用默认索引 3", TAG)
-            dividendIndex = 3
-        }
-        if (payDateIndex < 0) {
-            AppLogger.d("未识别分红发放日列，使用默认索引 4", TAG)
-            payDateIndex = 4
-        }
+        if (exDateIndex < 0) AppLogger.d("未识别除息日列，使用默认索引 2", TAG)
+        if (dividendIndex < 0) AppLogger.d("未识别分红金额列，使用默认索引 3", TAG)
+        if (payDateIndex < 0) AppLogger.d("未识别分红发放日列，使用默认索引 4", TAG)
 
         return FundDividendHeaderIndices(exDateIndex, regDateIndex, dividendIndex, payDateIndex)
     }

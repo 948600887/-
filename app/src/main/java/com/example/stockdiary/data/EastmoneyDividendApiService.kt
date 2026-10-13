@@ -17,11 +17,11 @@ import kotlinx.coroutines.CancellationException
  * 东方财富股票分红API服务
  * 使用 datacenter-web.eastmoney.com 接口获取股票分红数据
  */
-class EastmoneyDividendApiService(private val context: Context) : DividendApi {
+class EastmoneyDividendApiService(private val context: Context) {
     
     private val client = NetworkClient.fundClient
     
-    override suspend fun getDividendHistory(stockCode: String): Result<List<DividendData>> {
+    suspend fun getDividendHistory(stockCode: String): Result<List<DividendData>> {
         val code = StockCodeManager.extractDigits(stockCode)
         return fetchBySecurityCode(code, code)
     }
@@ -149,7 +149,7 @@ class EastmoneyDividendApiService(private val context: Context) : DividendApi {
         }
     }
     
-    override suspend fun getLatestDividend(stockCode: String): Result<List<DividendData>> {
+    suspend fun getLatestDividend(stockCode: String): Result<List<DividendData>> {
         val result = getDividendHistory(stockCode)
         return if (result.isSuccess) {
             val allDividends = result.getOrNull() ?: emptyList()

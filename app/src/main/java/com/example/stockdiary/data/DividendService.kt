@@ -165,29 +165,19 @@ class DividendService {
      * 若表头解析失败，回退到新浪标准列索引。
      */
     private fun parseDividendTableHeaders(table: org.jsoup.nodes.Element): HeaderIndices {
-        var announceDateIndex = -1
-        var dividendIndex = -1
-        var exDateIndex = -1
-
-        val rows = table.select("tr")
-        for (row in rows) {
-            val cells = row.select("th, td")
-            for ((index, cell) in cells.withIndex()) {
-                val text = cell.text().trim()
-                when {
-                    announceDateIndex < 0 && (text.contains("公告日期") || text.contains("公告日")) -> announceDateIndex = index
-                    dividendIndex < 0 && text.contains("派息") -> dividendIndex = index
-                    exDateIndex < 0 && (text.contains("除权除息日") || text.contains("除息日")) -> exDateIndex = index
-                }
-            }
-        }
-
-        // 新浪标准结构回退：公告日期=0，派息=3，除权除息日=5
-        if (announceDateIndex < 0) announceDateIndex = 0
-        if (dividendIndex < 0) dividendIndex = 3
-        if (exDateIndex < 0) exDateIndex = 5
-
-        return HeaderIndices(announceDateIndex, dividendIndex, exDateIndex)
+        val idx = DividendHtmlParser.resolveHeaderIndices(
+            table,
+            listOf(
+                DividendHtmlParser.ColumnSpec("announceDate", listOf("公告日期", "公告日"), 0),
+                DividendHtmlParser.ColumnSpec("dividend", listOf("派息"), 3),
+                DividendHtmlParser.ColumnSpec("exDate", listOf("除权除息日", "除息日"), 5)
+            )
+        )
+        return HeaderIndices(
+            announceDateIndex = idx["announceDate"] ?: -1,
+            dividendIndex = idx["dividend"] ?: -1,
+            exDateIndex = idx["exDate"] ?: -1
+        )
     }
 
     private data class HeaderIndices(

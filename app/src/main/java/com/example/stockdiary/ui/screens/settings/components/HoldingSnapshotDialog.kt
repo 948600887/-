@@ -11,6 +11,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.Upload
@@ -110,13 +111,12 @@ fun HoldingSnapshotDialog(
                 Box(modifier = Modifier.fillMaxSize().padding(padding)) {
                     when (state.step) {
                         HoldingSnapshotViewModel.Step.SELECT_IMAGE ->
-                            SelectSnapshotStep(state) {
-                                if (isFund) {
-                                    fileLauncher.launch(XLSX_MIME)
-                                } else {
-                                    imageLauncher.launch("image/*")
-                                }
-                            }
+                            SelectSnapshotStep(
+                                state = state,
+                                isFund = isFund,
+                                onPickFile = { fileLauncher.launch(XLSX_MIME) },
+                                onPickImage = { imageLauncher.launch("image/*") }
+                            )
 
                         HoldingSnapshotViewModel.Step.PREVIEW ->
                             SnapshotPreviewStep(state, viewModel)
@@ -155,7 +155,9 @@ private const val XLSX_MIME =
 @Composable
 private fun SelectSnapshotStep(
     state: HoldingSnapshotViewModel.UiState,
-    onPick: () -> Unit
+    isFund: Boolean,
+    onPickFile: () -> Unit,
+    onPickImage: () -> Unit
 ) {
     Column(
         modifier = Modifier.fillMaxSize().padding(24.dp).verticalScroll(rememberScrollState()),
@@ -166,12 +168,12 @@ private fun SelectSnapshotStep(
             CircularProgressIndicator()
             Spacer(Modifier.height(16.dp))
             Text(
-                "正在读取文件…",
+                if (isFund) "正在读取文件…" else "正在识别截图…",
                 style = MaterialTheme.typography.bodyLarge
             )
             Spacer(Modifier.height(8.dp))
             Text(
-                "通常只要一瞬间",
+                if (isFund) "通常只要一瞬间" else "通常需要 1~3 秒",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -183,21 +185,54 @@ private fun SelectSnapshotStep(
                 tint = MaterialTheme.colorScheme.primary
             )
             Spacer(Modifier.height(16.dp))
-            Text("选择导出的文件", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            Text(
+                if (isFund) "选择导出的文件" else "选择持仓截图",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold
+            )
             Spacer(Modifier.height(12.dp))
             Text(
-                "在基金E账户的「公募基金查询」页点右上角导出，得到的就是这个文件。" +
-                    "字段齐全，比截图准得多。",
+                if (isFund) {
+                    "在基金E账户的「公募基金查询」页点右上角导出，得到的就是这个文件。" +
+                        "字段齐全，比截图准得多。"
+                } else {
+                    "支持「中国结算 · 一码通持有查询」的持仓列表。" +
+                        "每条有两行（名称在上、代码在下），超出屏幕时请用长截图，识别会自动分块。"
+                },
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center
             )
             Spacer(Modifier.height(20.dp))
-            Button(onClick = onPick) {
+            Button(onClick = onPickFile) {
                 Icon(Icons.Default.Upload, contentDescription = null, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(8.dp))
-                Text("选择文件")
+                Text(if (isFund) "选择文件" else "选择截图")
             }
+
+            // 基金E账户多给一条退路：导出功能不可用时还能靠截图。
+            // 但要说清楚它不完整——实测一张长截图只装得下约 50 张卡片，
+            // 而导出明细有 136 条
+            if (isFund) {
+                Spacer(Modifier.height(12.dp))
+                TextButton(onClick = onPickImage) {
+                    Icon(
+                        Icons.Default.Image,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text("改用截图导入")
+                }
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "截图只能装下一屏，容易漏掉后面的持仓，建议优先用导出文件。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center
+                )
+            }
+
             if (state.knownAccounts.isNotEmpty()) {
                 Spacer(Modifier.height(24.dp))
                 Text(

@@ -8,6 +8,7 @@ import androidx.lifecycle.viewModelScope
 import com.example.stockdiary.data.AssetRepository
 import com.example.stockdiary.data.AssetSyncManager
 import com.example.stockdiary.data.FundEStatementParser
+import com.example.stockdiary.data.FundSnapshotParser
 import com.example.stockdiary.data.HoldingSnapshotParser
 import com.example.stockdiary.data.HoldingSnapshotResult
 import com.example.stockdiary.data.HoldingSnapshotService
@@ -99,7 +100,12 @@ class HoldingSnapshotViewModel(
         }
     }
 
-    /** 截图选中：OCR 识别 + 解析 + 与库里对齐，直接进预览 */
+    /**
+     * 截图选中：OCR 识别 + 解析 + 与库里对齐，直接进预览。
+     *
+     * 走哪条解析器由 [source] 决定：一码通那张是「名称/代码/数量」三条独立行，
+     * 基金E账户那张是「名称带代码、表头、数值」三行一组的卡片。
+     */
     fun onImageSelected(uri: Uri) {
         viewModelScope.launch(Dispatchers.IO) {
             _uiState.update { state -> state.copy(
@@ -108,14 +114,22 @@ class HoldingSnapshotViewModel(
             ) }
             try {
                 val recognized = recognizer.recognize(uri)
-                val parsed = HoldingSnapshotParser.parse(recognized.lines)
+                val parsed = when (source) {
+                    Source.STOCK_SNAPSHOT -> HoldingSnapshotParser.parse(recognized.lines)
+                    Source.FUND_EXPORT -> FundSnapshotParser.parse(recognized.lines)
+                }
 
                 if (parsed.holdings.isEmpty()) {
                     _uiState.update { state -> state.copy(
                         recognizing = false,
-                        error = "没从这张图里读到持仓。请确认截的是「中国结算 · 一码通持有查询」" +
-                            "的持仓列表，并且完整包含名称与代码两行。\n\n" +
-                            "可点「查看识别原文」，把内容发出来便于定位格式差异。",
+                        error = when (source) {
+                            Source.STOCK_SNAPSHOT ->
+                                "没从这张图里读到持仓。请确认截的是「中国结算 · 一码通持有查询」" +
+                                    "的持仓列表，并且完整包含名称与代码两行。"
+                            Source.FUND_EXPORT ->
+                                "没从这张图里读到持仓。请确认截的是基金E账户「公募基金查询」" +
+                                    "的资产列表，并且每张卡片完整包含名称、代码、份额和净值。"
+                        } + "\n\n可点「查看识别原文」，把内容发出来便于定位格式差异。",
                         recognizedText = recognized.text,
                         lines = recognized.lines
                     ) }
@@ -124,7 +138,7 @@ class HoldingSnapshotViewModel(
 
                 val preview = service.buildPreview(parsed)
                 AppLogger.i(
-                    "持仓截图解析：${parsed.holdings.size} 条 → 合并后 ${preview.items.size} 条",
+                    "持仓截图解析（$source）：${parsed.holdings.size} 条 → 合并后 ${preview.items.size} 条",
                     "HoldingSnapshotVM"
                 )
                 _uiState.update { state -> state.copy(

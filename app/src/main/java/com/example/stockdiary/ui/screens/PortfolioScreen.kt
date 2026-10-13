@@ -30,6 +30,34 @@ import kotlinx.coroutines.launch
 /** 负债单独成组时使用的分组 key；真实账户名不会叫这个，不会与账户分组撞车 */
 private const val LIABILITY_GROUP_KEY = "负债"
 
+/**
+ * 持仓列表的渲染单元：账户头，或一只资产。
+ *
+ * ## 为什么必须拍扁
+ *
+ * LazyColumn 的懒加载**只对它自己的直接子项生效**。原先「账户头 + 该账户下所有资产」
+ * 被打包成一个 item，内部用 Column + forEach 渲染，于是一个账户下的上百只基金
+ * 会被一次性全部组合——首屏直接卡死，持仓越多越明显。
+ *
+ * 拍扁成「账户头 / 资产行」两种单元后，每一项都是 LazyColumn 的直接子项，
+ * 滚动到哪才组合到哪。账户小计也在构造时算好，不在组合里重复 sumOf。
+ */
+private sealed interface PortfolioRow {
+    val key: String
+
+    data class AccountHeader(
+        val account: String,
+        val assetCount: Int,
+        val totalValue: Double
+    ) : PortfolioRow {
+        override val key: String get() = "account:$account"
+    }
+
+    data class AssetRow(val asset: Asset, val account: String) : PortfolioRow {
+        override val key: String get() = "asset:${asset.id}"
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PortfolioScreen(
@@ -95,6 +123,34 @@ fun PortfolioScreen(
     val filteredAssetsByAccount by remember {
         derivedStateOf {
             sortedAssets.groupBy { it.account }
+        }
+    }
+
+    /**
+     * 拍扁后的渲染单元。展开/收起只影响要不要把资产行放进去，
+     * 账户头始终在——收起后仍看得到这个账户和小计。
+     */
+    val rows = remember(sortedAssets, liabilities, expandedAccounts) {
+        buildList {
+            sortedAssets.groupBy { it.account }.forEach { (account, list) ->
+                add(PortfolioRow.AccountHeader(account, list.size, list.sumOf { it.totalValueCny }))
+                if (account in expandedAccounts) {
+                    list.forEach { add(PortfolioRow.AssetRow(it, account)) }
+                }
+            }
+            // 负债单独成组：混进账户小计里会让「这个账户有多少钱」变得不可读
+            if (liabilities.isNotEmpty()) {
+                add(
+                    PortfolioRow.AccountHeader(
+                        account = LIABILITY_GROUP_KEY,
+                        assetCount = liabilities.size,
+                        totalValue = liabilities.sumOf { it.totalValueCny }
+                    )
+                )
+                if (LIABILITY_GROUP_KEY in expandedAccounts) {
+                    liabilities.forEach { add(PortfolioRow.AssetRow(it, LIABILITY_GROUP_KEY)) }
+                }
+            }
         }
     }
 
@@ -298,63 +354,55 @@ fun PortfolioScreen(
                     }
                 }
 
-                items(filteredAssetsByAccount.keys.sorted(), key = { it }) { account ->
-                    val accountAssets = filteredAssetsByAccount[account] ?: return@items
-                    AccountGroup(
-                        account = account,
-                        assets = accountAssets,
-                        isExpanded = expandedAccounts.contains(account),
-                        onToggleExpand = {
-                            if (!selectionMode) {
-                                expandedAccounts = if (expandedAccounts.contains(account)) {
-                                    expandedAccounts - account
-                                } else {
-                                    expandedAccounts + account
-                                }
-                            }
-                        },
-                        onAssetClick = { if (!selectionMode) onNavigateToAssetDetail(it.id) },
-                        onDividendClick = { selectedDividendAsset = it },
-                        selectionMode = selectionMode,
-                        selectedIds = selectedIds,
-                        onToggleSelection = {
-                            selectedIds = if (selectedIds.contains(it.id)) {
-                                selectedIds - it.id
-                            } else {
-                                selectedIds + it.id
-                            }
-                        }
-                    )
-                }
-
-                // 负债单独成组：混进账户小计里会让「这个账户有多少钱」变得不可读
-                if (liabilities.isNotEmpty()) {
-                    item {
-                        AccountGroup(
-                            account = LIABILITY_GROUP_KEY,
-                            assets = liabilities,
-                            isExpanded = expandedAccounts.contains(LIABILITY_GROUP_KEY),
+                // 账户头与资产行都是 LazyColumn 的直接子项，滚动到哪组合到哪
+                items(rows, key = { it.key }) { row ->
+                    when (row) {
+                        is PortfolioRow.AccountHeader -> AccountHeaderCard(
+                            account = row.account,
+                            assetCount = row.assetCount,
+                            totalValue = row.totalValue,
+                            isExpanded = expandedAccounts.contains(row.account),
                             onToggleExpand = {
                                 if (!selectionMode) {
-                                    expandedAccounts = if (expandedAccounts.contains(LIABILITY_GROUP_KEY)) {
-                                        expandedAccounts - LIABILITY_GROUP_KEY
-                                    } else {
-                                        expandedAccounts + LIABILITY_GROUP_KEY
-                                    }
-                                }
-                            },
-                            onAssetClick = { if (!selectionMode) onNavigateToAssetDetail(it.id) },
-                            onDividendClick = { selectedDividendAsset = it },
-                            selectionMode = selectionMode,
-                            selectedIds = selectedIds,
-                            onToggleSelection = {
-                                selectedIds = if (selectedIds.contains(it.id)) {
-                                    selectedIds - it.id
-                                } else {
-                                    selectedIds + it.id
+                                    expandedAccounts =
+                                        if (expandedAccounts.contains(row.account)) {
+                                            expandedAccounts - row.account
+                                        } else {
+                                            expandedAccounts + row.account
+                                        }
                                 }
                             }
                         )
+
+                        is PortfolioRow.AssetRow -> {
+                            val asset = row.asset
+                            StockAssetItem(
+                                asset = asset,
+                                onClick = {
+                                    if (selectionMode) {
+                                        selectedIds =
+                                            if (selectedIds.contains(asset.id)) {
+                                                selectedIds - asset.id
+                                            } else {
+                                                selectedIds + asset.id
+                                            }
+                                    } else {
+                                        onNavigateToAssetDetail(asset.id)
+                                    }
+                                },
+                                onDividendClick = { selectedDividendAsset = asset },
+                                selectionMode = selectionMode,
+                                isSelected = selectedIds.contains(asset.id),
+                                onToggleSelection = {
+                                    selectedIds =
+                                        if (selectedIds.contains(asset.id)) {
+                                            selectedIds - asset.id
+                                        } else {
+                                            selectedIds + asset.id
+                                        }
+                                }
+                            )
+                        }
                     }
                 }
             }

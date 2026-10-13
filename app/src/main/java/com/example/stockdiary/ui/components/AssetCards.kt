@@ -74,61 +74,43 @@ fun PortfolioOverviewCard(
     }
 }
 
+/**
+ * 账户分组头。**只渲染头部**，资产行由外层 LazyColumn 直接渲染。
+ *
+ * 这里曾经把该账户下的资产也用 Column + forEach 一起渲染，结果 LazyColumn 的懒加载
+ * 完全失效——它只对自己的直接子项生效。持仓上百只时，一个账户就是上百个 Card
+ * 一次性全部组合，首屏必然卡死。现在拍扁后每一项都是 LazyColumn 的直接子项。
+ */
 @Composable
-fun AccountGroup(
+fun AccountHeaderCard(
     account: String,
-    assets: List<Asset>,
+    assetCount: Int,
+    totalValue: Double,
     isExpanded: Boolean,
-    onToggleExpand: () -> Unit,
-    onAssetClick: (Asset) -> Unit,
-    onDividendClick: (Asset) -> Unit,
-    selectionMode: Boolean = false,
-    selectedIds: Set<Long> = emptySet(),
-    onToggleSelection: (Asset) -> Unit = {}
+    onToggleExpand: () -> Unit
 ) {
-    val totalValue = assets.sumOf { it.totalValueCny }
-
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(12.dp),
         colors = CardDefaults.cardColors(containerColor = SurfaceContainer)
     ) {
-        Column {
-            Row(
-                modifier = Modifier.fillMaxWidth().clickable(onClick = onToggleExpand).padding(16.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column {
-                    Text(account, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, color = OnSurface)
-                    Text("${assets.size} 项", style = MaterialTheme.typography.bodySmall, color = OnSurfaceVariant)
-                }
-                Column(horizontalAlignment = Alignment.End) {
-                    Text("¥${totalValue.format(2)}", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, color = OnSurface)
-                }
-                Icon(
-                    imageVector = if (isExpanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
-                    contentDescription = if (isExpanded) "收起" else "展开",
-                    tint = OnSurfaceVariant
-                )
+        Row(
+            modifier = Modifier.fillMaxWidth().clickable(onClick = onToggleExpand).padding(16.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column {
+                Text(account, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, color = OnSurface)
+                Text("$assetCount 项", style = MaterialTheme.typography.bodySmall, color = OnSurfaceVariant)
             }
-            if (isExpanded) {
-                Column(modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 16.dp)) {
-                    HorizontalDivider(modifier = Modifier.fillMaxWidth(), color = Outline.copy(alpha = 0.3f))
-                    Spacer(modifier = Modifier.height(12.dp))
-                    assets.forEachIndexed { index, asset ->
-                        StockAssetItem(
-                            asset = asset,
-                            onClick = { if (selectionMode) onToggleSelection(asset) else onAssetClick(asset) },
-                            onDividendClick = { onDividendClick(asset) },
-                            selectionMode = selectionMode,
-                            isSelected = selectedIds.contains(asset.id),
-                            onToggleSelection = { onToggleSelection(asset) }
-                        )
-                        if (index < assets.size - 1) Spacer(modifier = Modifier.height(8.dp))
-                    }
-                }
+            Column(horizontalAlignment = Alignment.End) {
+                Text("¥${totalValue.format(2)}", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, color = OnSurface)
             }
+            Icon(
+                imageVector = if (isExpanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                contentDescription = if (isExpanded) "收起" else "展开",
+                tint = OnSurfaceVariant
+            )
         }
     }
 }

@@ -7,9 +7,12 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.example.stockdiary.data.AssetRepository
 import com.example.stockdiary.data.AssetSyncManager
+import com.example.stockdiary.data.FundEStatementParser
 import com.example.stockdiary.data.HoldingSnapshotParser
+import com.example.stockdiary.data.HoldingSnapshotResult
 import com.example.stockdiary.data.HoldingSnapshotService
 import com.example.stockdiary.data.ImageTextRecognizer
+import com.example.stockdiary.data.XlsxTableReader
 import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.di.AppContainer
 import com.example.stockdiary.utils.AppLogger
@@ -29,13 +32,30 @@ import kotlinx.coroutines.withContext
  *
  * 比交割单导入简单：截图格式固定，没有列映射这一步；
  * 而且持仓页带证券代码，不需要走「名称→代码」回填。
+ *
+ * ## 两种来源共用这一套流程
+ *
+ * [Source.STOCK_SNAPSHOT] 走 OCR，[Source.FUND_EXPORT] 直接读 xlsx——
+ * 但「读进来 → 按代码对齐 → 预览 → 落库」这段完全一致，
+ * 所以没有另开一个 ViewModel：另开一个迟早两边跑偏，
+ * 这正是当初把 ImageTextRecognizer 从交割单服务里抽出来的同一个理由。
  */
 class HoldingSnapshotViewModel(
     private val context: Context,
     private val repository: AssetRepository,
     private val service: HoldingSnapshotService,
-    private val recognizer: ImageTextRecognizer
+    private val recognizer: ImageTextRecognizer,
+    private val source: Source
 ) : ViewModel() {
+
+    /** 导入来源。决定选文件的方式与解析走哪条路 */
+    enum class Source {
+        /** 中国结算「一码通持有查询」：场内持仓，只能截图，走 OCR */
+        STOCK_SNAPSHOT,
+
+        /** 基金E账户：场外基金，页面可导出 xlsx 明细，直接读文件 */
+        FUND_EXPORT
+    }
 
     enum class Step { SELECT_IMAGE, PREVIEW, COMMITTING, RESULT }
 
@@ -128,6 +148,68 @@ class HoldingSnapshotViewModel(
 
     fun onAccountChange(value: String) {
         _uiState.update { state -> state.copy(account = value) }
+    }
+
+    /**
+     * 选中基金E账户导出的 xlsx。
+     *
+     * 解析出来的 [HoldingSnapshotResult] 与截图那条路**完全同构**，
+     * 所以后面 buildPreview / commit 一行都不用改。
+     * 区别只在数据来源：这里是官方导出的数字，比 OCR 少了一整层不确定。
+     */
+    fun onFileSelected(uri: Uri) {
+        viewModelScope.launch(Dispatchers.IO) {
+            _uiState.update { state -> state.copy(
+                recognizing = true, error = null, preview = null, result = null,
+                recognizedText = null, lines = emptyList(), step = Step.SELECT_IMAGE
+            ) }
+            try {
+                val rows = context.contentResolver.openInputStream(uri)?.use { input ->
+                    XlsxTableReader.read(input).rows
+                } ?: throw IllegalStateException("打不开这个文件")
+
+                val parsed = FundEStatementParser.parse(rows)
+                if (parsed.holdings.isEmpty()) {
+                    _uiState.update { state -> state.copy(
+                        recognizing = false,
+                        error = "没从这个文件里读到持仓。请确认导出自基金E账户的「公募基金查询」页" +
+                            "（右上角导出）。",
+                        recognizedText = null,
+                        lines = emptyList()
+                    ) }
+                    return@launch
+                }
+
+                val preview = service.buildPreview(
+                    HoldingSnapshotResult(
+                        holdings = parsed.holdings,
+                        dataDate = parsed.navDate,
+                        incomplete = parsed.problems
+                    )
+                )
+                AppLogger.i(
+                    "基金E账户导入解析：${parsed.holdings.size} 条 → 合并后 ${preview.items.size} 条，" +
+                        "数据日期 ${parsed.navDate}",
+                    "HoldingSnapshotVM"
+                )
+                _uiState.update { state -> state.copy(
+                    recognizing = false,
+                    step = Step.PREVIEW,
+                    preview = preview,
+                    recognizedText = null,
+                    lines = emptyList()
+                ) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                AppLogger.e("读取基金E账户导出失败: ${e.message}", e, "HoldingSnapshotVM")
+                _uiState.update { state -> state.copy(
+                    recognizing = false,
+                    error = "读取失败：${e.message ?: "未知错误"}\n\n" +
+                        "请确认选的是基金E账户「公募基金查询」导出的 .xlsx 文件。"
+                ) }
+            }
+        }
     }
 
     /** 确认导入：按 symbol 覆盖数量、其余新建。未变的不写库。 */
@@ -231,14 +313,18 @@ class HoldingSnapshotViewModel(
         ) }
     }
 
-    class Factory(private val container: AppContainer) : ViewModelProvider.Factory {
+    class Factory(
+        private val container: AppContainer,
+        private val source: Source
+    ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T {
             return HoldingSnapshotViewModel(
                 context = container.context,
                 repository = container.assetRepository,
                 service = container.holdingSnapshotService,
-                recognizer = container.imageTextRecognizer
+                recognizer = container.imageTextRecognizer,
+                source = source
             ) as T
         }
     }

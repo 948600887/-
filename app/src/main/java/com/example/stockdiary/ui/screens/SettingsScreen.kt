@@ -30,6 +30,7 @@ import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Schedule
+import androidx.compose.material.icons.filled.Savings
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -65,6 +66,7 @@ import com.example.stockdiary.ui.screens.settings.components.SettingsItem
 import com.example.stockdiary.ui.screens.settings.components.SettingsSection
 import com.example.stockdiary.ui.screens.settings.components.ThemeSelectionDialog
 import com.example.stockdiary.ui.theme.ThemeManager
+import com.example.stockdiary.ui.viewmodels.HoldingSnapshotViewModel
 import com.example.stockdiary.ui.viewmodels.SettingsViewModel
 import com.example.stockdiary.utils.format
 import com.example.stockdiary.utils.sumTotalValueCny
@@ -109,6 +111,7 @@ fun SettingsScreen(
     var showExportDialog by remember { mutableStateOf(false) }
     var showImportDialog by remember { mutableStateOf(false) }
     var showHoldingSnapshotDialog by remember { mutableStateOf(false) }
+    var showFundSnapshotDialog by remember { mutableStateOf(false) }
     var showApiSelectionDialog by remember { mutableStateOf(false) }
     var showReminderTimePicker by remember { mutableStateOf(false) }
     var currentPriceApi by remember { mutableStateOf(com.example.stockdiary.data.ApiManager.getPriceApi(context)) }
@@ -218,8 +221,14 @@ fun SettingsScreen(
                 SettingsItemData(
                     icon = Icons.Default.AccountBalanceWallet,
                     title = "导入持仓截图",
-                    subtitle = "中国结算「一码通持有查询」，直接得到当前持仓",
+                    subtitle = "中国结算「一码通持有查询」，场内股票/ETF/LOF/REITs",
                     onClick = { showHoldingSnapshotDialog = true }
+                ),
+                SettingsItemData(
+                    icon = Icons.Default.Savings,
+                    title = "导入场外基金",
+                    subtitle = "基金E账户导出的持有明细，场外公募基金",
+                    onClick = { showFundSnapshotDialog = true }
                 ),
                 SettingsItemData(
                     icon = Icons.Default.CloudSync,
@@ -450,7 +459,16 @@ fun SettingsScreen(
     if (showHoldingSnapshotDialog) {
         HoldingSnapshotDialog(
             container = container,
+            source = HoldingSnapshotViewModel.Source.STOCK_SNAPSHOT,
             onDismiss = { showHoldingSnapshotDialog = false }
+        )
+    }
+
+    if (showFundSnapshotDialog) {
+        HoldingSnapshotDialog(
+            container = container,
+            source = HoldingSnapshotViewModel.Source.FUND_EXPORT,
+            onDismiss = { showFundSnapshotDialog = false }
         )
     }
 

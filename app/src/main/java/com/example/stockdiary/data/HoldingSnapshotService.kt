@@ -1,6 +1,7 @@
 package com.example.stockdiary.data
 
 import com.example.stockdiary.database.Asset
+import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.utils.AppLogger
 import com.example.stockdiary.utils.StockCodeManager
 import kotlin.math.abs
@@ -66,7 +67,18 @@ class HoldingSnapshotService(
         val status: ItemStatus,
         val sources: List<ParsedHolding>,
         /** 库里同代码命中的**全部**账户：[ItemStatus.CONFLICT] 时要告诉用户是哪几个在抢 */
-        val matchedAccounts: List<String> = emptyList()
+        val matchedAccounts: List<String> = emptyList(),
+        /**
+         * 净值。只有基金E账户的导出里有。
+         * 落库时直接写进 `currentPrice`——它是官方给的数，不是凭空造的，
+         * 市值得等一次行情同步才显示属于无谓的等待。
+         */
+        val nav: Double? = null,
+        /**
+         * 净值日期。与 [Preview.dataDate] 不一致时界面要提示——
+         * 实测 QDII 的净值会比其它基金更旧，不能让用户以为全是同一天的数。
+         */
+        val navDate: String? = null
     ) {
         /** 数量变化量；新建时就是全部数量 */
         val delta: Double
@@ -130,6 +142,11 @@ class HoldingSnapshotService(
                 abs(existing.balance - quantity) < 1e-6 -> ItemStatus.UNCHANGED
                 else -> ItemStatus.UPDATE
             }
+            // 同代码合并时取**最新**那份净值：同一只基金在不同销售机构导出的净值
+            // 一般是同一天的，但万一有先后，取日期靠前的那只净值会低估市值。
+            // yyyy-MM-dd 的字典序就是时间序，直接比字符串即可
+            val latestNav = rows.filter { it.nav != null }.maxByOrNull { it.navDate.orEmpty() }
+
             SnapshotItem(
                 symbol = symbol,
                 name = existing?.name ?: first.name,
@@ -138,7 +155,9 @@ class HoldingSnapshotService(
                 existing = existing,
                 status = status,
                 sources = rows,
-                matchedAccounts = matched.map { it.account }
+                matchedAccounts = matched.map { it.account },
+                nav = latestNav?.nav,
+                navDate = latestNav?.navDate
             )
         }
 
@@ -161,6 +180,21 @@ class HoldingSnapshotService(
      * - 对不上 → 不敢猜，判 [ItemStatus.CONFLICT] 交给用户手动处理。
      *   挑一条覆盖会让总持仓凭空多出一份，比什么都不做错得多
      */
+    /**
+     * 决定落库时的资产类型。
+     *
+     * **带 `fund_` 前缀的一律是场外基金**，不能用 [StockCodeManager.classifyCode] 去推：
+     * 场外基金与深市股票共用 00xxxx 号段，而 classifyCode 只把「004xxx-009xxx」当场外，
+     * 于是 `000001`（华夏成长混合）会被判成股票、`002001`（华夏回报）也一样。
+     * 这些早年发行的基金代码恰好都落在那段里，是历史上绕不开的坑。
+     */
+    private fun assetTypeFor(symbol: String): AssetType =
+        if (symbol.startsWith(FundEStatementParser.SYMBOL_PREFIX, ignoreCase = true)) {
+            AssetType.FUND
+        } else {
+            StockCodeManager.classifyCode(symbol).toAssetType()
+        }
+
     private fun resolveMultiAccountStatus(matched: List<Asset>, quantity: Double): ItemStatus =
         if (abs(matched.sumOf { it.balance } - quantity) < 1e-6) {
             ItemStatus.UNCHANGED
@@ -185,19 +219,25 @@ class HoldingSnapshotService(
                 ItemStatus.NEW -> toInsert.add(
                     Asset(
                         name = item.name,
-                        type = StockCodeManager.classifyCode(item.symbol).toAssetType(),
+                        type = assetTypeFor(item.symbol),
                         symbol = item.symbol,
                         account = account.ifBlank { DEFAULT_ACCOUNT },
                         balance = item.quantity,
-                        // 参考单价留 0：持仓快照里没有价格信息，它是「无行情时的市值兜底价」，
-                        // 给个假数字会让市值凭空多出来。留 0 等行情同步来填 currentPrice。
-                        purchasePrice = 0.0
+                        // 参考单价留 0：它是「无行情时的市值兜底价」，
+                        // 给个假数字会让市值凭空多出来。有净值就走 currentPrice，没净值等行情同步。
+                        purchasePrice = 0.0,
+                        currentPrice = item.nav?.takeIf { it > 0.0 }
                     )
                 )
 
                 ItemStatus.UPDATE -> {
                     val existing = item.existing ?: continue
                     assetRepository.updateBalance(existing.id, item.quantity)
+                    // 净值也是权威数据：份额变了，价格同样该跟着刷新，
+                    // 否则用户会看到「数量更新了、市值还是上周的」
+                    item.nav?.takeIf { it > 0.0 }?.let { nav ->
+                        assetRepository.updatePriceById(existing.id, nav)
+                    }
                     updated++
                 }
 

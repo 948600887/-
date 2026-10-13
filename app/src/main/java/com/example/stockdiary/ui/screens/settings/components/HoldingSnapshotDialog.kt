@@ -39,19 +39,24 @@ import com.example.stockdiary.utils.StockCodeManager
 import com.example.stockdiary.utils.format
 
 /**
- * 持仓截图导入全屏 Dialog：选图 → 预览核对 → 完成。
+ * 持仓导入全屏 Dialog：选图/选文件 → 预览核对 → 完成。
  *
- * 适配「中国结算 · 一码通持有查询」的持仓列表截图。
- * 比交割单导入少一步列映射（截图格式固定），也不用回填证券代码（持仓页本来就有）。
+ * 两种来源共用这一个 Dialog：差别只在第一步怎么选、以及预览页要不要显示净值。
+ * 不另开一个 Dialog 是刻意的——孪生页面必然各犯一遍同样的 bug，
+ * 这个项目已经为这事返工过一次。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HoldingSnapshotDialog(
     container: AppContainer,
+    source: HoldingSnapshotViewModel.Source,
     onDismiss: () -> Unit
 ) {
+    // key 必须带 source：否则从「导入持仓截图」切到「导入场外基金」时，
+    // 会复用上一个 Dialog 的 ViewModel，带着上一次的预览和账户名
     val viewModel: HoldingSnapshotViewModel = viewModel(
-        factory = HoldingSnapshotViewModel.Factory(container)
+        key = source.name,
+        factory = HoldingSnapshotViewModel.Factory(container, source)
     )
     val state by viewModel.uiState.collectAsStateWithLifecycle()
 
@@ -64,6 +69,12 @@ fun HoldingSnapshotDialog(
         ActivityResultContracts.GetContent()
     ) { uri -> if (uri != null) viewModel.onImageSelected(uri) }
 
+    val fileLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.GetContent()
+    ) { uri -> if (uri != null) viewModel.onFileSelected(uri) }
+
+    val isFund = source == HoldingSnapshotViewModel.Source.FUND_EXPORT
+
     Dialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false)
@@ -74,8 +85,10 @@ fun HoldingSnapshotDialog(
                     TopAppBar(
                         title = {
                             val title = when (state.step) {
-                                HoldingSnapshotViewModel.Step.SELECT_IMAGE -> "导入持仓截图"
-                                HoldingSnapshotViewModel.Step.PREVIEW -> "核对持仓"
+                                HoldingSnapshotViewModel.Step.SELECT_IMAGE ->
+                                    if (isFund) "导入场外基金" else "导入持仓截图"
+                                HoldingSnapshotViewModel.Step.PREVIEW ->
+                                    if (isFund) "核对场外基金" else "核对持仓"
                                 HoldingSnapshotViewModel.Step.COMMITTING -> "正在导入…"
                                 HoldingSnapshotViewModel.Step.RESULT -> "导入完成"
                             }
@@ -97,7 +110,13 @@ fun HoldingSnapshotDialog(
                 Box(modifier = Modifier.fillMaxSize().padding(padding)) {
                     when (state.step) {
                         HoldingSnapshotViewModel.Step.SELECT_IMAGE ->
-                            SelectSnapshotStep(state) { imageLauncher.launch("image/*") }
+                            SelectSnapshotStep(state) {
+                                if (isFund) {
+                                    fileLauncher.launch(XLSX_MIME)
+                                } else {
+                                    imageLauncher.launch("image/*")
+                                }
+                            }
 
                         HoldingSnapshotViewModel.Step.PREVIEW ->
                             SnapshotPreviewStep(state, viewModel)
@@ -123,12 +142,20 @@ fun HoldingSnapshotDialog(
     }
 }
 
-// ---------------- 第一步：选图 ----------------
+/**
+ * xlsx 的 MIME。这里刻意不用「任意类型」：
+ * 用户选错文件（比如选成 CSV）时，解析器会报「没找到基金代码这一列」，
+ * 比静默读出 0 条要好，但先挡一道更省事。
+ */
+private const val XLSX_MIME =
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+// ---------------- 第一步：选图 / 选文件 ----------------
 
 @Composable
 private fun SelectSnapshotStep(
     state: HoldingSnapshotViewModel.UiState,
-    onPickImage: () -> Unit
+    onPick: () -> Unit
 ) {
     Column(
         modifier = Modifier.fillMaxSize().padding(24.dp).verticalScroll(rememberScrollState()),
@@ -138,10 +165,13 @@ private fun SelectSnapshotStep(
         if (state.recognizing) {
             CircularProgressIndicator()
             Spacer(Modifier.height(16.dp))
-            Text("正在识别截图…", style = MaterialTheme.typography.bodyLarge)
+            Text(
+                "正在读取文件…",
+                style = MaterialTheme.typography.bodyLarge
+            )
             Spacer(Modifier.height(8.dp))
             Text(
-                "通常需要 1~3 秒",
+                "通常只要一瞬间",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -153,19 +183,20 @@ private fun SelectSnapshotStep(
                 tint = MaterialTheme.colorScheme.primary
             )
             Spacer(Modifier.height(16.dp))
-            Text("选择持仓截图", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            Text("选择导出的文件", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(12.dp))
             Text(
-                "支持「中国结算 · 一码通持有查询」的持仓列表。" +
-                    "每条有两行（名称在上、代码在下），超出屏幕时请用长截图，识别会自动分块。",
+                "在基金E账户的「公募基金查询」页点右上角导出，得到的就是这个文件。" +
+                    "字段齐全，比截图准得多。",
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center
             )
             Spacer(Modifier.height(20.dp))
-            Button(onClick = onPickImage) {
+            Button(onClick = onPick) {
                 Icon(Icons.Default.Upload, contentDescription = null, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(8.dp))
-                Text("选择截图")
+                Text("选择文件")
             }
             if (state.knownAccounts.isNotEmpty()) {
                 Spacer(Modifier.height(24.dp))
@@ -228,8 +259,13 @@ private fun SnapshotPreviewStep(
                     }
                     Spacer(Modifier.height(8.dp))
                     Text(
-                        "覆盖只改数量，不会动你已经整理过的名称和账户。" +
-                            "导入后市值要等行情同步完成才会显示。",
+                        if (preview.items.any { it.nav != null }) {
+                            "净值会一并写入，市值立刻可见。" +
+                                "覆盖只改数量，不会动你已经整理过的名称和账户。"
+                        } else {
+                            "覆盖只改数量，不会动你已经整理过的名称和账户。" +
+                                "导入后市值要等行情同步完成才会显示。"
+                        },
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -320,13 +356,16 @@ private fun SnapshotPreviewStep(
         }
 
         items(preview.items, key = { it.symbol }) { item ->
-            SnapshotItemRow(item)
+            SnapshotItemRow(item, preview.dataDate)
         }
     }
 }
 
 @Composable
-private fun SnapshotItemRow(item: HoldingSnapshotService.SnapshotItem) {
+private fun SnapshotItemRow(
+    item: HoldingSnapshotService.SnapshotItem,
+    dataDate: String?
+) {
     val (statusText, statusColor) = when (item.status) {
         HoldingSnapshotService.ItemStatus.NEW -> "新增" to ProfitGreen
         HoldingSnapshotService.ItemStatus.UPDATE ->
@@ -369,6 +408,21 @@ private fun SnapshotItemRow(item: HoldingSnapshotService.SnapshotItem) {
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
+                    // 净值只有基金E账户的导出有。不给的话用户无从判断市值是怎么算出来的
+                    item.nav?.let { nav ->
+                        val stale = item.navDate != null && item.navDate != dataDate
+                        Text(
+                            if (stale) {
+                                // 净值日期比数据日期旧：实测 QDII 就会这样（基金账户 T-3，
+                                // QDII 的净值还要再滞后）。不标出来用户会以为全是同一天的数
+                                "净值 ${formatNav(nav)}（${item.navDate}，滞后）"
+                            } else {
+                                "净值 ${formatNav(nav)}"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (stale) LossRed else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
             }
             Spacer(Modifier.height(6.dp))
@@ -408,6 +462,13 @@ private fun SnapshotItemRow(item: HoldingSnapshotService.SnapshotItem) {
 /** 持仓数量的显示口径：整数就整着写，有小数才带两位（基金份额可能是小数）。 */
 private fun formatQuantity(value: Double): String =
     value.format(if (value % 1.0 == 0.0) 0 else 2)
+
+/**
+ * 净值的显示口径：**四位小数**。
+ * 基金的净值精度是 4 位（如 1.1663），按 2 位显示会看不出差别，
+ * 而「净值一模一样」恰恰是判断有没有读错列的最直接依据。
+ */
+private fun formatNav(value: Double): String = value.format(4)
 
 @Composable
 private fun SnapshotBottomBar(

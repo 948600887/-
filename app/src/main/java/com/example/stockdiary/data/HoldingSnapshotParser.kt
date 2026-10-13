@@ -60,7 +60,21 @@ data class ParsedHolding(
     /** 该记录在还原行里的行号（从 1 起），用于定位与报错 */
     val lineNumber: Int,
     /** 数量在截图里的原始写法（如 "1.44万"），预览页展示用 */
-    val rawQuantity: String
+    val rawQuantity: String,
+    /**
+     * 净值。只有基金E账户的导出里有（截图里没有价格信息）。
+     *
+     * 有它就**直接写进 currentPrice**：这是官方给的净值，不是凭空造的，
+     * 市值得等一次行情同步才显示属于无谓的等待。
+     */
+    val nav: Double? = null,
+    /**
+     * 净值日期（yyyy-MM-dd）。
+     *
+     * 基金E账户的数据是 T-3 的，而且**个别基金可能更旧**（实测有一只是 09/30，其余是 10/08）。
+     * 预览页要拿它跟数据日期比，不一致就提示——否则用户会以为这份持仓全是同一天的数。
+     */
+    val navDate: String? = null
 ) {
     /** 按代码前缀推断的类别：ETF / LOF / 股票 / 场内基金…… */
     val category: StockCodeManager.CodeCategory get() = StockCodeManager.classifyCode(symbol)

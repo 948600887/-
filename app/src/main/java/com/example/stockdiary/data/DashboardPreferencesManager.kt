@@ -17,7 +17,16 @@ data class DashboardPreferences(
     val defaultExpanded: Set<String> = emptySet(),
     val sortOrder: SortOrder = SortOrder.BY_TYPE,
     val defaultPeriod: String = "1M",
-    val monthlyExpense: String = "5000"
+    val monthlyExpense: String = "5000",
+    /**
+     * 上次算出的年度分红，以及算它时的持仓代码集合。
+     *
+     * ViewModel 每次进入持仓页都会重建，不做缓存的话用户每次进来都要看一次
+     * 「年度分红：计算中」——数据根本没变，重算纯属等待。
+     * 代码集合用来判断缓存还有没有效：持仓一变，旧值立刻作废。
+     */
+    val annualDividendCache: Double = 0.0,
+    val annualDividendSymbols: Set<String> = emptySet()
 )
 
 enum class SortOrder {
@@ -64,6 +73,8 @@ class DashboardPreferencesManager(context: Context) {
         private const val KEY_SORT_ORDER = "sort_order"
         private const val KEY_DEFAULT_PERIOD = "default_period"
         private const val KEY_MONTHLY_EXPENSE = "monthly_expense"
+        private const val KEY_ANNUAL_DIVIDEND_CACHE = "annual_dividend_cache"
+        private const val KEY_ANNUAL_DIVIDEND_SYMBOLS = "annual_dividend_symbols"
         
         @Volatile
         private var instance: DashboardPreferencesManager? = null
@@ -107,7 +118,10 @@ class DashboardPreferencesManager(context: Context) {
             defaultExpanded = prefs.getStringSet(KEY_DEFAULT_EXPANDED, emptySet()) ?: emptySet(),
             sortOrder = sortOrderOf(prefs.getString(KEY_SORT_ORDER, null)),
             defaultPeriod = prefs.getString(KEY_DEFAULT_PERIOD, "1M") ?: "1M",
-            monthlyExpense = prefs.getString(KEY_MONTHLY_EXPENSE, "5000") ?: "5000"
+            monthlyExpense = prefs.getString(KEY_MONTHLY_EXPENSE, "5000") ?: "5000",
+            annualDividendCache = prefs.getFloat(KEY_ANNUAL_DIVIDEND_CACHE, 0f).toDouble(),
+            annualDividendSymbols = prefs.getStringSet(KEY_ANNUAL_DIVIDEND_SYMBOLS, emptySet())?.toSet()
+                ?: emptySet()
         )
     }
     
@@ -126,6 +140,10 @@ class DashboardPreferencesManager(context: Context) {
             putString(KEY_SORT_ORDER, preferences.sortOrder.name)
             putString(KEY_DEFAULT_PERIOD, preferences.defaultPeriod)
             putString(KEY_MONTHLY_EXPENSE, preferences.monthlyExpense)
+            // 用 Float 存：SharedPreferences 没有 putDouble。分红金额到百万级时
+            // Float 的 7 位有效数字仍够用，且这里只用于「先显示旧值、后台再校准」
+            putFloat(KEY_ANNUAL_DIVIDEND_CACHE, preferences.annualDividendCache.toFloat())
+            putStringSet(KEY_ANNUAL_DIVIDEND_SYMBOLS, preferences.annualDividendSymbols)
             apply()
         }
     }

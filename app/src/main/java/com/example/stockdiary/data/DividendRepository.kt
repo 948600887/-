@@ -157,9 +157,14 @@ class DividendRepository private constructor(
     }
 
     private suspend fun fetchDividendData(normalizedSymbol: String): List<DividendRecord> {
-        val stockCode = StockCodeManager.extractPureCode(normalizedSymbol)
+        // fund_ 前缀必须在这里剥掉。extractPureCode 只认 sh/sz/bj，不认 fund_，
+        // 不剥的话 stockCode 会带着 "fund_" 传下去，于是 isOTCFundCode / isETF 全部判错，
+        // 最后拿着 "fund_004502" 去请求接口——场外基金的分红永远抓不到，
+        // 而且失败是静默的（接口返回空 → 不写库 → 分红弹窗显示「暂无」）
+        val pureSymbol = normalizedSymbol.removePrefix("fund_")
+        val stockCode = StockCodeManager.extractPureCode(pureSymbol)
         val isOTCFund = StockCodeManager.isOTCFundCode(stockCode)
-        val isEtf = StockCodeManager.isETF(normalizedSymbol)
+        val isEtf = StockCodeManager.isETF(pureSymbol)
 
         var data: List<DividendRecord> = if (isOTCFund) {
             fetchFromFundApi(stockCode)
@@ -172,7 +177,7 @@ class DividendRepository private constructor(
         }
 
         if (data.isEmpty() && !isOTCFund && !isEtf) {
-            val market = StockCodeManager.getMarketPrefix(normalizedSymbol)
+            val market = StockCodeManager.getMarketPrefix(pureSymbol)
             data = fetchFromSina(stockCode, market)
         }
 

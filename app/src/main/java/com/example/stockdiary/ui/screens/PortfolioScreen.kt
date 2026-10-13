@@ -31,7 +31,37 @@ import kotlinx.coroutines.launch
 private const val LIABILITY_GROUP_KEY = "负债"
 
 /**
- * 持仓列表的渲染单元：账户头，或一只资产。
+ * 持仓的一级分组：场内 / 场外 / 其他。
+ *
+ * 依据是 **symbol 形态**，不是账户名——账户名是用户自己填的，
+ * 两次导入填同一个名字就会混在一起，那是不可靠的。
+ *
+ * - `fund_` 前缀：基金E账户导入的**场外**份额（按净值成交）
+ * - `sh`/`sz`/`bj` 前缀：一码通导入的**场内**持仓（股票、ETF、LOF、REITs）
+ * - 没有代码：存款、加密货币等
+ */
+private enum class HoldingsMarket(val label: String) {
+    EXCHANGE("场内"),
+    OTC("场外"),
+    OTHER("其他");
+
+    companion object {
+        /** 展示顺序：场外（新导入的那批）放前面，其余按原顺序 */
+        val displayOrder = listOf(OTC, EXCHANGE, OTHER)
+    }
+}
+
+private fun marketOf(asset: Asset): HoldingsMarket {
+    val symbol = asset.symbol
+    return when {
+        symbol.isNullOrBlank() -> HoldingsMarket.OTHER
+        symbol.startsWith("fund_", ignoreCase = true) -> HoldingsMarket.OTC
+        else -> HoldingsMarket.EXCHANGE
+    }
+}
+
+/**
+ * 持仓列表的渲染单元：市场大区头、账户头，或一只资产。
  *
  * ## 为什么必须拍扁
  *
@@ -39,18 +69,35 @@ private const val LIABILITY_GROUP_KEY = "负债"
  * 被打包成一个 item，内部用 Column + forEach 渲染，于是一个账户下的上百只基金
  * 会被一次性全部组合——首屏直接卡死，持仓越多越明显。
  *
- * 拍扁成「账户头 / 资产行」两种单元后，每一项都是 LazyColumn 的直接子项，
- * 滚动到哪才组合到哪。账户小计也在构造时算好，不在组合里重复 sumOf。
+ * 拍扁成三种单元后，每一项都是 LazyColumn 的直接子项，滚动到哪才组合到哪。
+ * 账户小计也在构造时算好，不在组合里重复 sumOf。
  */
 private sealed interface PortfolioRow {
     val key: String
 
+    data class MarketHeader(
+        val market: HoldingsMarket,
+        val assetCount: Int,
+        val totalValue: Double,
+        /**
+         * 展开态用的 key。
+         *
+         * 默认取 "market:xxx"，与账户名不会撞车；负债区必须显式传
+         * [LIABILITY_GROUP_KEY]——否则它会和「其他」市场共用 OTHER，两处会一起展开/收起。
+         */
+        val expandKey: String = "market:${market.name}"
+    ) : PortfolioRow {
+        override val key: String get() = "header:$expandKey"
+    }
+
     data class AccountHeader(
         val account: String,
         val assetCount: Int,
-        val totalValue: Double
+        val totalValue: Double,
+        /** 所属市场。同一个账户名可能两边都出现（比如都填「中国结算」），key 要带上它 */
+        val market: HoldingsMarket
     ) : PortfolioRow {
-        override val key: String get() = "account:$account"
+        override val key: String get() = "account:${market.name}:$account"
     }
 
     data class AssetRow(val asset: Asset, val account: String) : PortfolioRow {
@@ -120,31 +167,50 @@ fun PortfolioScreen(
         }
     }
 
-    val filteredAssetsByAccount by remember {
-        derivedStateOf {
-            sortedAssets.groupBy { it.account }
-        }
-    }
-
     /**
-     * 拍扁后的渲染单元。展开/收起只影响要不要把资产行放进去，
-     * 账户头始终在——收起后仍看得到这个账户和小计。
+     * 拍扁后的渲染单元：市场大区 → 账户 → 资产。
+     *
+     * 一级分组按 symbol 形态（场内/场外/其他），不按账户名——
+     * 账户名是用户填的，两次导入填同一个名字就会混在一起。
+     * 展开/收起只影响要不要把资产行放进去，各级头始终在。
      */
     val rows = remember(sortedAssets, liabilities, expandedAccounts) {
         buildList {
-            sortedAssets.groupBy { it.account }.forEach { (account, list) ->
-                add(PortfolioRow.AccountHeader(account, list.size, list.sumOf { it.totalValueCny }))
-                if (account in expandedAccounts) {
-                    list.forEach { add(PortfolioRow.AssetRow(it, account)) }
+            HoldingsMarket.displayOrder.forEach { market ->
+                val marketAssets = sortedAssets.filter { marketOf(it) == market }
+                if (marketAssets.isEmpty()) return@forEach
+
+                add(
+                    PortfolioRow.MarketHeader(
+                        market = market,
+                        assetCount = marketAssets.size,
+                        totalValue = marketAssets.sumOf { it.totalValueCny }
+                    )
+                )
+                marketAssets.groupBy { it.account }.forEach { (account, list) ->
+                    add(
+                        PortfolioRow.AccountHeader(
+                            account = account,
+                            assetCount = list.size,
+                            totalValue = list.sumOf { it.totalValueCny },
+                            market = market
+                        )
+                    )
+                    if (account in expandedAccounts) {
+                        list.forEach { add(PortfolioRow.AssetRow(it, account)) }
+                    }
                 }
             }
-            // 负债单独成组：混进账户小计里会让「这个账户有多少钱」变得不可读
+
+            // 负债单独成组：混进账户小计里会让「这个账户有多少钱」变得不可读。
+            // expandKey 必须显式给 LIABILITY_GROUP_KEY，否则会与「其他」市场撞车
             if (liabilities.isNotEmpty()) {
                 add(
-                    PortfolioRow.AccountHeader(
-                        account = LIABILITY_GROUP_KEY,
+                    PortfolioRow.MarketHeader(
+                        market = HoldingsMarket.OTHER,
                         assetCount = liabilities.size,
-                        totalValue = liabilities.sumOf { it.totalValueCny }
+                        totalValue = liabilities.sumOf { it.totalValueCny },
+                        expandKey = LIABILITY_GROUP_KEY
                     )
                 )
                 if (LIABILITY_GROUP_KEY in expandedAccounts) {
@@ -154,20 +220,34 @@ fun PortfolioScreen(
         }
     }
 
-    LaunchedEffect(assetsOnly) {
+    /**
+     * 抓分红的触发条件：**持仓代码集合**，不是资产列表本身。
+     *
+     * 用列表做 key 的话，任何一次价格刷新都会让列表内容变化、效应重启、
+     * 分红重抓一遍——而分红跟价格半点关系都没有。代码集合不变就不该重抓。
+     */
+    val dividendSymbols = remember(assetsOnly) { assetsOnly.mapNotNull { it.symbol }.toSet() }
+
+    LaunchedEffect(dividendSymbols) {
         viewModel.loadDividendIncome(assetsOnly)
     }
 
-    // Set 的相等性是结构性的，用它做副作用 key 可以保证「账户集合没变」时不重跑，
+    // 所有「可展开分组」的 key：市场大区 + 账户。
+    // Set 的相等性是结构性的，用它做副作用 key 可以保证「分组集合没变」时不重跑，
     // 避免价格波动刷新列表就把用户刚收起的分组重新展开。
-    val accountKeys = remember(filteredAssetsByAccount, liabilities) {
-        filteredAssetsByAccount.keys.toSet() +
-            (if (liabilities.isNotEmpty()) setOf(LIABILITY_GROUP_KEY) else emptySet())
+    val groupKeys = remember(rows) {
+        rows.mapNotNull { row ->
+            when (row) {
+                is PortfolioRow.MarketHeader -> row.expandKey
+                is PortfolioRow.AccountHeader -> row.account
+                is PortfolioRow.AssetRow -> null
+            }
+        }.toSet()
     }
 
-    // null = 还没初始化过（首屏）。初始化后只自动展开「新出现」的账户，
+    // null = 还没初始化过（首屏）。初始化后只自动展开「新出现」的分组，
     // 用户手动收起的分组不会再被强行展开。
-    var initializedAccounts by remember { mutableStateOf<Set<String>?>(null) }
+    var initializedGroups by remember { mutableStateOf<Set<String>?>(null) }
 
     // 处在批量选择态时，返回键应当先退出选择态，而不是直接退出 App
     BackHandler(enabled = selectionMode) {
@@ -175,17 +255,17 @@ fun PortfolioScreen(
         selectedIds = emptySet()
     }
 
-    LaunchedEffect(accountKeys) {
-        val current = initializedAccounts
+    LaunchedEffect(groupKeys) {
+        val current = initializedGroups
         if (current == null) {
-            expandedAccounts = accountKeys
+            expandedAccounts = groupKeys
         } else {
-            val added = accountKeys - current
+            val added = groupKeys - current
             if (added.isNotEmpty()) {
                 expandedAccounts = expandedAccounts + added
             }
         }
-        initializedAccounts = accountKeys
+        initializedGroups = groupKeys
     }
 
     if (errorMessage != null) {
@@ -354,9 +434,26 @@ fun PortfolioScreen(
                     }
                 }
 
-                // 账户头与资产行都是 LazyColumn 的直接子项，滚动到哪组合到哪
+                // 市场头 / 账户头 / 资产行都是 LazyColumn 的直接子项，滚动到哪组合到哪
                 items(rows, key = { it.key }) { row ->
                     when (row) {
+                        is PortfolioRow.MarketHeader -> MarketHeaderCard(
+                            label = row.market.label,
+                            assetCount = row.assetCount,
+                            totalValue = row.totalValue,
+                            isExpanded = expandedAccounts.contains(row.expandKey),
+                            onToggleExpand = {
+                                if (!selectionMode) {
+                                    expandedAccounts =
+                                        if (expandedAccounts.contains(row.expandKey)) {
+                                            expandedAccounts - row.expandKey
+                                        } else {
+                                            expandedAccounts + row.expandKey
+                                        }
+                                }
+                            }
+                        )
+
                         is PortfolioRow.AccountHeader -> AccountHeaderCard(
                             account = row.account,
                             assetCount = row.assetCount,

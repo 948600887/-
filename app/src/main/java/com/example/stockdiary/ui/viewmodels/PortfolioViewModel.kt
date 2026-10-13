@@ -67,8 +67,33 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
         }
     }
 
+    /**
+     * 加载年度分红。
+     *
+     * ## 为什么进场不重算
+     *
+     * ViewModel 每次进入持仓页都会重建，旧做法是进来就重抓一遍分红，
+     * 于是用户每次打开 App 都要看一次「年度分红：计算中」——数据根本没变。
+     *
+     * 现在按「持仓代码集合」比对持久化的缓存：集合一致就直接用旧值，
+     * 一次网络请求都不发；持仓变了（导入、增删）才重新抓。
+     * 抓取期间也照常显示旧值，不用「计算中」把屏幕占住。
+     */
     fun loadDividendIncome(stockAssets: List<Asset>) {
         if (stockAssets.isEmpty()) return
+
+        val symbols = stockAssets.mapNotNull { it.symbol }.toSet()
+        val cached = _preferences.value
+
+        // 缓存命中：直接用旧值，不抓
+        if (symbols == cached.annualDividendSymbols && symbols.isNotEmpty()) {
+            _estimatedAnnualDividend.value = cached.annualDividendCache
+            _incomeCalculationStatus.value = if (cached.annualDividendCache == 0.0) "暂无分红数据" else null
+            hasLoadedDividend = true
+            _dividendLoading.value = false
+            return
+        }
+
         viewModelScope.launch {
             if (!hasLoadedDividend) _dividendLoading.value = true
             try {
@@ -78,6 +103,15 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
                     "暂无分红数据"
                 } else null
                 hasLoadedDividend = true
+
+                // 抓到手就存缓存：下次进场同一批持仓直接命中
+                _preferences.update { state ->
+                    state.copy(
+                        annualDividendCache = result.totalAnnualIncome,
+                        annualDividendSymbols = symbols
+                    )
+                }
+                container.dashboardPreferencesManager.savePreferences(_preferences.value)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -112,6 +146,16 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
                 val result = incomeUseCase.load(stockAssets, forceRefresh = false, tag = "PortfolioVM")
                 _estimatedAnnualDividend.value = result.totalAnnualIncome
                 _incomeCalculationStatus.value = null
+
+                // 手动刷新说明用户想看最新数，抓到就更新缓存
+                val symbols = stockAssets.mapNotNull { it.symbol }.toSet()
+                _preferences.update { state ->
+                    state.copy(
+                        annualDividendCache = result.totalAnnualIncome,
+                        annualDividendSymbols = symbols
+                    )
+                }
+                container.dashboardPreferencesManager.savePreferences(_preferences.value)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {

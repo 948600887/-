@@ -30,8 +30,6 @@ fun PortfolioOverviewCard(
     dividendStatus: String?,
     assetCount: Int
 ) {
-    val monthlyDividend = if (estimatedAnnualDividend > 0) estimatedAnnualDividend / 12 else 0.0
-
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(12.dp),
@@ -62,13 +60,71 @@ fun PortfolioOverviewCard(
             Spacer(modifier = Modifier.height(12.dp))
             HorizontalDivider(color = Outline.copy(alpha = 0.3f))
             Spacer(modifier = Modifier.height(12.dp))
+            // 抓取期间照常显示旧值，不用「计算中」把屏幕占住——
+            // 缓存命中时根本不抓，冷启动那一下也会有旧值可看
+            val dividendText = when {
+                isDividendLoading && estimatedAnnualDividend <= 0.0 -> "计算中"
+                estimatedAnnualDividend > 0.0 -> "¥${estimatedAnnualDividend.format(0)}"
+                else -> "-"
+            }
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceEvenly
             ) {
-                PortfolioMetricColumn("年度分红", if (isDividendLoading) "计算中" else "¥${estimatedAnnualDividend.format(0)}", isDividendLoading)
-                PortfolioMetricColumn("月均分红", if (isDividendLoading) "-" else "¥${monthlyDividend.format(0)}", false)
+                PortfolioMetricColumn("年度分红", dividendText, isDividendLoading && estimatedAnnualDividend <= 0.0)
+                PortfolioMetricColumn("月均分红", if (estimatedAnnualDividend > 0) "¥${(estimatedAnnualDividend / 12).format(0)}" else "-", false)
                 PortfolioMetricColumn(dividendStatus ?: "持有", if (dividendStatus != null) "" else "$assetCount", isDividendLoading && dividendStatus != null)
+            }
+        }
+    }
+}
+
+/**
+ * 市场大区头（场内 / 场外 / 其他）。比账户头更醒目，让两批来源一眼分开。
+ *
+ * 分组依据是 symbol 形态（`fund_` 前缀 = 场外份额，`sh`/`sz`/`bj` = 场内），
+ * 不是账户名——账户名是用户自己填的，两次导入填同一个名字就会混在一起。
+ */
+@Composable
+fun MarketHeaderCard(
+    label: String,
+    assetCount: Int,
+    totalValue: Double,
+    isExpanded: Boolean,
+    onToggleExpand: () -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(containerColor = PrimaryContainer)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().clickable(onClick = onToggleExpand).padding(16.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column {
+                Text(
+                    label,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = OnSurface
+                )
+                Text("$assetCount 项", style = MaterialTheme.typography.bodySmall, color = OnSurfaceVariant)
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "¥${totalValue.format(2)}",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = OnSurface
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Icon(
+                    imageVector = if (isExpanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                    contentDescription = if (isExpanded) "收起" else "展开",
+                    tint = OnSurfaceVariant
+                )
             }
         }
     }

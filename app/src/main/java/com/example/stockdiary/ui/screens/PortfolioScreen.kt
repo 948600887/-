@@ -188,6 +188,8 @@ fun PortfolioScreen(
                         totalValue = marketAssets.sumOf { it.totalValueCny }
                     )
                 )
+                // 这个市场大区的展开 key，下面判断资产行要不要加入时要用
+                val marketKey = "market:${market.name}"
                 marketAssets.groupBy { it.account }.forEach { (account, list) ->
                     add(
                         PortfolioRow.AccountHeader(
@@ -197,7 +199,10 @@ fun PortfolioScreen(
                             market = market
                         )
                     )
-                    if (account in expandedAccounts) {
+                    // 资产行要**同时**满足「市场头展开」和「账户头展开」。
+                    // 只判账户头的话，市场头的收起状态记是记了，构造时却不用它，
+                    // 于是点市场头毫无效果——两个区的资产行照加，看着像「全展开了」
+                    if (account in expandedAccounts && marketKey in expandedAccounts) {
                         list.forEach { add(PortfolioRow.AssetRow(it, account)) }
                     }
                 }

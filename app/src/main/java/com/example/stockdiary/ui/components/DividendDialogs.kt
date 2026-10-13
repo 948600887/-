@@ -131,8 +131,26 @@ fun DividendDetailDialog(
                         }
                     }
                 } else {
-                    val totalPerShare = records.sumOf { it.amount }
-                    val totalAmount = perTenSharesToAmount(totalPerShare, asset.balance)
+                    // 「累计分红」原来的口径是「基金成立以来全部分红 × 当前份额」。
+                    // 那等于假设用户从基金成立第一天起就持有当前这么多份额——
+                    // 历史越久数字越离谱，而用户实际可能一分钱都没收到。
+                    //
+                    // 改成近 12 个月：与持仓页「年度分红」同口径，有实际参考意义。
+                    // yyyy-MM-dd 的字典序就是时间序，字符串直接比即可
+                    val oneYearAgo = remember {
+                        val calendar = java.util.Calendar.getInstance()
+                        calendar.add(java.util.Calendar.DAY_OF_YEAR, -365)
+                        java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).format(calendar.time)
+                    }
+                    val recentRecords = records.filter { it.date >= oneYearAgo }
+                    val recentAmount = perTenSharesToAmount(
+                        recentRecords.sumOf { it.amount },
+                        asset.balance
+                    )
+                    // 历史累计只按「每10份」给：那是基金自身的属性，与用户持仓无关，
+                    // 数字绝对正确，也能看出这基金分红勤不勤
+                    val historicalPerTen = records.sumOf { it.amount }
+
                     Card(
                         colors = CardDefaults.cardColors(containerColor = PrimaryContainer.copy(alpha = 0.5f)),
                         shape = RoundedCornerShape(8.dp)
@@ -147,13 +165,13 @@ fun DividendDetailDialog(
                                     Text("分红次数", fontSize = 11.sp, color = OnSurfaceVariant)
                                 }
                                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                    Text("¥${totalAmount.format(2)}", fontWeight = FontWeight.Bold, color = LossRed)
-                                    Text("累计分红", fontSize = 11.sp, color = OnSurfaceVariant)
+                                    Text("¥${recentAmount.format(2)}", fontWeight = FontWeight.Bold, color = LossRed)
+                                    Text("近12个月分红", fontSize = 11.sp, color = OnSurfaceVariant)
                                 }
                             }
                             Spacer(modifier = Modifier.height(8.dp))
                             // 分红是按「除息日当天持有的份额」发的，App 只存了当前份额，
-                            // 所以这里只能拿当前份额去折算历史分红 —— 必须讲清楚它不是真实到账金额。
+                            // 所以这里只能拿当前份额去折算 —— 必须讲清楚它不是真实到账金额。
                             Text(
                                 text = "按当前 ${asset.balance.format(0)} $unitWord 估算，非实际到账",
                                 fontSize = 10.sp,
@@ -161,6 +179,26 @@ fun DividendDetailDialog(
                                 textAlign = TextAlign.Center,
                                 modifier = Modifier.fillMaxWidth()
                             )
+                            if (historicalPerTen > 0) {
+                                Text(
+                                    // 必须写 ${unitWord} 而不是 $unitWord：后面紧跟中文「派」，
+                                    // Kotlin 会把整个「unitWord派」当成一个标识符去解析
+                                    text = "该基金历史累计每10${unitWord}派 ¥${historicalPerTen.format(2)}",
+                                    fontSize = 10.sp,
+                                    color = OnSurfaceVariant,
+                                    textAlign = TextAlign.Center,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            }
+                            if (recentRecords.isEmpty() && records.isNotEmpty()) {
+                                Text(
+                                    text = "近12个月无分红，历史累计仅供参考",
+                                    fontSize = 10.sp,
+                                    color = OnSurfaceVariant,
+                                    textAlign = TextAlign.Center,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            }
                         }
                     }
                     Spacer(modifier = Modifier.height(12.dp))

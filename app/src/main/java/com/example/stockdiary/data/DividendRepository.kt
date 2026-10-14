@@ -28,6 +28,38 @@ class DividendRepository private constructor(
     private val cache = ConcurrentHashMap<String, CacheEntry>()
     private val cacheTTL = 24 * 60 * 60 * 1000L
 
+    /**
+     * 每个代码「上次抓过的时间」，跨进程存活。
+     *
+     * ## 为什么非有它不可
+     *
+     * 实测（2026-10-14 的诊断报告）：一次全量抓取里 **525 次抓回 0 条、只有 77 次有数据** ——
+     * 87% 的标的确实没有分红。而 [getDividendsBySymbol] 里写库那句是
+     * `if (data.isNotEmpty())`，**空结果从不落库**；[tryGetFromCache] 又只在库里有记录时
+     * 才算命中。两边一凑：空结果永远记不住。
+     *
+     * 于是进程一死（Android 后台进程被系统回收是常态），内存缓存全没，
+     * 库里又查不到 → 全部重新抓一遍。59 个代码 × 3 个数据源 ≈ 250 个请求，
+     * 每次冷启动来一轮，一天好几轮。后果是接口被打到返回 **HTTP 514（反爬限流）**
+     * （实测 106 次），请求排队到 60 秒才返回，进程长时间占着大量内存做 Jsoup 解析
+     * —— 然后更容易被系统回收，进入下一轮。这就是「闪退」反复出现的放大器。
+     *
+     * 所以：**「抓过，且确实没有分红」是一个必须记住的结论**，不是「没数据」。
+     */
+    private val fetchState by lazy {
+        context.getSharedPreferences(FETCH_STATE_PREFS, Context.MODE_PRIVATE)
+    }
+
+    /** 记录一次抓取完成（不管抓没抓到）。必须在抓取**成功**后写，失败时写会把错误固化 24 小时 */
+    private fun markFetched(symbol: String) {
+        runCatching { fetchState.edit().putLong(symbol, System.currentTimeMillis()).apply() }
+    }
+
+    private fun lastFetchedAt(symbol: String): Long? {
+        val value = runCatching { fetchState.getLong(symbol, 0L) }.getOrDefault(0L)
+        return value.takeIf { it > 0L }
+    }
+
     /** 预取分红时的并发上限：与 AssetSyncManager.MAX_CONCURRENT_SYNC 一致，别把接口打爆 */
     private val maxConcurrentFetch = 8
     
@@ -44,6 +76,9 @@ class DividendRepository private constructor(
     }
     
     companion object {
+        /** 「上次抓取时间」存放的 preferences 名，见 [fetchState] 的说明 */
+        private const val FETCH_STATE_PREFS = "dividend_fetch_state"
+
         // 基金/ETF 每10份分红超过100元视为异常（基金分红来自净值拆分，不可能达到）
         private const val MAX_DIVIDEND_PER_TEN_SHARES_FUND = 100.0
         // 股票每10股分红上限放宽：A股极端高分红如茅台约300元/10股（含特别分红更高），留足余量
@@ -117,6 +152,10 @@ class DividendRepository private constructor(
                 }
             }
 
+            // 抓成功了就记一笔，**不管抓没抓到**。空结果也是结论，不记下来
+            // 下次冷启动会再抓一遍（见 [fetchState] 的说明）
+            markFetched(normalizedSymbol)
+
             cache[normalizedSymbol] = CacheEntry(
                 data = mergedData,
                 timestamp = System.currentTimeMillis(),
@@ -151,6 +190,26 @@ class DividendRepository private constructor(
             }
             cache[normalizedSymbol] = CacheEntry(records, System.currentTimeMillis(), lastFullFetch = 0L)  // 数据库恢复的缓存不标记为全量拉取
             return records
+        }
+
+        // 库里一条都没有，但**近期确实抓过** → 结论是「这只没有分红」，不是「没抓过」。
+        // 判据抽成纯函数 [shouldReuseEmptyResult] 是为了能单测：这条判断错了要么
+        // 每次冷启动重抓几百个请求，要么把「真的有分红」误判成没有并压 24 小时
+        val stamp = lastFetchedAt(normalizedSymbol)
+        if (shouldReuseEmptyResult(
+                dbRecordCount = dbRecords.size,
+                lastFetchedAt = stamp,
+                now = System.currentTimeMillis(),
+                ttl = cacheTTL
+            )
+        ) {
+            cacheHits.incrementAndGet()
+            cache[normalizedSymbol] = CacheEntry(
+                emptyList(),
+                System.currentTimeMillis(),
+                lastFullFetch = stamp ?: 0L
+            )
+            return emptyList()
         }
 
         return null
@@ -469,4 +528,37 @@ class DividendRepository private constructor(
             }.filterNotNull().forEach { it.await() }
         }
     }
+}
+
+/**
+ * 库里一条分红记录都没有时，该不该把它当成「缓存命中」而不是「没抓过」。
+ *
+ * **纯函数**，不碰 Context / Room / 网络，所以能直接 JVM 单测。
+ * 抽出来是因为这条判断错了代价都不小，而且两个方向的错都很隐蔽：
+ *
+ * - 该认而不认 → 87% 的标的（实测）每次冷启动重抓一遍，接口被打到 514 限流，
+ *   进程长时间占着内存做解析，于是更容易被系统回收 → 又一轮重抓
+ * - 不该认而认 → 一只真有分红的标的被压 24 小时不抓，界面上分红一直是空的
+ *
+ * @param dbRecordCount 库里该代码的记录条数
+ * @param lastFetchedAt 上次抓取完成的时间戳；null 表示从没抓过
+ * @param now 当前时间戳
+ * @param ttl 认定「抓过」的有效期
+ */
+internal fun shouldReuseEmptyResult(
+    dbRecordCount: Int,
+    lastFetchedAt: Long?,
+    now: Long,
+    ttl: Long
+): Boolean {
+    // 库里有记录就走正常的库恢复路径，轮不到这里
+    if (dbRecordCount > 0) return false
+    // 从没抓过 → 真的没数据，必须去抓
+    val fetched = lastFetchedAt ?: return false
+    if (fetched <= 0L) return false
+    // 抓过，但太久之前 → 结论可能已经过期（一只基金可能刚宣布首次分红）
+    if (now - fetched >= ttl) return false
+    // 时间戳来自未来（改过系统时间）→ 不认，宁可重抓也别无限期压住
+    if (fetched > now) return false
+    return true
 }

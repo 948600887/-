@@ -72,7 +72,14 @@ class CalendarViewModel(
         if (assets.isEmpty()) return
         viewModelScope.launch {
             try {
-                val result = dividendIncomeUseCase.load(assets, forceRefresh = false, tag = "CalendarVM")
+                // cacheOnly：冷启动只读缓存，不为了「预计收入」去敲几十个接口。
+                // 连过期数据都没有（首次安装）时内部会自己走抓取流程
+                val result = dividendIncomeUseCase.load(
+                    assets,
+                    forceRefresh = false,
+                    tag = "CalendarVM",
+                    cacheOnly = true
+                )
                 _uiState.update { state -> state.copy(realAnnualIncome = result.totalAnnualIncome) }
             } catch (e: CancellationException) {
                 throw e

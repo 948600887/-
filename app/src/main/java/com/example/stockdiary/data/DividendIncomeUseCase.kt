@@ -24,9 +24,15 @@ import kotlinx.coroutines.sync.withLock
  *
  * @param loader 真正的抓取动作（生产环境是 [DividendIncomeLoader.loadIncome]）。用挂起 lambda 注入，
  *        方便单测在不依赖 Android Context 的情况下替换成计数桩。
+ *        最后一个参数 cacheOnly 表示「只读缓存、TTL 过期也照用」，冷启动路径用它做到零请求。
  */
 class DividendIncomeUseCase(
-    private val loader: suspend (assets: List<Asset>, forceRefresh: Boolean, tag: String) -> DividendIncomeLoader.IncomeResult
+    private val loader: suspend (
+        assets: List<Asset>,
+        forceRefresh: Boolean,
+        tag: String,
+        cacheOnly: Boolean
+    ) -> DividendIncomeLoader.IncomeResult
 ) {
     // 进行中的抓取挂在这个独立作用域上，而不是某个调用者的作用域：否则调用者一返回，
     // 它的 coroutineScope 会把进行中的 deferred 取消掉，复用方就再也 await 不到结果了。
@@ -49,7 +55,8 @@ class DividendIncomeUseCase(
     suspend fun load(
         assets: List<Asset>,
         forceRefresh: Boolean = false,
-        tag: String = "DividendIncomeUseCase"
+        tag: String = "DividendIncomeUseCase",
+        cacheOnly: Boolean = false
     ): DividendIncomeLoader.IncomeResult {
         // 非强制刷新时，先看看有没有进行中且可复用的抓取（锁外读，不在持锁时 await）
         val existing = mutex.withLock {
@@ -58,7 +65,7 @@ class DividendIncomeUseCase(
         if (existing != null) return existing.await()
 
         // 没在飞的就新起一个抓取，并登记为进行中（供后续调用复用）
-        val deferred = scope.async { loader(assets, forceRefresh, tag) }
+        val deferred = scope.async { loader(assets, forceRefresh, tag, cacheOnly) }
         mutex.withLock { inFlight = deferred }
         return try {
             deferred.await()

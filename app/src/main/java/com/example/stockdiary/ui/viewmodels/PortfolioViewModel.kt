@@ -128,7 +128,14 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
         viewModelScope.launch(refreshExceptionHandler) {
             if (!hasLoadedDividend) _dividendLoading.value = true
             try {
-                val result = incomeUseCase.load(stockAssets, forceRefresh = false, tag = "PortfolioVM")
+                // cacheOnly：冷启动只读缓存，不为了「预计分红」去敲几十个接口。
+                // 下面的批量同步 / 下拉刷新路径不带这个参数，走的是最新数据
+                val result = incomeUseCase.load(
+                    stockAssets,
+                    forceRefresh = false,
+                    tag = "PortfolioVM",
+                    cacheOnly = true
+                )
                 _estimatedAnnualDividend.value = result.totalAnnualIncome
                 _incomeCalculationStatus.value = if (result.totalAnnualIncome == 0.0 && !result.hasDividendData) {
                     "暂无分红数据"

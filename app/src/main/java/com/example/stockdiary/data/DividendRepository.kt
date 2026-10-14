@@ -60,6 +60,143 @@ class DividendRepository private constructor(
         return value.takeIf { it > 0L }
     }
 
+    /**
+     * 批量预取的结果：normalizedSymbol → 记录。**只在一次 [prefetchDividends] 调用内有效**，
+     * 每次预取前清空，避免上一轮的残留被下一轮误用。
+     *
+     * 值为空列表表示「批量问过了，这只没有」—— 这时候仍然要让级联里的 Sina 兜底发言
+     * （那是独立的第二来源），所以不能简单当成 null 处理，见 [fetchDividendData]。
+     */
+    private val batchPrefetch = ConcurrentHashMap<String, List<DividendRecord>>()
+
+    /**
+     * 一次性把一批标的的分红抓完，结果留给后续的 [getDividendsBySymbol] 用。
+     *
+     * ## 为什么值得单独做一次
+     *
+     * 东财的 filter 支持 `SECURITY_CODE in ("a","b",…)`，**一个请求就能问全部代码**。
+     * 逐条抓的话：59 个代码一个请求，ETF 空手后还要顺序试三种代码格式（再 3 个），
+     * 一次全量 100 多个请求。合并后 1~2 个。
+     *
+     * ## 只走东财这条路
+     *
+     * 天天基金的分红页是**每个基金一个 HTML 页面**，没有可用的批量入口
+     * （实测 `FundArchivesDatas.aspx?type=jjfh&code=a,b` 返回空，单代码也返回空），
+     * 所以场外基金仍逐个抓 —— 那部分请求量省不掉，交给 TTL 分层去治。
+     *
+     * ## 不改变兜底语义
+     *
+     * 批量拿到记录的标的，后续不再级联（数据已经有了，没必要再问）；
+     * 批量说没有的标的，级联照旧走完，只是**跳过已经问过的东财那一步**，
+     * 让 Sina 兜底有机会发言。这样不因为合并请求而丢任何数据来源。
+     */
+    suspend fun prefetchDividends(symbols: List<String>, forceRefresh: Boolean = false) {
+        if (symbols.isEmpty()) return
+        batchPrefetch.clear()
+
+        val normalized = symbols.map { StockCodeManager.normalizeSymbol(it) }.distinct()
+
+        // 已经有缓存的不用再问。forceRefresh 时全问（调用方明确要刷新）
+        val pending = normalized.filter { symbol ->
+            forceRefresh || tryGetFromCache(symbol) == null
+        }
+        if (pending.isEmpty()) return
+
+        // 每个标的候选的 SECURITY_CODE：直接码 + （ETF 才有的）三种格式变体。
+        // ETF 的格式历史上换过，接口三种都认，一起塞进批量查询比顺序重试省两个请求
+        val codesBySymbol = mutableMapOf<String, MutableList<String>>()
+        val codeToSymbol = mutableMapOf<String, String>()
+        val eastmoneySymbols = mutableListOf<String>()
+
+        for (symbol in pending) {
+            val pure = symbol.removePrefix("fund_")
+            val code = StockCodeManager.extractPureCode(pure)
+            if (StockCodeManager.isOTCFundCode(code)) continue  // 场外基金走天天基金，没有批量入口
+
+            eastmoneySymbols += symbol
+            val candidates = codesBySymbol.getOrPut(symbol) { mutableListOf() }
+            candidates += code
+            codeToSymbol.putIfAbsent(code, symbol)
+
+            if (StockCodeManager.isETF(pure)) {
+                val marketPre = if (code.startsWith("5")) "SH" else "SZ"
+                for (fmt in listOf("${marketPre}.$code", "${marketPre}$code", "$code.$marketPre")) {
+                    candidates += fmt
+                    codeToSymbol.putIfAbsent(fmt, symbol)
+                }
+            }
+        }
+
+        if (eastmoneySymbols.isEmpty()) return
+
+        val result = try {
+            eastmoneyApi.getDividendHistoryBySecurityCodes(codeToSymbol.keys.toList())
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            AppLogger.w("批量预取分红失败: ${e.message}", "DividendRepository")
+            return  // 失败就退回逐条路径，别让整次抓取失败
+        }
+
+        if (!result.isSuccess) return
+
+        val records = result.getOrNull().orEmpty()
+        // 按接口返回的 SECURITY_CODE 归组，再发回给各个标的。
+        // 同一标的可能靠多种格式命中，取并集并按除息日去重。
+        // 这里要把 [DividendData]（接口层）转成 [DividendRecord]（领域层）——
+        // 口径与逐条路径 [fetchFromEastmoneyWithFormat] 保持一致，否则同一天的分红
+        // 会因为走了批量还是逐条而算出不同的金额
+        val byCode = records.groupBy { it.ticker }
+        for (symbol in eastmoneySymbols) {
+            val codes = codesBySymbol[symbol].orEmpty()
+            val merged = codes.flatMap { byCode[it].orEmpty() }
+                .map { it.toDividendRecord() }
+                .distinctBy { it.exDividendDate }
+                .sortedByDescending { it.exDividendDate }
+            batchPrefetch[symbol] = merged
+        }
+
+        AppLogger.i(
+            "批量预取：${eastmoneySymbols.size} 只走东财的标的合并成 1~2 个请求，" +
+                "其中 ${batchPrefetch.values.count { it.isNotEmpty() }} 只有分红记录",
+            "DividendRepository"
+        )
+    }
+
+    /**
+     * 冷启动专用的缓存读取：**TTL 过期也照用**，只留一个很硬的上限。
+     *
+     * 打开 App 不该为了刷新「预计收入」去敲几十个接口 —— 那是用户点「刷新」时才该做的事。
+     * 所以这里故意比 [cacheTTL] / [NEGATIVE_RESULT_TTL] 宽松：过期几天照样用，
+     * 只有超过 [STALE_CEILING_MS]（30 天）才判定「连过期数据都没有」，让调用方去抓。
+     *
+     * 返回值可能是**空列表**：那表示「抓过，且确实没有分红」，是有效答案，不是没数据。
+     * 只有 null 才代表调用方该去抓。
+     */
+    suspend fun getCachedAllowingStale(symbol: String): List<DividendRecord>? {
+        val normalized = StockCodeManager.normalizeSymbol(symbol)
+
+        // 先按正常 TTL 走一遍（命中就直接返回，顺带把内存缓存填上）
+        tryGetFromCache(normalized)?.let { return it }
+
+        // TTL 过期了：只要还没超过硬上限，就承认这份数据。
+        // 只认抓取时间戳（库里记录本身不带时间戳，没法判断它有多旧）
+        val stamp = lastFetchedAt(normalized)
+        val freshEnough = stamp != null && System.currentTimeMillis() - stamp < STALE_CEILING_MS
+        if (!freshEnough) return null
+
+        val dbRecords = dividendDao.getBySymbol(normalized)
+        return dbRecords.map { dbDiv ->
+            DividendRecord(
+                exDividendDate = dbDiv.date,
+                dividendPerShare = dbDiv.amount.toString(),
+                announceDate = "",
+                fiscalYear = dbDiv.date.take(4),
+                paymentDate = dbDiv.payDate
+            )
+        }
+    }
+
     /** 预取分红时的并发上限：与 AssetSyncManager.MAX_CONCURRENT_SYNC 一致，别把接口打爆 */
     private val maxConcurrentFetch = 8
     
@@ -79,8 +216,27 @@ class DividendRepository private constructor(
         /** 「上次抓取时间」存放的 preferences 名，见 [fetchState] 的说明 */
         private const val FETCH_STATE_PREFS = "dividend_fetch_state"
 
-        // 基金/ETF 每10份分红超过100元视为异常（基金分红来自净值拆分，不可能达到）
-        private const val MAX_DIVIDEND_PER_TEN_SHARES_FUND = 100.0
+        /**
+         * 「抓过，且确实没有分红」这个结论的有效期。
+         *
+         * 比 [cacheTTL] 长得多是刻意的：实测一次全量抓取里 87% 的标的没有分红，
+         * 它们是绝大多数请求量的来源，而「没有分红」这个结论又极不容易变。
+         * 仍保留上限（而不是永久）是因为万一第一次抓取正好撞上限流/反爬拿到空结果，
+         * 过期后还有机会重试；而且用户点「刷新」本来就会 forceRefresh 绕开缓存。
+         */
+        private const val NEGATIVE_RESULT_TTL = 7L * 24 * 60 * 60 * 1000
+
+    /**
+     * 冷启动允许使用的过期数据上限。
+     *
+     * 比 [NEGATIVE_RESULT_TTL] 长得多是刻意的：打开 App 不该为了刷新「预计收入」
+     * 去敲几十个接口。超过这个天数才判定「连过期数据都没有」，让调用方去抓 ——
+     * 那是为了防止用户换了手机/清了数据之后，界面上永远显示一份很旧的数。
+     */
+    private const val STALE_CEILING_MS = 30L * 24 * 60 * 60 * 1000
+
+    // 基金/ETF 每10份分红超过100元视为异常（基金分红来自净值拆分，不可能达到）
+    private const val MAX_DIVIDEND_PER_TEN_SHARES_FUND = 100.0
         // 股票每10股分红上限放宽：A股极端高分红如茅台约300元/10股（含特别分红更高），留足余量
         private const val MAX_DIVIDEND_PER_TEN_SHARES_STOCK = 1000.0
 
@@ -195,12 +351,17 @@ class DividendRepository private constructor(
         // 库里一条都没有，但**近期确实抓过** → 结论是「这只没有分红」，不是「没抓过」。
         // 判据抽成纯函数 [shouldReuseEmptyResult] 是为了能单测：这条判断错了要么
         // 每次冷启动重抓几百个请求，要么把「真的有分红」误判成没有并压 24 小时
+        //
+        // 空结果用**长得多的 TTL**：走到这里说明这只标的没有分红记录，
+        // 而一只从没分过红的基金/股票不会明天突然开始分（要分也是先出公告，
+        // 那时 lastFetchedAt 也会被刷新）。有分红的标的仍走 24 小时短 TTL ——
+        // 它们的到账日、金额会随新公告变化，得勤着点。
         val stamp = lastFetchedAt(normalizedSymbol)
         if (shouldReuseEmptyResult(
                 dbRecordCount = dbRecords.size,
                 lastFetchedAt = stamp,
                 now = System.currentTimeMillis(),
-                ttl = cacheTTL
+                ttl = NEGATIVE_RESULT_TTL
             )
         ) {
             cacheHits.incrementAndGet()
@@ -215,7 +376,22 @@ class DividendRepository private constructor(
         return null
     }
 
-    private suspend fun fetchDividendData(normalizedSymbol: String): List<DividendRecord> {
+    private suspend fun fetchDividendData(
+        normalizedSymbol: String
+    ): List<DividendRecord> {
+        // 批量预取优先。[prefetchDividends] 已经用一个请求把这批标的问完了，
+        // 命中就直接用，省掉逐条的级联（ETF 空手还要顺序试三种代码格式，再 3 个请求）
+        val prefetched = batchPrefetch.remove(normalizedSymbol)
+        if (prefetched != null && prefetched.isNotEmpty()) return prefetched
+
+        // 有条目 ⇔ 这个标的参与过东财批量查询（场外基金与批量失败时无条目，行为不变）。
+        // 从预取结果派生而不是收形参：唯一的调用点从来传不过来，形参是死代码，
+        // 批量只让「有数据」的标的省了请求，空标的首次 sweep 仍付全级联
+        // （逐条重问东财 + ETF 重问 3 种格式 + 非 ETF 空股票多打一次新浪）。
+        // 批量说没有的标的，级联里跳过重复问东财那一步，但保留 Sina 兜底 ——
+        // 那是独立的第二来源，不能因为合并了请求就把它一起省掉
+        val eastmoneyAnswered = prefetched != null
+
         // fund_ 前缀必须在这里剥掉。extractPureCode 只认 sh/sz/bj，不认 fund_，
         // 不剥的话 stockCode 会带着 "fund_" 传下去，于是 isOTCFundCode / isETF 全部判错，
         // 最后拿着 "fund_004502" 去请求接口——场外基金的分红永远抓不到，
@@ -225,14 +401,17 @@ class DividendRepository private constructor(
         val isOTCFund = StockCodeManager.isOTCFundCode(stockCode)
         val isEtf = StockCodeManager.isETF(pureSymbol)
 
-        var data: List<DividendRecord> = if (isOTCFund) {
-            fetchFromFundApi(stockCode)
-        } else {
-            fetchFromEastmoney(stockCode)
+        var data: List<DividendRecord> = when {
+            isOTCFund -> fetchFromFundApi(stockCode)
+            eastmoneyAnswered -> emptyList()  // 批量已经问过东财了，答案是空，别再逐条重问
+            else -> fetchFromEastmoney(stockCode)
         }
 
         if (data.isEmpty() && isEtf) {
-            data = fetchETFDividends(stockCode)
+            // 批量已经覆盖了东财的三种代码格式，别再问一遍；
+            // 直接走天天基金这个独立数据源，只砍重复问东财
+            // （fetchETFDividends 内部最后本来就会调 fetchFromFundApiForETF，不损失数据源）
+            data = if (eastmoneyAnswered) fetchFromFundApiForETF(stockCode) else fetchETFDividends(stockCode)
         }
 
         if (data.isEmpty() && !isOTCFund && !isEtf) {
@@ -562,3 +741,22 @@ internal fun shouldReuseEmptyResult(
     if (fetched > now) return false
     return true
 }
+
+/**
+ * 接口层 [DividendData] → 领域层 [DividendRecord]。
+ *
+ * 与逐条路径 `fetchFromEastmoneyWithFormat` 里的映射是同一套口径：
+ * 东财的 `PRETAX_BONUS_RMB` 实际是「每 10 股」分红，与应用内 `dividendPerShare` 单位一致，
+ * 不做换算。抽成扩展函数是为了让批量路径和逐条路径不可能各写一份而对不上 ——
+ * 分红金额差一位就是一个数量级，而且是静默的。
+ */
+private fun DividendData.toDividendRecord(): DividendRecord = DividendRecord(
+    exDividendDate = date,
+    dividendPerShare = dividendPerShare.toString(),
+    announceDate = reportDate ?: "",
+    // date 理论上不会为空（mapDividendItem 里已挡掉空除息日），
+    // 但仍不能直接 substring(0, 4)：一旦为空会 StringIndexOutOfBounds，
+    // 而这里在批量路径上，一次异常会把整批预取全废掉
+    fiscalYear = date.take(4),
+    paymentDate = paymentDate
+)

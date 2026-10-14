@@ -136,7 +136,14 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
                 val bankDeposits = assetsOnly.filter { it.type == AssetType.BANK_DEPOSIT }
                 _hasInterestData.value = bankDeposits.any { (it.interestRate ?: 0.0) > 0 }
 
-                val result = incomeUseCase.load(assetsOnly, forceRefresh = false, tag = "DashboardVM")
+                // cacheOnly：冷启动只读缓存，TTL 过期也照用（30 天硬上限）。
+                // 连过期数据都没有时内部会自己走抓取流程，所以首次安装仍然有数可显示
+                val result = incomeUseCase.load(
+                    assetsOnly,
+                    forceRefresh = false,
+                    tag = "DashboardVM",
+                    cacheOnly = true
+                )
                 _realAnnualIncome.value = result.totalAnnualIncome
                 _estimatedDailyDividend.value = result.totalAnnualIncome / 365
                 _dividendProgress.value = withContext(Dispatchers.Default) {
@@ -222,6 +229,8 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
             }
 
             try {
+                // 这条是「同步完成后再算一次收入」，**不能** cacheOnly：
+                // 用户刚刷新过行情，需要的是最新分红，不是缓存里的旧值
                 val result = incomeUseCase.load(assetsOnly, forceRefresh = false, tag = "DashboardVM")
                 _realAnnualIncome.value = result.totalAnnualIncome
                 _estimatedDailyDividend.value = result.totalAnnualIncome / 365

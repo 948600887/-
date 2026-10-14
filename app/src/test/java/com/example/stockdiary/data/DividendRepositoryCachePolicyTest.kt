@@ -115,4 +115,30 @@ class DividendRepositoryCachePolicyTest {
             )
         )
     }
+
+    // ---------- TTL 分层：空结果比有结果容忍得多 ----------
+
+    @Test
+    fun 空结果的TTL比有分红的长_这是把请求量压下来的关键() {
+        // 87% 的标的没有分红，它们是请求量的绝大多数来源。
+        // 如果两者同 TTL，冷启动每隔一天就要把全部标的重抓一遍
+        val day = 24 * 60 * 60 * 1000L
+        val negativeTtl = 7 * day
+
+        // 第 3 天：有分红的标的 TTL（24h）已过，空结果的还没过
+        assertFalse(
+            shouldReuseEmptyResult(0, now - 3 * day, now, ttl = day)
+        )
+        assertTrue(
+            shouldReuseEmptyResult(0, now - 3 * day, now, ttl = negativeTtl)
+        )
+    }
+
+    @Test
+    fun 空结果第七天开始也要重抓_不是永久缓存() {
+        // 万一第一次抓取正好撞上限流/反爬拿到空结果，过期后还得有机会重试
+        val negativeTtl = 7 * 24 * 60 * 60 * 1000L
+        assertTrue(shouldReuseEmptyResult(0, now - 6 * negativeTtl / 7, now, negativeTtl))
+        assertFalse(shouldReuseEmptyResult(0, now - negativeTtl, now, negativeTtl))
+    }
 }

@@ -65,7 +65,21 @@ class DividendService {
                     }
 
                     // 4. 解析HTML响应
-                    val html = it.body?.string() ?: ""
+                    //
+                    // **必须显式按 GBK 解码**。新浪这个页面的响应头是
+                    // `Content-Type: text/html`，不带 charset，OkHttp 的 body.string()
+                    // 会退回 UTF-8 —— 而页面实体是 GBK，中文全部变成乱码，
+                    // 于是 parseDividendHtml 里 `tableText.contains("分红")` 永远不命中，
+                    // 表现就是日志里刷屏的「找到 0 个表格」：**整条兜底链路静默失效**，
+                    // 既拿不到数据，又每次白跑一个请求。
+                    //
+                    // 响应头真带了 charset 时以它为准，没带才用 GBK（这个站点的既成事实）。
+                    // 用 Charset.forName 而不是 Charsets.GBK：Kotlin 的 Charsets 里没有 GBK
+                    val body = it.body ?: return@withContext AppResult.Error(
+                        IOException("响应体为空")
+                    )
+                    val charset = body.contentType()?.charset() ?: java.nio.charset.Charset.forName("GBK")
+                    val html = String(body.bytes(), charset)
                     val dividendRecords = parseDividendHtml(html, stockCode, market)
 
                     if (dividendRecords.isEmpty()) {

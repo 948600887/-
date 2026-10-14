@@ -85,7 +85,7 @@ class DashboardViewModelTest {
         every { assetRepo.getAllAssets() } returns flowOf(emptyList())
         every { assetRepo.getAllSnapshots() } returns flowOf(emptyList())
         coEvery { assetRepo.getAllAccounts() } returns emptyList()
-        coEvery { useCase.load(any(), any(), any()) } returns DividendIncomeLoader.IncomeResult(
+        coEvery { useCase.load(any(), any(), any(), any()) } returns DividendIncomeLoader.IncomeResult(
             dividendsBySymbol = emptyMap(),
             recordsBySymbol = emptyMap(),
             totalAnnualIncome = 1234.5,

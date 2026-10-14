@@ -26,8 +26,8 @@ class AppContainer(val context: Context) {
     // 跨 VM 共享的单一入口：分红收入抓取经此收口，进程内 in-flight 单飞，避免多屏重复抓同一份数据
     private val dividendIncomeLoader by lazy { DividendIncomeLoader(dividendRepository) }
     val dividendIncomeUseCase: DividendIncomeUseCase by lazy {
-        DividendIncomeUseCase { assets, forceRefresh, tag ->
-            dividendIncomeLoader.loadIncome(assets, forceRefresh, tag)
+        DividendIncomeUseCase { assets, forceRefresh, tag, cacheOnly ->
+            dividendIncomeLoader.loadIncome(assets, forceRefresh, tag, cacheOnly)
         }
     }
     val dashboardPreferencesManager: DashboardPreferencesManager by lazy { DashboardPreferencesManager.getInstance(context) }

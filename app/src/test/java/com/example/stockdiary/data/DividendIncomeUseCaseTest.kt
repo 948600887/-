@@ -22,9 +22,12 @@ class DividendIncomeUseCaseTest {
     /**
      * 用计数 lambda 模拟一次真实抓取（带延迟让并发重叠），验证单飞：
      * 同一时刻多个调用者应当只真正触发一次底层抓取。
+     *
+     * 第四个参数 cacheOnly 只透传给 loader，计数桩不需要区分 ——
+     * 「冷启动到底有没有发请求」由 [DividendIncomeLoader] 自己决定并单测。
      */
-    private fun countingLoader(counter: AtomicInteger): suspend (List<Asset>, Boolean, String) -> DividendIncomeLoader.IncomeResult =
-        { assets, _force, _tag ->
+    private fun countingLoader(counter: AtomicInteger): suspend (List<Asset>, Boolean, String, Boolean) -> DividendIncomeLoader.IncomeResult =
+        { assets, _force, _tag, _cacheOnly ->
             counter.incrementAndGet()
             kotlinx.coroutines.delay(50) // 模拟网络耗时
             DividendIncomeLoader.IncomeResult(
@@ -85,7 +88,7 @@ class DividendIncomeUseCaseTest {
         // 但它**绝不能**把 await 这条路径的异常也吞了 —— 否则调用方的 try-catch
         // 全部失效，界面会一直显示旧值却不知道抓取其实失败了。
         val boom = RuntimeException("抓取炸了")
-        val useCase = DividendIncomeUseCase { _, _, _ -> throw boom }
+        val useCase = DividendIncomeUseCase { _, _, _, _ -> throw boom }
         val assets = listOf(asset("600900"))
 
         val thrown = runCatching {
@@ -104,7 +107,7 @@ class DividendIncomeUseCaseTest {
         // 上一次抓取失败并已抛给调用方后，inFlight 必须清掉：
         // 否则后续调用会一直 await 到那个已经失败的 deferred，永远拿到同一个异常。
         var attempt = 0
-        val useCase = DividendIncomeUseCase { assets, _, _ ->
+        val useCase = DividendIncomeUseCase { assets, _, _, _ ->
             attempt += 1
             if (attempt == 1) throw RuntimeException("第一次失败")
             DividendIncomeLoader.IncomeResult(

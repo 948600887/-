@@ -68,7 +68,7 @@ class CalendarViewModelTest {
     // 刻意**不加**延后：这样 loadDividendIncome 会先于 generateCalendarData 完成写入，
     // 正好是原先会把 realAnnualIncome 覆盖掉的顺序 —— 用例仍通过即证明 uiState 的
     // 原子更新（update{}）确实修好了那处竞态。
-    private val useCase = DividendIncomeUseCase { _assets, _forceRefresh, _tag ->
+    private val useCase = DividendIncomeUseCase { _assets, _forceRefresh, _tag, _cacheOnly ->
         DividendIncomeLoader.IncomeResult(
             dividendsBySymbol = emptyMap(),
             recordsBySymbol = emptyMap(),

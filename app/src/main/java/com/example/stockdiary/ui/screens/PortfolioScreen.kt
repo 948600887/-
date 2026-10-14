@@ -98,6 +98,16 @@ private sealed interface PortfolioRow {
         val market: HoldingsMarket
     ) : PortfolioRow {
         override val key: String get() = "account:${market.name}:$account"
+
+        /**
+         * 展开态用的 key，**必须像 [key] 一样带市场**。
+         *
+         * 之前这里用的是裸账户名，于是场内、场外两个区里的同名账户共用同一个展开态：
+         * 点其中一个展开，另一个区的同名账户也跟着展开、资产行一起加进来，
+         * 看着就像「点了一个账户，场内场外全展开了」。
+         * 与负债区那个 LIABILITY_GROUP_KEY 是同一类撞 key 问题，只是出在账户这一层。
+         */
+        val expandKey: String get() = "account:${market.name}:$account"
     }
 
     data class AssetRow(val asset: Asset, val account: String) : PortfolioRow {
@@ -191,18 +201,19 @@ fun PortfolioScreen(
                 // 这个市场大区的展开 key，下面判断资产行要不要加入时要用
                 val marketKey = "market:${market.name}"
                 marketAssets.groupBy { it.account }.forEach { (account, list) ->
-                    add(
-                        PortfolioRow.AccountHeader(
-                            account = account,
-                            assetCount = list.size,
-                            totalValue = list.sumOf { it.totalValueCny },
-                            market = market
-                        )
+                    val header = PortfolioRow.AccountHeader(
+                        account = account,
+                        assetCount = list.size,
+                        totalValue = list.sumOf { it.totalValueCny },
+                        market = market
                     )
-                    // 资产行要**同时**满足「市场头展开」和「账户头展开」。
-                    // 只判账户头的话，市场头的收起状态记是记了，构造时却不用它，
-                    // 于是点市场头毫无效果——两个区的资产行照加，看着像「全展开了」
-                    if (account in expandedAccounts && marketKey in expandedAccounts) {
+                    add(header)
+                    // 资产行要**同时**满足「市场头展开」和「账户头展开」，
+                    // 且两个 key 都必须带市场：
+                    // - 只判账户头 → 市场头收起无效，两个区资产行照加（上次修的）
+                    // - 账户 key 不带市场 → 场内/场外的同名账户共用一个展开态，
+                    //   点一个另一个跟着展开（本次修的）
+                    if (header.expandKey in expandedAccounts && marketKey in expandedAccounts) {
                         list.forEach { add(PortfolioRow.AssetRow(it, account)) }
                     }
                 }
@@ -245,7 +256,7 @@ fun PortfolioScreen(
         rows.mapNotNull { row ->
             when (row) {
                 is PortfolioRow.MarketHeader -> row.expandKey
-                is PortfolioRow.AccountHeader -> row.account
+                is PortfolioRow.AccountHeader -> row.expandKey
                 is PortfolioRow.AssetRow -> null
             }
         }.toSet()
@@ -480,14 +491,14 @@ fun PortfolioScreen(
                             account = row.account,
                             assetCount = row.assetCount,
                             totalValue = row.totalValue,
-                            isExpanded = expandedAccounts.contains(row.account),
+                            isExpanded = expandedAccounts.contains(row.expandKey),
                             onToggleExpand = {
                                 if (!selectionMode) {
                                     expandedAccounts =
-                                        if (expandedAccounts.contains(row.account)) {
-                                            expandedAccounts - row.account
+                                        if (expandedAccounts.contains(row.expandKey)) {
+                                            expandedAccounts - row.expandKey
                                         } else {
-                                            expandedAccounts + row.account
+                                            expandedAccounts + row.expandKey
                                         }
                                 }
                             }

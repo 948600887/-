@@ -21,6 +21,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.CancellationException
@@ -91,10 +92,46 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
         }
     }
 
+    /**
+     * 加载预计收入。
+     *
+     * ## 为什么进场不再「重新计算」
+     *
+     * 原先进来就把 `hasLoadedIncome` 重置、重新算一遍，于是每次打开 App
+     * 都要看一次「预计年度收入：计算中」——数据根本没变，纯属等待。
+     * 触发 key 用的还是资产列表，任何一次价格刷新都会重启效应再算一遍，
+     * 而分红跟价格毫无关系。
+     *
+     * 现在：
+     * - 触发 key 改为「持仓代码集合」（见 DashboardScreen），集合不变就不重跑；
+     * - 进场先把上次算出的值摆出来、**不进 loading 态**，界面直接显示数字而不是「计算中」；
+     * - 之后按 forceRefresh=false 静默取一次（命中库缓存时不出网），
+     *   只为补齐「收息进度」需要的明细记录，不占屏。
+     *
+     * ## 为什么这里不比对「代码集合」来决定要不要取
+     *
+     * 持仓页可以这么做是因为它每次传入的资产集合口径一致。但首页、持仓页、
+     * 以及持仓页的手动刷新，三者传入的资产范围**并不相同**（首页含全部非负债资产、
+     * 持仓页只含用户勾选可见的类型、手动刷新只含股票/基金）。
+     * 若各自拿自己的集合去比对并回写同一份缓存，就会互相覆盖、永远命中不了，
+     * 反而变成每次都重算。所以这里只取「有没有算过」这层判断，
+     * 值本身由后台那次静默取数负责校正。
+     */
     fun loadDividendIncome(assetsOnly: List<Asset>) {
         if (assetsOnly.isEmpty()) return
+
+        // 上次是否算过：有就先摆出来，别让「计算中」占屏
+        val lastValue = _preferences.value.annualDividendCache
+        val hasCached = _preferences.value.annualDividendSymbols.isNotEmpty()
+
         viewModelScope.launch {
-            if (!hasLoadedIncome) _dividendLoading.value = true
+            if (hasCached) {
+                _realAnnualIncome.value = lastValue
+                _estimatedDailyDividend.value = lastValue / 365
+                _incomeCalculationStatus.value = null
+            }
+            // 已有可显示的值时不转圈；只有真没值可显示时才转
+            if (!hasLoadedIncome && !hasCached) _dividendLoading.value = true
             try {
                 val bankDeposits = assetsOnly.filter { it.type == AssetType.BANK_DEPOSIT }
                 _hasInterestData.value = bankDeposits.any { (it.interestRate ?: 0.0) > 0 }
@@ -115,13 +152,25 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
                     else -> null
                 }
                 hasLoadedIncome = true
+
+                // 存下来：下次进场先摆这个值，不用等这一轮算完
+                _preferences.update { state ->
+                    state.copy(
+                        annualDividendCache = result.totalAnnualIncome,
+                        annualDividendSymbols = assetsOnly.mapNotNull { it.symbol }.toSet()
+                    )
+                }
+                preferencesManager.savePreferences(_preferences.value)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 AppLogger.e("计算收入失败: ${e.message}", e, "DashboardVM")
-                _realAnnualIncome.value = 0.0
-                _estimatedDailyDividend.value = 0.0
-                _incomeCalculationStatus.value = "计算失败"
+                // 已经摆出来的旧值别抹成 0
+                if (!hasCached) {
+                    _realAnnualIncome.value = 0.0
+                    _estimatedDailyDividend.value = 0.0
+                    _incomeCalculationStatus.value = "计算失败"
+                }
             } finally {
                 _dividendLoading.value = false
             }

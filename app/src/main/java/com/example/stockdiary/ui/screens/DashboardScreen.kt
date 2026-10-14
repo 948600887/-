@@ -95,7 +95,13 @@ fun DashboardScreen(
         }
     }
 
-    LaunchedEffect(assetsOnly) {
+    // 抓分红的触发条件：持仓代码集合，不是资产列表本身。
+    // 用列表做 key 的话，任何一次价格刷新都会让列表内容变化、效应重启、
+    // 分红重算一遍——而分红跟价格半点关系都没有。代码集合不变就不该重算
+    // （与持仓页 PortfolioScreen 同一套处理）。
+    val dividendSymbols = remember(assetsOnly) { assetsOnly.mapNotNull { it.symbol }.toSet() }
+
+    LaunchedEffect(dividendSymbols) {
         viewModel.loadDividendIncome(assetsOnly)
     }
 

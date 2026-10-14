@@ -8,6 +8,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
@@ -19,6 +20,9 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalFocusManager
@@ -77,6 +81,27 @@ fun HoldingSnapshotDialog(
 
     val isFund = source == HoldingSnapshotViewModel.Source.FUND_EXPORT
 
+    // 识别原文只在本地决定要不要显示，不进 ViewModel：它是排障用的临时视图，
+    // 塞进 UiState 会让它跟着 reset() 一起被清掉——而用户正是关掉报错后才想看它
+    var showRawText by remember { mutableStateOf(false) }
+
+    /**
+     * 主按钮点下去要开哪个选择器。
+     *
+     * **必须按 [source] 分派，不能只看 isFund**：一码通（中国结算）只有截图这一条路，
+     * 基金E账户优先走导出的 xlsx。这里刻意写成**覆盖枚举全部取值的 when 表达式**
+     * 而不是 `if (isFund)`——将来加第三个来源时编译器会逼这里表态。
+     *
+     * 出过的事故：给基金E账户加「改用截图导入」次要按钮时，原本在主按钮里做的
+     * 来源分派被挪走了，主按钮直接硬绑 `onPickFile`。于是一码通那个写着
+     * 「选择截图」的按钮开的是 xlsx 表格过滤器，用户在里面根本挑不到 PNG，
+     * 整条「导入持仓截图」功能对外表现为「用不了了」，而代码一行没报错。
+     */
+    val primaryPick: () -> Unit = when (source) {
+        HoldingSnapshotViewModel.Source.STOCK_SNAPSHOT -> { { imageLauncher.launch(IMAGE_MIME) } }
+        HoldingSnapshotViewModel.Source.FUND_EXPORT -> { { fileLauncher.launch(XLSX_MIME) } }
+    }
+
     Dialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false)
@@ -115,8 +140,9 @@ fun HoldingSnapshotDialog(
                             SelectSnapshotStep(
                                 state = state,
                                 isFund = isFund,
-                                onPickFile = { fileLauncher.launch(XLSX_MIME) },
-                                onPickImage = { imageLauncher.launch("image/*") }
+                                onPickPrimary = primaryPick,
+                                onPickImage = { imageLauncher.launch(IMAGE_MIME) },
+                                onShowRawText = { showRawText = true }
                             )
 
                         HoldingSnapshotViewModel.Step.PREVIEW ->
@@ -141,6 +167,78 @@ fun HoldingSnapshotDialog(
             }
         )
     }
+
+    // 错误提示里写了「可点『查看识别原文』，把内容发出来便于定位格式差异」——
+    // 这个按钮必须真的存在，否则那句话是在指一个不存在的控件
+    if (showRawText) {
+        RawTextDialog(
+            lines = state.lines,
+            onDismiss = { showRawText = false }
+        )
+    }
+}
+
+/**
+ * OCR 识别原文（还原后的视觉行，即解析器实际吃进去的输入）。
+ *
+ * 解析不出持仓时，这是**唯一**能定位问题的东西：解析器认的是「名称一行、代码一行」
+ * 这种结构，官方一改版（比如把名称和代码排到同一行）就会一条都读不出来，
+ * 而「没从这张图里读到持仓」这句话本身说不出差在哪。
+ * 用 [SelectionContainer] 包住，便于长按整段复制出来。
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun RawTextDialog(lines: List<String>, onDismiss: () -> Unit) {
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Surface(modifier = Modifier.fillMaxSize()) {
+            Scaffold(
+                topBar = {
+                    TopAppBar(
+                        title = { Text("识别原文", fontWeight = FontWeight.Bold) },
+                        navigationIcon = {
+                            IconButton(onClick = onDismiss) {
+                                Icon(Icons.Default.Close, contentDescription = "关闭")
+                            }
+                        }
+                    )
+                }
+            ) { padding ->
+                if (lines.isEmpty()) {
+                    Box(
+                        modifier = Modifier.fillMaxSize().padding(padding).padding(24.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            "这次没有留下识别原文。",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            textAlign = TextAlign.Center
+                        )
+                    }
+                } else {
+                    SelectionContainer {
+                        LazyColumn(
+                            modifier = Modifier.fillMaxSize().padding(padding),
+                            contentPadding = PaddingValues(16.dp)
+                        ) {
+                            // 带行号：解析器就是按这个顺序从上往下配对的，
+                            // 哪一行被误判成表头、哪两行该合并，对着行号一眼看得出来
+                            items(lines.size) { index ->
+                                Text(
+                                    text = "${index + 1}. ${lines[index]}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontSize = 12.sp
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 /**
@@ -151,14 +249,20 @@ fun HoldingSnapshotDialog(
 private const val XLSX_MIME =
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
+private const val IMAGE_MIME = "image/*"
+
 // ---------------- 第一步：选图 / 选文件 ----------------
 
 @Composable
 private fun SelectSnapshotStep(
     state: HoldingSnapshotViewModel.UiState,
     isFund: Boolean,
-    onPickFile: () -> Unit,
-    onPickImage: () -> Unit
+    /** 主按钮：按来源分派，一码通开图片、基金E账户开 xlsx（见调用处的注释） */
+    onPickPrimary: () -> Unit,
+    /** 次要按钮「改用截图导入」：只有基金E账户有导出之外的这条退路 */
+    onPickImage: () -> Unit,
+    /** 打开上次识别的原文。只在识别过一次之后才出现 */
+    onShowRawText: () -> Unit
 ) {
     Column(
         modifier = Modifier.fillMaxSize().padding(24.dp).verticalScroll(rememberScrollState()),
@@ -205,7 +309,7 @@ private fun SelectSnapshotStep(
                 textAlign = TextAlign.Center
             )
             Spacer(Modifier.height(20.dp))
-            Button(onClick = onPickFile) {
+            Button(onClick = onPickPrimary) {
                 Icon(Icons.Default.Upload, contentDescription = null, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(8.dp))
                 Text(if (isFund) "选择文件" else "选择截图")
@@ -232,6 +336,15 @@ private fun SelectSnapshotStep(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     textAlign = TextAlign.Center
                 )
+            }
+
+            // 上一次识别过才显示。错误提示里承诺了这个入口，
+            // 而且它是「读不出持仓」时唯一能看出截图格式差在哪的东西
+            if (state.recognizedText != null) {
+                Spacer(Modifier.height(12.dp))
+                TextButton(onClick = onShowRawText) {
+                    Text("查看上次识别原文（${state.lines.size} 行）")
+                }
             }
 
             if (state.knownAccounts.isNotEmpty()) {

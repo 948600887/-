@@ -5,11 +5,17 @@ import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.utils.AppLogger
 import com.example.stockdiary.utils.StockCodeManager
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.withContext
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CancellationException
 
@@ -18,13 +24,32 @@ import kotlinx.coroutines.CancellationException
  * 负责资产价格同步，使用并发控制避免过载
  */
 object AssetSyncManager {
-    
+
+    private const val TAG = "AssetSyncManager"
     private const val MAX_CONCURRENT_SYNC = 8
-    
+
+    /**
+     * 手动刷新之间的进程内互斥。
+     *
+     * 资产页与持仓页各有一个 ViewModel，各自持有一份 [syncAllAssets] 调用
+     * （分红收入计算有 [DividendIncomeUseCase] 的单飞，价格同步从前没有）。
+     * 用户在两个页面之间切换、各点一次刷新，就是两份并发扇出 + 双倍请求：
+     * 主线程与 OkHttp 队列被双双压爆，正是这次卡死的放大器之一。
+     *
+     * 只锁**手动**刷新：后台 [PriceSyncWorker] 不传 startTime 之外还带着
+     * 自己的 9 分钟预算，让用户手动点下的刷新排在它后面（最多 9 分钟）
+     * 比叠加更糟。Worker 与手动刷新不幸撞车时，最坏约 16 个并发请求，
+     * 由 [com.example.stockdiary.network.NetworkClient] 的 per-host 上限
+     * 与这里的 Semaphore 共同兜底。
+     */
+    private val manualSyncMutex = Mutex()
+
     /**
      * 同步所有资产的价格（并行版本，限流控制）
      *
-     * @param startTime 同步开始时间戳（毫秒），传入 >0 时启用时间上限检查，避免后台任务被系统强制终止
+     * @param startTime 同步开始时间戳（毫秒）。传入 >0 时启用时间上限检查，
+     *        避免后台任务被系统强制终止；**不传（0）的视为手动刷新**，自动获得
+     *        默认时间预算（[SyncBudget.MANUAL_SYNC_TIME_LIMIT_MS]）与进程内互斥
      * @param timeLimitMs 时间上限（毫秒），接近上限时跳过后续未开始的资产并提前返回
      */
     suspend fun syncAllAssets(
@@ -40,7 +65,68 @@ object AssetSyncManager {
             return SyncResult(0, 0)
         }
 
-        val enforceTimeLimit = startTime > 0L && timeLimitMs > 0L
+        // 不传 startTime 的都是 UI 触发的刷新（资产页/持仓页的刷新按钮、
+        // 资产详情页、导入持仓后的同步），走「互斥 + 默认预算」保护；
+        // 后台 Worker 一定传 startTime，用自己的 9 分钟上限，两项都不套
+        val isManualSync = startTime <= 0L
+
+        return if (isManualSync) {
+            if (manualSyncMutex.isLocked) {
+                AppLogger.i("另一次刷新正在进行，本次刷新排队等待", TAG)
+            }
+            manualSyncMutex.withLock {
+                // 预算从真正开跑那一刻起算：在锁上排队的时间不能算进本次刷新，
+                // 否则第二次刷新拿到的是被第一次吃掉大半的残预算
+                runSync(
+                    context = context,
+                    repository = repository,
+                    assets = assets,
+                    onProgress = onProgress,
+                    forceRefresh = forceRefresh,
+                    startTime = System.currentTimeMillis(),
+                    timeLimitMs = SyncBudget.MANUAL_SYNC_TIME_LIMIT_MS
+                )
+            }
+        } else {
+            runSync(
+                context = context,
+                repository = repository,
+                assets = assets,
+                onProgress = onProgress,
+                forceRefresh = forceRefresh,
+                startTime = startTime,
+                timeLimitMs = timeLimitMs
+            )
+        }
+    }
+
+    /**
+     * 真正干活的同步。整段强制跑在 [Dispatchers.IO] 上——
+     * 这是这次卡死修复的核心。
+     *
+     * ## 从前的问题
+     *
+     * 调用方是 `viewModelScope`，调度器是 `Dispatchers.Main.immediate`，
+     * 而这个函数从前**不切换调度器**：60 个持仓 = 60 个协程的启动加上几百个
+     * 网络续体，全部挤在主线程 Looper 里，每个续体还夹带缓存写入、Room 调用、
+     * 日志与进度回调（进度回调又触发 Compose 重组）。主线程饱和的直接表现
+     * 就是用户看到的「黑屏」，而且刷新链路自己的日志也发不出去——
+     * 排查时那一百多秒的日志全静默就是这么来的。
+     *
+     * 注意**只把扇出搬下来，不把进度回调搬走**：进度必须回主线程更新
+     * StateFlow 才能触发重组，但每一次只是一次轻量分发，与几百个续体
+     * 挤在主线程有本质区别。
+     */
+    private suspend fun runSync(
+        context: Context,
+        repository: AssetRepository,
+        assets: List<Asset>,
+        onProgress: (SyncProgress) -> Unit,
+        forceRefresh: Boolean,
+        startTime: Long,
+        timeLimitMs: Long
+    ): SyncResult = withContext(Dispatchers.IO) {
+        val enforceTimeLimit = timeLimitMs > 0L
 
         val successCount = AtomicInteger(0)
         val failedCount = AtomicInteger(0)
@@ -53,23 +139,73 @@ object AssetSyncManager {
         val stockDataManager = StockDataManager.getInstance(context)
         val dividendRepository = DividendRepository.getInstance(context)
 
+        // 进度回调回主线程更新 StateFlow；扇出与续体留在 IO
+        val notifyProgress: suspend (SyncProgress) -> Unit = { progress ->
+            withContext(Dispatchers.Main) { onProgress(progress) }
+        }
+
+        // 心跳要能读出「卡在哪个标的」：进行中的标的在这里登记/注销
+        val inFlightAssets = ConcurrentHashMap.newKeySet<String>()
+
+        AppLogger.i(
+            "价格同步开始：${totalCount} 个资产，forceRefresh=$forceRefresh，" +
+                "时间预算=${if (enforceTimeLimit) "${timeLimitMs}ms" else "无"}",
+            TAG
+        )
+
         val stocksAndFunds = assets.filter { it.type == AssetType.STOCK || it.type == AssetType.FUND }
+        if (stocksAndFunds.isNotEmpty()) {
+            val symbols = stocksAndFunds.mapNotNull { it.symbol }
+            notifyProgress(SyncProgress(0, totalCount, "正在获取分红数据..."))
+            // 分红预取是刷新的配角，只划一段子预算（见 SyncBudget），
+            // 剩下的留给价格同步——用户点刷新真正要看的是行情
+            val prefetchBudget = SyncBudget.prefetchPhaseBudget(timeLimitMs)
+            dividendRepository.preFetchDividends(symbols, forceRefresh, prefetchBudget)
+            AppLogger.i("分红预取阶段结束，开始逐标的价格同步", TAG)
+        }
 
-        onProgress(SyncProgress(0, totalCount, "正在获取分红数据..."))
-        dividendRepository.preFetchDividends(stocksAndFunds.mapNotNull { it.symbol }, forceRefresh)
-
-        coroutineScope {
+        withHeartbeat(
+            tag = TAG,
+            phase = "价格同步",
+            status = {
+                val doing = inFlightAssets.take(3).joinToString("、")
+                "已完成 ${completedCount.get()}/$totalCount" +
+                    "，进行中 ${inFlightAssets.size} 个" +
+                    if (doing.isNotEmpty()) "（$doing）" else ""
+            }
+        ) {
             val jobs = assets.map { asset ->
                 async {
-                    // 接近时间上限时跳过后续未开始的资产，已启动的任务继续完成
-                    if (enforceTimeLimit && System.currentTimeMillis() - startTime > timeLimitMs) {
-                        truncated.set(true)
+                    // 达到时间预算就跳过还没开始的标的：已启动的跑完，
+                    // 没启动的不再启动，结果带 truncatedByTimeLimit 让调用方提示用户
+                    if (SyncBudget.isExceeded(startTime, timeLimitMs, System.currentTimeMillis())) {
+                        if (truncated.compareAndSet(false, true)) {
+                            AppLogger.w(
+                                "已达时间预算（${timeLimitMs}ms），后续未开始的标的本次跳过",
+                                TAG
+                            )
+                        }
                         return@async
                     }
                     semaphore.withPermit {
-                        syncSingleAsset(asset, repository, stockDataManager, successCount, failedCount, errorTypes, forceRefresh)
+                        val label = "${asset.name}（${asset.symbol ?: "无代码"}）".take(24)
+                        AppLogger.d("开始同步 $label", TAG)
+                        inFlightAssets.add(label)
+                        try {
+                            syncSingleAsset(
+                                asset,
+                                repository,
+                                stockDataManager,
+                                successCount,
+                                failedCount,
+                                errorTypes,
+                                forceRefresh
+                            )
+                        } finally {
+                            inFlightAssets.remove(label)
+                        }
                         val completed = completedCount.incrementAndGet()
-                        onProgress(SyncProgress(completed, totalCount, "同步 ${asset.name}..."))
+                        notifyProgress(SyncProgress(completed, totalCount, "同步 ${asset.name}..."))
                     }
                 }
             }
@@ -83,7 +219,7 @@ object AssetSyncManager {
         val unknownErrorCount = errorTypes.count { it == SyncErrorType.UNKNOWN }
         val dominantErrorType = errorTypes.groupingBy { it }.eachCount().maxByOrNull { it.value }?.key
 
-        return SyncResult(
+        SyncResult(
             successCount = successCount.get(),
             failedCount = failedCount.get(),
             networkErrorCount = networkErrorCount,
@@ -92,9 +228,15 @@ object AssetSyncManager {
             unknownErrorCount = unknownErrorCount,
             dominantErrorType = dominantErrorType,
             truncatedByTimeLimit = truncated.get()
-        )
+        ).also {
+            AppLogger.i(
+                "价格同步结束：成功 ${it.successCount}，失败 ${it.failedCount}，" +
+                    "超时截断=${it.truncatedByTimeLimit}",
+                TAG
+            )
+        }
     }
-    
+
     private suspend fun syncSingleAsset(
         asset: Asset,
         repository: AssetRepository,
@@ -220,7 +362,7 @@ object AssetSyncManager {
                 // 停牌不是同步失败：计进 failedCount 会让 PriceSyncWorker 走到
                 // 「同步多次失败，请检查网络」的通知，用户被一条根本不是故障的事骚扰。
                 // 价格保持上次的值不动（AssetRepository 也不会写入 0 价）。
-                AppLogger.i("跳过停牌标的: ${asset.name}（${lastError?.message}）", "AssetSyncManager")
+                AppLogger.i("跳过停牌标的: ${asset.name}（${lastError?.message}）", TAG)
             } else {
                 failedCount.incrementAndGet()
                 errorTypes.offer(SyncStrategy.classifyError(lastError))
@@ -229,12 +371,12 @@ object AssetSyncManager {
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            AppLogger.w("同步资产 ${asset.name} 失败: ${e.message}", "AssetSyncManager")
+            AppLogger.w("同步资产 ${asset.name} 失败: ${e.message}", TAG)
             failedCount.incrementAndGet()
             errorTypes.offer(SyncStrategy.classifyError(e))
         }
     }
-    
+
 }
 
 data class SyncProgress(

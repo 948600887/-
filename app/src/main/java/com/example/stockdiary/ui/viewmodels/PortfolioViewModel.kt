@@ -173,14 +173,22 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
                 "PortfolioVM"
             )
             try {
-                AssetSyncManager.syncAllAssets(
+                val result = AssetSyncManager.syncAllAssets(
                     context = container.context,
                     repository = repository,
                     assets = stockAssets,
                     onProgress = { progress -> _syncProgress.value = progress },
                     forceRefresh = true
                 )
-                AppLogger.i("价格同步完成，开始计算分红", "PortfolioVM")
+                // 时间预算兜底：超时不是失败，但要让用户知道「这次没跑完」、
+                // 界面上是保留的上次数据，而不是转圈到天荒地老
+                if (result.truncatedByTimeLimit) {
+                    _errorMessage.value = "同步超时，已保留上次数据"
+                }
+                AppLogger.i(
+                    "价格同步完成（成功 ${result.successCount}，失败 ${result.failedCount}），开始计算分红",
+                    "PortfolioVM"
+                )
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {

@@ -246,12 +246,21 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
             _errorMessage.value = null
             val assetsOnly = assets.value.filter { !it.type.isLiability }
             try {
-                AssetSyncManager.syncAllAssets(
+                val result = AssetSyncManager.syncAllAssets(
                     context = container.context,
                     repository = repository,
                     assets = assetsOnly,
                     onProgress = { },
                     forceRefresh = true
+                )
+                // 时间预算兜底：超时不抛错，但明确告诉用户「这次没跑完」，
+                // 看到的是保留的上次数据
+                if (result.truncatedByTimeLimit) {
+                    _errorMessage.value = "同步超时，已保留上次数据"
+                }
+                AppLogger.i(
+                    "价格同步完成（成功 ${result.successCount}，失败 ${result.failedCount}）",
+                    "DashboardVM"
                 )
             } catch (e: CancellationException) {
                 throw e

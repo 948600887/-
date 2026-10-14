@@ -6,10 +6,12 @@ import androidx.room.withTransaction
 import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.database.Dividend
 import com.example.stockdiary.database.StockDatabase
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.withContext
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 import com.example.stockdiary.common.Result
@@ -757,24 +759,65 @@ class DividendRepository private constructor(
      * 多个协程同时做 Jsoup 解析，内存压力直接让系统回收进程 ——
      * 就是用户看到的「按了刷新就闪退」。
      * forceRefresh 时 [prefetchDividends] 内部全量 pending，不存在「刷新拿到旧数据」。
+     *
+     * 整段强制跑在 [Dispatchers.IO] 上：调用方可能是 `viewModelScope`
+     * （`Dispatchers.Main.immediate`），52 个代码的协程启动与续体挤在主线程
+     * Looper 里，就是「点刷新黑屏、日志还全静默」的直接原因之一。
+     *
+     * @param timeBudgetMs 本阶段的时间预算（毫秒），<=0 表示不设限。
+     *        [AssetSyncManager] 的手动刷新会传入子预算（见
+     *        [SyncBudget.prefetchPhaseBudget]）：超时后跳过的代码不写缓存，
+     *        「抓过且没有分红」的结论留空，之后按需抓取时还会补上，不丢数据。
      */
-    suspend fun preFetchDividends(symbols: List<String>, forceRefresh: Boolean = false) {
-        val normalizedSymbols = symbols.map { StockCodeManager.normalizeSymbol(it) }.distinct()
+    suspend fun preFetchDividends(
+        symbols: List<String>,
+        forceRefresh: Boolean = false,
+        timeBudgetMs: Long = 0L
+    ) {
+        withContext(Dispatchers.IO) {
+            val normalizedSymbols = symbols.map { StockCodeManager.normalizeSymbol(it) }.distinct()
 
-        val batchResults = prefetchDividends(normalizedSymbols, forceRefresh)
+            val batchResults = prefetchDividends(normalizedSymbols, forceRefresh)
 
-        val semaphore = Semaphore(maxConcurrentFetch)
-        coroutineScope {
-            normalizedSymbols.map { symbol ->
-                val entry = cache[symbol]
-                if (forceRefresh || entry == null || !entry.isValid(cacheTTL)) {
-                    async {
-                        semaphore.withPermit {
-                            getDividendsBySymbol(symbol, forceRefresh, batchResults)
-                        }
-                    }
-                } else null
-            }.filterNotNull().forEach { it.await() }
+            // 预算截止时刻：超时后不再启动新代码的逐条抓取
+            val deadline = if (timeBudgetMs > 0L) System.currentTimeMillis() + timeBudgetMs else 0L
+            val semaphore = Semaphore(maxConcurrentFetch)
+            val checkedCount = AtomicInteger(0)
+
+            // 心跳：这个阶段是刷新链路里第二长的静默期（批量之后是逐条级联），
+            // 从前只有开始/结束各一行日志，卡住时完全看不出走到哪
+            withHeartbeat(
+                tag = "DividendRepository",
+                phase = "分红预取",
+                status = {
+                    val leftSeconds =
+                        if (deadline > 0L) ((deadline - System.currentTimeMillis()) / 1000).coerceAtLeast(0L)
+                        else null
+                    "已检查 ${checkedCount.get()}/${normalizedSymbols.size} 个代码" +
+                        (leftSeconds?.let { "，预算剩余 ${it}s" } ?: "")
+                }
+            ) {
+                coroutineScope {
+                    normalizedSymbols.map { symbol ->
+                        val entry = cache[symbol]
+                        if (forceRefresh || entry == null || !entry.isValid(cacheTTL)) {
+                            async {
+                                if (deadline > 0L && System.currentTimeMillis() > deadline) {
+                                    AppLogger.w(
+                                        "分红预取达到时间预算，跳过 $symbol（留待按需抓取）",
+                                        "DividendRepository"
+                                    )
+                                    return@async
+                                }
+                                semaphore.withPermit {
+                                    checkedCount.incrementAndGet()
+                                    getDividendsBySymbol(symbol, forceRefresh, batchResults)
+                                }
+                            }
+                        } else null
+                    }.filterNotNull().forEach { it.await() }
+                }
+            }
         }
     }
 }

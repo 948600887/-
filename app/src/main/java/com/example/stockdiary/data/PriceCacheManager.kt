@@ -3,6 +3,7 @@ package com.example.stockdiary.data
 import android.content.Context
 import com.example.stockdiary.network.SinaStockData
 import com.example.stockdiary.utils.AppLogger
+import kotlin.jvm.Volatile
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -19,10 +20,19 @@ object PriceCacheManager {
 
     private val memoryCache = java.util.concurrent.ConcurrentHashMap<String, CachedPriceData>()
     private var cacheFile: File? = null
+    @Volatile
     private var lastSaveTime = 0L
     private val diskLock = Any()
     private const val MAX_MEMORY_CACHE_SIZE = 200
     // SharedPreferences 单条字符串有 ~1MB 限制，改为文件存储避免大缓存崩溃
+
+    // 落盘专用后台线程：JSON 序列化 + writeText 是磁盘 IO，而 cachePrice 的
+    // 调用点很散（刷新链路、各数据源成功回调），绝不能在调用方线程上同步写盘 ——
+    // 从前 maybeSaveToDisk 直接在调用线程 file.writeText，刷新时主线程会被
+    // 整份缓存的序列化 + 落盘卡住（60 秒节流只决定频率，不决定线程）
+    private val diskWriter = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+        Thread(r, "PriceCacheWriter").apply { isDaemon = true }
+    }
 
     data class CachedPriceData(
         val data: SinaStockData,
@@ -121,8 +131,18 @@ object PriceCacheManager {
     private fun maybeSaveToDisk() {
         val now = System.currentTimeMillis()
         if (now - lastSaveTime > 60000) {
-            saveToDisk()
             lastSaveTime = now
+            // 快照是纯内存拷贝，微秒级，留在调用线程拿；
+            // 真正慢的 JSON 序列化 + writeText 丢给 diskWriter，调用方零阻塞
+            val snapshot = memoryCache.toMap()
+            if (snapshot.isEmpty()) return
+            try {
+                diskWriter.execute { writeSnapshotToDisk(snapshot) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // 执行器被拒绝（进程退出等极端情况）：只丢一次落盘，内存缓存还在
+            }
         }
     }
 
@@ -159,11 +179,9 @@ object PriceCacheManager {
         }
     }
 
-    private fun saveToDisk() {
-        if (memoryCache.isEmpty()) return
+    private fun writeSnapshotToDisk(snapshot: Map<String, CachedPriceData>) {
         val file = cacheFile ?: return
 
-        val snapshot = memoryCache.toMap()
         synchronized(diskLock) {
             try {
                 val jsonArray = JSONArray()

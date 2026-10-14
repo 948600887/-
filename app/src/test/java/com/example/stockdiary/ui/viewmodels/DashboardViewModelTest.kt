@@ -1,10 +1,12 @@
 package com.example.stockdiary.ui.viewmodels
 
 import com.example.stockdiary.data.AssetRepository
+import com.example.stockdiary.data.AssetSyncManager
 import com.example.stockdiary.data.DashboardPreferences
 import com.example.stockdiary.data.DashboardPreferencesManager
 import com.example.stockdiary.data.DividendIncomeLoader
 import com.example.stockdiary.data.DividendIncomeUseCase
+import com.example.stockdiary.data.SyncResult
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.di.AppContainer
@@ -12,6 +14,8 @@ import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
+import io.mockk.mockkObject
+import io.mockk.unmockkAll
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.flowOf
@@ -130,5 +134,43 @@ class DashboardViewModelTest {
         vm.addAsset(depositAsset)
         coVerify { assetRepo.insertAsset(depositAsset) }
         coVerify(exactly = 0) { assetRepo.addOrUpdateStockAsset(any(), any(), any(), any(), any(), any(), any()) }
+    }
+
+    @Test
+    fun `同步被时间预算截断时提示用户已保留上次数据`() = runBlocking {
+        // 90 秒预算用尽不是失败：不转圈到天荒地老，但必须让用户知道
+        // 「这次没跑完、界面是上次的数据」。截断标记要一路透传到 errorMessage。
+        mockkObject(AssetSyncManager)
+        try {
+            coEvery {
+                AssetSyncManager.syncAllAssets(any(), any(), any(), any(), any(), any(), any())
+            } returns SyncResult(successCount = 3, failedCount = 1, truncatedByTimeLimit = true)
+
+            val vm = buildVm()
+            vm.refresh()
+            waitUntil { !vm.isRefreshing.value }
+
+            assertEquals("同步超时，已保留上次数据", vm.errorMessage.value)
+        } finally {
+            unmockkAll()
+        }
+    }
+
+    @Test
+    fun `同步未超时时不弹截断提示`() = runBlocking {
+        mockkObject(AssetSyncManager)
+        try {
+            coEvery {
+                AssetSyncManager.syncAllAssets(any(), any(), any(), any(), any(), any(), any())
+            } returns SyncResult(successCount = 5, failedCount = 0, truncatedByTimeLimit = false)
+
+            val vm = buildVm()
+            vm.refresh()
+            waitUntil { !vm.isRefreshing.value }
+
+            assertEquals(null, vm.errorMessage.value)
+        } finally {
+            unmockkAll()
+        }
     }
 }

@@ -1,11 +1,13 @@
 package com.example.stockdiary.ui.viewmodels
 
 import com.example.stockdiary.data.AssetRepository
+import com.example.stockdiary.data.AssetSyncManager
 import com.example.stockdiary.data.DashboardPreferences
 import com.example.stockdiary.data.DashboardPreferencesManager
 import com.example.stockdiary.data.DividendIncomeLoader
 import com.example.stockdiary.data.DividendIncomeUseCase
 import com.example.stockdiary.data.SortOrder
+import com.example.stockdiary.data.SyncResult
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.di.AppContainer
@@ -13,7 +15,9 @@ import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
+import io.mockk.mockkObject
 import io.mockk.slot
+import io.mockk.unmockkAll
 import io.mockk.verify
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -140,5 +144,25 @@ class PortfolioViewModelTest {
         vm.addAsset(depositAsset)
         coVerify { assetRepo.insertAsset(depositAsset) }
         coVerify(exactly = 0) { assetRepo.addOrUpdateStockAsset(any(), any(), any(), any(), any(), any(), any()) }
+    }
+
+    @Test
+    fun `刷新被时间预算截断时提示用户已保留上次数据`() = runBlocking {
+        // 持仓页的刷新按钮同样要走「同步超时，已保留上次数据」，
+        // 截断标记必须透传到 errorMessage，而不是只存在于日志里
+        mockkObject(AssetSyncManager)
+        try {
+            coEvery {
+                AssetSyncManager.syncAllAssets(any(), any(), any(), any(), any(), any(), any())
+            } returns SyncResult(successCount = 2, failedCount = 0, truncatedByTimeLimit = true)
+
+            val vm = buildVm()
+            vm.refresh()
+            waitUntil { !vm.isRefreshing.value }
+
+            assertEquals("同步超时，已保留上次数据", vm.errorMessage.value)
+        } finally {
+            unmockkAll()
+        }
     }
 }

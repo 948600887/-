@@ -4,6 +4,7 @@ import com.example.stockdiary.BuildConfig
 import com.example.stockdiary.common.APIEndpoints
 import com.example.stockdiary.common.Timeouts
 import com.example.stockdiary.utils.AppLogger
+import okhttp3.Dispatcher
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
 import okhttp3.Response
@@ -47,6 +48,23 @@ object NetworkClient {
                     keepAliveDuration = 60,
                     timeUnit = TimeUnit.SECONDS
                 )
+            )
+            .dispatcher(
+                Dispatcher().apply {
+                    // 默认 maxRequestsPerHost=5 是这次「刷新卡死」的二号根因：
+                    // 一次手动刷新 60 个持仓的价格请求集中在 qt.gtimg.cn /
+                    // hq.sinajs.cn 少数几个主机上，超出配额的请求排在 Dispatcher
+                    // 里**没有总超时**（connect/read 超时都从 call 真正开始执行
+                    // 才起算），于是配了 15 秒读超时的请求排队一分多钟不返回
+                    // 也不报错——诊断日志里那个 112 秒没下文的腾讯请求就是这么来的。
+                    //
+                    // 调到 16：真实并发仍由各业务层的 Semaphore（价格同步 8 +
+                    // 分红级联 8 + 批量分块 3）兜底，不会变成请求风暴；16 也正好
+                    // 覆盖「后台 Worker 与手动刷新不幸撞车」时的同主机峰值。
+                    // maxRequests 显式写出来，别让人以后以为是默认值乱改
+                    maxRequests = 64
+                    maxRequestsPerHost = 16
+                }
             )
 
         if (isDebug) {

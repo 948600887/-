@@ -11,6 +11,7 @@ import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CancellationException
 
 class DividendIncomeLoader(
@@ -72,6 +73,7 @@ class DividendIncomeLoader(
         val dividendsBySymbol = ConcurrentHashMap<String, Double>()
         val recordsBySymbol = ConcurrentHashMap<String, List<DividendRecord>>()
         val hasDividendFlag = AtomicBoolean(false)
+        val doneCount = AtomicInteger(0)
         val semaphore = Semaphore(MAX_CONCURRENT_FETCH)
 
         // 先把这一批一次性抓完（东财那条路合并成少量请求），再逐个读缓存。
@@ -84,26 +86,35 @@ class DividendIncomeLoader(
             forceRefresh = forceRefresh
         )
 
-        coroutineScope {
-            stockAssets.map { asset ->
-                async {
-                    val symbol = asset.symbol ?: return@async
-                    val dividends = try {
-                        semaphore.withPermit {
-                            dividendRepository.getDividendsBySymbol(symbol, forceRefresh, batchResults)
+        // 心跳：刷新后的这一步（「同步完成后再算一次收入」）同样可能跑几十秒，
+        // 从前中间完全静默，卡住了只能干等。跑到 IO 线程之后更要在日志里留痕
+        withHeartbeat(
+            tag = tag,
+            phase = "分红收入计算",
+            status = { "已算完 ${doneCount.get()}/${stockAssets.size} 个标的" }
+        ) {
+            coroutineScope {
+                stockAssets.map { asset ->
+                    async {
+                        val symbol = asset.symbol ?: return@async
+                        val dividends = try {
+                            semaphore.withPermit {
+                                dividendRepository.getDividendsBySymbol(symbol, forceRefresh, batchResults)
+                            }
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            AppLogger.e("获取${symbol}分红失败: ${e.message}", e, tag)
+                            emptyList()
                         }
-                    } catch (e: CancellationException) {
-                        throw e
-                    } catch (e: Exception) {
-                        AppLogger.e("获取${symbol}分红失败: ${e.message}", e, tag)
-                        emptyList()
+                        val ttmDividend = DividendYieldCalculator.getTTMDividend(dividends)
+                        dividendsBySymbol[symbol] = ttmDividend
+                        recordsBySymbol[symbol] = dividends
+                        if (ttmDividend > 0) hasDividendFlag.set(true)
+                        doneCount.incrementAndGet()
                     }
-                    val ttmDividend = DividendYieldCalculator.getTTMDividend(dividends)
-                    dividendsBySymbol[symbol] = ttmDividend
-                    recordsBySymbol[symbol] = dividends
-                    if (ttmDividend > 0) hasDividendFlag.set(true)
-                }
-            }.forEach { it.await() }
+                }.forEach { it.await() }
+            }
         }
 
         val totalAnnualIncome = DividendIncomeCalculator.calculateTotalAnnualIncome(assets, dividendsBySymbol)

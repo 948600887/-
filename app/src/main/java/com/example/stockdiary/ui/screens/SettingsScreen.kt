@@ -16,6 +16,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccountBalance
 import androidx.compose.material.icons.filled.AccountBalanceWallet
+import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.SyncAlt
 import androidx.compose.material.icons.filled.Android
 import androidx.compose.material.icons.filled.CloudSync
@@ -60,6 +61,7 @@ import com.example.stockdiary.ui.screens.settings.components.DashboardConfigShee
 import com.example.stockdiary.ui.screens.settings.components.DataSourceStatusDialog
 import com.example.stockdiary.ui.screens.settings.components.ExportDataDialog
 import com.example.stockdiary.ui.screens.settings.components.ImportBrokerageDialog
+import com.example.stockdiary.ui.screens.settings.components.LogViewerDialog
 import com.example.stockdiary.ui.screens.settings.components.HoldingSnapshotDialog
 import com.example.stockdiary.ui.screens.settings.components.ReminderTimePickerDialog
 import com.example.stockdiary.ui.screens.settings.components.SettingsItem
@@ -113,6 +115,7 @@ fun SettingsScreen(
     var showHoldingSnapshotDialog by remember { mutableStateOf(false) }
     var showFundSnapshotDialog by remember { mutableStateOf(false) }
     var showApiSelectionDialog by remember { mutableStateOf(false) }
+    var showLogViewerDialog by remember { mutableStateOf(false) }
     var showReminderTimePicker by remember { mutableStateOf(false) }
     var currentPriceApi by remember { mutableStateOf(com.example.stockdiary.data.ApiManager.getPriceApi(context)) }
 
@@ -334,6 +337,12 @@ fun SettingsScreen(
                     onClick = { if (reminderEnabled) showReminderTimePicker = true }
                 ),
                 SettingsItemData(
+                    icon = Icons.Default.BugReport,
+                    title = "运行日志与崩溃报告",
+                    subtitle = "闪退排查用，可一键分享出来",
+                    onClick = { showLogViewerDialog = true }
+                ),
+                SettingsItemData(
                     icon = Icons.Default.Info,
                     title = "关于",
                     subtitle = "金库 v1.0.0",
@@ -474,6 +483,10 @@ fun SettingsScreen(
 
     if (showAboutDialog) {
         AboutDialog(onDismiss = { showAboutDialog = false })
+    }
+
+    if (showLogViewerDialog) {
+        LogViewerDialog(onDismiss = { showLogViewerDialog = false })
     }
 
     if (showDashboardConfigSheet) {

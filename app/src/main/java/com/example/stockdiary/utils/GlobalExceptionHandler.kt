@@ -65,6 +65,21 @@ object GlobalExceptionHandler {
             AppLogger.e("记录崩溃通知失败", e, "CrashHandler")
         }
 
+        // 崩溃堆栈必须**同步**落盘，再交给系统默认处理器。
+        //
+        // AppLogger.e 只是把这一行放进队列，由后台守护线程异步 flush；而
+        // invokeDefaultHandler 紧接着就终止进程——那个线程几乎赢不了这场竞态，
+        // 结果是「app.log 里永远看不到崩溃」，而用户拿到的日志恰恰主要是想看崩溃。
+        //
+        // 同一个竞态 CrashRecoveryManager.recordCrash 已经处理过（用 commit() 而非 apply()，
+        // 注释里写了理由），这里补上 AppLogger 这一半。
+        try {
+            AppLogger.forceFlush()
+        } catch (t: Throwable) {
+            // 崩溃现场可能是 OOM / StackOverflow：落盘失败也绝不能卡住终止流程，
+            // 否则表现会从「闪退」变成「ANR / 黑屏卡死」
+        }
+
         // 交给系统默认处理器，让应用按正常流程终止，不掩盖崩溃信号
         invokeDefaultHandler(thread, throwable)
     }
@@ -116,7 +131,7 @@ object GlobalExceptionHandler {
                 }
             }
 
-            val crashFile = File(appContext?.getExternalFilesDir(null), "crash_reports")
+            val crashFile = crashReportsDir(appContext ?: return)
             if (!crashFile.exists()) crashFile.mkdirs()
 
             val logFile = File(crashFile, "$crashId.log")
@@ -131,6 +146,16 @@ object GlobalExceptionHandler {
     }
 
     /**
+     * 崩溃报告目录。
+     *
+     * 对外暴露是因为界面要把它列出来给用户看、给用户分享——
+     * 光有文件没有入口等于没有：Android 11 起 `Android/data` 对用户和大多数
+     * 文件管理器都不可见，用户根本拿不到，只能靠 App 自己把内容送出去。
+     */
+    fun crashReportsDir(context: Context): File =
+        File(context.getExternalFilesDir(null), "crash_reports")
+
+    /**
      * 只保留最近 [MAX_CRASH_LOGS] 份崩溃日志。
      *
      * 放在启动阶段做，不在崩溃现场做：磁盘目录不受 MAX_CRASH_LOGS 约束，
@@ -139,7 +164,7 @@ object GlobalExceptionHandler {
      */
     fun pruneCrashFiles() {
         try {
-            val dir = File(appContext?.getExternalFilesDir(null), "crash_reports")
+            val dir = crashReportsDir(appContext ?: return)
             val files = dir.listFiles() ?: return
             if (files.size <= MAX_CRASH_LOGS) return
             // 文件名是 "crash_<timestamp>.log"，定长时间戳，字典序即时间序
@@ -214,8 +239,7 @@ object GlobalExceptionHandler {
     fun clearCrashLogs() {
         crashLogs.clear()
         try {
-            val crashDir = File(appContext?.getExternalFilesDir(null), "crash_reports")
-            crashDir.listFiles()?.forEach { it.delete() }
+            crashReportsDir(appContext ?: return).listFiles()?.forEach { it.delete() }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {

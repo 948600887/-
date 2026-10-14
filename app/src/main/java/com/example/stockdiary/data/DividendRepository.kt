@@ -61,22 +61,21 @@ class DividendRepository private constructor(
     }
 
     /**
-     * 批量预取的结果：normalizedSymbol → 记录。**只在一次 [prefetchDividends] 调用内有效**，
-     * 每次预取前清空，避免上一轮的残留被下一轮误用。
+     * 一次性把一批标的的分红抓完，结果**按次返回**，由调用方在随后的逐条
+     * [getDividendsBySymbol] 里作为 `batchResults` 传回来。
      *
-     * 值为空列表表示「批量问过了，这只没有」—— 这时候仍然要让级联里的 Sina 兜底发言
-     * （那是独立的第二来源），所以不能简单当成 null 处理，见 [fetchDividendData]。
-     */
-    private val batchPrefetch = ConcurrentHashMap<String, List<DividendRecord>>()
-
-    /**
-     * 一次性把一批标的的分红抓完，结果留给后续的 [getDividendsBySymbol] 用。
+     * ## 为什么按次返回而不是放共享字段
+     *
+     * 结果曾经放在单例的 `batchPrefetch` 字段里。资产页与持仓页同时刷新
+     * （或后台 PriceSyncWorker 撞上手动刷新）时，两个预取周期会互相
+     * clear / remove：后启动的清掉前一个的结果，整批退化成逐条级联，
+     * 请求风暴照旧。按次返回后每个周期只读自己那份不可变结果，并发互不干扰。
      *
      * ## 为什么值得单独做一次
      *
      * 东财的 filter 支持 `SECURITY_CODE in ("a","b",…)`，**一个请求就能问全部代码**。
      * 逐条抓的话：59 个代码一个请求，ETF 空手后还要顺序试三种代码格式（再 3 个），
-     * 一次全量 100 多个请求。合并后 1~2 个。
+     * 一次全量 100 多个请求。合并后 1~N 个。
      *
      * ## 只走东财这条路
      *
@@ -90,9 +89,11 @@ class DividendRepository private constructor(
      * 批量说没有的标的，级联照旧走完，只是**跳过已经问过的东财那一步**，
      * 让 Sina 兜底有机会发言。这样不因为合并请求而丢任何数据来源。
      */
-    suspend fun prefetchDividends(symbols: List<String>, forceRefresh: Boolean = false) {
-        if (symbols.isEmpty()) return
-        batchPrefetch.clear()
+    suspend fun prefetchDividends(
+        symbols: List<String>,
+        forceRefresh: Boolean = false
+    ): Map<String, List<DividendRecord>> {
+        if (symbols.isEmpty()) return emptyMap()
 
         val normalized = symbols.map { StockCodeManager.normalizeSymbol(it) }.distinct()
 
@@ -100,7 +101,7 @@ class DividendRepository private constructor(
         val pending = normalized.filter { symbol ->
             forceRefresh || tryGetFromCache(symbol) == null
         }
-        if (pending.isEmpty()) return
+        if (pending.isEmpty()) return emptyMap()
 
         // 每个标的候选的 SECURITY_CODE：直接码 + （ETF 才有的）三种格式变体。
         // ETF 的格式历史上换过，接口三种都认，一起塞进批量查询比顺序重试省两个请求
@@ -127,40 +128,81 @@ class DividendRepository private constructor(
             }
         }
 
-        if (eastmoneySymbols.isEmpty()) return
+        if (eastmoneySymbols.isEmpty()) return emptyMap()
 
-        val result = try {
-            eastmoneyApi.getDividendHistoryBySecurityCodes(codeToSymbol.keys.toList())
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            AppLogger.w("批量预取分红失败: ${e.message}", "DividendRepository")
-            return  // 失败就退回逐条路径，别让整次抓取失败
+        // 分块发：每块一个请求，URL 长度与代码数双保险（见 [chunkSecurityCodes]）。
+        // 不切块的后果不是慢，是整批失败后退回逐条级联 —— 59 个标的打出 250~400 个请求，
+        // 那就是这次要修掉的「点刷新闪退」
+        val chunks = chunkSecurityCodes(codeToSymbol.keys.toList())
+        // 被**成功**块覆盖的标的才会写进结果；块失败的标的不写 ——
+        // 没有条目 ⇔ 级联里照常逐条重问，不能用「批量失败」冒充「批量问过且没有」
+        val answeredSymbols = ConcurrentHashMap.newKeySet<String>()
+        val recordsByCode = ConcurrentHashMap<String, MutableList<DividendData>>()
+
+        coroutineScope {
+            val chunkSemaphore = Semaphore(MAX_CONCURRENT_BATCH_CHUNKS)
+            chunks.map { chunk ->
+                async {
+                    chunkSemaphore.withPermit {
+                        val result = try {
+                            eastmoneyApi.getDividendHistoryBySecurityCodes(chunk)
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            // 只废这一块：块内标的不写结果条目，随后会走逐条级联，
+                            // 其他块的结果照常生效 —— 一块失败不能把整批拖垮
+                            AppLogger.w(
+                                "批量预取分块失败（${chunk.size} 个代码）: ${e.message}",
+                                "DividendRepository"
+                            )
+                            return@withPermit
+                        }
+                        if (!result.isSuccess) {
+                            AppLogger.w(
+                                "批量预取分块未成功（${chunk.size} 个代码）",
+                                "DividendRepository"
+                            )
+                            return@withPermit
+                        }
+                        result.getOrNull().orEmpty().forEach { record ->
+                            recordsByCode.computeIfAbsent(record.ticker) { mutableListOf() }
+                                .add(record)
+                        }
+                        chunk.forEach { code -> codeToSymbol[code]?.let { answeredSymbols += it } }
+                    }
+                }
+            }.forEach { it.await() }
         }
 
-        if (!result.isSuccess) return
+        if (answeredSymbols.isEmpty()) {
+            // 全块失败：一个条目都不写，全部标的走逐条级联（与改造前批量失败的行为一致）
+            AppLogger.w("批量预取所有分块均失败，退回逐条路径", "DividendRepository")
+            return emptyMap()
+        }
 
-        val records = result.getOrNull().orEmpty()
         // 按接口返回的 SECURITY_CODE 归组，再发回给各个标的。
         // 同一标的可能靠多种格式命中，取并集并按除息日去重。
         // 这里要把 [DividendData]（接口层）转成 [DividendRecord]（领域层）——
         // 口径与逐条路径 [fetchFromEastmoneyWithFormat] 保持一致，否则同一天的分红
         // 会因为走了批量还是逐条而算出不同的金额
-        val byCode = records.groupBy { it.ticker }
+        val batchResults = HashMap<String, List<DividendRecord>>(eastmoneySymbols.size)
         for (symbol in eastmoneySymbols) {
+            if (symbol !in answeredSymbols) continue
             val codes = codesBySymbol[symbol].orEmpty()
-            val merged = codes.flatMap { byCode[it].orEmpty() }
+            val merged = codes.flatMap { recordsByCode[it].orEmpty() }
                 .map { it.toDividendRecord() }
                 .distinctBy { it.exDividendDate }
                 .sortedByDescending { it.exDividendDate }
-            batchPrefetch[symbol] = merged
+            batchResults[symbol] = merged
         }
 
         AppLogger.i(
-            "批量预取：${eastmoneySymbols.size} 只走东财的标的合并成 1~2 个请求，" +
-                "其中 ${batchPrefetch.values.count { it.isNotEmpty() }} 只有分红记录",
+            "批量预取：${eastmoneySymbols.size} 只走东财的标的分 ${chunks.size} 个请求，" +
+                "${batchResults.size} 只拿到批量答案，其中 " +
+                "${batchResults.values.count { it.isNotEmpty() }} 只有分红记录",
             "DividendRepository"
         )
+        return batchResults
     }
 
     /**
@@ -265,9 +307,19 @@ class DividendRepository private constructor(
         cache.clear()
     }
     
+    /**
+     * 取某个标的的分红记录。
+     *
+     * @param forceRefresh true 时跳过缓存强制重抓（用户点「刷新」走这条）
+     * @param batchResults 同一批 [prefetchDividends] 的结果，key 是**标准化后**的 symbol。
+     *        命中就跳过逐条级联；为 null 时行为与从前完全一致（单标的查询传 null）。
+     *        按次传入而不是读共享字段，是为了让并发的两个预取周期互不干扰 ——
+     *        共享字段会互相清空，导致整批退化成逐条级联
+     */
     suspend fun getDividendsBySymbol(
         symbol: String,
-        forceRefresh: Boolean = false
+        forceRefresh: Boolean = false,
+        batchResults: Map<String, List<DividendRecord>>? = null
     ): List<DividendRecord> {
         val normalizedSymbol = StockCodeManager.normalizeSymbol(symbol)
 
@@ -282,7 +334,7 @@ class DividendRepository private constructor(
         val isIncremental = !forceRefresh && existingEntry != null && !existingEntry.needsFullFetch()
 
         return try {
-            val data = fetchDividendData(normalizedSymbol)
+            val data = fetchDividendData(normalizedSymbol, batchResults)
 
             if (data.isNotEmpty()) {
                 saveDividendsToDb(normalizedSymbol, data, isIncremental)
@@ -377,11 +429,15 @@ class DividendRepository private constructor(
     }
 
     private suspend fun fetchDividendData(
-        normalizedSymbol: String
+        normalizedSymbol: String,
+        batchResults: Map<String, List<DividendRecord>>?
     ): List<DividendRecord> {
-        // 批量预取优先。[prefetchDividends] 已经用一个请求把这批标的问完了，
+        // 批量预取优先。[prefetchDividends] 已经用少量请求把这批标的问完了，
         // 命中就直接用，省掉逐条的级联（ETF 空手还要顺序试三种代码格式，再 3 个请求）
-        val prefetched = batchPrefetch.remove(normalizedSymbol)
+        //
+        // 从入参读而不是从共享字段 remove：共享字段在资产页与持仓页同时刷新时
+        // 会被另一个预取周期清空，整批退化成逐条级联 —— 请求风暴照旧、闪退照旧
+        val prefetched = batchResults?.get(normalizedSymbol)
         if (prefetched != null && prefetched.isNotEmpty()) return prefetched
 
         // 有条目 ⇔ 这个标的参与过东财批量查询（场外基金与批量失败时无条目，行为不变）。
@@ -691,16 +747,30 @@ class DividendRepository private constructor(
         cache[symbol] = CacheEntry(validRecords, System.currentTimeMillis())
     }
     
+    /**
+     * 老入口：逐条抓一批标的的分红（内部先跑一次 [prefetchDividends] 批量预取）。
+     *
+     * 先批量再逐条是这次修复的核心：刷新按钮（forceRefresh=true）是全 App
+     * 唯一还在走这条老入口的路径，而它从前**完全绕开批量预取** —— 每个标的
+     * 各打一遍完整级联（东财逐条 + ETF 三种代码格式 + 新浪兜底 + 场外基金
+     * 逐个抓 HTML），59 个标的打出 250~400 个请求：OkHttp 队列排长龙、
+     * 多个协程同时做 Jsoup 解析，内存压力直接让系统回收进程 ——
+     * 就是用户看到的「按了刷新就闪退」。
+     * forceRefresh 时 [prefetchDividends] 内部全量 pending，不存在「刷新拿到旧数据」。
+     */
     suspend fun preFetchDividends(symbols: List<String>, forceRefresh: Boolean = false) {
+        val normalizedSymbols = symbols.map { StockCodeManager.normalizeSymbol(it) }.distinct()
+
+        val batchResults = prefetchDividends(normalizedSymbols, forceRefresh)
+
         val semaphore = Semaphore(maxConcurrentFetch)
         coroutineScope {
-            symbols.map { symbol ->
-                val normalized = StockCodeManager.normalizeSymbol(symbol)
-                val entry = cache[normalized]
+            normalizedSymbols.map { symbol ->
+                val entry = cache[symbol]
                 if (forceRefresh || entry == null || !entry.isValid(cacheTTL)) {
                     async {
                         semaphore.withPermit {
-                            getDividendsBySymbol(normalized, forceRefresh)
+                            getDividendsBySymbol(symbol, forceRefresh, batchResults)
                         }
                     }
                 } else null
@@ -760,3 +830,78 @@ private fun DividendData.toDividendRecord(): DividendRecord = DividendRecord(
     fiscalYear = date.take(4),
     paymentDate = paymentDate
 )
+
+/**
+ * 单个批量请求最多带多少个 SECURITY_CODE。
+ *
+ * 50 个代码的 filter 编码后约 2KB，离服务端/代理常见的 8KB 上限有足够余量；
+ * 再大一是没有额外收益，二是把「414 或 OkHttp 拒绝」的概率推高 ——
+ * 而批量失败意味着整批预取退化成逐条级联，正是这次要修掉的请求风暴。
+ */
+internal const val MAX_SECURITY_CODES_PER_REQUEST = 50
+
+/**
+ * 单个批量请求 URL 的长度预算（字符）。
+ *
+ * 按最坏情况估算：URLEncoder 会把引号、括号、逗号全部转义成 %XX，
+ * 一个代码最坏占 3 倍长度。4KB 预算下即使代码全是 `SH.510050` 这种
+ * 9 字符长码，也只会先撞数量上限，URL 永远不会接近 8KB。
+ */
+internal const val MAX_BATCH_URL_LENGTH = 4000
+
+/**
+ * 批量请求 URL 的固定部分基数：域名 + reportName / columns / pageSize /
+ * sortColumns 等参数，再加编码放大的经验估计。切块时把它算进每一块的预算。
+ */
+internal const val BATCH_URL_FIXED_OVERHEAD = 600
+
+/** 批量分块请求的并发上限：块数本来就少（百个代码 ≈ 2~4 块），别把东财当成压测对象 */
+internal const val MAX_CONCURRENT_BATCH_CHUNKS = 3
+
+/**
+ * 把一批 SECURITY_CODE 切成分块，让每块的批量请求 URL 都控制在安全长度内。
+ *
+ * ## 为什么必须切
+ *
+ * 批量查询要把所有代码拼进 `filter=(SECURITY_CODE in ("a","b",…))`。
+ * 59 个标的加上 ETF 的三种格式变体就是 100+ 个代码，URL 有好几 KB：
+ * 服务端可能返回 414，OkHttp/代理也可能直接拒绝 —— 而批量失败意味着
+ * 整批预取退化成逐条级联（那就是这次要修的请求风暴），所以必须在发出去之前切好。
+ *
+ * 双保险，先撞哪个算哪个：数量上限 [MAX_SECURITY_CODES_PER_REQUEST] 与
+ * 长度预算 [MAX_BATCH_URL_LENGTH]（含固定基数 [BATCH_URL_FIXED_OVERHEAD]，
+ * 每个代码按最坏 3 倍编码长度估）。
+ *
+ * **纯函数**：不碰网络与 Context，切块规则错了（丢代码 / 超长 URL）能直接单测。
+ *
+ * @param codes 一批 SECURITY_CODE，结果保持顺序、不重不漏
+ * @return 分块结果；单个代码就超预算时独占一块 —— 宁可发一个可能被拒的长请求，
+ *         也不能把它切丢了（丢了它就会走逐条级联，正是要避免的）
+ */
+internal fun chunkSecurityCodes(
+    codes: List<String>,
+    maxCodesPerChunk: Int = MAX_SECURITY_CODES_PER_REQUEST,
+    maxUrlLength: Int = MAX_BATCH_URL_LENGTH,
+    fixedOverhead: Int = BATCH_URL_FIXED_OVERHEAD
+): List<List<String>> {
+    if (codes.isEmpty()) return emptyList()
+    val safeCount = maxCodesPerChunk.coerceAtLeast(1)
+    val chunks = mutableListOf<List<String>>()
+    var current = mutableListOf<String>()
+    var usedLength = fixedOverhead
+    for (code in codes) {
+        // 引号 + 逗号 + 括号开销，最坏情况每个字符都被百分号编码
+        val encodedCost = (code.length + 3) * 3
+        val wouldExceedCount = current.size >= safeCount
+        val wouldExceedLength = usedLength + encodedCost > maxUrlLength
+        if (current.isNotEmpty() && (wouldExceedCount || wouldExceedLength)) {
+            chunks += current
+            current = mutableListOf()
+            usedLength = fixedOverhead
+        }
+        current += code
+        usedLength += encodedCost
+    }
+    if (current.isNotEmpty()) chunks += current
+    return chunks
+}

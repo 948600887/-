@@ -77,7 +77,7 @@ class DividendIncomeLoaderTest {
         coVerify(exactly = 1) { repository.getCachedAllowingStale("sh600519") }
         coVerify(exactly = 1) { repository.getCachedAllowingStale("sh000001") }
         coVerify(exactly = 0) { repository.prefetchDividends(any(), any()) }
-        coVerify(exactly = 0) { repository.getDividendsBySymbol(any(), any()) }
+        coVerify(exactly = 0) { repository.getDividendsBySymbol(any(), any(), any()) }
     }
 
     @Test
@@ -86,16 +86,16 @@ class DividendIncomeLoaderTest {
         val assets = listOf(stock("sh600519"), stock("sh000001"))
         coEvery { repository.getCachedAllowingStale("sh600519") } returns listOf(record(today, "5.0"))
         coEvery { repository.getCachedAllowingStale("sh000001") } returns null // 连过期数据都没有
-        coEvery { repository.prefetchDividends(any(), any()) } returns Unit
-        coEvery { repository.getDividendsBySymbol("sh600519", false) } returns listOf(record(today, "5.0"))
-        coEvery { repository.getDividendsBySymbol("sh000001", false) } returns emptyList()
+        coEvery { repository.prefetchDividends(any(), any()) } returns emptyMap()
+        coEvery { repository.getDividendsBySymbol("sh600519", false, any()) } returns listOf(record(today, "5.0"))
+        coEvery { repository.getDividendsBySymbol("sh000001", false, any()) } returns emptyList()
 
         val result = loader.loadIncome(assets, cacheOnly = true)
 
         // 批量预取必须带上全部标的，而不是只抓缺的那只——合并请求才省得下请求数
         coVerify(exactly = 1) { repository.prefetchDividends(listOf("sh600519", "sh000001"), false) }
-        coVerify(exactly = 1) { repository.getDividendsBySymbol("sh600519", false) }
-        coVerify(exactly = 1) { repository.getDividendsBySymbol("sh000001", false) }
+        coVerify(exactly = 1) { repository.getDividendsBySymbol("sh600519", false, any()) }
+        coVerify(exactly = 1) { repository.getDividendsBySymbol("sh000001", false, any()) }
         assertEquals(50.0, result.totalAnnualIncome, 1e-6)
     }
 
@@ -103,21 +103,21 @@ class DividendIncomeLoaderTest {
     fun `cacheOnly 与 forceRefresh 同时为 true 时不走快速路径`() = runBlocking {
         val today = LocalDate.now().toString()
         val assets = listOf(stock("sh600519"))
-        coEvery { repository.prefetchDividends(any(), any()) } returns Unit
-        coEvery { repository.getDividendsBySymbol("sh600519", true) } returns listOf(record(today, "5.0"))
+        coEvery { repository.prefetchDividends(any(), any()) } returns emptyMap()
+        coEvery { repository.getDividendsBySymbol("sh600519", true, any()) } returns listOf(record(today, "5.0"))
 
         loader.loadIncome(assets, forceRefresh = true, cacheOnly = true)
 
         // 刷新路径刻意不看缓存：宁可多发一次批量请求，也不能把旧数据当新的
         coVerify(exactly = 1) { repository.prefetchDividends(listOf("sh600519"), true) }
-        coVerify(exactly = 1) { repository.getDividendsBySymbol("sh600519", true) }
+        coVerify(exactly = 1) { repository.getDividendsBySymbol("sh600519", true, any()) }
     }
 
     @Test
     fun `只有存款没有股票基金时零请求且结果正确`() = runBlocking {
         val assets = listOf(deposit(balance = 100_000.0, rate = 3.0))
         // 没有股票基金时 prefetch 仍会被调一次（空列表直接返回），必须打桩
-        coEvery { repository.prefetchDividends(any(), any()) } returns Unit
+        coEvery { repository.prefetchDividends(any(), any()) } returns emptyMap()
 
         val result = loader.loadIncome(assets, cacheOnly = true)
 
@@ -126,7 +126,7 @@ class DividendIncomeLoaderTest {
         assertTrue(result.dividendsBySymbol.isEmpty())
         assertTrue(!result.hasDividendData)
         coVerify(exactly = 1) { repository.prefetchDividends(emptyList(), false) }
-        coVerify(exactly = 0) { repository.getDividendsBySymbol(any(), any()) }
+        coVerify(exactly = 0) { repository.getDividendsBySymbol(any(), any(), any()) }
     }
 
     @Test

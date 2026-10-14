@@ -74,10 +74,12 @@ class DividendIncomeLoader(
         val hasDividendFlag = AtomicBoolean(false)
         val semaphore = Semaphore(MAX_CONCURRENT_FETCH)
 
-        // 先把这一批一次性抓完（东财那条路合并成一个请求），再逐个读缓存。
+        // 先把这一批一次性抓完（东财那条路合并成少量请求），再逐个读缓存。
         // 顺序不能反：先 prefetch 再逐个 getDividendsBySymbol，后者才会命中预取结果；
         // 反过来就是每个代码各发一次请求，批量白发。
-        dividendRepository.prefetchDividends(
+        // 结果按次传回给下面的逐条循环：并发的另一个抓取周期有自己的一份，
+        // 不会互相清空 —— 曾经的共享字段就是这么把批量结果弄丢、退回逐条级联的
+        val batchResults = dividendRepository.prefetchDividends(
             symbols = stockAssets.mapNotNull { it.symbol },
             forceRefresh = forceRefresh
         )
@@ -88,7 +90,7 @@ class DividendIncomeLoader(
                     val symbol = asset.symbol ?: return@async
                     val dividends = try {
                         semaphore.withPermit {
-                            dividendRepository.getDividendsBySymbol(symbol, forceRefresh)
+                            dividendRepository.getDividendsBySymbol(symbol, forceRefresh, batchResults)
                         }
                     } catch (e: CancellationException) {
                         throw e

@@ -25,8 +25,33 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineExceptionHandler
 
 class DashboardViewModel(private val container: AppContainer) : ViewModel() {
+
+    /**
+     * 刷新/同步路径的兜底异常处理。
+     *
+     * `viewModelScope` 用的是 SupervisorJob：子协程失败不会牵连兄弟，
+     * 但失败本身仍会向上抛。没有 handler 的话，它会一路抛到线程默认的
+     * UncaughtExceptionHandler —— 也就是用户看到的「闪退」，而且一行日志都没有。
+     *
+     * 刷新的失败原因千奇百怪（网络、解析、某个标的的数据特别），
+     * 任何一个都不值得让整个 App 死掉：记录日志、提示用户、保持界面可用。
+     *
+     * 这是**兜底**不是修因。真因仍要靠日志定位，所以这里必须把堆栈打全。
+     * （持仓页 PortfolioViewModel 早就挂了这个 handler，资产页一直漏了。）
+     */
+    private val refreshExceptionHandler = CoroutineExceptionHandler { _, throwable ->
+        AppLogger.e(
+            "刷新过程发生未捕获异常: ${throwable.message}",
+            throwable,
+            "DashboardVM"
+        )
+        _errorMessage.value = "刷新没能完成：${throwable.message ?: "未知错误"}"
+        _isRefreshing.value = false
+        _isSyncing.value = false
+    }
 
     private val repository = container.assetRepository
     private val preferencesManager = container.dashboardPreferencesManager
@@ -67,6 +92,10 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
 
     private val _incomeCalculationStatus = MutableStateFlow<String?>(null)
     val incomeCalculationStatus: StateFlow<String?> = _incomeCalculationStatus.asStateFlow()
+
+    // 刷新兜底异常的 user-facing 出口：handler 只能记日志，用户需要看到「刷新没成功」
+    private val _errorMessage = MutableStateFlow<String?>(null)
+    val errorMessage: StateFlow<String?> = _errorMessage.asStateFlow()
 
     // 收息进度：今年已收 / 全年预计 / 月度现金流 / 下一笔到账
     private val _dividendProgress = MutableStateFlow(DividendProgressCalculator.EMPTY)
@@ -185,8 +214,9 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
     }
 
     fun sync() {
-        viewModelScope.launch {
+        viewModelScope.launch(refreshExceptionHandler) {
             _isSyncing.value = true
+            _errorMessage.value = null
             _syncResult.value = null
             try {
                 var lastProgress: SyncProgress? = null
@@ -211,8 +241,9 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
     }
 
     fun refresh() {
-        viewModelScope.launch {
+        viewModelScope.launch(refreshExceptionHandler) {
             _isRefreshing.value = true
+            _errorMessage.value = null
             val assetsOnly = assets.value.filter { !it.type.isLiability }
             try {
                 AssetSyncManager.syncAllAssets(
@@ -255,6 +286,10 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
     fun clearSyncResult() {
         _syncResult.value = null
         _syncProgress.value = null
+    }
+
+    fun clearError() {
+        _errorMessage.value = null
     }
 
     suspend fun addAsset(asset: Asset) {

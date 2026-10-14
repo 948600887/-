@@ -45,6 +45,7 @@ fun DashboardScreen(
     val incomeCalculationStatus by viewModel.incomeCalculationStatus.collectAsStateWithLifecycle()
     val existingAccounts by viewModel.existingAccounts.collectAsStateWithLifecycle()
     val dividendProgress by viewModel.dividendProgress.collectAsStateWithLifecycle()
+    val errorMessage by viewModel.errorMessage.collectAsStateWithLifecycle()
 
     var showAddDialog by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
@@ -113,6 +114,15 @@ fun DashboardScreen(
             }
             snackbarHostState.showSnackbar(msg)
             viewModel.clearSyncResult()
+        }
+    }
+
+    // 刷新兜底：ViewModel 的 CoroutineExceptionHandler 把逃逸异常变成这条提示，
+    // 进程不再被杀掉；用户至少知道「刷新没成功」，而不是界面莫名停止转动
+    errorMessage?.let { message ->
+        LaunchedEffect(message) {
+            snackbarHostState.showSnackbar(message)
+            viewModel.clearError()
         }
     }
 

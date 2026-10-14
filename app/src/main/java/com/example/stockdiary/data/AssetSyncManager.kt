@@ -26,7 +26,22 @@ import kotlinx.coroutines.CancellationException
 object AssetSyncManager {
 
     private const val TAG = "AssetSyncManager"
-    private const val MAX_CONCURRENT_SYNC = 8
+
+    /**
+     * 同步并发上限。
+     *
+     * 从 8 降到 3 是这轮「点刷新闪退」修复的一部分：场外基金每只需要下载
+     * 天天基金 `pingzhongdata/{code}.js`，实测响应 **0.5~2MB**
+     * （文件里是这只基金的完整历史净值，而我们要的只是今天一个数）。
+     * 8 并发 = 最多 16MB 响应体同时驻留，再叠加解析对象图与界面状态，
+     * 106 个持仓足以把进程压到被系统回收 —— 用户看到的是黑屏后闪退，
+     * 而且零崩溃报告（不是 Java 异常，是 LMK）。
+     *
+     * 降到 3 后峰值降到约 6MB。速度代价可接受：106 个标的约 36 批，
+     * 每批 100~500ms；而且 [FundAPI] 已会在「缓存里已是今日净值」时
+     * 跳过下载，同一天的第二刷及以后基本不下载，快得多。
+     */
+    private const val MAX_CONCURRENT_SYNC = 3
 
     /**
      * 手动刷新之间的进程内互斥。

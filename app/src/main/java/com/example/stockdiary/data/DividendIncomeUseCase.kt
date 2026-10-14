@@ -1,6 +1,8 @@
 package com.example.stockdiary.data
 
 import com.example.stockdiary.database.Asset
+import com.example.stockdiary.utils.AppLogger
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
@@ -28,7 +30,19 @@ class DividendIncomeUseCase(
 ) {
     // 进行中的抓取挂在这个独立作用域上，而不是某个调用者的作用域：否则调用者一返回，
     // 它的 coroutineScope 会把进行中的 deferred 取消掉，复用方就再也 await 不到结果了。
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    //
+    // 必须带 CoroutineExceptionHandler：这个 scope 是 SupervisorJob 且**没有父作用域**，
+    // 一旦 loader 抛出而调用方已经离开（deferred 再也没有人 await，典型的就是
+    // 「刷新跑到一半用户切走」），异常就无处可去 —— 会一路抛到线程的默认处理器把进程杀掉，
+    // 表现就是「刷新跑一段时间后闪退」，而且堆栈里还看不到业务代码。
+    // 装上 handler 后：调用方 await 到的异常照旧交给调用方（不会被这里吞掉），
+    // 只有真的没人接的那次才落到这里记录一行日志。
+    private val scope = CoroutineScope(
+        SupervisorJob() + Dispatchers.Default +
+            CoroutineExceptionHandler { _, throwable ->
+                AppLogger.e("分红抓取协程异常（无人 await）: ${throwable.message}", throwable, "DividendIncome")
+            }
+    )
     private val mutex = Mutex()
     private var inFlight: Deferred<DividendIncomeLoader.IncomeResult>? = null
 

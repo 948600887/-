@@ -5,6 +5,7 @@ import com.example.stockdiary.database.AssetType
 import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -76,5 +77,48 @@ class DividendIncomeUseCaseTest {
         val second = useCase.load(assets, forceRefresh = false)
         assertEquals(1.0, first.totalAnnualIncome, 0.0)
         assertEquals(1.0, second.totalAnnualIncome, 0.0)
+    }
+
+    @Test
+    fun `底层抓取抛异常时调用方仍能拿到，不被兜底handler吞掉`() = runBlocking {
+        // 进程级 scope 上装了 CoroutineExceptionHandler（防止无人 await 的异常杀进程），
+        // 但它**绝不能**把 await 这条路径的异常也吞了 —— 否则调用方的 try-catch
+        // 全部失效，界面会一直显示旧值却不知道抓取其实失败了。
+        val boom = RuntimeException("抓取炸了")
+        val useCase = DividendIncomeUseCase { _, _, _ -> throw boom }
+        val assets = listOf(asset("600900"))
+
+        val thrown = runCatching {
+            useCase.load(assets, forceRefresh = false, tag = "test")
+        }.exceptionOrNull()
+
+        // 注意：不能断言「就是 boom 那个对象」。协程跨线程传递异常时会复制一份实例
+        // （Throwable.equals 是对象身份比较，两个 message 相同的实例并不相等），
+        // 所以这里比的是类型 + 消息。
+        assertTrue("异常必须照常抛给调用方，不能被兜底 handler 吞掉", thrown is RuntimeException)
+        assertEquals("抓取炸了", thrown?.message)
+    }
+
+    @Test
+    fun `单飞登记在被兜底后仍能清理，后续调用不受污染`() = runBlocking {
+        // 上一次抓取失败并已抛给调用方后，inFlight 必须清掉：
+        // 否则后续调用会一直 await 到那个已经失败的 deferred，永远拿到同一个异常。
+        var attempt = 0
+        val useCase = DividendIncomeUseCase { assets, _, _ ->
+            attempt += 1
+            if (attempt == 1) throw RuntimeException("第一次失败")
+            DividendIncomeLoader.IncomeResult(
+                dividendsBySymbol = assets.associate { it.symbol!! to 1.0 },
+                recordsBySymbol = emptyMap(),
+                totalAnnualIncome = 7.0,
+                hasDividendData = true
+            )
+        }
+        val assets = listOf(asset("600900"))
+
+        runCatching { useCase.load(assets, forceRefresh = false, tag = "test") }
+
+        val recovered = useCase.load(assets, forceRefresh = false, tag = "test")
+        assertEquals("失败后应重新抓取，而不是复用失败的 deferred", 7.0, recovered.totalAnnualIncome, 0.0)
     }
 }

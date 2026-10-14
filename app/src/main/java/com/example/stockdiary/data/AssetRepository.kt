@@ -3,6 +3,7 @@ package com.example.stockdiary.data
 import android.annotation.SuppressLint
 import android.content.Context
 import com.example.stockdiary.utils.AppLogger
+import com.example.stockdiary.utils.StockCodeManager
 import androidx.room.withTransaction
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetDao
@@ -173,10 +174,16 @@ class AssetRepository private constructor(
         fee: Double = 0.0
     ): Asset {
         val now = System.currentTimeMillis()
+        // 存储边界强制统一代码形态：全项目约定存库的一律是 normalizeSymbol 的结果
+        // （600519 → sh600519、场外 000306 → 000306、fund_ 前缀原样保留）。
+        // 该函数幂等，调用方已规范化过也不会有变化；但少了这一道，
+        // 任何新调用方漏掉规范化就会写进形态不一致的代码 ——
+        // 同一标的被建成两条，或分红按另一种形态去查而永远抓不到（与 fund_ 前缀那次同源）。
+        val normalizedSymbol = StockCodeManager.normalizeSymbol(symbol)
 
         return StockDatabase.getInstance(context).withTransaction {
             // 按 symbol + account 查找：不同账户的同名持仓独立核算，不跨账户合并
-            val existingAsset = assetDao.getAssetBySymbolAndAccount(symbol, account)
+            val existingAsset = assetDao.getAssetBySymbolAndAccount(normalizedSymbol, account)
 
             val resultAsset = if (existingAsset != null) {
                 val newBalance = existingAsset.balance + balance
@@ -196,7 +203,7 @@ class AssetRepository private constructor(
                 val newAsset = Asset(
                     name = name,
                     type = assetType,
-                    symbol = symbol,
+                    symbol = normalizedSymbol,
                     account = account,
                     balance = balance,
                     // 新建成仓时同样把手续费摊入成本
@@ -208,7 +215,7 @@ class AssetRepository private constructor(
             }
 
             // 在同一事务中写入交易记录，失败时整体回滚
-            recordTransactionInternal(symbol, name, TransactionType.BUY.value, balance, price, fee)
+            recordTransactionInternal(normalizedSymbol, name, TransactionType.BUY.value, balance, price, fee)
             resultAsset
         }
     }

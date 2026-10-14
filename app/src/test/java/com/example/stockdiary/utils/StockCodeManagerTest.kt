@@ -191,6 +191,24 @@ class StockCodeManagerTest {
         assertEquals("fund_123456", StockCodeManager.normalizeSymbol("fund_123456"))
     }
 
+    @Test
+    fun `normalizeSymbol 幂等，重复调用结果不变`() {
+        // 存储边界（AssetRepository.addOrUpdateStockAsset）会对 symbol 兜底做一次规范化，
+        // 而调用方大多已经规范化过了 —— 这整条链依赖 normalizeSymbol 幂等，
+        // 否则兜底那一次会把已经正确的代码二次改写。
+        listOf(
+            "600519", "SH600519", "sh600519",   // 沪市：补前缀 / 已带前缀转小写
+            "000001", "sz000001",               // 深市
+            "007467", "010000",                 // 场外基金：保持纯数字
+            "fund_000001",                      // 场外前缀原样保留
+            "163415", "SH510050"                // LOF / ETF
+        ).forEach { raw ->
+            val once = StockCodeManager.normalizeSymbol(raw)
+            val twice = StockCodeManager.normalizeSymbol(once)
+            assertEquals("normalizeSymbol 不幂等：$raw → $once → $twice", once, twice)
+        }
+    }
+
     // ========== inferMarketPrefix ==========
 
     @Test

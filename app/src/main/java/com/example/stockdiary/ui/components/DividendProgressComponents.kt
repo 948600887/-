@@ -232,6 +232,17 @@ fun MonthlyCashFlowCard(
     }
 }
 
+/**
+ * 柱子之间的间隙。
+ *
+ * **柱子（Canvas）和下方月份标签（Row）必须共用同一个值**，并且用同一套布局算法：
+ * 每格宽度 =（总宽 − 间隙×11）÷ 12，文字在格内居中。
+ * 之前标签用 `Arrangement.SpaceBetween`，它是「按文字实际宽度均分剩余空间」——
+ * 而 "1"~"9" 与 "10"~"12" 字宽不同，格心就不等距，和柱子的等距格心对不上，
+ * 看起来就是「柱子和月份没对齐」。
+ */
+private val CHART_BAR_GAP = 4.dp
+
 @Composable
 private fun LegendItem(color: Color, label: String) {
     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -261,7 +272,8 @@ private fun MonthlyCashFlowChart(
 
         Canvas(modifier = Modifier.fillMaxWidth().height(96.dp)) {
             val count = monthly.size
-            val gap = 4.dp.toPx()
+            // 与下方月份标签共用同一个间隙值、同一套分格算法，否则两者会错位
+            val gap = CHART_BAR_GAP.toPx()
             val barWidth = (size.width - gap * (count - 1)) / count
             // 顶部留一点余量，柱子顶到边会显得挤
             val usableHeight = size.height - 14.dp.toPx()
@@ -292,17 +304,24 @@ private fun MonthlyCashFlowChart(
             }
         }
 
+        // 每格 weight(1f) + 固定 4.dp 间隙 = 与柱子完全相同的分格：
+        // 格宽 (总宽 − 间隙×11) ÷ 12，文字在格内居中，格心与柱子中心重合。
         Row(
-            modifier = Modifier.fillMaxWidth().align(Alignment.BottomCenter),
-            horizontalArrangement = Arrangement.SpaceBetween
+            modifier = Modifier.fillMaxWidth().align(Alignment.BottomCenter)
         ) {
-            monthly.forEach { month ->
-                Text(
-                    text = "${month.month}",
-                    fontSize = 10.sp,
-                    color = if (month.month == currentMonth) Primary else OnSurfaceVariant,
-                    fontWeight = if (month.month == currentMonth) FontWeight.Bold else FontWeight.Normal
-                )
+            monthly.forEachIndexed { index, month ->
+                if (index > 0) Spacer(modifier = Modifier.width(CHART_BAR_GAP))
+                Box(
+                    modifier = Modifier.weight(1f),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "${month.month}",
+                        fontSize = 10.sp,
+                        color = if (month.month == currentMonth) Primary else OnSurfaceVariant,
+                        fontWeight = if (month.month == currentMonth) FontWeight.Bold else FontWeight.Normal
+                    )
+                }
             }
         }
     }

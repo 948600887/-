@@ -275,4 +275,66 @@ class DividendProgressCalculatorTest {
         assertFalse(progress.hasData)
         assertNull(progress.nextPayout)
     }
+
+    // 下面三个用例用固定的 10/14 作「今天」：前后挪十几天都不会跨年，
+    // 避免用例在年末运行时因跨年而失效。
+    private val midYear: LocalDate = LocalDate.of(year, 10, 14)
+
+    @Test
+    fun `跨月到账的分红归到到账日所在月而不是除息日所在月`() {
+        // 3/28 除息、4/10 到账：钱是 4 月进来的，柱子必须画在 4 月。
+        // 改之前按除息日归月，这笔会画进 3 月 —— 整张节奏图前移、跨月的那笔还画错月份。
+        val assets = listOf(asset("红利LOF", "sh510880", 1000.0))
+        val records = mapOf(
+            "sh510880" to listOf(
+                record("$year-03-28", 2.0).copy(paymentDate = "$year-04-10")
+            )
+        )
+
+        val progress = DividendProgressCalculator.calculate(assets, records, midYear)
+
+        // 每十股 2 元 × 1000 份 ÷ 10 = 200
+        assertEquals(200.0, progress.yearReceived, 0.001)
+        assertEquals(0.0, progress.monthly[2].received, 0.001)   // 3 月：空的
+        assertEquals(200.0, progress.monthly[3].received, 0.001) // 4 月：200
+    }
+
+    @Test
+    fun `已除息但钱还没到账不算已收而算待到账`() {
+        // 10/04 除息、10/29 到账：今天 10/14 只是「有资格」，钱还没进来
+        val assets = listOf(asset("红利LOF", "sh510880", 1000.0))
+        val records = mapOf(
+            "sh510880" to listOf(
+                record("$year-10-04", 2.0).copy(paymentDate = "$year-10-29")
+            )
+        )
+
+        val progress = DividendProgressCalculator.calculate(assets, records, midYear)
+
+        assertEquals(0.0, progress.yearReceived, 0.001)           // 还没收到
+        assertEquals(0, progress.receivedCount)
+        assertEquals(0.0, progress.monthly[9].received, 0.001)    // 10 月已到账：0
+        assertEquals(200.0, progress.monthly[9].scheduled, 0.001) // 10 月待到账：200
+    }
+
+    @Test
+    fun `年末排定次年初到账的派息仍算下一笔但不画进今年柱图`() {
+        // 12/20 除息、次年 1/10 到账：柱图只有今年 12 个月，这笔不画进今年；
+        // 但它是钱下一次真正进来的日子，必须作为「下一笔」显示（数据源排定的真数据）
+        val assets = listOf(asset("红利LOF", "sh510880", 1000.0))
+        val records = mapOf(
+            "sh510880" to listOf(
+                record("$year-12-20", 2.0).copy(paymentDate = "${year + 1}-01-10")
+            )
+        )
+
+        val progress = DividendProgressCalculator.calculate(assets, records, midYear)
+
+        val next = progress.nextPayout
+        assertNotNull(next)
+        assertEquals("$year-12-20", next?.date)               // 资格日
+        assertEquals("${year + 1}-01-10", next?.displayDate)  // 界面显示到账日
+        assertFalse(next?.isEstimated ?: true)                // 排定的，不是推算
+        assertEquals(0.0, progress.monthly[0].scheduled, 0.001) // 今年 1 月柱图：不画
+    }
 }

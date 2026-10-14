@@ -16,10 +16,13 @@ import java.time.temporal.ChronoUnit
  *
  * 口径说明：
  * - 全年预计 = TTM（最近 12 个月）每十股分红 × 持仓数量 ÷ 10
- * - 今年已收 = 除息日落在「今年 1 月 1 日 ~ 今天」之间的记录 × 持仓数量 ÷ 10
- * - 月度柱图只认**今年**的记录：已过的是实收，未来的已排定派息是预计
- * - 下一笔：优先数据源已排定的未来派息；没有才按历史同期推算，
- *   且**最后一次派息距今超过 12 个月就不再推算**（见 [STALE_MONTHS]）
+ * - 今年已收 = **到账日**落在「今年 1 月 1 日 ~ 今天」之间的记录 × 持仓数量 ÷ 10
+ * - 月度柱图只认**今年**的记录：已过的是实收，未来的已排定派息是预计。
+ *   归月一律按**到账日**而非除息日——除息日只是「有资格拿」的日子，
+ *   钱真正进来通常晚 1~4 周；用除息日归月会把跨月的那笔画进上个月。
+ *   数据源没给发放日时才退回除息日。
+ * - 下一笔：优先数据源已排定的未来派息（**不限年份**，钱下一次进来就该显示）；
+ *   没有才按历史同期推算，且**最后一次派息距今超过 12 个月就不再推算**（见 [STALE_MONTHS]）
  */
 object DividendProgressCalculator {
 
@@ -120,26 +123,42 @@ object DividendProgressCalculator {
             // 已排定的未来派息：用于倒计时（数据源给的日期比推算更可信）
             // 三元组 = 除息日 / 到账日 / 金额
             var earliestScheduled: Triple<String, String?, Double>? = null
+            // 上面三元组的排序键（到账日，拿不到到账日时是除息日）。
+            // 单独存一份：否则会拿「到账日」去比三元组里存的「除息日」，
+            // 两个不是同一个东西，会挑错「下一笔」。
+            var earliestCashDate: String? = null
 
             records.forEach recordLoop@{ record ->
-                val date = record.exDividendDate.take(10)
-                if (date.length != 10) return@recordLoop
-                val month = date.substring(5, 7).toIntOrNull() ?: return@recordLoop
+                val exDate = record.exDividendDate.take(10)
+                if (exDate.length != 10) return@recordLoop
                 val amount = record.amountFor(balance)
 
+                // 归月与「已到账 / 待到账」一律按**到账日**算，不能按除息日。
+                // 除息日只决定「你有没有资格拿」，钱真正进来通常晚 1~4 周：
+                // 3/28 除息、4/10 到账的那笔，属于 4 月而不是 3 月。
+                // 原先按除息日归月，整张节奏图会前移，跨月的那笔还画错月份。
+                // 数据源没给发放日（如新浪）时退回除息日。
+                val payDate = record.paymentDate?.take(10)?.takeIf { it.length == 10 }
+                val cashDate = payDate ?: exDate
+                val month = cashDate.substring(5, 7).toIntOrNull() ?: return@recordLoop
+
                 when {
-                    date >= yearStart && date <= todayStr -> {
+                    cashDate >= yearStart && cashDate <= todayStr -> {
                         yearReceived += amount
                         receivedCount += 1
                         monthlyReceived[month] += amount
                     }
-                    date > todayStr && date.startsWith("$year-") -> {
-                        monthlyScheduled[month] += amount
-                        // 比谁更早，要比「到账日」——用户关心的是钱什么时候进来
-                        val payDate = record.paymentDate
-                        val sortKey = payDate ?: date
-                        if (earliestScheduled == null || sortKey < earliestScheduled!!.first) {
-                            earliestScheduled = Triple(date, payDate, amount)
+                    cashDate > todayStr -> {
+                        // 柱图只有今年 12 个月：跨年到账的那笔不画进今年的图
+                        if (cashDate.startsWith("$year-")) {
+                            monthlyScheduled[month] += amount
+                        }
+                        // 「下一笔」找的是钱下一次什么时候进来，与年份无关——
+                        // 年末排定、次年初到账的那笔恰恰最该显示。
+                        // 排序键与比较对象同为到账日，避免挑错。
+                        if (earliestCashDate == null || cashDate < earliestCashDate!!) {
+                            earliestCashDate = cashDate
+                            earliestScheduled = Triple(exDate, payDate, amount)
                         }
                     }
                 }

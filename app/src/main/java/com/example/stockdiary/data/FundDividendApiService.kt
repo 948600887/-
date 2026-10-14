@@ -53,9 +53,23 @@ class FundDividendApiService {
                     AppLogger.d("天天基金HTML长度: ${html.length}, 是否包含分红表格: ${html.contains("每10份分红") || html.contains("每份分红")}", TAG)
                     val records = parseDividendHtml(html, fundCode)
                     AppLogger.d("OkHttp 解析到 ${records.size} 条基金分红记录", TAG)
-                    if (records.isNotEmpty()) {
+
+                    // **请求成功就是拿到答案了，哪怕解析出 0 条。**
+                    //
+                    // 以前这里写成「解析到非空才返回」，于是「这只基金确实没有分红」
+                    // 被当成失败，掉到下面用 Jsoup 把**同一个 URL** 再抓一遍。
+                    // 实测：一次全量抓取里 525 次抓回 0 条、只有 77 次有数据（87% 是空的），
+                    // 而这些空页面上明写着「暂无分红信息!」—— 第二遍必然也是 0。
+                    // 等于每个空标的付双倍流量、多解析一遍 40KB 的 DOM，
+                    // 而且 Jsoup 那条路遇到非 2xx 会抛 HttpStatusException，
+                    // 诊断报告里那 106 次 HTTP 514（反爬限流）就是这么撞出来的。
+                    //
+                    // 唯一还值得换 Jsoup 重试的情况是**拿到的根本不是分红页**
+                    // （反爬页 / 错误页），判据见 [isRealDividendPage]。
+                    if (isRealDividendPage(html)) {
                         return@withContext Result.success(records)
                     }
+                    AppLogger.w("天天基金返回的页面不像分红页（可能是反爬页），换 Jsoup 重试", TAG)
                 } else {
                     AppLogger.w("OkHttp HTTP 请求失败: ${response.code}", TAG)
                 }
@@ -274,3 +288,19 @@ class FundDividendApiService {
         }
     }
 }
+
+/**
+ * 判断这页是不是**真的分红页**（而不是反爬页 / 错误页）。
+ *
+ * 判据是「有没有分红表的表头」，**不是**「有没有数据行」：
+ * 一只从没分过红的基金，页面上照样是
+ * 「年份 | 权益登记日 | 除息日 | 每10份分红 | 分红发放日」表头 + 一行「暂无分红信息!」
+ * —— **表头在、数据不在**。表头在就说明拿对了页面，此时 0 条是真实答案，
+ * 不该再抓一遍（以前就因为这里判错，87% 的空标的都被抓了第二遍，
+ * 还把接口往 HTTP 514 限流上撞）；表头不在才说明拿到了反爬页，值得换条路重试。
+ *
+ * 两个关键词都收：极端情况下页面可能只渲染出表头、或只渲染出空提示。
+ * 放在文件级而不是类里，是为了能直接 JVM 单测（不用构造带 OkHttp 客户端的实例）。
+ */
+internal fun isRealDividendPage(html: String): Boolean =
+    html.contains("权益登记日") || html.contains("暂无分红信息")

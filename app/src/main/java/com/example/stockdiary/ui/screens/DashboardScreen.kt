@@ -100,9 +100,15 @@ fun DashboardScreen(
     // 用列表做 key 的话，任何一次价格刷新都会让列表内容变化、效应重启、
     // 分红重算一遍——而分红跟价格半点关系都没有。代码集合不变就不该重算
     // （与持仓页 PortfolioScreen 同一套处理）。
-    val dividendSymbols = remember(assetsOnly) { assetsOnly.mapNotNull { it.symbol }.toSet() }
+    //
+    // key 必须用「集合内容」而不是 [Set] 对象身份：每次 assetsOnly 变化都会新建一个 Set，
+    // 内容相同身份也不同，若用对象当 key，刷新时每写一个标的 LaunchedEffect 就重启一次
+    // loadDividendIncome，纯属空转。这里排序后拼成稳定字符串，内容不变就不动。
+    val dividendSymbolsKey = remember(assetsOnly) {
+        assetsOnly.mapNotNull { it.symbol }.sorted().joinToString(",")
+    }
 
-    LaunchedEffect(dividendSymbols) {
+    LaunchedEffect(dividendSymbolsKey) {
         viewModel.loadDividendIncome(assetsOnly)
     }
 

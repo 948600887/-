@@ -154,13 +154,19 @@ internal fun PreviewTransactionRow(
             it != BrokerageImportService.ERR_SYMBOL_EMPTY
     }
 
+    // 稳定回调：用 remember 缓存同一实例，避免弹窗（UiState）一变就让所有可见行重排。
+    // 这几个回调都只依赖 viewModel（稳定）和 tx.rowNumber（本行不变），捕获它们即可。
+    val onToggleSkip = remember(tx.rowNumber) { { _: Boolean -> viewModel.toggleSkip(tx.rowNumber) } }
+    val onSymbolChange = remember(tx.rowNumber) { { s: String -> viewModel.updateSymbol(tx.rowNumber, s) } }
+    val onPickSuggestion = remember(tx.rowNumber) { { c: SymbolResolver.Candidate -> viewModel.updateSymbol(tx.rowNumber, c.symbol) } }
+
     Row(
         modifier = Modifier.fillMaxWidth().background(bg).padding(8.dp),
         verticalAlignment = Alignment.Top
     ) {
         androidx.compose.material3.Checkbox(
             checked = !tx.skip,
-            onCheckedChange = { viewModel.toggleSkip(tx.rowNumber) },
+            onCheckedChange = onToggleSkip,
             enabled = !hasHardError
         )
         Column(modifier = Modifier.padding(start = 8.dp).fillMaxWidth()) {
@@ -177,7 +183,7 @@ internal fun PreviewTransactionRow(
                 Spacer(Modifier.height(4.dp))
                 OutlinedTextField(
                     value = tx.symbol,
-                    onValueChange = { viewModel.updateSymbol(tx.rowNumber, it) },
+                    onValueChange = onSymbolChange,
                     label = {
                         Text(
                             if (tx.symbol.isBlank()) "证券代码（必填，如 515080）"
@@ -201,9 +207,7 @@ internal fun PreviewTransactionRow(
                     )
                 }
             }
-            PreviewSuggestions(suggestions = suggestions) { candidate ->
-                viewModel.updateSymbol(tx.rowNumber, candidate.symbol)
-            }
+            PreviewSuggestions(suggestions = suggestions, onPick = onPickSuggestion)
             if (tx.errors.isNotEmpty()) {
                 Text(
                     "异常: ${tx.errors.joinToString()}",

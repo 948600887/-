@@ -238,24 +238,31 @@ fun DividendDetailDialog(
                                             fontWeight = FontWeight.Bold,
                                             color = LossRed
                                         )
-                                        if (isEditMode) {
-                                            Spacer(modifier = Modifier.width(8.dp))
-                                            IconButton(
-                                                onClick = {
-                                                    editingRecord = record
-                                                    showEditDialog = true
-                                                },
-                                                modifier = Modifier.size(24.dp)
-                                            ) {
-                                                Icon(Icons.Filled.Edit, contentDescription = "编辑", tint = Primary, modifier = Modifier.size(16.dp))
-                                            }
-                                            IconButton(
-                                                onClick = { pendingDeleteRecord = record },
-                                                modifier = Modifier.size(24.dp)
-                                            ) {
-                                                Icon(Icons.Filled.Delete, contentDescription = "删除", tint = LossRed, modifier = Modifier.size(16.dp))
-                                            }
-                                        }
+                                if (isEditMode) {
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    // remember(record) 缓存 onClick：这段行是 items{} 里的 inline lambda，
+                                    // 弹窗自身状态（isEditMode / editingRecord 等）一变就会让所有可见行重排，
+                                    // 若不缓存，每个 IconButton 都拿到新 lambda 实例被迫重排。
+                                    // record 是 data class，同一条记录实例不变时 lambda 复用。
+                                    val editClick = remember(record) {
+                                        { editingRecord = record; showEditDialog = true }
+                                    }
+                                    val deleteClick = remember(record) {
+                                        { pendingDeleteRecord = record }
+                                    }
+                                    IconButton(
+                                        onClick = editClick,
+                                        modifier = Modifier.size(24.dp)
+                                    ) {
+                                        Icon(Icons.Filled.Edit, contentDescription = "编辑", tint = Primary, modifier = Modifier.size(16.dp))
+                                    }
+                                    IconButton(
+                                        onClick = deleteClick,
+                                        modifier = Modifier.size(24.dp)
+                                    ) {
+                                        Icon(Icons.Filled.Delete, contentDescription = "删除", tint = LossRed, modifier = Modifier.size(16.dp))
+                                    }
+                                }
                                     }
                                 }
                             }

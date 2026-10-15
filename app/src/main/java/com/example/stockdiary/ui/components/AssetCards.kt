@@ -91,7 +91,8 @@ fun MarketHeaderCard(
     assetCount: Int,
     totalValue: Double,
     isExpanded: Boolean,
-    onToggleExpand: () -> Unit
+    expandKey: String,
+    onToggleExpand: (String) -> Unit
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -99,7 +100,7 @@ fun MarketHeaderCard(
         colors = CardDefaults.cardColors(containerColor = PrimaryContainer)
     ) {
         Row(
-            modifier = Modifier.fillMaxWidth().clickable(onClick = onToggleExpand).padding(16.dp),
+            modifier = Modifier.fillMaxWidth().clickable(onClick = { onToggleExpand(expandKey) }).padding(16.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
@@ -143,7 +144,8 @@ fun AccountHeaderCard(
     assetCount: Int,
     totalValue: Double,
     isExpanded: Boolean,
-    onToggleExpand: () -> Unit
+    expandKey: String,
+    onToggleExpand: (String) -> Unit
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -151,7 +153,7 @@ fun AccountHeaderCard(
         colors = CardDefaults.cardColors(containerColor = SurfaceContainer)
     ) {
         Row(
-            modifier = Modifier.fillMaxWidth().clickable(onClick = onToggleExpand).padding(16.dp),
+            modifier = Modifier.fillMaxWidth().clickable(onClick = { onToggleExpand(expandKey) }).padding(16.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
@@ -174,11 +176,11 @@ fun AccountHeaderCard(
 @Composable
 fun StockAssetItem(
     asset: Asset,
-    onClick: () -> Unit,
-    onDividendClick: () -> Unit,
+    onClick: (Long) -> Unit,
+    onDividendClick: (Long) -> Unit,
     selectionMode: Boolean = false,
     isSelected: Boolean = false,
-    onToggleSelection: () -> Unit = {}
+    onToggleSelection: (Long) -> Unit
 ) {
     val isLiability = asset.type.isLiability
     val currentPrice = asset.currentPrice
@@ -186,7 +188,7 @@ fun StockAssetItem(
     val unitLabel = if (asset.type == AssetType.STOCK) "股" else "份"
 
     Card(
-        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick),
+        modifier = Modifier.fillMaxWidth().clickable(onClick = { onClick(asset.id) }),
         shape = RoundedCornerShape(8.dp),
         colors = CardDefaults.cardColors(
             containerColor = if (isSelected) PrimaryContainer.copy(alpha = 0.4f) else SurfaceContainerLow
@@ -200,7 +202,7 @@ fun StockAssetItem(
             if (selectionMode) {
                 Checkbox(
                     checked = isSelected,
-                    onCheckedChange = { onToggleSelection() },
+                    onCheckedChange = { onToggleSelection(asset.id) },
                     modifier = Modifier.padding(end = 8.dp)
                 )
             }
@@ -231,7 +233,7 @@ fun StockAssetItem(
             }
             // 分红入口只对能分红的类型有意义，负债点了也是空列表
             if (!selectionMode && !isLiability) {
-                IconButton(onClick = onDividendClick, modifier = Modifier.size(32.dp)) {
+                IconButton(onClick = { onDividendClick(asset.id) }, modifier = Modifier.size(32.dp)) {
                     Icon(Icons.Filled.Savings, contentDescription = "分红", tint = Primary, modifier = Modifier.size(18.dp))
                 }
             }

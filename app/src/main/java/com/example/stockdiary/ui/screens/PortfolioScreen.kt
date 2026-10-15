@@ -242,10 +242,16 @@ fun PortfolioScreen(
      *
      * 用列表做 key 的话，任何一次价格刷新都会让列表内容变化、效应重启、
      * 分红重抓一遍——而分红跟价格半点关系都没有。代码集合不变就不该重抓。
+     *
+     * 注意 key 用「集合内容」而不是 [Set] 对象身份：每次 assetsOnly 变化都会新建一个
+     * Set，内容相同身份也不同，若用对象当 key，刷新时每写一个标的 LaunchedEffect 就重启一次
+     * loadDividendIncome，纯属空转。这里排序后拼成稳定字符串，内容不变就不动。
      */
-    val dividendSymbols = remember(assetsOnly) { assetsOnly.mapNotNull { it.symbol }.toSet() }
+    val dividendSymbolsKey = remember(assetsOnly) {
+        assetsOnly.mapNotNull { it.symbol }.sorted().joinToString(",")
+    }
 
-    LaunchedEffect(dividendSymbols) {
+    LaunchedEffect(dividendSymbolsKey) {
         viewModel.loadDividendIncome(assetsOnly)
     }
 
@@ -289,6 +295,36 @@ fun PortfolioScreen(
         LaunchedEffect(errorMessage) {
             snackbarHostState.showSnackbar(errorMessage ?: "")
             viewModel.clearError()
+        }
+    }
+
+    // 稳定回调：以下 lambda 都用 remember 缓存同一实例，且只读「实时状态」
+    // （selectionMode / expandedAccounts / selectedIds 等都是 by-remember 属性，
+    // lambda 体内读取拿到的是调用时刻的最新值，无需作为 remember 依赖）。
+    // 这是持仓页流畅的关键：未变化的资产行必须能被 Compose 跳过重组——
+    // 否则每次全屏重组（刷新时 assets 流每写一个标的就 emit 一次）都会把所有可见行重排一遍，列表发抖。
+    val toggleExpand: (String) -> Unit = remember {
+        { key: String ->
+            if (!selectionMode) {
+                expandedAccounts = if (expandedAccounts.contains(key)) expandedAccounts - key else expandedAccounts + key
+            }
+        }
+    }
+    val onAssetClick: (Long) -> Unit = remember {
+        { id: Long ->
+            if (selectionMode) {
+                selectedIds = if (selectedIds.contains(id)) selectedIds - id else selectedIds + id
+            } else {
+                onNavigateToAssetDetail(id)
+            }
+        }
+    }
+    val onAssetDividendClick: (Long) -> Unit = remember {
+        { id: Long -> selectedDividendAsset = visibleAssets.firstOrNull { it.id == id } }
+    }
+    val onAssetToggleSelection: (Long) -> Unit = remember {
+        { id: Long ->
+            selectedIds = if (selectedIds.contains(id)) selectedIds - id else selectedIds + id
         }
     }
 
@@ -468,23 +504,16 @@ fun PortfolioScreen(
                 }
 
                 // 市场头 / 账户头 / 资产行都是 LazyColumn 的直接子项，滚动到哪组合到哪
-                items(rows, key = { it.key }) { row ->
+                // contentType 让 LazyLayout 在跨类型滚动时复用组合（否则头/资产交替处要重排）
+                items(rows, key = { it.key }, contentType = { it::class.qualifiedName }) { row ->
                     when (row) {
                         is PortfolioRow.MarketHeader -> MarketHeaderCard(
                             label = row.market.label,
                             assetCount = row.assetCount,
                             totalValue = row.totalValue,
                             isExpanded = expandedAccounts.contains(row.expandKey),
-                            onToggleExpand = {
-                                if (!selectionMode) {
-                                    expandedAccounts =
-                                        if (expandedAccounts.contains(row.expandKey)) {
-                                            expandedAccounts - row.expandKey
-                                        } else {
-                                            expandedAccounts + row.expandKey
-                                        }
-                                }
-                            }
+                            expandKey = row.expandKey,
+                            onToggleExpand = toggleExpand
                         )
 
                         is PortfolioRow.AccountHeader -> AccountHeaderCard(
@@ -492,45 +521,19 @@ fun PortfolioScreen(
                             assetCount = row.assetCount,
                             totalValue = row.totalValue,
                             isExpanded = expandedAccounts.contains(row.expandKey),
-                            onToggleExpand = {
-                                if (!selectionMode) {
-                                    expandedAccounts =
-                                        if (expandedAccounts.contains(row.expandKey)) {
-                                            expandedAccounts - row.expandKey
-                                        } else {
-                                            expandedAccounts + row.expandKey
-                                        }
-                                }
-                            }
+                            expandKey = row.expandKey,
+                            onToggleExpand = toggleExpand
                         )
 
                         is PortfolioRow.AssetRow -> {
                             val asset = row.asset
                             StockAssetItem(
                                 asset = asset,
-                                onClick = {
-                                    if (selectionMode) {
-                                        selectedIds =
-                                            if (selectedIds.contains(asset.id)) {
-                                                selectedIds - asset.id
-                                            } else {
-                                                selectedIds + asset.id
-                                            }
-                                    } else {
-                                        onNavigateToAssetDetail(asset.id)
-                                    }
-                                },
-                                onDividendClick = { selectedDividendAsset = asset },
+                                onClick = onAssetClick,
+                                onDividendClick = onAssetDividendClick,
                                 selectionMode = selectionMode,
                                 isSelected = selectedIds.contains(asset.id),
-                                onToggleSelection = {
-                                    selectedIds =
-                                        if (selectedIds.contains(asset.id)) {
-                                            selectedIds - asset.id
-                                        } else {
-                                            selectedIds + asset.id
-                                        }
-                                }
+                                onToggleSelection = onAssetToggleSelection
                             )
                         }
                     }

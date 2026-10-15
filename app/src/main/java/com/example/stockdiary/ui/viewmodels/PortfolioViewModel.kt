@@ -296,15 +296,20 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
             _isRefreshing.value = true
             AppLogger.i("批量同步开始：${assets.size} 项", "PortfolioVM")
             try {
-                AssetSyncManager.syncAllAssets(
+                val result = AssetSyncManager.syncAllAssets(
                     context = container.context,
                     repository = repository,
                     assets = assets,
                     onProgress = { },
                     forceRefresh = true
                 )
-                val result = incomeUseCase.load(assets, forceRefresh = false, tag = "PortfolioVM")
-                _estimatedAnnualDividend.value = result.totalAnnualIncome
+                // 批量同步同样可能被时间预算截断：勾选的标的只同步了一部分，
+                // 不提示的话用户会以为整批都更新了
+                if (result.truncatedByTimeLimit) {
+                    _errorMessage.value = "同步超时，已保留上次数据"
+                }
+                val income = incomeUseCase.load(assets, forceRefresh = false, tag = "PortfolioVM")
+                _estimatedAnnualDividend.value = income.totalAnnualIncome
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {

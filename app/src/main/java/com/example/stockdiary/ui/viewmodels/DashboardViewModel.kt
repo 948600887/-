@@ -228,6 +228,11 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
                 )
                 _syncProgress.value = lastProgress
                 _syncResult.value = result
+                // 「同步」按钮与「刷新」按钮走同一条链路，超时截断的提示不能只有一个有：
+                // 否则用户点同步看到「成功 X 项」，实际有一半标的没同步到
+                if (result.truncatedByTimeLimit) {
+                    _errorMessage.value = "同步超时，已保留上次数据"
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {

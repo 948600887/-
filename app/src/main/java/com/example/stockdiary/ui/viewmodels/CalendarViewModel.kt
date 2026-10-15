@@ -8,6 +8,7 @@ import com.example.stockdiary.data.DashboardPreferencesManager
 import com.example.stockdiary.data.DividendIncomeUseCase
 import com.example.stockdiary.data.DividendRecord
 import com.example.stockdiary.data.DividendRepository
+import com.example.stockdiary.data.SyncBudget
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.database.SnapshotDao
@@ -221,7 +222,16 @@ class CalendarViewModel(
             }
 
             val symbols = assets.mapNotNull { it.symbol }
-            dividendRepository.preFetchDividends(symbols, forceRefresh = forceRefresh)
+            // 必须带时间预算：不传就是不设限，而这条路径会强制重抓全部标的的分红
+            // （refresh() 传 forceRefresh=true）。每个请求最坏 15s 读超时 ×3 次重试，
+            // 十几个场外基金足以把日历页拖到两分多钟且无法中止 —— 和「点刷新卡死」
+            // 是同一类病，只是没那么致命。超时后跳过的标的不会写缓存，之后按需抓取
+            // 还会补上，不丢数据
+            dividendRepository.preFetchDividends(
+                symbols = symbols,
+                forceRefresh = forceRefresh,
+                timeBudgetMs = SyncBudget.MANUAL_SYNC_TIME_LIMIT_MS
+            )
 
             val dividendDates = mutableSetOf<LocalDate>()
             val dividends = mutableListOf<Pair<String, List<DividendRecord>>>()
@@ -280,7 +290,13 @@ class CalendarViewModel(
             }
 
             val symbols = assets.mapNotNull { it.symbol }
-            dividendRepository.preFetchDividends(symbols, forceRefresh = forceRefresh)
+            // 同 generateAssetCalendarData：不带预算就是不设限，弱网下能把日历页
+            // 拖到几分钟且无法中止。超时跳过的标的不写缓存，按需抓取会补上
+            dividendRepository.preFetchDividends(
+                symbols = symbols,
+                forceRefresh = forceRefresh,
+                timeBudgetMs = SyncBudget.MANUAL_SYNC_TIME_LIMIT_MS
+            )
 
             val dividendDates = mutableSetOf<LocalDate>()
             val dividends = mutableListOf<Pair<String, List<DividendRecord>>>()

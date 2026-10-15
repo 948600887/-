@@ -98,7 +98,7 @@ class CalendarViewModelTest {
         coEvery { snapshotDao.getAllSnapshotsSync() } returns emptyList()
         // 两个日历生成路径都会先调 preFetchDividends，必须显式打桩：
         // 只依赖 relaxed 会让它落到未初始化字段的真实实现上抛异常，日历生成整体失败
-        coEvery { divRepo.preFetchDividends(any(), any()) } returns Unit
+        coEvery { divRepo.preFetchDividends(any(), any(), any()) } returns Unit
         return CalendarViewModel(assetRepo, divRepo, snapshotDao, prefsMgr, useCase)
     }
 

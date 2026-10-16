@@ -4,6 +4,7 @@ import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.network.BinanceBalance
 import com.example.stockdiary.utils.AppLogger
+import com.example.stockdiary.utils.ExchangeRateManager
 import kotlin.math.abs
 
 /**
@@ -224,4 +225,81 @@ class BinanceImportService(
 internal fun baseAssetToSymbol(asset: String): String {
     val base = asset.uppercase().trim()
     return if (base.endsWith("USDT")) base else "${base}USDT"
+}
+
+/**
+ * 常见 USD 稳定币集合。
+ *
+ * 这些币锚定 1 美元，且币安上没有 `XXXUSDT` 自我交易对（USDT 本身就是报价币），
+ * 查价必然查空。估算市值时按 1.0 美元计，省掉一次注定取不到价的请求。
+ *
+ * 覆盖主流几个；认不出的稳定币会走「查价拿不到 → 保留」的兜底，不会被误滤。
+ */
+internal val BINANCE_STABLECOINS: Set<String> = setOf(
+    "USDT", "USDC", "BUSD", "TUSD", "DAI", "FDUSD",
+    "USDP", "USDD", "GUSD", "USDS", "SUSD"
+)
+
+/** 是否是 USD 稳定币（无需查价，按 1 美元计） */
+internal fun isStablecoin(asset: String): Boolean =
+    asset.uppercase().trim() in BINANCE_STABLECOINS
+
+/**
+ * 该资产用于查价的交易对；稳定币返回 null（无需查价）。
+ *
+ * 与 [estimatedValueCny] 内部的取价键保持一致：ViewModel 据此生成 getPrices
+ * 的请求列表，estimatedValueCny 据此查 priceOf，两边永不错位。
+ */
+internal fun priceKeyFor(asset: String): String? {
+    val base = asset.uppercase().trim()
+    return if (base in BINANCE_STABLECOINS) null else "${base}USDT"
+}
+
+/**
+ * 估算某持仓值多少人民币。
+ *
+ * @param asset   基础资产名（BTC / USDT…）
+ * @param total   持有量（free + locked）
+ * @param priceOf 按交易对取 USD 价；查不到返回 null
+ * @return 人民币市值；**估不出价时返回 null（不猜）**——调用方应保留而非丢弃
+ *
+ * 稳定币按 1.0 美元计；其余查 `priceOf(asset + "USDT")`。美元价经
+ * [ExchangeRateManager] 的 USD 汇率折算成人民币。
+ */
+internal fun estimatedValueCny(
+    asset: String,
+    total: Double,
+    priceOf: (String) -> Double?
+): Double? {
+    val key = priceKeyFor(asset)
+    val usdUnitPrice = if (key == null) 1.0 else priceOf(key) ?: return null
+    return total * usdUnitPrice * ExchangeRateManager.getRate("USD")
+}
+
+/**
+ * 按人民币市值过滤零碎资产。
+ *
+ * 保留两类：市值 ≥ [minValueCny] 的，以及**估不出价**的（priceOf 拿不到价）。
+ * 后者一律保留——取不到价可能是新币/冷门币，静默丢弃等于弄丢用户真实持仓，
+ * 宁可多导一条让人自己删，也不能凭空少一份。
+ *
+ * @return (保留的余额列表, 被过滤掉的数量)
+ */
+internal fun filterDustByValue(
+    balances: List<BinanceBalance>,
+    priceOf: (String) -> Double?,
+    minValueCny: Double
+): Pair<List<BinanceBalance>, Int> {
+    val kept = mutableListOf<BinanceBalance>()
+    var filtered = 0
+    for (balance in balances) {
+        val value = estimatedValueCny(balance.asset, balance.total, priceOf)
+        // value == null（估不出价）→ 保留；value < 阈值 → 滤掉
+        if (value == null || value >= minValueCny) {
+            kept.add(balance)
+        } else {
+            filtered++
+        }
+    }
+    return kept to filtered
 }

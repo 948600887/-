@@ -229,4 +229,86 @@ class BinanceImportServiceTest {
         assertEquals(0, result.inserted + result.updated + result.skipped)
         coVerify(exactly = 0) { repo.insertAssets(any()) }
     }
+
+    // ---------- 市值估算 estimatedValueCny ----------
+
+    @Test
+    fun 稳定币按1美元估算_无需查价() = runBlocking {
+        // USDT 锚定 1 美元，不查价；100 USDT × 1.0 × 7.25(USD汇率) = 725 元
+        val value = estimatedValueCny("USDT", 100.0) { null }
+        assertEquals(725.0, value!!, 1e-6)
+    }
+
+    @Test
+    fun 普通币按交易对价估算() = runBlocking {
+        val priceOf: (String) -> Double? = { if (it == "BTCUSDT") 67000.0 else null }
+        // 0.01 BTC × 67000 美元 × 7.25 = 4857.5 元
+        val value = estimatedValueCny("BTC", 0.01, priceOf)
+        assertEquals(4857.5, value!!, 1e-6)
+    }
+
+    @Test
+    fun 估不出价返回null而不猜() = runBlocking {
+        // 查不到价 → null（调用方应保留，不能猜个价把持仓滤掉）
+        val value = estimatedValueCny("NEWCOIN", 1000.0) { null }
+        assertEquals(null, value)
+    }
+
+    @Test
+    fun 查价键_稳定币为null_其它补USDT() {
+        assertEquals(null, priceKeyFor("USDT"))
+        assertEquals(null, priceKeyFor("usdc"))
+        assertEquals("BTCUSDT", priceKeyFor("BTC"))
+        assertEquals("SOLUSDT", priceKeyFor("sol"))
+        assertTrue(isStablecoin("busd"))
+        assertTrue(!isStablecoin("BTC"))
+    }
+
+    // ---------- 按市值过滤 filterDustByValue ----------
+
+    @Test
+    fun 低于阈值滤掉_高于阈值保留_无价保留_计数正确() = runBlocking {
+        val priceOf: (String) -> Double? = {
+            when (it) {
+                "BTCUSDT" -> 67000.0   // 0.01 → 4857.5 元，保留
+                "SHIBUSDT" -> 0.00001  // 100000 → 7.25 元，低于 10 滤掉
+                else -> null           // 查不到
+            }
+        }
+        val balances = listOf(
+            balance("BTC", free = 0.01),
+            balance("SHIB", free = 100000.0),
+            balance("NEWCOIN", free = 500.0)   // 估不出价 → 一律保留
+        )
+
+        val (kept, filtered) = filterDustByValue(balances, priceOf, minValueCny = 10.0)
+
+        assertEquals(1, filtered)
+        assertEquals(setOf("BTC", "NEWCOIN"), kept.map { it.asset }.toSet())
+    }
+
+    @Test
+    fun 取不到价时全保留_不过滤() = runBlocking {
+        // 模拟 getPrices 失败：priceOf 全 null → 一个都滤不掉，绝不因取价挂掉丢持仓
+        val balances = listOf(
+            balance("BTC", free = 0.01),
+            balance("SHIB", free = 100000.0)
+        )
+        val (kept, filtered) = filterDustByValue(balances, { null }, minValueCny = 10.0)
+
+        assertEquals(0, filtered)
+        assertEquals(balances.size, kept.size)
+    }
+
+    @Test
+    fun 阈值为0时全部保留() = runBlocking {
+        val priceOf: (String) -> Double? = { 67000.0 }
+        val (kept, filtered) = filterDustByValue(
+            listOf(balance("BTC", free = 0.0001)),  // 市值很小但 > 0
+            priceOf,
+            minValueCny = 0.0
+        )
+        assertEquals(0, filtered)
+        assertEquals(1, kept.size)
+    }
 }

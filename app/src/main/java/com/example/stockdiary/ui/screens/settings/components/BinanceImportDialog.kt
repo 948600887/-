@@ -53,6 +53,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
@@ -62,7 +63,9 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.stockdiary.data.BinanceImportService
+import com.example.stockdiary.data.estimatedValueCny
 import com.example.stockdiary.di.AppContainer
+import com.example.stockdiary.ui.dialogs.sanitizeDecimalInput
 import com.example.stockdiary.ui.theme.ProfitGreen
 import com.example.stockdiary.ui.viewmodels.BinanceImportViewModel
 import com.example.stockdiary.utils.format
@@ -249,6 +252,27 @@ private fun BinanceInputStep(
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
                 keyboardActions = KeyboardActions(onDone = { focusManager.clearFocus() })
             )
+            Spacer(Modifier.height(12.dp))
+            OutlinedTextField(
+                value = state.thresholdText,
+                // 只留数字与一个小数点：挡掉键盘能打出来但无意义的输入
+                onValueChange = { viewModel.onThresholdChange(sanitizeDecimalInput(it)) },
+                label = { Text("零碎资产阈值（¥）") },
+                placeholder = { Text("10") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+                keyboardOptions = KeyboardOptions(
+                    keyboardType = KeyboardType.Decimal,
+                    imeAction = ImeAction.Done
+                ),
+                keyboardActions = KeyboardActions(onDone = { focusManager.clearFocus() }),
+                supportingText = {
+                    Text(
+                        "忽略市值低于该金额（人民币）的资产，默认 ¥10；填 0 表示不过滤",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+            )
 
             Spacer(Modifier.height(20.dp))
             Button(
@@ -302,6 +326,8 @@ private fun BinancePreviewStep(
 ) {
     val preview = state.preview ?: return
     val focusManager = LocalFocusManager.current
+    // 同一份 priceOf 既用于「是否被过滤」也用于每行市值显示
+    val priceOf: (String) -> Double? = { state.prices[it] }
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -336,6 +362,33 @@ private fun BinancePreviewStep(
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                }
+            }
+        }
+
+        // 有资产被市值阈值挡掉时明确告知数量——静默丢持仓最伤信任
+        if (state.filteredCount > 0) {
+            item {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.4f)
+                    )
+                ) {
+                    Row(modifier = Modifier.padding(12.dp)) {
+                        Icon(
+                            Icons.Default.Info,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.tertiary,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            "已过滤 ${state.filteredCount} 个市值低于 " +
+                                "¥${state.minValueCny.toInt()} 的零碎资产",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
                 }
             }
         }
@@ -383,13 +436,16 @@ private fun BinancePreviewStep(
         }
 
         items(preview.items, key = { it.symbol }) { item ->
-            BinancePreviewItemRow(item)
+            BinancePreviewItemRow(item, priceOf)
         }
     }
 }
 
 @Composable
-private fun BinancePreviewItemRow(item: BinanceImportService.PreviewItem) {
+private fun BinancePreviewItemRow(
+    item: BinanceImportService.PreviewItem,
+    priceOf: (String) -> Double?
+) {
     val (statusText, statusColor) = when (item.status) {
         BinanceImportService.ItemStatus.NEW -> "新增" to ProfitGreen
         BinanceImportService.ItemStatus.UPDATE ->
@@ -397,6 +453,9 @@ private fun BinancePreviewItemRow(item: BinanceImportService.PreviewItem) {
                 MaterialTheme.colorScheme.tertiary
         BinanceImportService.ItemStatus.UNCHANGED -> "未变" to MaterialTheme.colorScheme.onSurfaceVariant
     }
+
+    // 估算人民币市值：拿不到价显示「—」（这类资产会被保留，不会被过滤）
+    val valueCny = estimatedValueCny(item.name, item.quantity, priceOf)
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -419,6 +478,11 @@ private fun BinancePreviewItemRow(item: BinanceImportService.PreviewItem) {
             }
             Column(horizontalAlignment = Alignment.End) {
                 Text(item.quantity.format(4), fontWeight = FontWeight.Bold)
+                Text(
+                    valueCny?.let { "≈ ¥${it.format(2)}" } ?: "市值 —",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
                 Text(statusText, style = MaterialTheme.typography.bodySmall, color = statusColor)
             }
         }

@@ -7,6 +7,8 @@ import androidx.lifecycle.viewModelScope
 import com.example.stockdiary.data.AssetRepository
 import com.example.stockdiary.data.BinanceCredentialsManager
 import com.example.stockdiary.data.BinanceImportService
+import com.example.stockdiary.data.filterDustByValue
+import com.example.stockdiary.data.priceKeyFor
 import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.di.AppContainer
 import com.example.stockdiary.network.BinanceAccountAPI
@@ -50,11 +52,24 @@ class BinanceImportViewModel(
         /** 库里已有的账户名，供界面做快捷选择 */
         val knownAccounts: List<String> = emptyList(),
         val result: BinanceImportService.CommitResult? = null,
-        val error: String? = null
+        val error: String? = null,
+        /**
+         * 零碎资产阈值的原始输入（人民币）。存文本而非 Double：
+         * 数字输入框编辑中途会出现 "10." 这类非法值，文本权威、按需解析更稳。
+         */
+        val thresholdText: String = DEFAULT_THRESHOLD_CNY.toInt().toString(),
+        /** 本次拉取用到的交易对最新价，供预览行估算市值 */
+        val prices: Map<String, Double> = emptyMap(),
+        /** 本次拉取因市值低于阈值被过滤掉的资产数量 */
+        val filteredCount: Int = 0
     ) {
         /** 密钥都填了才能拉取 */
         val canFetch: Boolean
             get() = apiKey.isNotBlank() && apiSecret.isNotBlank() && !fetching
+
+        /** 生效的市值阈值（人民币）。输入为空/非法时回落到默认值 */
+        val minValueCny: Double
+            get() = thresholdText.toDoubleOrNull() ?: DEFAULT_THRESHOLD_CNY
     }
 
     private val _uiState = MutableStateFlow(UiState())
@@ -92,6 +107,10 @@ class BinanceImportViewModel(
         _uiState.update { it.copy(account = value) }
     }
 
+    fun onThresholdChange(value: String) {
+        _uiState.update { it.copy(thresholdText = value) }
+    }
+
     /**
      * 拉取账户余额 → 与库里对齐 → 进预览。
      *
@@ -125,30 +144,53 @@ class BinanceImportViewModel(
                 // 拉到了再存密钥：见方法注释
                 credentialsManager.save(current.apiKey, current.apiSecret)
 
+                // 批量取公开价，用于按人民币市值过滤零碎。
+                // 交易对列表从余额生成（稳定币无需查价）；取价失败降级为空 map
+                // → priceOf 全 null → 一个都滤不掉、全量导入，绝不阻断导入
+                val pairs = balances.mapNotNull { priceKeyFor(it.asset) }.distinct()
+                val priceMap = BinanceAccountAPI.getPrices(pairs)
+                val priceOf: (String) -> Double? = { priceMap[it] }
+
+                // 按市值过滤零碎（阈值用户可设，默认 ¥10）；估不出价的一律保留
+                val (kept, filteredCount) = filterDustByValue(balances, priceOf, current.minValueCny)
+
                 // 只取库里已有的加密货币资产来对齐：导入只可能命中这一类
                 val existing = repository.getAssetsByTypes(listOf(AssetType.CRYPTO))
-                val preview = service.buildPreview(balances, existing)
+                val preview = service.buildPreview(kept, existing)
 
                 AppLogger.i(
-                    "币安账户拉取：${balances.size} 项 → 合并后 ${preview.items.size} 条",
+                    "币安账户拉取：${balances.size} 项 → 市值过滤 $filteredCount → 合并后 ${preview.items.size} 条",
                     "BinanceImportVM"
                 )
 
                 if (preview.items.isEmpty()) {
-                    // 滤完 dust 后一条不剩：账户是空的（或全是零头）。
-                    // 停在 INPUT 并说清楚，别给一个空预览页让用户以为出错了
+                    // 滤完一条不剩：账户为空、只剩dust、或全被市值阈值挡掉。
+                    // 停在 INPUT 说清楚原因，别给个空预览页让用户以为出错了
+                    val hint = if (filteredCount > 0) {
+                        "有 $filteredCount 项市值低于 ¥${current.minValueCny.toInt()} 被过滤，可调低阈值重试。"
+                    } else {
+                        "可能账户为空或只剩dust零头。"
+                    }
                     _uiState.update { state ->
                         state.copy(
                             fetching = false,
                             step = Step.INPUT,
-                            error = "账户里没有可导入的持仓（可能只有dust零头或为空）。"
+                            error = "账户里没有可导入的持仓。$hint",
+                            filteredCount = 0,
+                            prices = emptyMap()
                         )
                     }
                     return@launch
                 }
 
                 _uiState.update { state ->
-                    state.copy(fetching = false, step = Step.PREVIEW, preview = preview)
+                    state.copy(
+                        fetching = false,
+                        step = Step.PREVIEW,
+                        preview = preview,
+                        filteredCount = filteredCount,
+                        prices = priceMap
+                    )
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -199,9 +241,16 @@ class BinanceImportViewModel(
                 fetching = false,
                 preview = null,
                 result = null,
-                error = null
+                error = null,
+                filteredCount = 0,
+                prices = emptyMap()
             )
         }
+    }
+
+    companion object {
+        /** 零碎资产市值阈值默认值（人民币） */
+        const val DEFAULT_THRESHOLD_CNY = 10.0
     }
 
     class Factory(

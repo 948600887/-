@@ -5,9 +5,11 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.Request
+import org.json.JSONArray
 import org.json.JSONObject
 import java.net.ConnectException
 import java.net.SocketTimeoutException
+import java.net.URLEncoder
 import java.net.UnknownHostException
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
@@ -54,6 +56,17 @@ object BinanceAccountAPI {
 
     /** 账户查询接口。BASE_URL 与 [BinanceAPI] 保持一致 */
     private const val ACCOUNT_URL = "https://api.binance.com/api/v3/account"
+
+    /** 批量最新价接口（公开免签）。用于导入时估算市值、按价值过滤零碎 */
+    private const val PRICE_URL = "https://api.binance.com/api/v3/ticker/price"
+
+    /**
+     * 批量取价每批的交易对个数上限。
+     *
+     * symbols 是 JSON 数组且要整体 URL 编码，一批太多 URL 会超出服务端/中间件
+     * 的长度限制。真实账户的去重交易对通常远少于此数，分片主要是防御性的。
+     */
+    private const val PRICE_BATCH = 80
 
     /**
      * recvWindow：请求有效期窗口（毫秒）。
@@ -149,6 +162,60 @@ object BinanceAccountAPI {
         }
 
     /**
+     * 批量取最新价（公开免签）。
+     *
+     * 用于导入时估算各持仓的人民币市值，好按价值过滤零碎。走公开的
+     * `/ticker/price?symbols=[...]`，无需 API Key，也不带任何密钥信息。
+     *
+     * ## 为什么失败不抛、而是返回空 Map
+     *
+     * 取价只是「按市值过滤」的增强：取不到价就不过滤、全量导入，
+     * 绝不能因为一次公开行情请求挂了就让整个导入失败——余额才是关键数据。
+     * 所以内部吞掉异常，尽量返回已取到的部分。
+     *
+     * ## 日志口径
+     *
+     * 只记批次大小，不记 symbols 内容——那等于把用户的持仓构成写进可分享日志。
+     *
+     * @param pairs 交易对列表（如 BTCUSDT）
+     * @return Map<交易对, 最新价>；失败/无数据时返回空 Map（调用方据此降级为不过滤）
+     */
+    suspend fun getPrices(pairs: List<String>): Map<String, Double> = withContext(Dispatchers.IO) {
+        if (pairs.isEmpty()) return@withContext emptyMap()
+        val result = mutableMapOf<String, Double>()
+        try {
+            pairs.distinct().chunked(PRICE_BATCH).forEach { batch ->
+                // symbols 是 JSON 数组字符串，整体 URL 编码后作 query 值
+                val symbolsJson = batch.joinToString(prefix = "[", postfix = "]") { "\"$it\"" }
+                val encoded = URLEncoder.encode(symbolsJson, "UTF-8")
+                val url = "$PRICE_URL?symbols=$encoded"
+
+                AppLogger.d("GET /ticker/price (batch=${batch.size})", "BinanceAccountAPI")
+
+                val request = Request.Builder()
+                    .url(url)
+                    .addHeader("User-Agent", "Mozilla/5.0")
+                    .build()
+
+                val response = client.newCall(request).execute()
+                response.use { resp ->
+                    // 单批失败只跳过这一批，不影响已取到的其它批——降级而非整体失败
+                    if (!resp.isSuccessful) return@forEach
+                    val body = resp.body?.string() ?: return@forEach
+                    parsePrices(body).forEach { (symbol, price) -> result[symbol] = price }
+                }
+            }
+            result
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // 只记异常类型，不记 message（可能含 URL）；返回已取到的部分（通常为空）
+            AppLogger.e("批量取价失败: ${e::class.simpleName}", e, "BinanceAccountAPI")
+            result
+        }
+    }
+
+    /**
      * 把币安的错误响应转成带 code+msg 的异常。
      *
      * body 形如 `{"code":-2015,"msg":"Invalid API-key, IP, or permissions for action."}`。
@@ -197,5 +264,25 @@ object BinanceAccountAPI {
             )
         }
         return result
+    }
+
+    /**
+     * 解析批量最新价响应：`[{"symbol":"BTCUSDT","price":"67000.00"},...]`。
+     *
+     * price 同样是字符串。价格为 0 或解析不了的行跳过——0 价没有估算意义，
+     * 混进 map 会让对应资产被当成「估得出价但市值为 0」而误滤掉。
+     */
+    private fun parsePrices(body: String): Map<String, Double> {
+        val arr = JSONArray(body)
+        val map = mutableMapOf<String, Double>()
+        for (i in 0 until arr.length()) {
+            val obj = arr.getJSONObject(i)
+            val symbol = obj.optString("symbol")
+            val price = obj.optString("price").toDoubleOrNull()
+            if (symbol.isNotBlank() && price != null && price > 0.0) {
+                map[symbol] = price
+            }
+        }
+        return map
     }
 }

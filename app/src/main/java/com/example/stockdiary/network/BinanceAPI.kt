@@ -94,7 +94,7 @@ object BinanceAPI {
         }
     }
     
-    private fun formatSymbol(symbol: String): String {
+    internal fun formatSymbol(symbol: String): String {
         val cleanSymbol = symbol.uppercase().replace(" ", "").replace("-", "")
         
         return when {

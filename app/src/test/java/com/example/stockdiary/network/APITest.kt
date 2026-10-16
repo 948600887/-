@@ -96,38 +96,45 @@ class FundAPIParseTest {
 }
 
 class BinanceAPISymbolTest {
-    
-    @Test
-    fun `formatSymbol adds USDT for plain symbols`() {
-        val formatted = formatSymbolForTest("BTC")
-        assertTrue(formatted.endsWith("USDT"))
-    }
-    
-    @Test
-    fun `formatSymbol keeps USDT suffix`() {
-        val formatted = formatSymbolForTest("BTCUSDT")
-        assertEquals("BTCUSDT", formatted)
-    }
-    
-    @Test
-    fun `formatSymbol handles lowercase`() {
-        val formatted = formatSymbolForTest("ethusdt")
-        assertEquals("ETHUSDT", formatted)
-    }
-    
-    private fun formatSymbolForTest(symbol: String): String {
-        val cleanSymbol = symbol.uppercase().replace(" ", "").replace("-", "")
 
-        return when {
-            cleanSymbol.endsWith("USDT") -> cleanSymbol
-            cleanSymbol.endsWith("BTC") && cleanSymbol != "BTC" -> cleanSymbol
-            cleanSymbol.endsWith("ETH") && cleanSymbol != "ETH" -> cleanSymbol
-            cleanSymbol.endsWith("CNY") -> {
-                val base = cleanSymbol.removeSuffix("CNY")
-                "${base}USDT"
-            }
-            else -> "${cleanSymbol}USDT"
-        }
+    @Test
+    fun `formatSymbol keeps USDT pair unchanged`() {
+        assertEquals("BTCUSDT", BinanceAPI.formatSymbol("BTCUSDT"))
+    }
+
+    @Test
+    fun `formatSymbol normalizes lowercase USDT pair`() {
+        assertEquals("ETHUSDT", BinanceAPI.formatSymbol("ethusdt"))
+    }
+
+    @Test
+    fun `formatSymbol appends USDT to plain base symbol`() {
+        assertEquals("SOLUSDT", BinanceAPI.formatSymbol("SOL"))
+    }
+
+    @Test
+    fun `formatSymbol converts USD suffix to USDT pair`() {
+        assertEquals("BTCUSDT", BinanceAPI.formatSymbol("BTCUSD"))
+    }
+
+    @Test
+    fun `formatSymbol converts CNY suffix to USDT pair`() {
+        assertEquals("BTCUSDT", BinanceAPI.formatSymbol("BTCCNY"))
+    }
+
+    @Test
+    fun `formatSymbol strips spaces and dashes`() {
+        assertEquals("BTCUSDT", BinanceAPI.formatSymbol("btc-usdt"))
+    }
+
+    @Test
+    fun `formatSymbol keeps BTC-quote trade pair`() {
+        assertEquals("ADABTC", BinanceAPI.formatSymbol("ADABTC"))
+    }
+
+    @Test
+    fun `formatSymbol keeps ETH-quote trade pair`() {
+        assertEquals("XRPETH", BinanceAPI.formatSymbol("XRPETH"))
     }
 }
 

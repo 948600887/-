@@ -6,6 +6,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.Request
 import org.json.JSONObject
+import java.net.ConnectException
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 
@@ -130,9 +133,18 @@ object BinanceAccountAPI {
                 // 协程取消必须原样抛回，不能被 catch(Exception) 吞成失败结果
                 throw e
             } catch (e: Exception) {
-                // 网络异常等。message 只描述网络层失败，不含任何密钥信息
-                AppLogger.e("拉取币安账户失败: ${e.message}", e, "BinanceAccountAPI")
-                Result.failure(e)
+                // 连接类失败（连不上 / 超时 / 域名解析不了）换成一句人话。
+                // OkHttp 的原始 message 形如 "failed to connect to api.binance.com/2001:… (port 443)
+                // from /2409:… (port 48944) after 10000ms"——既看不懂，又把设备 IP/端口
+                // 抖给用户。币安国际站在部分网络/地区连不上是常态，这句提示更对症。
+                // 日志也只记异常类型，不记 e.message（同样含 IP），避免地址写进可分享的日志。
+                val userFacing = if (e is ConnectException || e is SocketTimeoutException || e is UnknownHostException) {
+                    Exception("连不上币安服务器，可能被网络或地区限制，请检查网络或代理后重试")
+                } else {
+                    e
+                }
+                AppLogger.e("拉取币安账户失败: ${e::class.simpleName}", userFacing, "BinanceAccountAPI")
+                Result.failure(userFacing)
             }
         }
 

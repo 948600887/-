@@ -156,15 +156,24 @@ object BinanceAccountAPI {
      * 必须带给用户；解析不出结构化字段时退回 HTTP 状态码。
      */
     private fun binanceError(body: String, httpCode: Int): Exception {
+        // 地区限制：币安按条款 "b. Eligibility" 挡部分地区/IP，常返回 451 或
+        // {"code":0,"msg":"Service unavailable from a restricted location..."}。
+        // 只给英文原文用户不知道该干嘛，补一句可操作的中文——换允许地区的代理节点即可。
+        val geoHint = "（当前代理/VPN 节点所在地区被币安限制，更换到允许地区的节点后重试）"
         return try {
             val obj = JSONObject(body)
             val code = obj.optInt("code", httpCode)
             val msg = obj.optString("msg").ifBlank { "HTTP $httpCode" }
-            Exception("币安拒绝请求（$code）：$msg")
+            val isGeo = httpCode == 451 ||
+                msg.contains("restricted location", true) ||
+                msg.contains("Eligibility", true) ||
+                msg.contains("Service unavailable", true)
+            Exception("币安拒绝请求（$code）：$msg" + if (isGeo) geoHint else "")
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Exception("币安请求失败（HTTP $httpCode）")
+            // 非 JSON body（451 有时返回纯文本/HTML）：按状态码兜底，451 同样给地区提示
+            Exception("币安请求失败（HTTP $httpCode）" + if (httpCode == 451) geoHint else "")
         }
     }
 

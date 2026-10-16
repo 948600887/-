@@ -31,27 +31,32 @@ import kotlinx.coroutines.launch
 private const val LIABILITY_GROUP_KEY = "负债"
 
 /**
- * 持仓的一级分组：场内 / 场外 / 其他。
+ * 持仓的一级分组：场外 / 场内 / 加密货币 / 其他。
  *
- * 依据是 **symbol 形态**，不是账户名——账户名是用户自己填的，
+ * 一级分组优先按**资产类型与 symbol 形态**判定，不是账户名——账户名是用户自己填的，
  * 两次导入填同一个名字就会混在一起，那是不可靠的。
  *
+ * - `AssetType.CRYPTO`：加密货币（币安导入的 BTC/ETH…，代码形如 BTCUSDT）
  * - `fund_` 前缀：基金E账户导入的**场外**份额（按净值成交）
  * - `sh`/`sz`/`bj` 前缀：一码通导入的**场内**持仓（股票、ETF、LOF、REITs）
- * - 没有代码：存款、加密货币等
+ * - 没有代码：存款等
  */
 private enum class HoldingsMarket(val label: String) {
     EXCHANGE("场内"),
     OTC("场外"),
+    CRYPTO("加密货币"),
     OTHER("其他");
 
     companion object {
         /** 展示顺序：场外（新导入的那批）放前面，其余按原顺序 */
-        val displayOrder = listOf(OTC, EXCHANGE, OTHER)
+        val displayOrder = listOf(OTC, EXCHANGE, CRYPTO, OTHER)
     }
 }
 
 private fun marketOf(asset: Asset): HoldingsMarket {
+    // 加密货币必须优先按**类型**判：币安导入的代码形如 BTCUSDT，只按 symbol 形态会落进
+    // 「场内」的 else 分支——加密不是场内证券，得单列一组。
+    if (asset.type == AssetType.CRYPTO) return HoldingsMarket.CRYPTO
     val symbol = asset.symbol
     return when {
         symbol.isNullOrBlank() -> HoldingsMarket.OTHER

@@ -140,7 +140,8 @@ fun PortfolioScreen(
     var showAddDialog by remember { mutableStateOf(false) }
     var showSearchDialog by remember { mutableStateOf(false) }
     var selectedDividendAsset by remember { mutableStateOf<Asset?>(null) }
-    var expandedAccounts by remember { mutableStateOf<Set<String>>(emptySet()) }
+    // 展开态提升到 ViewModel：跨标签页存活，切走再回来保持用户的展开/收起
+    val expandedAccounts by viewModel.expandedGroups.collectAsStateWithLifecycle()
     var selectionMode by remember { mutableStateOf(false) }
     var selectedIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
     var showMoveAccountDialog by remember { mutableStateOf(false) }
@@ -273,27 +274,16 @@ fun PortfolioScreen(
         }.toSet()
     }
 
-    // null = 还没初始化过（首屏）。初始化后只自动展开「新出现」的分组，
-    // 用户手动收起的分组不会再被强行展开。
-    var initializedGroups by remember { mutableStateOf<Set<String>?>(null) }
-
     // 处在批量选择态时，返回键应当先退出选择态，而不是直接退出 App
     BackHandler(enabled = selectionMode) {
         selectionMode = false
         selectedIds = emptySet()
     }
 
+    // 分组展开态在 ViewModel（expandedGroups）：首次全展开，之后只自动展开"新出现"的
+    // 分组，用户手动收起的切走再回来也保持收起（不再被首屏逻辑强行展开）。
     LaunchedEffect(groupKeys) {
-        val current = initializedGroups
-        if (current == null) {
-            expandedAccounts = groupKeys
-        } else {
-            val added = groupKeys - current
-            if (added.isNotEmpty()) {
-                expandedAccounts = expandedAccounts + added
-            }
-        }
-        initializedGroups = groupKeys
+        viewModel.syncGroups(groupKeys)
     }
 
     if (errorMessage != null) {
@@ -304,15 +294,13 @@ fun PortfolioScreen(
     }
 
     // 稳定回调：以下 lambda 都用 remember 缓存同一实例，且只读「实时状态」
-    // （selectionMode / expandedAccounts / selectedIds 等都是 by-remember 属性，
-    // lambda 体内读取拿到的是调用时刻的最新值，无需作为 remember 依赖）。
-    // 这是持仓页流畅的关键：未变化的资产行必须能被 Compose 跳过重组——
-    // 否则每次全屏重组（刷新时 assets 流每写一个标的就 emit 一次）都会把所有可见行重排一遍，列表发抖。
+    // （selectionMode / selectedIds 等都是 by-remember 属性，lambda 体内读取拿到的是
+    // 调用时刻的最新值；viewModel.toggleGroup 本身稳定）。这是持仓页流畅的关键：
+    // 未变化的资产行必须能被 Compose 跳过重组——否则每次全屏重组（刷新时 assets 流
+    // 每写一个标的就 emit 一次）都会把所有可见行重排一遍，列表发抖。
     val toggleExpand: (String) -> Unit = remember {
         { key: String ->
-            if (!selectionMode) {
-                expandedAccounts = if (expandedAccounts.contains(key)) expandedAccounts - key else expandedAccounts + key
-            }
+            if (!selectionMode) viewModel.toggleGroup(key)
         }
     }
     val onAssetClick: (Long) -> Unit = remember {

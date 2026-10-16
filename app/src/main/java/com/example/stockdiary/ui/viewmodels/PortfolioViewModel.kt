@@ -84,6 +84,37 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
     )
     val preferences: StateFlow<DashboardPreferences> = _preferences.asStateFlow()
 
+    /**
+     * 持仓页各分组的展开/收起状态。
+     *
+     * 提升到 ViewModel 而非 composable 的 remember：后者只活在这个页面的组合期，
+     * 用户切到别的标签页 → 页面退出组合 → remember 记忆被清；再回来时「首屏全展开」
+     * 逻辑会把用户手动收起的分组重新展开（梦瑶反馈"折叠了退出再进又展开"）。
+     * VM 挂在 Activity 作用域、跨标签页存活，收起状态因此留得住。
+     */
+    private val _expandedGroups = MutableStateFlow<Set<String>>(emptySet())
+    val expandedGroups: StateFlow<Set<String>> = _expandedGroups.asStateFlow()
+
+    /** 已见过的分组 key，用于「只自动展开新出现的分组」 */
+    private var knownGroups: Set<String> = emptySet()
+    private var groupsInitialized = false
+
+    /** 页面带入当前分组 key 时调用：首次全展开，之后只补"新出现"的分组，不动用户已收起的 */
+    fun syncGroups(currentKeys: Set<String>) {
+        if (!groupsInitialized) {
+            _expandedGroups.value = currentKeys
+            groupsInitialized = true
+        } else {
+            val added = currentKeys - knownGroups
+            if (added.isNotEmpty()) _expandedGroups.update { it + added }
+        }
+        knownGroups = currentKeys
+    }
+
+    fun toggleGroup(key: String) {
+        _expandedGroups.update { if (key in it) it - key else it + key }
+    }
+
     private var hasLoadedDividend = false
 
     init {

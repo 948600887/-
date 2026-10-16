@@ -163,6 +163,7 @@ fun AssetDetailScreen(
                                 Text("基本信息", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
                                 AssistChip(
                                     onClick = { },
+                                    enabled = false,
                                     label = { Text(a.type.displayName, fontSize = 11.sp) }
                                 )
                             }

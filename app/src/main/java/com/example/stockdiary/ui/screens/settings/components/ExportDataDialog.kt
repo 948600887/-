@@ -10,7 +10,7 @@ import androidx.compose.material.icons.automirrored.filled.TextSnippet
 import androidx.compose.material.icons.filled.History
 // 注意：ReceiptLong 的 AutoMirrored 版本在当前 Compose BOM（2024.02.00）里取不到，
 // 只能用 deprecated 的 filled 版；等 BOM 升级后再换 Icons.AutoMirrored.Filled.ReceiptLong。
-import androidx.compose.material.icons.filled.ReceiptLong
+import androidx.compose.material.icons.automirrored.filled.ReceiptLong
 import androidx.compose.material.icons.filled.TableChart
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -74,7 +74,7 @@ fun ExportDataDialog(
                         enabled = !isExporting,
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Icon(Icons.Default.ReceiptLong, contentDescription = null)
+                        Icon(Icons.AutoMirrored.Filled.ReceiptLong, contentDescription = null)
                         Spacer(modifier = Modifier.width(8.dp))
                         Text("导出交易对账单 (${transactions.size}条)")
                     }

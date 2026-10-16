@@ -145,7 +145,7 @@ object XlsxTableReader {
                     }
                 }
                 XmlPullParser.END_TAG -> if (parser.name == "row" && cells != null) {
-                    rows.add(sparseToList(cells!!))
+                    rows.add(sparseToList(cells))
                     cells = null
                 }
             }

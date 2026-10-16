@@ -378,7 +378,7 @@ object SinaStockAPI : StockAPI {
      * @return 正常报价的映射。`suspended` 收集「响应里出现了、但报价无效」的代码
      *   （停牌 / 退市整理期 / 集合竞价前）。它们不能混在失败里——见 [QuoteSuspendedException]。
      */
-    private fun parseRealtimeData(
+    internal fun parseRealtimeData(
         text: String,
         @Suppress("UNUSED_PARAMETER") codes: List<String>,
         suspended: MutableSet<String> = mutableSetOf()

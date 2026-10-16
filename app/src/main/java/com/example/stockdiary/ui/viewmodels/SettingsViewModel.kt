@@ -6,11 +6,13 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.example.stockdiary.common.Result
+import com.example.stockdiary.data.ApiManager
 import com.example.stockdiary.data.AssetRepository
 import com.example.stockdiary.data.DashboardPreferences
 import com.example.stockdiary.data.DashboardPreferencesManager
 import com.example.stockdiary.data.DataExporter
 import com.example.stockdiary.data.PriceSyncPreferencesManager
+import com.example.stockdiary.data.PriceSyncScheduler
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetSnapshot
 import com.example.stockdiary.database.SnapshotDao
@@ -186,10 +188,6 @@ class SettingsViewModel(
         CSV_STATEMENT
     }
 
-    fun exportData(context: Context) {
-        exportData(context, ExportType.TEXT)
-    }
-
     fun exportData(context: Context, type: ExportType) {
         viewModelScope.launch(Dispatchers.IO) {
             _uiState.update { state -> state.copy(isExporting = true, exportResult = null) }
@@ -243,6 +241,12 @@ class SettingsViewModel(
             try {
                 assetRepository.deleteAllData()
                 clearAllPreferences()
+                // 数据清了，后台任务和内存缓存不能留着：否则用户以为关干净了，
+                // 后台还在按旧偏好跑同步、到点还弹提醒。最后从磁盘回读真实状态。
+                PriceSyncScheduler.cancelDailySync(appContext)
+                NotificationHelper.cancelReminder(appContext)
+                ApiManager.clearCache()
+                refreshPriceSyncState()
                 _uiState.update { state -> state.copy(isDeleting = false, deleteResult = Result.success(Unit)) }
             } catch (e: CancellationException) {
                 throw e
@@ -340,6 +344,24 @@ class SettingsViewModel(
             } catch (e: Exception) {
                 AppLogger.e("保存自动价格同步设置失败: ${e.message}", e, "SettingsVM")
             }
+        }
+    }
+
+    /**
+     * 从磁盘重读价格同步与每日提醒的快照状态。
+     *
+     * StateFlow 初值只在 ViewModel 创建时读一次：别处（后台任务、系统设置、
+     * 清除数据）改过磁盘后，内存里的值就过期了。进入设置页或清除数据后调用，
+     * 保证界面显示的是真实值。
+     */
+    fun refreshPriceSyncState() {
+        viewModelScope.launch(Dispatchers.IO) {
+            _autoPriceSyncEnabled.value = priceSyncPreferencesManager.isAutoSyncEnabled()
+            _lastPriceSyncTime.value = priceSyncPreferencesManager.getLastSyncTimeMillis()
+            _reminderEnabled.value = NotificationHelper.isReminderEnabled(appContext)
+            val reminderTime = NotificationHelper.getReminderTime(appContext)
+            _reminderHour.value = reminderTime.first
+            _reminderMinute.value = reminderTime.second
         }
     }
 

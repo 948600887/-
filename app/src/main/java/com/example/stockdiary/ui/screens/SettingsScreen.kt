@@ -6,7 +6,6 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
-import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.fillMaxSize
@@ -34,17 +33,19 @@ import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Savings
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TimePicker
 import androidx.compose.material3.rememberTimePickerState
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -67,12 +68,14 @@ import com.example.stockdiary.ui.screens.settings.components.ReminderTimePickerD
 import com.example.stockdiary.ui.screens.settings.components.SettingsItem
 import com.example.stockdiary.ui.screens.settings.components.SettingsSection
 import com.example.stockdiary.ui.screens.settings.components.ThemeSelectionDialog
+import com.example.stockdiary.ui.theme.rememberThemeMode
 import com.example.stockdiary.ui.theme.ThemeManager
 import com.example.stockdiary.ui.viewmodels.HoldingSnapshotViewModel
 import com.example.stockdiary.ui.viewmodels.SettingsViewModel
 import com.example.stockdiary.utils.format
 import com.example.stockdiary.utils.sumTotalValueCny
 import com.example.stockdiary.utils.totalValueCny
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -81,6 +84,14 @@ fun SettingsScreen(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val snackbarHostState = remember { SnackbarHostState() }
+    // 版本号从包信息动态读取，避免发版后忘记改硬编码的 "1.0.0"
+    val versionName = remember {
+        runCatching {
+            context.packageManager.getPackageInfo(context.packageName, 0).versionName
+        }.getOrNull() ?: "1.0.0"
+    }
     val viewModel: SettingsViewModel = viewModel(factory = SettingsViewModel.Factory(container))
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val dashboardPrefs by viewModel.dashboardPreferences.collectAsStateWithLifecycle()
@@ -90,20 +101,7 @@ fun SettingsScreen(
     val reminderHour by viewModel.reminderHour.collectAsStateWithLifecycle()
     val reminderMinute by viewModel.reminderMinute.collectAsStateWithLifecycle()
     val reminderError by viewModel.reminderError.collectAsStateWithLifecycle()
-    var currentTheme by remember { mutableStateOf(ThemeManager.getThemeMode(context)) }
-
-    DisposableEffect(Unit) {
-        val prefs = context.getSharedPreferences("theme_prefs", android.content.Context.MODE_PRIVATE)
-        val listener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
-            if (key == "theme_mode") {
-                currentTheme = ThemeManager.getThemeMode(context)
-            }
-        }
-        prefs.registerOnSharedPreferenceChangeListener(listener)
-        onDispose {
-            prefs.unregisterOnSharedPreferenceChangeListener(listener)
-        }
-    }
+    val currentTheme = rememberThemeMode()
 
     var showThemeDialog by remember { mutableStateOf(false) }
     var showClearDataDialog by remember { mutableStateOf(false) }
@@ -118,17 +116,20 @@ fun SettingsScreen(
     var showLogViewerDialog by remember { mutableStateOf(false) }
     var showReminderTimePicker by remember { mutableStateOf(false) }
     var currentPriceApi by remember { mutableStateOf(com.example.stockdiary.data.ApiManager.getPriceApi(context)) }
+    /** 记录这次通知权限请求是哪个开关发起的，权限回调时按来源给出准确文案 */
+    var pendingPermissionReason by remember { mutableStateOf<String?>(null) }
 
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { isGranted ->
         if (!isGranted) {
-            Toast.makeText(
-                context,
-                "已开启自动同步，但通知权限被拒绝，同步结果将不会显示通知",
-                Toast.LENGTH_LONG
-            ).show()
+            val message = when (pendingPermissionReason) {
+                "每日查看提醒" -> "已开启每日查看提醒，但通知权限被拒绝，到点不会弹出通知"
+                else -> "已开启自动同步，但通知权限被拒绝，同步结果将不会显示通知"
+            }
+            scope.launch { snackbarHostState.showSnackbar(message) }
         }
+        pendingPermissionReason = null
     }
 
     val assets = uiState.assets
@@ -146,16 +147,22 @@ fun SettingsScreen(
         assetSum to liabilitySum
     }
 
+    // 每次进入「我的」页都从磁盘重读同步/提醒快照：
+    // 后台任务或系统设置改过状态后，页面要能反映真实值
+    LaunchedEffect(Unit) {
+        viewModel.refreshPriceSyncState()
+    }
+
     LaunchedEffect(uiState.errorMessage) {
         uiState.errorMessage?.let { message ->
-            Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+            snackbarHostState.showSnackbar(message)
             viewModel.clearErrorMessage()
         }
     }
 
     LaunchedEffect(reminderError) {
         reminderError?.let { message ->
-            Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+            snackbarHostState.showSnackbar(message)
             viewModel.clearReminderError()
         }
     }
@@ -165,11 +172,7 @@ fun SettingsScreen(
             if (result.isSuccess) {
                 showClearDataDialog = false
             } else {
-                Toast.makeText(
-                    context,
-                    result.exceptionOrNull()?.message ?: "清除失败",
-                    Toast.LENGTH_SHORT
-                ).show()
+                snackbarHostState.showSnackbar(result.exceptionOrNull()?.message ?: "清除失败")
             }
             viewModel.clearDeleteResult()
         }
@@ -178,17 +181,24 @@ fun SettingsScreen(
     LaunchedEffect(uiState.exportResult) {
         uiState.exportResult?.let { result ->
             if (result.isError) {
-                Toast.makeText(
-                    context,
-                    result.exceptionOrNull()?.message ?: "导出失败",
-                    Toast.LENGTH_SHORT
-                ).show()
+                snackbarHostState.showSnackbar(result.exceptionOrNull()?.message ?: "导出失败")
             }
             viewModel.clearExportResult()
         }
     }
 
-    val settingsSections = remember(assetCount, totalAssets, totalLiabilities, currentTheme, autoPriceSyncEnabled, lastPriceSyncTime) {
+    val settingsSections = remember(
+        assetCount,
+        totalAssets,
+        totalLiabilities,
+        currentTheme,
+        autoPriceSyncEnabled,
+        lastPriceSyncTime,
+        reminderEnabled,
+        reminderHour,
+        reminderMinute,
+        currentPriceApi
+    ) {
         listOf(
             SettingsSectionData("外观", listOf(
                 SettingsItemData(
@@ -269,6 +279,7 @@ fun SettingsScreen(
                                     Manifest.permission.POST_NOTIFICATIONS
                                 ) != PackageManager.PERMISSION_GRANTED
                             ) {
+                                pendingPermissionReason = "自动同步"
                                 notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
                             }
                             PriceSyncScheduler.scheduleDailySync(context)
@@ -281,19 +292,23 @@ fun SettingsScreen(
                     icon = Icons.Default.Storage,
                     title = "资产数量",
                     subtitle = "$assetCount 个资产",
-                    onClick = { }
+                    onClick = { },
+                    // 纯展示行：不置灰会被渲染成可点击，误导用户
+                    enabled = false
                 ),
                 SettingsItemData(
                     icon = Icons.Default.AccountBalance,
                     title = "总资产",
                     subtitle = "¥${totalAssets.format(2)}",
-                    onClick = { }
+                    onClick = { },
+                    enabled = false
                 ),
                 SettingsItemData(
                     icon = Icons.Default.MoneyOff,
                     title = "总负债",
                     subtitle = "¥${totalLiabilities.format(2)}",
-                    onClick = { }
+                    onClick = { },
+                    enabled = false
                 ),
                 SettingsItemData(
                     icon = Icons.Default.DeleteForever,
@@ -324,6 +339,7 @@ fun SettingsScreen(
                                 Manifest.permission.POST_NOTIFICATIONS
                             ) != PackageManager.PERMISSION_GRANTED
                         ) {
+                            pendingPermissionReason = "每日查看提醒"
                             notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
                         }
                         viewModel.setReminderEnabled(enabled)
@@ -345,7 +361,7 @@ fun SettingsScreen(
                 SettingsItemData(
                     icon = Icons.Default.Info,
                     title = "关于",
-                    subtitle = "金库 v1.0.0",
+                    subtitle = "金库 v$versionName",
                     onClick = { showAboutDialog = true }
                 ),
                 SettingsItemData(
@@ -365,9 +381,11 @@ fun SettingsScreen(
 
     Scaffold(
         modifier = modifier,
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             TopAppBar(
-                title = { Text("设置", fontWeight = FontWeight.Bold) }
+                // 与底部导航标签保持一致
+                title = { Text("我的", fontWeight = FontWeight.Bold) }
             )
         }
     ) { padding ->
@@ -412,7 +430,8 @@ fun SettingsScreen(
         ThemeSelectionDialog(
             currentTheme = currentTheme,
             onThemeSelected = { mode ->
-                currentTheme = mode
+                // currentTheme 是 rememberThemeMode() 的只读值：
+                // setThemeMode 落盘 theme_prefs 后，其内部监听会驱动刷新，无需手动赋值
                 ThemeManager.setThemeMode(context, mode)
                 showThemeDialog = false
             },
@@ -482,7 +501,10 @@ fun SettingsScreen(
     }
 
     if (showAboutDialog) {
-        AboutDialog(onDismiss = { showAboutDialog = false })
+        AboutDialog(
+            version = versionName,
+            onDismiss = { showAboutDialog = false }
+        )
     }
 
     if (showLogViewerDialog) {

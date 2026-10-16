@@ -10,6 +10,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
 import com.example.stockdiary.common.Result as AppResult
+import com.example.stockdiary.common.Timeouts
 import com.example.stockdiary.utils.AppLogger
 import kotlinx.coroutines.CancellationException
 
@@ -20,9 +21,9 @@ object EastmoneySkillApi {
     private val API_KEY = BuildConfig.EASTMONEY_SKILL_API_KEY
     
     private val client = NetworkClient.defaultClient.newBuilder()
-        .connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
-        .writeTimeout(30, TimeUnit.SECONDS)
+        .connectTimeout(Timeouts.CONNECT_MS.toLong(), TimeUnit.MILLISECONDS)
+        .readTimeout(Timeouts.READ_MS.toLong(), TimeUnit.MILLISECONDS)
+        .writeTimeout(Timeouts.WRITE_MS.toLong(), TimeUnit.MILLISECONDS)
         .build()
     
     private val jsonMediaType = "application/json; charset=utf-8".toMediaType()

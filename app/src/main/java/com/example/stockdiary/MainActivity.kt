@@ -30,6 +30,9 @@ import com.example.stockdiary.ui.theme.GoldVaultTheme
 import com.example.stockdiary.utils.GlobalExceptionHandler
 import com.example.stockdiary.utils.NotificationPermissionGate
 
+/** 崩溃恢复弹窗的冷却窗口：距上次崩溃小于此时长才弹出恢复提示（毫秒） */
+private const val CRASH_RECOVERY_WINDOW_MS = 60_000
+
 class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -55,7 +58,7 @@ class MainActivity : ComponentActivity() {
                         val recoveryManager = container.crashRecoveryManager
                         val crashState = recoveryManager.getCrashState()
 
-                        if (crashState.hasCrash && System.currentTimeMillis() - crashState.lastCrashTime < 60000) {
+                        if (crashState.hasCrash && System.currentTimeMillis() - crashState.lastCrashTime < CRASH_RECOVERY_WINDOW_MS) {
                             recoveryMessage = crashState.lastCrashInfo
                             showRecoveryDialog = true
                             recoveryManager.clearCrashState()

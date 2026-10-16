@@ -35,7 +35,6 @@ import com.example.stockdiary.ui.components.DialogSectionHeader
 import com.example.stockdiary.utils.StockCodeManager
 import com.example.stockdiary.utils.StockCodeManager.CodeCategory
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.delay
 
 /**
  * 添加资产弹窗。
@@ -200,7 +199,6 @@ fun AddAssetDialog(
             if (symbol.length >= 4 && selectedType == AssetType.STOCK) {
                 // 无法识别但用户选了股票，尝试用股票API兜底
                 isLoading = true
-                delay(500)
                 try {
                     val formattedCode = SinaStockAPI.formatStockCode(symbol)
                     val result = StockAPIManager.instance.getStockData(formattedCode)
@@ -231,7 +229,6 @@ fun AddAssetDialog(
             else -> {}
         }
 
-        delay(500)
         isLoading = true
         try {
             when (cat) {

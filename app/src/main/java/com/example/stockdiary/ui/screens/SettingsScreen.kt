@@ -16,6 +16,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccountBalance
 import androidx.compose.material.icons.filled.AccountBalanceWallet
 import androidx.compose.material.icons.filled.BugReport
+import androidx.compose.material.icons.filled.CurrencyBitcoin
 import androidx.compose.material.icons.filled.SyncAlt
 import androidx.compose.material.icons.filled.Android
 import androidx.compose.material.icons.filled.CloudSync
@@ -57,6 +58,7 @@ import com.example.stockdiary.data.PriceSyncScheduler
 import com.example.stockdiary.di.AppContainer
 import com.example.stockdiary.ui.components.ApiSelectionDialog
 import com.example.stockdiary.ui.screens.settings.components.AboutDialog
+import com.example.stockdiary.ui.screens.settings.components.BinanceImportDialog
 import com.example.stockdiary.ui.screens.settings.components.ClearDataDialog
 import com.example.stockdiary.ui.screens.settings.components.DashboardConfigSheet
 import com.example.stockdiary.ui.screens.settings.components.DataSourceStatusDialog
@@ -112,6 +114,7 @@ fun SettingsScreen(
     var showImportDialog by remember { mutableStateOf(false) }
     var showHoldingSnapshotDialog by remember { mutableStateOf(false) }
     var showFundSnapshotDialog by remember { mutableStateOf(false) }
+    var showBinanceImportDialog by remember { mutableStateOf(false) }
     var showApiSelectionDialog by remember { mutableStateOf(false) }
     var showLogViewerDialog by remember { mutableStateOf(false) }
     var showReminderTimePicker by remember { mutableStateOf(false) }
@@ -242,6 +245,12 @@ fun SettingsScreen(
                     title = "导入场外基金",
                     subtitle = "基金E账户导出的持有明细，场外公募基金",
                     onClick = { showFundSnapshotDialog = true }
+                ),
+                SettingsItemData(
+                    icon = Icons.Default.CurrencyBitcoin,
+                    title = "同步币安资产",
+                    subtitle = "只读拉取币安现货持仓，按代码合并到加密资产",
+                    onClick = { showBinanceImportDialog = true }
                 ),
                 SettingsItemData(
                     icon = Icons.Default.CloudSync,
@@ -497,6 +506,13 @@ fun SettingsScreen(
             container = container,
             source = HoldingSnapshotViewModel.Source.FUND_EXPORT,
             onDismiss = { showFundSnapshotDialog = false }
+        )
+    }
+
+    if (showBinanceImportDialog) {
+        BinanceImportDialog(
+            container = container,
+            onDismiss = { showBinanceImportDialog = false }
         )
     }
 

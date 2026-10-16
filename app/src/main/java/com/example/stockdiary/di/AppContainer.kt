@@ -3,6 +3,8 @@ package com.example.stockdiary.di
 import android.content.Context
 import androidx.compose.runtime.staticCompositionLocalOf
 import com.example.stockdiary.data.AssetRepository
+import com.example.stockdiary.data.BinanceCredentialsManager
+import com.example.stockdiary.data.BinanceImportService
 import com.example.stockdiary.data.DashboardPreferencesManager
 import com.example.stockdiary.data.DataExporter
 import com.example.stockdiary.data.BrokerageImportService
@@ -39,6 +41,12 @@ class AppContainer(val context: Context) {
     /** 「图片→视觉行」的通用能力，持仓快照导入与交割单导入共用同一份实现 */
     val imageTextRecognizer: ImageTextRecognizer by lazy { ImageTextRecognizer.getInstance(context) }
     val holdingSnapshotService: HoldingSnapshotService by lazy { HoldingSnapshotService(assetRepository) }
+    /** 币安只读密钥的本地存储 */
+    val binanceCredentialsManager: BinanceCredentialsManager by lazy {
+        BinanceCredentialsManager.getInstance(context)
+    }
+    /** 币安现货持仓导入：拉余额 → 按交易对合并 → 落库（按需触发，不后台自动） */
+    val binanceImportService: BinanceImportService by lazy { BinanceImportService(assetRepository) }
     val crashRecoveryManager: CrashRecoveryManager by lazy { CrashRecoveryManager.getInstance() }
 }
 

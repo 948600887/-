@@ -1,0 +1,227 @@
+package com.example.stockdiary.data
+
+import com.example.stockdiary.database.Asset
+import com.example.stockdiary.database.AssetType
+import com.example.stockdiary.network.BinanceBalance
+import com.example.stockdiary.utils.AppLogger
+import kotlin.math.abs
+
+/**
+ * 币安现货持仓导入：把账户接口拉回的余额对齐到库里的加密资产，产出预览、确认后落库。
+ *
+ * 结构刻意镜像 [HoldingSnapshotService]：**拉取 → 按代码合并 → 预览 → commit 落库**。
+ * 复用同一套心智模型，用户在两个导入入口看到的行为一致，代码也不用各写一遍。
+ *
+ * ## 与持仓快照的区别
+ *
+ * - 快照吃的是 OCR/xlsx，这里是签名 HTTP，没有「解析失败」这一步。
+ * - 币安一个账户只有一份持仓，不存在「同代码跨多个账户」的冲突，
+ *   所以状态只有 NEW / UPDATE / UNCHANGED，没有 [HoldingSnapshotService.ItemStatus.CONFLICT]。
+ *
+ * ## symbol 映射（关键，见 [baseAssetToSymbol]）
+ *
+ * 币安账户接口给的是**基础资产名**（BTC/ETH/USDT…），而 App 的加密货币资产
+ * 按**交易对**存代码（BTCUSDT）——[com.example.stockdiary.network.UnifiedPriceService]
+ * 的 CRYPTO 取价直接用 `symbol.uppercase()` 当币安交易对查价。映射错了，
+ * 导入的资产就永远同步不到行情。这里统一拼成 `<基础资产>USDT`，与既有加密资产同格式。
+ */
+class BinanceImportService(
+    private val assetRepository: AssetRepository
+) {
+
+    enum class ItemStatus {
+        /** 库里没有这个交易对，要新建 */
+        NEW,
+
+        /** 库里已有，数量不同，按币安余额覆盖 */
+        UPDATE,
+
+        /** 库里已有且数量一致，不用动 */
+        UNCHANGED
+    }
+
+    /**
+     * 预览里的一项（一个交易对）。
+     *
+     * [name] 是给用户看的基础资产名（BTC），[symbol] 是落库/取价用的交易对（BTCUSDT）。
+     */
+    data class PreviewItem(
+        val symbol: String,
+        val name: String,
+        val quantity: Double,
+        val existing: Asset?,
+        val status: ItemStatus
+    ) {
+        /** 数量变化量；新建时就是全部数量 */
+        val delta: Double
+            get() = quantity - (existing?.balance ?: 0.0)
+    }
+
+    data class Preview(
+        val items: List<PreviewItem>
+    ) {
+        val newItems: List<PreviewItem> get() = items.filter { it.status == ItemStatus.NEW }
+        val updatedItems: List<PreviewItem> get() = items.filter { it.status == ItemStatus.UPDATE }
+        val unchangedItems: List<PreviewItem> get() = items.filter { it.status == ItemStatus.UNCHANGED }
+
+        /** 需要落库的条数（NEW + UPDATE，未变不算） */
+        val pendingCount: Int
+            get() = items.count { it.status == ItemStatus.NEW || it.status == ItemStatus.UPDATE }
+    }
+
+    data class CommitResult(
+        val inserted: Int,
+        val updated: Int,
+        val skipped: Int
+    )
+
+    /**
+     * 把币安余额对齐到库里资产，产出预览。**不写库**。
+     *
+     * @param balances      账户接口返回的原始余额（未过滤 dust）
+     * @param existingAssets 库里已有的加密货币资产（调用方按 CRYPTO 类型取出后传入）
+     */
+    suspend fun buildPreview(
+        balances: List<BinanceBalance>,
+        existingAssets: List<Asset>
+    ): Preview {
+        val existingBySymbol = existingAssets.groupBy { it.symbol }
+
+        val items = balances
+            // dust 过滤：币安会返还一堆 0.00000000 的零头资产，free+locked 低于阈值一律忽略，
+            // 否则预览里会出现几十条数量为 0 的「新增」，用户根本不知道自己持有这些
+            .filter { it.total >= DUST_THRESHOLD }
+            // 同一基础资产理论上账户接口只返回一行，但仍按交易对合并，
+            // 与持仓快照「同代码合并」保持同一套路，防御性更强
+            .groupBy { baseAssetToSymbol(it.asset) }
+            .map { (symbol, rows) ->
+                val quantity = rows.sumOf { it.total }
+                val base = rows.first().asset
+                val matched = existingBySymbol[symbol].orEmpty()
+                val existing = matched.firstOrNull()
+                val status = when {
+                    // 一个匹配都没有 → 新建。注意：只要有任何一条匹配就不算 NEW，
+                    // 避免库里已存同名资产时又造一条重复的
+                    matched.isEmpty() -> ItemStatus.NEW
+                    // 浮点比较：余额来自接口字符串，用 1e-6 容差挡住表示误差
+                    abs(matched.sumOf { it.balance } - quantity) < BALANCE_TOLERANCE -> ItemStatus.UNCHANGED
+                    else -> ItemStatus.UPDATE
+                }
+                PreviewItem(
+                    symbol = symbol,
+                    name = base,
+                    quantity = quantity,
+                    existing = existing,
+                    status = status
+                )
+            }
+
+        AppLogger.i(
+            "币安持仓对齐完成：共 ${items.size} 条，新增 ${items.count { it.status == ItemStatus.NEW }}，" +
+                "覆盖 ${items.count { it.status == ItemStatus.UPDATE }}，" +
+                "未变 ${items.count { it.status == ItemStatus.UNCHANGED }}",
+            "BinanceImport"
+        )
+
+        return Preview(items = items)
+    }
+
+    /**
+     * 落库。只处理 [ItemStatus.NEW] 与 [ItemStatus.UPDATE]，未变的跳过。
+     *
+     * @param account 用户输入的账户名，只用于**新建**的资产；
+     *                已存在的资产保持它原来的账户，不跟着改（与持仓快照一致）。
+     */
+    suspend fun commit(preview: Preview, account: String): CommitResult {
+        val toInsert = mutableListOf<Asset>()
+        var updated = 0
+        var skipped = 0
+
+        for (item in preview.items) {
+            when (item.status) {
+                ItemStatus.NEW -> toInsert.add(
+                    Asset(
+                        name = item.name,
+                        type = AssetType.CRYPTO,
+                        symbol = item.symbol,
+                        account = account.ifBlank { DEFAULT_ACCOUNT },
+                        balance = item.quantity,
+                        // 参考单价留 0：币安接口此刻没给价格，塞假数字会凭空造出市值。
+                        // currentPrice 传 null，让后续行情同步按交易对填真实价
+                        purchasePrice = 0.0,
+                        currentPrice = null,
+                        // 币安现货价以 USDT 计价（≈ 美元）。标成 USD，
+                        // totalValueCny 才能按美元汇率折算，否则 USDT 价会被当成人民币数值直接汇总
+                        currency = CURRENCY
+                    )
+                )
+
+                ItemStatus.UPDATE -> {
+                    val existing = item.existing ?: continue
+                    // 只覆盖数量：不动名称/账户/币种，避免冲掉用户整理过的分类
+                    assetRepository.updateBalance(existing.id, item.quantity)
+                    updated++
+                }
+
+                ItemStatus.UNCHANGED -> skipped++
+            }
+        }
+
+        if (toInsert.isNotEmpty()) assetRepository.insertAssets(toInsert)
+
+        AppLogger.i(
+            "币安持仓落库：新增 ${toInsert.size}，覆盖 $updated，跳过 $skipped",
+            "BinanceImport"
+        )
+        return CommitResult(inserted = toInsert.size, updated = updated, skipped = skipped)
+    }
+
+    companion object {
+        /** 用户没填账户名时的兜底。用「币安」而非通用「默认账户」——来源一目了然 */
+        const val DEFAULT_ACCOUNT = "币安"
+
+        /**
+         * dust 阈值：free+locked 低于此值的零头资产忽略。
+         *
+         * 1e-8 约是常见币种的最小可交易精度（BTC 8 位小数）。币安会把历史上
+         * 接触过的所有币都列出来，绝大多数是 0，不滤掉会污染预览。
+         */
+        private const val DUST_THRESHOLD = 1e-8
+
+        /** 数量比较容差，挡住浮点表示误差 */
+        private const val BALANCE_TOLERANCE = 1e-6
+
+        /** 币安现货计价币种（USDT 稳定币 ≈ 美元） */
+        private const val CURRENCY = "USD"
+    }
+}
+
+/**
+ * 币安基础资产名 → App 加密货币交易对代码。
+ *
+ * ## 为什么是 `<基础资产>USDT`
+ *
+ * App 的加密资产按**交易对**存 symbol，行情同步
+ * （[com.example.stockdiary.network.UnifiedPriceService] 的 CRYPTO 分支）
+ * 直接拿 `symbol.uppercase()` 当币安交易对查价。所以落库的 symbol 必须是
+ * 币安认得的交易对形态（BTCUSDT、ETHUSDT…），这也是
+ * [com.example.stockdiary.network.BinanceAPI.getSupportedSymbols] 返回的全集格式。
+ *
+ * ## 为什么不复用 [com.example.stockdiary.network.BinanceAPI] 的 formatSymbol
+ *
+ * formatSymbol 面向「用户输入的交易对/简称」，它把 BTC、ETH 当作**报价币**：
+ * `formatSymbol("BTC")` 命中 `endsWith("BTC")` 分支返回 "BTC" 本身，而非 "BTCUSDT"。
+ * 账户接口给的是裸基础资产，直接套 formatSymbol 会让 BTC→BTC、ETH→ETH，
+ * 全部同步不到价。所以这里用一段专用于「基础资产补 USDT」的映射，产出与
+ * getSupportedSymbols 完全一致的格式。
+ *
+ * ## 稳定币特例
+ *
+ * USDT 自身没有 `USDTUSDT` 交易对（它就是报价币）。这类原样返回，
+ * 价格同步查不到对应交易对时会留空——稳定币价值≈1 美元，影响有限，
+ * 但余额仍被准确记录。
+ */
+internal fun baseAssetToSymbol(asset: String): String {
+    val base = asset.uppercase().trim()
+    return if (base.endsWith("USDT")) base else "${base}USDT"
+}

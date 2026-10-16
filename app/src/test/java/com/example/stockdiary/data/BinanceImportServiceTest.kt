@@ -1,0 +1,232 @@
+package com.example.stockdiary.data
+
+import com.example.stockdiary.database.Asset
+import com.example.stockdiary.database.AssetType
+import com.example.stockdiary.network.BinanceBalance
+import io.mockk.coEvery
+import io.mockk.coVerify
+import io.mockk.mockk
+import io.mockk.slot
+import kotlinx.coroutines.runBlocking
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+/**
+ * 币安持仓导入的回归。AssetRepository 是需 Context 的 final 类，用 MockK 伪造。
+ *
+ * 重点几条规则：dust 过滤、基础资产→交易对映射、NEW/UPDATE/UNCHANGED 判定、
+ * 以及新建资产的字段口径（type=CRYPTO、currentPrice 留空、币种 USD）。
+ */
+class BinanceImportServiceTest {
+
+    private val repo = mockk<AssetRepository>(relaxed = true)
+    private val service = BinanceImportService(repo)
+
+    private fun balance(asset: String, free: Double, locked: Double = 0.0) =
+        BinanceBalance(asset = asset, free = free, locked = locked)
+
+    /** 造一条库里已有的加密资产，symbol 用交易对形态（与落库/取价一致） */
+    private fun cryptoAsset(
+        id: Long,
+        symbol: String,
+        balance: Double,
+        account: String = "币安"
+    ) = Asset(
+        id = id,
+        name = symbol.removeSuffix("USDT"),
+        type = AssetType.CRYPTO,
+        symbol = symbol,
+        account = account,
+        balance = balance,
+        purchasePrice = 0.0
+    )
+
+    // ---------- dust 过滤 ----------
+
+    @Test
+    fun dust零头被过滤掉() = runBlocking {
+        val preview = service.buildPreview(
+            balances = listOf(
+                balance("BTC", free = 0.5),
+                balance("SHIB", free = 0.0, locked = 0.0),      // 全零
+                balance("DUST", free = 1e-9, locked = 1e-9)      // 低于 1e-8 阈值
+            ),
+            existingAssets = emptyList()
+        )
+
+        assertEquals(1, preview.items.size)
+        assertEquals("BTCUSDT", preview.items[0].symbol)
+    }
+
+    @Test
+    fun 刚好等于阈值的不算dust() = runBlocking {
+        val preview = service.buildPreview(
+            balances = listOf(balance("XRP", free = 1e-8)),
+            existingAssets = emptyList()
+        )
+        assertEquals(1, preview.items.size)
+    }
+
+    // ---------- 三种状态 ----------
+
+    @Test
+    fun 库里没有的判为新增() = runBlocking {
+        val preview = service.buildPreview(
+            balances = listOf(balance("BTC", free = 0.5)),
+            existingAssets = emptyList()
+        )
+        assertEquals(1, preview.newItems.size)
+        assertEquals(0.5, preview.newItems[0].quantity, 1e-9)
+        assertEquals(1, preview.pendingCount)
+    }
+
+    @Test
+    fun 数量不同的判为覆盖() = runBlocking {
+        val preview = service.buildPreview(
+            balances = listOf(balance("BTC", free = 0.8)),
+            existingAssets = listOf(cryptoAsset(7L, "BTCUSDT", balance = 0.5))
+        )
+        assertEquals(1, preview.updatedItems.size)
+        assertEquals(0.8, preview.updatedItems[0].quantity, 1e-9)
+        // delta 供界面提示「0.5 → 0.8」
+        assertEquals(0.3, preview.updatedItems[0].delta, 1e-9)
+    }
+
+    @Test
+    fun 数量一致的判为未变_不写库() = runBlocking {
+        val preview = service.buildPreview(
+            balances = listOf(balance("BTC", free = 0.5)),
+            existingAssets = listOf(cryptoAsset(7L, "BTCUSDT", balance = 0.5))
+        )
+        assertEquals(1, preview.unchangedItems.size)
+        assertEquals(0, preview.pendingCount)
+
+        val result = service.commit(preview, account = "币安")
+        assertEquals(0, result.inserted)
+        assertEquals(0, result.updated)
+        assertEquals(1, result.skipped)
+        coVerify(exactly = 0) { repo.insertAssets(any()) }
+        coVerify(exactly = 0) { repo.updateBalance(any(), any()) }
+    }
+
+    @Test
+    fun free加locked才是持仓量() = runBlocking {
+        val preview = service.buildPreview(
+            balances = listOf(balance("ETH", free = 1.0, locked = 2.0)),
+            existingAssets = emptyList()
+        )
+        assertEquals(3.0, preview.items[0].quantity, 1e-9)
+    }
+
+    // ---------- symbol 映射与匹配 ----------
+
+    @Test
+    fun 映射成交易对后才能匹配到库里已有的加密资产() = runBlocking {
+        // 币安给裸 BTC，库存形态是 BTCUSDT。映射错了就会每次导入都造重复资产
+        val preview = service.buildPreview(
+            balances = listOf(balance("BTC", free = 0.8)),
+            existingAssets = listOf(cryptoAsset(7L, "BTCUSDT", balance = 0.5))
+        )
+        assertEquals(0, preview.newItems.size)
+        assertEquals(1, preview.updatedItems.size)
+    }
+
+    @Test
+    fun 同名不同资产不会被错误合并() = runBlocking {
+        // BTC 与 ETH 是两个不同条目，各自独立
+        val preview = service.buildPreview(
+            balances = listOf(balance("BTC", free = 1.0), balance("ETH", free = 2.0)),
+            existingAssets = emptyList()
+        )
+        assertEquals(2, preview.items.size)
+    }
+
+    // ---------- 落库 ----------
+
+    @Test
+    fun 新建的加密资产字段口径正确() = runBlocking {
+        val captured = slot<List<Asset>>()
+        coEvery { repo.insertAssets(capture(captured)) } returns Unit
+
+        val preview = service.buildPreview(
+            balances = listOf(balance("BTC", free = 0.5)),
+            existingAssets = emptyList()
+        )
+        service.commit(preview, account = "")
+
+        val asset = captured.captured.single()
+        assertEquals(AssetType.CRYPTO, asset.type)
+        assertEquals("BTCUSDT", asset.symbol)
+        // 现价留空让后续行情同步填；参考单价 0 不凭空造市值
+        assertEquals(null, asset.currentPrice)
+        assertEquals(0.0, asset.purchasePrice, 1e-9)
+        // 币安现货以 USDT(≈美元)计价，标 USD 才能按美元汇率折算成人民币
+        assertEquals("USD", asset.currency)
+        // 账户留空走默认「币安」
+        assertEquals(BinanceImportService.DEFAULT_ACCOUNT, asset.account)
+    }
+
+    @Test
+    fun 覆盖时只改数量_不碰账户名称币种() = runBlocking {
+        val existing = cryptoAsset(7L, "BTCUSDT", balance = 0.5, account = "我的币安")
+        val balanceSlot = slot<Double>()
+        coEvery { repo.updateBalance(7L, capture(balanceSlot)) } returns Unit
+
+        val preview = service.buildPreview(
+            balances = listOf(balance("BTC", free = 0.8)),
+            existingAssets = listOf(existing)
+        )
+        val result = service.commit(preview, account = "别的账户")
+
+        assertEquals(1, result.updated)
+        assertEquals(0.8, balanceSlot.captured, 1e-9)
+        // 只调 updateBalance：不 insert（会造重复）、不 updateAsset（会冲掉名称/账户）
+        coVerify(exactly = 0) { repo.insertAssets(any()) }
+        coVerify(exactly = 0) { repo.updateAsset(any()) }
+    }
+
+    @Test
+    fun 新建与覆盖混在一起各自走对分支() = runBlocking {
+        val captured = slot<List<Asset>>()
+        coEvery { repo.insertAssets(capture(captured)) } returns Unit
+
+        val preview = service.buildPreview(
+            balances = listOf(
+                balance("BTC", free = 0.8),   // 库里已有 → 覆盖
+                balance("ETH", free = 2.0)    // 库里没有 → 新建
+            ),
+            existingAssets = listOf(cryptoAsset(7L, "BTCUSDT", balance = 0.5))
+        )
+        val result = service.commit(preview, account = "币安")
+
+        assertEquals(1, result.inserted)
+        assertEquals(1, result.updated)
+        assertEquals(listOf("ETHUSDT"), captured.captured.map { it.symbol })
+    }
+
+    @Test
+    fun 账户名留空时用默认账户兜底() = runBlocking {
+        val captured = slot<List<Asset>>()
+        coEvery { repo.insertAssets(capture(captured)) } returns Unit
+
+        val preview = service.buildPreview(
+            balances = listOf(balance("BTC", free = 0.5)),
+            existingAssets = emptyList()
+        )
+        service.commit(preview, account = "   ")
+        assertEquals(BinanceImportService.DEFAULT_ACCOUNT, captured.captured[0].account)
+    }
+
+    @Test
+    fun 空结果不写库() = runBlocking {
+        val preview = service.buildPreview(
+            balances = listOf(balance("SHIB", free = 0.0)),
+            existingAssets = emptyList()
+        )
+        assertTrue(preview.items.isEmpty())
+        val result = service.commit(preview, account = "币安")
+        assertEquals(0, result.inserted + result.updated + result.skipped)
+        coVerify(exactly = 0) { repo.insertAssets(any()) }
+    }
+}

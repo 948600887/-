@@ -14,7 +14,7 @@ import com.example.stockdiary.data.DividendRepository
 import com.example.stockdiary.data.importer.HoldingSnapshotService
 import com.example.stockdiary.data.importer.ImageTextRecognizer
 import com.example.stockdiary.data.importer.OcrStatementService
-import com.example.stockdiary.data.PriceSyncPreferencesManager
+import com.example.stockdiary.data.sync.PriceSyncPreferencesManager
 import com.example.stockdiary.database.StockDatabase
 import com.example.stockdiary.utils.CrashRecoveryManager
 

@@ -8,7 +8,7 @@ import com.example.stockdiary.data.DashboardPreferencesManager
 import com.example.stockdiary.data.DividendIncomeUseCase
 import com.example.stockdiary.data.DividendRecord
 import com.example.stockdiary.data.DividendRepository
-import com.example.stockdiary.data.SyncBudget
+import com.example.stockdiary.data.sync.SyncBudget
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.database.SnapshotDao

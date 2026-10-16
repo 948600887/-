@@ -1,8 +1,8 @@
 package com.example.stockdiary
 
 import android.app.Application
-import com.example.stockdiary.data.PriceSyncScheduler
-import com.example.stockdiary.data.SnapshotScheduler
+import com.example.stockdiary.data.sync.PriceSyncScheduler
+import com.example.stockdiary.data.sync.SnapshotScheduler
 import com.example.stockdiary.di.AppContainer
 import com.example.stockdiary.utils.AppLogger
 import com.example.stockdiary.utils.CrashRecoveryManager

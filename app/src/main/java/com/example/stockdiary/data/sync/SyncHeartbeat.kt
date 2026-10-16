@@ -1,4 +1,4 @@
-package com.example.stockdiary.data
+package com.example.stockdiary.data.sync
 
 import com.example.stockdiary.utils.AppLogger
 import kotlinx.coroutines.CoroutineScope

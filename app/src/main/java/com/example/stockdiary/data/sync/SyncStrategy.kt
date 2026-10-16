@@ -1,4 +1,4 @@
-package com.example.stockdiary.data
+package com.example.stockdiary.data.sync
 
 import java.io.IOException
 import java.net.SocketTimeoutException

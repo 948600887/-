@@ -1,5 +1,6 @@
 package com.example.stockdiary.data
 
+import com.example.stockdiary.data.sync.withHeartbeat
 import android.annotation.SuppressLint
 import android.content.Context
 import androidx.room.withTransaction

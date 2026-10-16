@@ -11,8 +11,8 @@ import com.example.stockdiary.data.AssetRepository
 import com.example.stockdiary.data.DashboardPreferences
 import com.example.stockdiary.data.DashboardPreferencesManager
 import com.example.stockdiary.data.DataExporter
-import com.example.stockdiary.data.PriceSyncPreferencesManager
-import com.example.stockdiary.data.PriceSyncScheduler
+import com.example.stockdiary.data.sync.PriceSyncPreferencesManager
+import com.example.stockdiary.data.sync.PriceSyncScheduler
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetSnapshot
 import com.example.stockdiary.database.SnapshotDao

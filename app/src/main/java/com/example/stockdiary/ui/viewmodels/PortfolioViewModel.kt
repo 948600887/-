@@ -3,11 +3,11 @@ package com.example.stockdiary.ui.viewmodels
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
-import com.example.stockdiary.data.AssetSyncManager
+import com.example.stockdiary.data.sync.AssetSyncManager
 import com.example.stockdiary.data.DashboardPreferences
 import com.example.stockdiary.data.DividendIncomeUseCase
 import com.example.stockdiary.data.SortOrder
-import com.example.stockdiary.data.SyncProgress
+import com.example.stockdiary.data.sync.SyncProgress
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.di.AppContainer

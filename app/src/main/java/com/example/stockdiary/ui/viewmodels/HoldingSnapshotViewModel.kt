@@ -6,7 +6,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.example.stockdiary.data.AssetRepository
-import com.example.stockdiary.data.AssetSyncManager
+import com.example.stockdiary.data.sync.AssetSyncManager
 import com.example.stockdiary.data.importer.FundEStatementParser
 import com.example.stockdiary.data.importer.FundSnapshotParser
 import com.example.stockdiary.data.importer.HoldingSnapshotParser

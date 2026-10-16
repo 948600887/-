@@ -1,4 +1,4 @@
-package com.example.stockdiary.data
+package com.example.stockdiary.data.sync
 
 /**
  * 刷新链路的时间预算。

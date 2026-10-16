@@ -55,7 +55,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.example.stockdiary.data.PriceSyncScheduler
+import com.example.stockdiary.data.sync.PriceSyncScheduler
 import com.example.stockdiary.di.AppContainer
 import com.example.stockdiary.ui.components.ApiSelectionDialog
 import com.example.stockdiary.ui.screens.settings.components.AboutDialog

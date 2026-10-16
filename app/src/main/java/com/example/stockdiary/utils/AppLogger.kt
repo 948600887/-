@@ -77,11 +77,11 @@ object AppLogger {
     }
 
     /**
-     * 对 URL 进行安全处理：截断长度并移除 query 参数中的敏感字段
+     * 对 URL 进行安全处理：先移除 `?` 及其后的整个 query 串（含 signature、token
+     * 等敏感字段，绝不落盘），再截断到 [MAX_LOG_URL_LENGTH] 安全长度。
      */
     private fun sanitizeUrl(url: String): String {
-        if (url.length <= MAX_LOG_URL_LENGTH) return url
-        return url.take(MAX_LOG_URL_LENGTH) + "..."
+        return url.substringBefore('?').take(MAX_LOG_URL_LENGTH)
     }
 
     private const val MAX_LOG_URL_LENGTH = 120

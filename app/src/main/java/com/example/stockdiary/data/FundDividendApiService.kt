@@ -4,6 +4,7 @@ import com.example.stockdiary.network.NetworkClient
 import com.example.stockdiary.utils.AppLogger
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.jsoup.Jsoup
 import kotlinx.coroutines.CancellationException
@@ -24,7 +25,7 @@ class FundDividendApiService {
     // 复用统一客户端：通过 defaultClient.newBuilder() 派生，共享底层 ConnectionPool/Dispatcher
     // （连接池复用，避免每 API 类各建一个连接池的浪费）；defaultClient 不带 BaseUrlInterceptor，
     // 不会干扰天天基金 fhsp 页面的完整 https URL 请求。仅保留基金页面所需的长超时。
-    private val client = NetworkClient.defaultClient.newBuilder()
+    internal var client: OkHttpClient = NetworkClient.defaultClient.newBuilder()
         .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
         .readTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
         .build()
@@ -108,7 +109,7 @@ class FundDividendApiService {
      * 解析天天基金分红配股HTML页面
      * 表头示例：年份 | 权益登记日 | 除息日 | 每10份分红 | 分红发放日
      */
-    private fun parseDividendHtml(html: String, @Suppress("UNUSED_PARAMETER") fundCode: String): List<DividendRecord> {
+    internal fun parseDividendHtml(html: String, @Suppress("UNUSED_PARAMETER") fundCode: String): List<DividendRecord> {
         val records = mutableListOf<DividendRecord>()
 
         try {
@@ -262,7 +263,7 @@ class FundDividendApiService {
      * 支持："每10份派现金0.2000元" -> 0.2，"每份派现金0.0200元" -> 0.2
      * 注意：不能简单提取所有数字，否则会误把"每10份"中的"10"也当作金额一部分。
      */
-    private fun parseFundDividendAmount(text: String): Double {
+    internal fun parseFundDividendAmount(text: String): Double {
         if (text.isBlank()) return 0.0
 
         // 标准格式：每10份派现金0.2000元 / 每份派现金0.0200元

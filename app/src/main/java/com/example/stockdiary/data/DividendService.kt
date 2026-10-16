@@ -11,12 +11,13 @@ import com.example.stockdiary.network.NetworkClient
 import com.example.stockdiary.utils.StockCodeManager
 import com.example.stockdiary.common.Result as AppResult
 import kotlinx.coroutines.CancellationException
+import okhttp3.OkHttpClient
 
 /**
  * 分红数据获取服务
  */
 class DividendService {
-    private val client = NetworkClient.defaultClient
+    internal var client: OkHttpClient = NetworkClient.defaultClient
     
     companion object {
         private const val BASE_URL = "https://vip.stock.finance.sina.com.cn/corp/go.php/vISSUE_ShareBonus/stockid/"
@@ -106,7 +107,7 @@ class DividendService {
      * 公告日期 | 送股(股) | 转增(股) | 派息(税前)(元) | 进度 | 除权除息日 | ...
      * 派息列数据仅为数字，不带"元"，因此不能靠包含"元"来定位。
      */
-    private fun parseDividendHtml(html: String, @Suppress("UNUSED_PARAMETER") stockCode: String, @Suppress("UNUSED_PARAMETER") market: String): List<DividendRecord> {
+    internal fun parseDividendHtml(html: String, @Suppress("UNUSED_PARAMETER") stockCode: String, @Suppress("UNUSED_PARAMETER") market: String): List<DividendRecord> {
         val records = mutableListOf<DividendRecord>()
 
         try {

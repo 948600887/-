@@ -95,6 +95,41 @@ class HoldingSnapshotParserTest {
         assertTrue("不该有没读懂的行: ${r.incomplete}", r.incomplete.isEmpty())
     }
 
+    /** 梦瑶 2026-10-16 发来的真实一码通截图：同上版式，数量是较新快照，含 1.10万 这种带尾零的万 */
+    private val mengyaoScreenshot = noise + listOf(
+        "嘉实黄金LOF 202", "160719",
+        "国投白银LOF 1264", "161226",
+        "黄金LOF 156", "164701",
+        "R东方1 100", "400264",
+        "全球芯片 44", "501225",
+        "海外科技 195", "501312",
+        "华电REIT 1", "508016",
+        "北京亦庄 1", "508080",
+        "恒泰租住 1", "508085",
+        "综指ETF 1.74万", "510210",
+        "中证红利 2.45万", "515080",
+        "科创50 1.10万", "588000",
+        "中国电信 1400", "601728",
+        "中国银行 900", "601988"
+    )
+
+    @Test
+    fun 梦瑶的截图十四条全部解析_万带尾零也认() {
+        val r = HoldingSnapshotParser.parse(mengyaoScreenshot)
+        assertEquals(14, r.holdings.size)
+        assertTrue("不该有没读懂的行: ${r.incomplete}", r.incomplete.isEmpty())
+        val bySymbol = r.holdings.associateBy { it.symbol }
+        // 三个「万」：1.74万=17400、2.45万=24500、1.10万=11000（小数带尾零也要展开对）
+        assertEquals(17400.0, bySymbol.getValue("510210").quantity, 0.001)
+        assertEquals(24500.0, bySymbol.getValue("515080").quantity, 0.001)
+        assertEquals(11000.0, bySymbol.getValue("588000").quantity, 0.001)
+        // 名称相近（都叫黄金LOF）但代码不同的两只，必须各归各、不能混成一条
+        assertEquals("嘉实黄金LOF", bySymbol.getValue("160719").name)
+        assertEquals(202.0, bySymbol.getValue("160719").quantity, 0.001)
+        assertEquals("黄金LOF", bySymbol.getValue("164701").name)
+        assertEquals(156.0, bySymbol.getValue("164701").quantity, 0.001)
+    }
+
     @Test
     fun 真实截图的数量逐个核对() {
         val bySymbol = HoldingSnapshotParser.parse(realScreenshot).holdings.associateBy { it.symbol }

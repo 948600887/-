@@ -1,4 +1,4 @@
-package com.example.stockdiary.data
+package com.example.stockdiary.data.price
 
 /**
  * 统一的股票数据模型

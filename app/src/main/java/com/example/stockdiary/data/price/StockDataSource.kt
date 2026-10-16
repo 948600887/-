@@ -1,4 +1,4 @@
-package com.example.stockdiary.data
+package com.example.stockdiary.data.price
 
 import com.example.stockdiary.common.Result
 

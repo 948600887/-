@@ -18,7 +18,7 @@ import com.example.stockdiary.common.CacheConfig
 import com.example.stockdiary.common.RequestLimits
 import com.example.stockdiary.utils.PerformanceMonitor
 import com.example.stockdiary.utils.StockCodeManager
-import com.example.stockdiary.data.PriceCacheManager
+import com.example.stockdiary.data.price.PriceCacheManager
 import kotlinx.coroutines.CancellationException
 
 object SinaStockAPI : StockAPI {

@@ -1,5 +1,6 @@
 package com.example.stockdiary.data
 
+import com.example.stockdiary.data.price.StockDataManager
 import com.example.stockdiary.data.sync.AssetSyncManager
 import com.example.stockdiary.data.sync.SyncBudget
 import android.content.Context

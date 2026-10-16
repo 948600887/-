@@ -1,4 +1,4 @@
-package com.example.stockdiary.data
+package com.example.stockdiary.data.price
 
 import android.content.Context
 import com.example.stockdiary.network.SinaStockData

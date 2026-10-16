@@ -1,6 +1,6 @@
 package com.example.stockdiary.ui.screens
 
-import com.example.stockdiary.data.ApiManager
+import com.example.stockdiary.data.price.ApiManager
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -119,7 +119,7 @@ fun SettingsScreen(
     var showApiSelectionDialog by remember { mutableStateOf(false) }
     var showLogViewerDialog by remember { mutableStateOf(false) }
     var showReminderTimePicker by remember { mutableStateOf(false) }
-    var currentPriceApi by remember { mutableStateOf(com.example.stockdiary.data.ApiManager.getPriceApi(context)) }
+    var currentPriceApi by remember { mutableStateOf(com.example.stockdiary.data.price.ApiManager.getPriceApi(context)) }
     /** 记录这次通知权限请求是哪个开关发起的，权限回调时按来源给出准确文案 */
     var pendingPermissionReason by remember { mutableStateOf<String?>(null) }
 

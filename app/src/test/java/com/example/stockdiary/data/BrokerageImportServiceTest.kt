@@ -1,5 +1,6 @@
 package com.example.stockdiary.data
 
+import com.example.stockdiary.data.price.StockDataManager
 import com.example.stockdiary.data.importer.BrokerageImportService
 import android.content.Context
 import com.example.stockdiary.database.Asset
@@ -50,7 +51,7 @@ class BrokerageImportServiceTest {
     private val mockDb = mockk<StockDatabase>(relaxed = true)
     private val assetDao = mockk<AssetDao>(relaxed = true)
     private val txDao = mockk<TransactionDao>(relaxed = true)
-    private val stockDataManager = mockk<com.example.stockdiary.data.StockDataManager>(relaxed = true)
+    private val stockDataManager = mockk<com.example.stockdiary.data.price.StockDataManager>(relaxed = true)
     private lateinit var service: BrokerageImportService
 
     @Before

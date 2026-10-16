@@ -1,5 +1,6 @@
 package com.example.stockdiary.data
 
+import com.example.stockdiary.data.importer.HoldingSnapshotParser
 import com.example.stockdiary.utils.StockCodeManager
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull

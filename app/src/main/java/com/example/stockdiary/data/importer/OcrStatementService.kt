@@ -1,4 +1,4 @@
-package com.example.stockdiary.data
+package com.example.stockdiary.data.importer
 
 import android.content.Context
 import android.net.Uri

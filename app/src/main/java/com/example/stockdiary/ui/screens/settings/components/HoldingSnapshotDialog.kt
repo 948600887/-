@@ -35,7 +35,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.example.stockdiary.data.HoldingSnapshotService
+import com.example.stockdiary.data.importer.HoldingSnapshotService
 import com.example.stockdiary.di.AppContainer
 import com.example.stockdiary.ui.theme.LossRed
 import com.example.stockdiary.ui.theme.ProfitGreen

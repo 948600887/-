@@ -62,8 +62,8 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.example.stockdiary.data.BinanceImportService
-import com.example.stockdiary.data.estimatedValueCny
+import com.example.stockdiary.data.importer.BinanceImportService
+import com.example.stockdiary.data.importer.estimatedValueCny
 import com.example.stockdiary.di.AppContainer
 import com.example.stockdiary.ui.dialogs.sanitizeDecimalInput
 import com.example.stockdiary.ui.theme.ProfitGreen

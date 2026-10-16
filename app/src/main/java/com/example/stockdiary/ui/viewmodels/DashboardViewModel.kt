@@ -1,5 +1,6 @@
 package com.example.stockdiary.ui.viewmodels
 
+import com.example.stockdiary.data.DashboardPreferences
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope

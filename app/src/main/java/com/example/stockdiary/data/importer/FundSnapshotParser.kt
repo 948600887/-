@@ -1,4 +1,4 @@
-package com.example.stockdiary.data
+package com.example.stockdiary.data.importer
 
 /**
  * 「基金E账户」持仓截图解析器（纯函数，可直接 JVM 单测）。

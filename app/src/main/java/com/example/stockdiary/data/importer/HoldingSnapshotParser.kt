@@ -1,4 +1,4 @@
-package com.example.stockdiary.data
+package com.example.stockdiary.data.importer
 
 import com.example.stockdiary.utils.StockCodeManager
 

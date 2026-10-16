@@ -1,6 +1,6 @@
 package com.example.stockdiary.network
 
-import com.example.stockdiary.data.baseAssetToSymbol
+import com.example.stockdiary.data.importer.baseAssetToSymbol
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue

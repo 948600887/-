@@ -1,4 +1,4 @@
-package com.example.stockdiary.data
+package com.example.stockdiary.data.importer
 
 /**
  * 证券「名称 → 代码」解析器（纯函数，不依赖 Context/Android 框架，可单元测试）。

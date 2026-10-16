@@ -1,4 +1,4 @@
-package com.example.stockdiary.data
+package com.example.stockdiary.data.importer
 
 import android.util.Xml
 import org.xmlpull.v1.XmlPullParser

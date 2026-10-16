@@ -5,10 +5,10 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.example.stockdiary.data.AssetRepository
-import com.example.stockdiary.data.BinanceCredentialsManager
-import com.example.stockdiary.data.BinanceImportService
-import com.example.stockdiary.data.filterDustByValue
-import com.example.stockdiary.data.priceKeyFor
+import com.example.stockdiary.data.importer.BinanceCredentialsManager
+import com.example.stockdiary.data.importer.BinanceImportService
+import com.example.stockdiary.data.importer.filterDustByValue
+import com.example.stockdiary.data.importer.priceKeyFor
 import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.di.AppContainer
 import com.example.stockdiary.network.BinanceAccountAPI

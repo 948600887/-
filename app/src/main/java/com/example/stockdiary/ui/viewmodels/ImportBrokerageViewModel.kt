@@ -4,9 +4,9 @@ import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
-import com.example.stockdiary.data.BrokerageImportService
-import com.example.stockdiary.data.OcrStatementService
-import com.example.stockdiary.data.SymbolResolver
+import com.example.stockdiary.data.importer.BrokerageImportService
+import com.example.stockdiary.data.importer.OcrStatementService
+import com.example.stockdiary.data.importer.SymbolResolver
 import com.example.stockdiary.di.AppContainer
 import com.example.stockdiary.utils.AppLogger
 import kotlinx.coroutines.Dispatchers

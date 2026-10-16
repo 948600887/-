@@ -1,5 +1,6 @@
-package com.example.stockdiary.data
+package com.example.stockdiary.data.importer
 
+import com.example.stockdiary.data.StockDataManager
 import android.annotation.SuppressLint
 import android.content.Context
 import android.net.Uri

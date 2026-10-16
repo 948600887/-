@@ -32,9 +32,9 @@ import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
-import com.example.stockdiary.data.BrokerageImportService
-import com.example.stockdiary.data.GalaxyStatementParser
-import com.example.stockdiary.data.SymbolResolver
+import com.example.stockdiary.data.importer.BrokerageImportService
+import com.example.stockdiary.data.importer.GalaxyStatementParser
+import com.example.stockdiary.data.importer.SymbolResolver
 import com.example.stockdiary.ui.viewmodels.ImportBrokerageViewModel
 
 /**

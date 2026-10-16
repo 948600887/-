@@ -27,6 +27,9 @@ class StockDiaryApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         instance = this
+        // 日志尽早初始化：下面 GlobalExceptionHandler.initialize 内部、以及应用启动日志都要用它。
+        // 原先 AppLogger.init 放在 MainActivity，导致 Application 阶段的日志早于初始化而被丢弃。
+        AppLogger.init(this, debug = BuildConfig.DEBUG)
         container = AppContainer(this)
         // 崩溃处理必须挂在 Application 级：只在 MainActivity 初始化时，启动早期崩溃无人记录。
         // GlobalExceptionHandler.initialize 有 isInitialized 幂等保护，MainActivity 重复调用无副作用。

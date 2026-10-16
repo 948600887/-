@@ -1,6 +1,5 @@
 package com.example.stockdiary.ui.screens
 
-import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -11,7 +10,6 @@ import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.compose.ui.platform.LocalContext
 import com.example.stockdiary.utils.AppLogger
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -148,7 +146,6 @@ fun PortfolioScreen(
     var showDeleteConfirmDialog by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
-    val context = LocalContext.current
 
     // 资产列表已从资产页并入这里：股票/基金/虚拟货币/银行存款 + 负债，一页看全。
     // 显示开关沿用「设置 → 仪表盘显示」，关掉某类就整类不出现。
@@ -546,7 +543,7 @@ fun PortfolioScreen(
                     runCatching { viewModel.addAsset(asset) }
                         .onFailure {
                             AppLogger.e("新增资产失败: ${it.message}", it, "PortfolioScreen")
-                            Toast.makeText(context, "保存失败：${it.message ?: "未知错误"}", Toast.LENGTH_LONG).show()
+                            snackbarHostState.showSnackbar("保存失败：${it.message ?: "未知错误"}")
                         }
                     showAddDialog = false
                 }

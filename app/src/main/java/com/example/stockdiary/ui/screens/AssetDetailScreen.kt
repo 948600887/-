@@ -1,6 +1,5 @@
 package com.example.stockdiary.ui.screens
 
-import android.widget.Toast
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -12,7 +11,6 @@ import androidx.compose.runtime.*
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -53,7 +51,6 @@ fun AssetDetailScreen(
     var isDeleting by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
-    val context = LocalContext.current
 
     val shareBonus = remember(asset, dividends) {
         val assetVal = asset ?: return@remember null
@@ -260,7 +257,7 @@ fun AssetDetailScreen(
                     runCatching { viewModel.updateAsset(updatedAsset) }
                         .onFailure {
                             AppLogger.e("更新资产失败: ${it.message}", it, "AssetDetailScreen")
-                            Toast.makeText(context, "保存失败：${it.message ?: "未知错误"}", Toast.LENGTH_LONG).show()
+                            snackbarHostState.showSnackbar("保存失败：${it.message ?: "未知错误"}")
                         }
                     showEditDialog = false
                 }
@@ -279,14 +276,10 @@ fun AssetDetailScreen(
                         viewModel.adjustPosition(updatedAsset)
                     }.exceptionOrNull()
                     if (failure == null) {
-                        Toast.makeText(context, "已记录", Toast.LENGTH_SHORT).show()
+                        snackbarHostState.showSnackbar("已记录")
                     } else {
                         AppLogger.e("调整持仓失败: ${failure.message}", failure, "AssetDetailScreen")
-                        Toast.makeText(
-                            context,
-                            "调整失败：${failure.message ?: "未知错误"}",
-                            Toast.LENGTH_LONG
-                        ).show()
+                        snackbarHostState.showSnackbar("调整失败：${failure.message ?: "未知错误"}")
                     }
                     // 成败都要关：否则按钮永久转圈且没有出口
                     showAdjustDialog = false
@@ -315,7 +308,7 @@ fun AssetDetailScreen(
                                 onNavigateBack()
                             } else {
                                 AppLogger.e("删除资产失败: ${failure.message}", failure, "AssetDetailScreen")
-                                Toast.makeText(context, "删除失败：${failure.message ?: "未知错误"}", Toast.LENGTH_LONG).show()
+                                snackbarHostState.showSnackbar("删除失败：${failure.message ?: "未知错误"}")
                             }
                         }
                     },

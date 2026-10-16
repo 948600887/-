@@ -13,7 +13,9 @@ import java.nio.charset.Charset
 import java.util.concurrent.ConcurrentHashMap
 import org.json.JSONArray
 import org.json.JSONObject
-import com.example.stockdiary.common.Constants
+import com.example.stockdiary.common.APIEndpoints
+import com.example.stockdiary.common.CacheConfig
+import com.example.stockdiary.common.RequestLimits
 import com.example.stockdiary.utils.PerformanceMonitor
 import com.example.stockdiary.utils.StockCodeManager
 import com.example.stockdiary.data.PriceCacheManager
@@ -21,13 +23,13 @@ import kotlinx.coroutines.CancellationException
 
 object SinaStockAPI : StockAPI {
     private const val TAG = "SinaStockAPI"
-    private const val BASE_URL_REALTIME = Constants.BASE_URL_REALTIME
-    private const val BASE_URL_HISTORY = Constants.BASE_URL_HISTORY
-    
+    private const val BASE_URL_REALTIME = APIEndpoints.Sina.HQ_API + "/list="
+    private const val BASE_URL_HISTORY = APIEndpoints.Sina.HISTORY_API
+
     private val stockDataCache = ConcurrentHashMap<String, Pair<Long, SinaStockData>>()
-    private const val CACHE_DURATION = Constants.PORTFOLIO_CACHE_DURATION
+    private const val CACHE_DURATION = CacheConfig.PORTFOLIO_CACHE_MS
     private const val MAX_CACHE_SIZE = 200
-    private const val MAX_RETRY_COUNT = Constants.MAX_RETRY_COUNT
+    private const val MAX_RETRY_COUNT = RequestLimits.MAX_RETRY
     
     private val pendingRequests = ConcurrentHashMap<String, kotlinx.coroutines.CompletableDeferred<Result<SinaStockData>>>()
     private val batchPendingRequests = ConcurrentHashMap<String, kotlinx.coroutines.CompletableDeferred<Result<Map<String, SinaStockData>>>>()
@@ -106,7 +108,7 @@ object SinaStockAPI : StockAPI {
                     needRequest.addAll(uniqueStockCodes)
                 }
                 
-                val batchSize = Constants.BATCH_REQUEST_SIZE
+                val batchSize = RequestLimits.BATCH_SIZE
                 val batches = needRequest.chunked(batchSize)
                 val allResults = mutableMapOf<String, SinaStockData>()
                 allResults.putAll(cachedResults)
@@ -167,7 +169,7 @@ object SinaStockAPI : StockAPI {
 
                                 // 批次间延迟，防止API限流（串行处理非首批次时生效）
                                 if (index > 0) {
-                                    kotlinx.coroutines.delay(Constants.REQUEST_DELAY_MS.toLong())
+                                    kotlinx.coroutines.delay(RequestLimits.DELAY_MS)
                                 }
 
                                 request.complete(Result.success(batchResult))

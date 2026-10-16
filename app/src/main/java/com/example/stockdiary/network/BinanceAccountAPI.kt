@@ -1,5 +1,6 @@
 package com.example.stockdiary.network
 
+import com.example.stockdiary.common.APIEndpoints
 import com.example.stockdiary.utils.AppLogger
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -54,11 +55,11 @@ data class BinanceBalance(
  */
 object BinanceAccountAPI {
 
-    /** 账户查询接口。BASE_URL 与 [BinanceAPI] 保持一致 */
-    private const val ACCOUNT_URL = "https://api.binance.com/api/v3/account"
+    /** 账户查询接口。BASE_URL 复用 [APIEndpoints.Binance]，避免硬编码重复 */
+    private const val ACCOUNT_URL = APIEndpoints.Binance.BASE_URL + "/account"
 
     /** 批量最新价接口（公开免签）。用于导入时估算市值、按价值过滤零碎 */
-    private const val PRICE_URL = "https://api.binance.com/api/v3/ticker/price"
+    private const val PRICE_URL = APIEndpoints.Binance.BASE_URL + APIEndpoints.Binance.TICKER
 
     /**
      * 批量取价每批的交易对个数上限。

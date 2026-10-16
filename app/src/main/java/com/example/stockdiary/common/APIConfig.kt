@@ -60,6 +60,7 @@ object Timeouts {
 
 object CacheConfig {
     const val PRICE_CACHE_MS = 60000L
+    const val PORTFOLIO_CACHE_MS = 300000L
     const val FUND_CACHE_MS = 300000L
     const val FUND_DETAIL_CACHE_MS = 3600000L
     const val FUND_HISTORY_CACHE_MS = 1800000L

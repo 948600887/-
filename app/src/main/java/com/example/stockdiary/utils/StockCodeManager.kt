@@ -44,15 +44,18 @@ object StockCodeManager {
     
     /**
      * 代码分类枚举
+     *
+     * @param color 浅色分类色（Color.kt 现值，浅色模式使用）
+     * @param colorDark 深色分类色（深色模式提亮变体，避免深背景下对比不足）
      */
-    enum class CodeCategory(val label: String) {
-        STOCK("股票"),
-        ETF("ETF"),
-        LOF("LOF基金"),
-        EXCHANGE_FUND("场内基金"),
-        OTC_FUND("场外基金"),
-        UNKNOWN("未知");
-        
+    enum class CodeCategory(val label: String, val colorDark: Color) {
+        STOCK("股票", Color(0xFF64B5F6)),
+        ETF("ETF", Color(0xFF81C784)),
+        LOF("LOF基金", Color(0xFFFFB74D)),
+        EXCHANGE_FUND("场内基金", Color(0xFFCE93D8)),
+        OTC_FUND("场外基金", Color(0xFF4DD0E1)),
+        UNKNOWN("未知", Color(0xFF9E9E9E));
+
         val color: Color get() = when (this) {
             STOCK -> Color(0xFF1565C0)
             ETF -> Color(0xFF2E7D32)

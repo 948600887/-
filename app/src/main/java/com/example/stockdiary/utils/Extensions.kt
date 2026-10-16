@@ -1,8 +1,8 @@
 package com.example.stockdiary.utils
 
+import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
-import com.example.stockdiary.ui.theme.LossRed
-import com.example.stockdiary.ui.theme.ProfitGreen
+import com.example.stockdiary.ui.theme.AppTheme
 import java.time.Instant
 import java.time.LocalDate
 import java.time.LocalDateTime
@@ -34,7 +34,13 @@ fun Double.toCurrencyString(symbol: String = "¥") = "$symbol${this.format(2)}"
 fun Double.toProfitDisplay(currency: String = "¥"): String =
     "${if (this >= 0) "+" else ""}$currency${this.format(2)}"
 
-fun Double.profitColor(): Color = if (this >= 0) LossRed else ProfitGreen
+/**
+ * 盈亏色（红涨绿跌，A 股惯例）：>=0 红、<0 绿。
+ * 主题感知：随 AppTheme.colors 切换深浅两套；调用点均位于 @Composable 内。
+ */
+@Composable
+fun Double.profitColor(): Color =
+    if (this >= 0) AppTheme.colors.lossRed else AppTheme.colors.profitGreen
 
 fun Long.toFileTimestamp(): String =
     ZonedDateTime.ofInstant(Instant.ofEpochMilli(this), ZoneId.systemDefault()).toLocalDateTime()

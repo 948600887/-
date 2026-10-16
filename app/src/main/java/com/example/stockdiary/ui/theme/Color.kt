@@ -2,6 +2,15 @@ package com.example.stockdiary.ui.theme
 
 import androidx.compose.ui.graphics.Color
 
+/**
+ * 主题定义源（设计令牌的浅色基值）。
+ *
+ * 这些是主题令牌的浅色基值，深色变体见 AppColors（ui/theme/AppColors.kt 的 DarkAppColors）；
+ * 页面请改用 AppTheme.colors.xxx（Composable 内唯一读取入口），不要直接引用本文件的语义 val。
+ * 本文件 val 保留的原因：被 LightAppColors / DarkAppColors / Light(Dark)ColorScheme 引用，
+ * 以及 StockCodeManager.CodeCategory.color 等非 Composable 上下文仍会使用。
+ */
+
 val WhiteSurface = Color(0xFFFFFFFF)
 val WhiteBackground = Color(0xFFF5F5F5)
 val LightGray = Color(0xFFF0F0F0)
@@ -32,6 +41,11 @@ val LossRed = Color(0xFFE53935)
 
 val AccentOrange = Color(0xFFFF9800)
 val AccentBlue = Color(0xFF1976D2)
+
+// 深色模式微调强调色（无 *Dark 变体的共享强调色提亮，供 DarkAppColors / DarkColorScheme 共用）。
+val LossRedBright = Color(0xFFFF8A80)
+val ProfitGreenBright = Color(0xFF81C784)
+val WarningBright = Color(0xFFFFB74D)
 
 val DividerLight = Color(0xFFE0E0E0)
 val DividerDark = Color(0xFF333333)

@@ -1,0 +1,83 @@
+classDiagram
+    class AppColors {
+        <<data class>>
+        +Boolean isDark
+        +Color onSurface
+        +Color onSurfaceVariant
+        +Color surface
+        +Color surfaceContainerLowest
+        +Color surfaceContainerLow
+        +Color surfaceContainer
+        +Color surfaceContainerHigh
+        +Color surfaceContainerHighest
+        +Color background
+        +Color onBackground
+        +Color onPrimary
+        +Color onError
+        +Color primary
+        +Color primaryGreen
+        +Color primaryContainer
+        +Color lossRed
+        +Color profitGreen
+        +Color error
+        +Color success
+        +Color warning
+        +Color info
+        +Color accentOrange
+        +Color accentBlue
+        +Color disabled
+        +Color outline
+        +Color outlineVariant
+        +Color secondaryContainer
+        +Color tertiaryContainer
+        +Color errorContainer
+        +Color warningContainer
+        +Color chartAxisText
+        +Color chartPointFill
+    }
+
+    class LocalAppColors {
+        <<staticCompositionLocalOf>>
+        +AppColors current
+    }
+
+    class AppTheme {
+        <<object>>
+        +AppColors colors @Composable
+    }
+
+    class LightAppColors {
+        <<val>>
+    }
+    class DarkAppColors {
+        <<val>>
+    }
+
+    class GoldVaultTheme {
+        <<@Composable>>
+        +content @Composable () -> Unit
+    }
+    class ThemeManager {
+        <<object>>
+        +setThemeMode(Context, ThemeMode)
+        +getThemeMode(Context) ThemeMode
+    }
+    class ThemeMode {
+        <<enumeration>>
+        SYSTEM
+        LIGHT
+        DARK
+    }
+    class DoubleExt {
+        <<ext fun on Double>>
+        +profitColor() Color @Composable
+    }
+
+    LightAppColors ..|> AppColors : 实例
+    DarkAppColors ..|> AppColors : 实例
+    LocalAppColors ..> AppColors : 持有值
+    AppTheme --> LocalAppColors : current
+    GoldVaultTheme ..> LocalAppColors : CompositionLocalProvider 提供
+    GoldVaultTheme --> ThemeManager : rememberThemeMode 读取偏好
+    ThemeManager --> ThemeMode
+    DoubleExt ..> AppTheme : profitColor 读 colors

@@ -54,7 +54,7 @@ private val DarkColorScheme = darkColorScheme(
     onTertiary = OnPrimaryDark,
     tertiaryContainer = TertiaryContainerDark,
     onTertiaryContainer = TertiaryLight,
-    error = Error,
+    error = LossRedBright,
     onError = OnErrorDark,
     errorContainer = ErrorContainerDark,
     onErrorContainer = ErrorLight,
@@ -96,12 +96,15 @@ fun GoldVaultTheme(
     }.let { darkTheme ?: it }
 
     val colorScheme = if (isDark) DarkColorScheme else LightColorScheme
+    val appColors = if (isDark) DarkAppColors else LightAppColors
 
-    MaterialTheme(
-        colorScheme = colorScheme,
-        typography = Typography,
-        content = content
-    )
+    CompositionLocalProvider(LocalAppColors provides appColors) {
+        MaterialTheme(
+            colorScheme = colorScheme,
+            typography = Typography,
+            content = content
+        )
+    }
 }
 
 @Composable

@@ -1,0 +1,31 @@
+sequenceDiagram
+    participant U as 用户
+    participant TSD as ThemeSelectionDialog
+    participant TM as ThemeManager
+    participant SP as SharedPreferences
+    participant RTM as rememberThemeMode
+    participant GVT as GoldVaultTheme
+    participant LAC as LocalAppColors
+    participant PG as 页面 Composable
+    participant CV as Canvas/DrawScope
+
+    Note over U,CV: 路径1：应用内切换主题
+    U->>TSD: 选择「深色模式」
+    TSD->>TM: setThemeMode(context, DARK)
+    TM->>SP: putString("theme_mode", "DARK")
+    SP-->>RTM: OnSharedPreferenceChangeListener 回调
+    RTM-->>GVT: themeMode = DARK → isDark = true
+    GVT->>LAC: CompositionLocalProvider(LocalAppColors provides DarkAppColors)
+    LAC-->>PG: 重组：AppTheme.colors == DarkAppColors
+    PG->>CV: 组体内读出 colors.* 捕获为局部 val
+    CV-->>U: 深色卡片/文字/图表
+
+    Note over U,CV: 路径2：系统深色（SYSTEM 模式）
+    U->>GVT: 系统切换深色 → onConfigurationChanged → recreate()
+    GVT->>GVT: systemDark = true → isDark = true
+    GVT->>LAC: 提供 DarkAppColors
+    LAC-->>PG: 整树重组
+
+    Note over U,CV: 页面读取约定
+    PG->>LAC: AppTheme.colors.onSurface / .lossRed / .chartAxisText …
+    PG->>CV: draw lambda 仅使用组体内捕获的局部色值

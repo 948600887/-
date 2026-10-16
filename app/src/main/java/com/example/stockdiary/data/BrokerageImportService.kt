@@ -32,7 +32,7 @@ import kotlinx.coroutines.CancellationException
  * - 先预览再提交：解析后展示交易列表 + 异常行/重复行标记，用户确认后才批量入库。
  * - 回放顺序：commit 前按日期升序排序，保证多次买入的加权成本正确累积。
  */
-class BrokerageImportService private constructor(private val context: Context) {
+class BrokerageImportService internal constructor(private val context: Context) {
 
     /** 解析后的 CSV 结构 */
     data class ParsedCsv(
@@ -267,7 +267,7 @@ class BrokerageImportService private constructor(private val context: Context) {
             ?: throw IllegalStateException("无法读取文件")
     }
 
-    private fun detectCharset(bytes: ByteArray): Charset {
+    internal fun detectCharset(bytes: ByteArray): Charset {
         if (bytes.size >= 3 && bytes[0] == 0xEF.toByte() && bytes[1] == 0xBB.toByte() && bytes[2] == 0xBF.toByte())
             return Charsets.UTF_8
         if (bytes.size >= 2 && bytes[0] == 0xFF.toByte() && bytes[1] == 0xFE.toByte())
@@ -302,7 +302,7 @@ class BrokerageImportService private constructor(private val context: Context) {
     /**
      * CSV 文本解析：支持引号包裹字段（含逗号、转义双引号 ""）、引号内换行。
      */
-    private fun parseCsvText(content: String): ParsedCsv {
+    internal fun parseCsvText(content: String): ParsedCsv {
         val rows = mutableListOf<List<String>>()
         val current = mutableListOf<String>()
         val sb = StringBuilder()
@@ -384,7 +384,7 @@ class BrokerageImportService private constructor(private val context: Context) {
      * （AddAssetDialog / AssetDetailViewModel 都走它），例如 "515080" → "sh515080"。
      * 导入时如果直接拿原始 6 位数字去查库，会查不到已有持仓，进而重复建仓、成本算错。
      */
-    private fun normalizedSymbol(raw: String): String =
+    internal fun normalizedSymbol(raw: String): String =
         if (raw.isBlank()) "" else StockCodeManager.normalizeSymbol(raw)
 
     /**
@@ -484,33 +484,10 @@ class BrokerageImportService private constructor(private val context: Context) {
 
         for (t in valid) {
             try {
-                var localSkipped = false
-                db.withTransaction {
-                    // 事务内二次确认去重（防止预览后库内新增同记录）
-                    if (transactionDao.findDuplicate(t.symbol, t.type, t.quantity, t.price, t.date) != null) {
-                        localSkipped = true
-                        return@withTransaction
-                    }
-                    val now = System.currentTimeMillis()
-                    if (t.type == TransactionType.BUY.value) {
-                        applyBuy(t, now)
-                    } else {
-                        applySell(t, now)
-                    }
-                    transactionDao.insert(
-                        Transaction(
-                            symbol = t.symbol,
-                            name = t.name,
-                            type = t.type,
-                            quantity = t.quantity,
-                            price = t.price,
-                            date = t.date,
-                            fee = t.fee
-                        )
-                    )
-                    success++
-                }
-                if (localSkipped) skippedDup++
+                // 事务内处理单笔：先去重，再写持仓 + 写流水。
+                // 抽出 commitTransaction 仅为可单测；事务边界与原来完全一致。
+                val added = db.withTransaction { commitTransaction(t) }
+                if (added) success++ else skippedDup++
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -530,8 +507,40 @@ class BrokerageImportService private constructor(private val context: Context) {
         CommitResult(success, skippedDup, skippedUser, skippedError, failed, failures)
     }
 
+    /**
+     * 处理单笔已校验通过的交易：事务内先按「同标的+同方向+同数量+同价格+同日期」去重，
+     * 再去重写持仓（加权成本 / 减仓清仓）与写交易流水。
+     *
+     * 返回 true=成功写入，false=被去重跳过。抽出为 internal 仅为可单测，
+     * [commit] 在 withTransaction 内调用它，事务边界与原来完全一致。
+     */
+    internal suspend fun commitTransaction(t: ParsedTransaction): Boolean {
+        // 事务内二次确认去重（防止预览后库内新增同记录）
+        if (transactionDao.findDuplicate(t.symbol, t.type, t.quantity, t.price, t.date) != null) {
+            return false
+        }
+        val now = System.currentTimeMillis()
+        if (t.type == TransactionType.BUY.value) {
+            applyBuy(t, now)
+        } else {
+            applySell(t, now)
+        }
+        transactionDao.insert(
+            Transaction(
+                symbol = t.symbol,
+                name = t.name,
+                type = t.type,
+                quantity = t.quantity,
+                price = t.price,
+                date = t.date,
+                fee = t.fee
+            )
+        )
+        return true
+    }
+
     /** 买入：同 symbol 且同 account 的已有持仓则合并加权成本（含手续费摊入），否则新建资产 */
-    private suspend fun applyBuy(t: ParsedTransaction, now: Long) {
+    internal suspend fun applyBuy(t: ParsedTransaction, now: Long) {
         val existing = assetDao.getAssetBySymbolAndAccount(t.symbol, t.account)
         if (existing != null) {
             val newBalance = existing.balance + t.quantity
@@ -558,7 +567,7 @@ class BrokerageImportService private constructor(private val context: Context) {
      * 卖出：有持仓则减仓/清仓，无持仓则跳过持仓操作（仅写交易记录，回放时数据可能不全）。
      * 这里不抛异常——卖出无持仓视为交易记录补录，持仓由后续买入记录重建。
      */
-    private suspend fun applySell(t: ParsedTransaction, now: Long) {
+    internal suspend fun applySell(t: ParsedTransaction, now: Long) {
         val existing = assetDao.getAssetBySymbolAndAccount(t.symbol, t.account)
         if (existing == null) {
             // 无持仓但仍记录交易；标记为提示而非硬失败
@@ -572,7 +581,7 @@ class BrokerageImportService private constructor(private val context: Context) {
     }
 
     /** 买卖方向识别：买/买入/B/BUY → BUY；卖/卖出/S/SELL → SELL */
-    private fun parseType(raw: String): String? {
+    internal fun parseType(raw: String): String? {
         val s = raw.trim()
         if (s.isEmpty()) return null
         // 先判卖再判买，避免「卖出」「买入」互含误判
@@ -582,7 +591,7 @@ class BrokerageImportService private constructor(private val context: Context) {
     }
 
     /** 日期归一化为 yyyy-MM-dd，支持多种格式 */
-    private fun parseDate(raw: String): String? {
+    internal fun parseDate(raw: String): String? {
         val s = raw.trim()
         if (s.isEmpty()) return null
         // 带时间

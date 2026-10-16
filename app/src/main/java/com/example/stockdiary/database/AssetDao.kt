@@ -56,6 +56,9 @@ interface AssetDao {
     
     @Query("UPDATE assets SET currentPrice = :price, lastSyncTime = :syncTime WHERE id = :id")
     suspend fun updatePriceById(id: Long, price: Double, syncTime: Long)
+
+    @Query("UPDATE assets SET name = :name, lastSyncTime = :syncTime WHERE id = :id")
+    suspend fun updateNameById(id: Long, name: String, syncTime: Long)
     
     @Query("UPDATE assets SET balance = :balance, lastUpdateTime = :updateTime WHERE id = :id")
     suspend fun updateBalance(id: Long, balance: Double, updateTime: Long)

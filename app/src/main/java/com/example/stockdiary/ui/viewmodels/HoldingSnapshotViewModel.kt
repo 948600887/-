@@ -290,7 +290,11 @@ class HoldingSnapshotViewModel(
                     onProgress = { progress ->
                         _uiState.update { state -> state.copy(syncMessage = progress.message) }
                     },
-                    forceRefresh = true
+                    forceRefresh = true,
+                    // 这次同步的是刚导入的持仓：名字大概率是 OCR 认的，形近字易错
+                    // （华电REIT→怯电REIT、科创50→料创50）。让同步按代码对应的行情标准名
+                    // 纠偏。仅限本链路，其它同步不传，避免冲掉用户自己改过的名字。
+                    correctNames = true
                 )
 
                 val message = buildString {

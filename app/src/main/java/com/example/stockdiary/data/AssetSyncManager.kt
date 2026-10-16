@@ -74,7 +74,8 @@ object AssetSyncManager {
         onProgress: (SyncProgress) -> Unit,
         forceRefresh: Boolean = false,
         startTime: Long = 0L,
-        timeLimitMs: Long = 0L
+        timeLimitMs: Long = 0L,
+        correctNames: Boolean = false
     ): SyncResult {
         if (assets.isEmpty()) {
             return SyncResult(0, 0)
@@ -99,7 +100,8 @@ object AssetSyncManager {
                     onProgress = onProgress,
                     forceRefresh = forceRefresh,
                     startTime = System.currentTimeMillis(),
-                    timeLimitMs = SyncBudget.MANUAL_SYNC_TIME_LIMIT_MS
+                    timeLimitMs = SyncBudget.MANUAL_SYNC_TIME_LIMIT_MS,
+                    correctNames = correctNames
                 )
             }
         } else {
@@ -110,7 +112,8 @@ object AssetSyncManager {
                 onProgress = onProgress,
                 forceRefresh = forceRefresh,
                 startTime = startTime,
-                timeLimitMs = timeLimitMs
+                timeLimitMs = timeLimitMs,
+                correctNames = correctNames
             )
         }
     }
@@ -139,7 +142,8 @@ object AssetSyncManager {
         onProgress: (SyncProgress) -> Unit,
         forceRefresh: Boolean,
         startTime: Long,
-        timeLimitMs: Long
+        timeLimitMs: Long,
+        correctNames: Boolean
     ): SyncResult = withContext(Dispatchers.IO) {
         val enforceTimeLimit = timeLimitMs > 0L
 
@@ -214,7 +218,8 @@ object AssetSyncManager {
                                 successCount,
                                 failedCount,
                                 errorTypes,
-                                forceRefresh
+                                forceRefresh,
+                                correctNames
                             )
                         } finally {
                             inFlightAssets.remove(label)
@@ -259,7 +264,8 @@ object AssetSyncManager {
         successCount: AtomicInteger,
         failedCount: AtomicInteger,
         errorTypes: ConcurrentLinkedQueue<SyncErrorType>,
-        forceRefresh: Boolean
+        forceRefresh: Boolean,
+        correctNames: Boolean
     ) {
         val symbol = asset.symbol
 
@@ -297,6 +303,7 @@ object AssetSyncManager {
                             val stockData = result.getOrNull()
                             if (stockData != null) {
                                 repository.updatePriceBySymbol(symbol, stockData.price)
+                                if (correctNames) correctAssetName(asset, stockData.name, repository)
                                 isSuccess = true
                             } else {
                                 lastError = IllegalStateException("返回数据为空")
@@ -335,6 +342,7 @@ object AssetSyncManager {
                         val stockData = result.getOrNull()
                         if (stockData != null) {
                             repository.updatePriceBySymbol(stockSymbol, stockData.price)
+                            if (correctNames) correctAssetName(asset, stockData.name, repository)
                             isSuccess = true
                         } else {
                             lastError = IllegalStateException("返回数据为空")
@@ -390,6 +398,22 @@ object AssetSyncManager {
             failedCount.incrementAndGet()
             errorTypes.offer(SyncStrategy.classifyError(e))
         }
+    }
+
+    /**
+     * 导入后校正证券名：行情名非空、且与库存名不同才改成行情名；否则返回 null（不改）。
+     *
+     * 为什么普通同步不做：用户能在编辑弹窗自定义名称（EditAssetDialog 的 name 字段），
+     * 无脑改名会把用户的命名冲掉。只有「导入后同步」显式传 correctNames 才走这里——
+     * 那批名字来自 OCR，形近字误识高发（华→怯、科→料），值得按代码对应的行情标准名纠偏。
+     */
+    internal fun nameCorrectionOrNull(storedName: String, canonicalName: String?): String? =
+        canonicalName?.takeIf { it.isNotBlank() && it != storedName }
+
+    private suspend fun correctAssetName(asset: Asset, canonicalName: String?, repository: AssetRepository) {
+        val corrected = nameCorrectionOrNull(asset.name, canonicalName) ?: return
+        repository.updateNameById(asset.id, corrected)
+        AppLogger.i("校正证券名：${asset.symbol} 「${asset.name}」→「$corrected」（按代码取行情标准名）", TAG)
     }
 
 }

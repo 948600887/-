@@ -80,6 +80,16 @@ class AssetRepository private constructor(
         }
         assetDao.updatePriceById(id, price, System.currentTimeMillis())
     }
+
+    /**
+     * 按代码校正证券名（只「导入后同步」链路调用）。
+     *
+     * 只改 name、不动其它字段；该不该改由调用方判断（见 [AssetSyncManager.nameCorrectionOrNull]）——
+     * 普通行情同步不走这里，避免把用户故意改过的名字冲掉。
+     */
+    suspend fun updateNameById(id: Long, name: String) {
+        assetDao.updateNameById(id, name, System.currentTimeMillis())
+    }
     
     suspend fun updateBalance(id: Long, balance: Double) = 
         assetDao.updateBalance(id, balance, System.currentTimeMillis())

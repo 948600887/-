@@ -14,6 +14,12 @@ import kotlinx.coroutines.CancellationException
  */
 object DividendIncomeCalculator {
 
+    /** 每万份收益的「万份」：日收益 = 持有份额 × 每万份收益 ÷ 10000 */
+    private const val COPIES_PER_UNIT = 10_000.0
+
+    /** 年化用的天数。与 Dashboard 把年化收入 ÷365 估「每日分红」保持同一口径。 */
+    private const val DAYS_PER_YEAR = 365.0
+
     /**
      * 计算单个资产的年化收入（分红+利息）
      */
@@ -33,8 +39,18 @@ object DividendIncomeCalculator {
             if (asset.type != com.example.stockdiary.database.AssetType.STOCK && asset.type != com.example.stockdiary.database.AssetType.FUND) {
                 0.0
             } else {
-                // 每股分红与标的同币种，折成人民币后再乘份额
-                asset.balance * ExchangeRateManager.toCny(dividendPerShare, asset.currency) / 10.0
+                // 货币基金：不派「每十股分红」，收益是每日「每万份收益」。
+                // 年化 = 日收益（份额 × 万份收益 ÷ 10000）× 365。
+                // 这条必须加，否则「年化收入 / 年度分红」与收息进度的「全年预计」
+                // 会对同一只货基给出两个不同的数，同一屏上自相矛盾。
+                val mci = asset.millionCopiesIncome
+                if (mci != null && mci > 0.0) {
+                    asset.balance * ExchangeRateManager.toCny(mci, asset.currency) /
+                        COPIES_PER_UNIT * DAYS_PER_YEAR
+                } else {
+                    // 每股分红与标的同币种，折成人民币后再乘份额
+                    asset.balance * ExchangeRateManager.toCny(dividendPerShare, asset.currency) / 10.0
+                }
             }
         }
     }

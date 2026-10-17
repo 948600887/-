@@ -5,6 +5,8 @@ import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.database.amountFor
 import com.example.stockdiary.database.perTenSharesToAmount
 import java.time.LocalDate
+import java.time.Year
+import java.time.YearMonth
 import java.time.temporal.ChronoUnit
 
 /**
@@ -37,6 +39,12 @@ object DividendProgressCalculator {
      * 判定用 `lastDate.isBefore(today - 12个月)`，与 `getTTMDividend` 的闭区间窗口对齐。
      */
     private const val STALE_MONTHS = 12L
+
+    /**
+     * 每万份收益的「万份」：货币基金按**每一万份**公布当天赚多少，
+     * 故日收益 = 持有份额 × 每万份收益 ÷ 10000。
+     */
+    private const val COPIES_PER_UNIT = 10_000.0
 
     data class NextPayout(
         val assetName: String,
@@ -113,7 +121,15 @@ object DividendProgressCalculator {
         // 显式标签：外层遍历资产、内层遍历分红记录，两个都叫 @forEach 会让 return@forEach 产生歧义
         assets.filter { it.type == AssetType.STOCK || it.type == AssetType.FUND }.forEach assetLoop@{ asset ->
             val symbol = asset.symbol ?: return@assetLoop
-            val records = recordsBySymbol[symbol] ?: return@assetLoop
+            val records = recordsBySymbol[symbol].orEmpty()
+
+            // 货币基金不发现金分红，收益是每日「每万份收益」，必须在这里单独进收息进度：
+            // 否则它会撞上下面「无分红记录 → 跳过」，全年预计里永远是 0。
+            // 与现金分红分支并存累加：极少数货基可能同时带分红记录，两条路都该算进来。
+            val moneyFund = moneyFundIncome(asset, today, monthlyReceived, monthlyScheduled)
+            yearProjected += moneyFund.projected
+            yearReceived += moneyFund.received
+
             if (records.isEmpty()) return@assetLoop
 
             val balance = asset.balance
@@ -190,6 +206,65 @@ object DividendProgressCalculator {
             nextPayout = next,
             monthly = (1..12).map { MonthCash(it, monthlyReceived[it], monthlyScheduled[it]) }
         )
+    }
+
+    private data class MoneyFundIncome(val projected: Double, val received: Double) {
+        companion object {
+            val ZERO = MoneyFundIncome(0.0, 0.0)
+        }
+    }
+
+    /**
+     * 货币基金（每万份收益）对收息进度的贡献。
+     *
+     * 货币基金不发现金分红，收益**每天**按份额派发：每万份收益
+     * （[Asset.millionCopiesIncome]）= 每一万份当天赚多少，
+     * 所以持有 balance 份的日收益 = balance × 万份收益 ÷ 10000。
+     *
+     * 与现金分红口径的差异（务必记住）：
+     * - **全年预计** = 日收益 × 当年天数。前向预估，与现金分红的 TTM 同为 estimate 性质。
+     * - **今年已收** = 日收益 × 今年已过天数。**这是估算，不是真实到账记录**：
+     *   我们只存了**最新**的万份收益，没有历史每日序列，只能拿最新值单点外推。
+     *   用户已确认接受（否则货基已收恒为 0、进度条永远空着，反而更误导）。
+     * - **月度柱图**：已过天数进 received、当年剩余天数进 scheduled，
+     *   两段相加正好等于全年预计，柱图与「全年预计」不会打架。
+     * - **不进 receivedCount**：那是「派息笔数」；货基按日计息，逐日计数会把笔数冲到几百。
+     * - **不设 nextPayout**：货基按日结息，没有「下一笔」概念。
+     *
+     * 币种：与这个文件里现金分红的口径一致，**不做汇率换算**（[perTenSharesToAmount] 同样不换）。
+     * 要人民币口径的走 DividendIncomeCalculator，那边会换算。
+     */
+    private fun moneyFundIncome(
+        asset: Asset,
+        today: LocalDate,
+        monthlyReceived: DoubleArray,
+        monthlyScheduled: DoubleArray
+    ): MoneyFundIncome {
+        val mci = asset.millionCopiesIncome
+        val balance = asset.balance
+        if (mci == null || mci <= 0.0 || balance <= 0.0) return MoneyFundIncome.ZERO
+
+        val daily = balance * mci / COPIES_PER_UNIT
+        val daysInYear = Year.of(today.year).length()
+        val elapsed = today.dayOfYear.coerceIn(0, daysInYear)
+
+        // 已过天数填进各月 received，当年剩余天数填进 scheduled
+        var remaining = elapsed
+        for (month in 1..12) {
+            val dim = YearMonth.of(today.year, month).lengthOfMonth()
+            val days = remaining.coerceAtMost(dim)
+            if (days > 0) {
+                monthlyReceived[month] += daily * days
+                remaining -= days
+                // 当月只过了一部分时，该月剩下的天数属未来 → 计入 scheduled
+                val rest = dim - days
+                if (rest > 0) monthlyScheduled[month] += daily * rest
+            } else {
+                monthlyScheduled[month] += daily * dim
+            }
+        }
+
+        return MoneyFundIncome(projected = daily * daysInYear, received = daily * elapsed)
     }
 
     /**

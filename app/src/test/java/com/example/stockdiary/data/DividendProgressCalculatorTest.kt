@@ -35,6 +35,38 @@ class DividendProgressCalculatorTest {
     private fun dateIn(month: Int, day: Int): String =
         "$year-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}"
 
+    // ===== 货币基金（每万份收益）=====
+
+    /**
+     * 固定「今天」= 2026-03-01。2026 不是闰年（365 天），3/1 是当年第 60 天。
+     * 于是 10000 份 × 每万份收益 1.0 → 日收益 1.0 元：
+     * 全年预计 = 1 × 365 = 365，今年已收 = 1 × 60 = 60。
+     * 用固定日期而不是 LocalDate.now()，用例才不会跑着跑着就漂。
+     */
+    private val moneyFundToday: LocalDate = LocalDate.of(2026, 3, 1)
+
+    private fun moneyFundAsset(
+        name: String,
+        symbol: String,
+        balance: Double,
+        millionCopiesIncome: Double
+    ) = Asset(
+        name = name,
+        type = AssetType.FUND,
+        symbol = symbol,
+        account = "默认",
+        balance = balance,
+        millionCopiesIncome = millionCopiesIncome
+    )
+
+    private fun plainFund(name: String, symbol: String, balance: Double) = Asset(
+        name = name,
+        type = AssetType.FUND,
+        symbol = symbol,
+        account = "默认",
+        balance = balance
+    )
+
     @Test
     fun `今年已收只统计今年1月1日到今天之间的派息`() {
         val assets = listOf(asset("长江电力", "600900", 1000.0))
@@ -338,5 +370,98 @@ class DividendProgressCalculatorTest {
         assertEquals("${year + 1}-01-10", next?.displayDate)  // 界面显示到账日
         assertFalse(next?.isEstimated ?: true)                // 排定的，不是推算
         assertEquals(0.0, progress.monthly[0].scheduled, 0.001) // 今年 1 月柱图：不画
+    }
+
+    @Test
+    fun `货币基金_全年预计等于日收益乘当年天数`() {
+        val assets = listOf(moneyFundAsset("汇添富货币A", "519518", 10_000.0, 1.0))
+        val progress = DividendProgressCalculator.calculate(assets, emptyMap(), moneyFundToday)
+
+        // 10000 份 × 每万份 1 元 ÷ 10000 = 1 元/天；2026 年 365 天
+        assertEquals(365.0, progress.yearProjected, 0.001)
+    }
+
+    @Test
+    fun `货币基金_今年已收按已过天数估算`() {
+        val assets = listOf(moneyFundAsset("汇添富货币A", "519518", 10_000.0, 1.0))
+        val progress = DividendProgressCalculator.calculate(assets, emptyMap(), moneyFundToday)
+
+        // 2026-03-01 是当年第 60 天 → 1 元/天 × 60 = 60。
+        // 这是估算：我们只存最新的万份收益，没有历史每日序列，只能单点外推。
+        assertEquals(60.0, progress.yearReceived, 0.001)
+    }
+
+    @Test
+    fun `货币基金_月度柱图已过进已收剩余进待到账`() {
+        val assets = listOf(moneyFundAsset("汇添富货币A", "519518", 10_000.0, 1.0))
+        val progress = DividendProgressCalculator.calculate(assets, emptyMap(), moneyFundToday)
+
+        val monthly = progress.monthly
+        assertEquals(31.0, monthly[0].received, 0.001)  // 1 月整月
+        assertEquals(28.0, monthly[1].received, 0.001)  // 2 月整月
+        assertEquals(1.0, monthly[2].received, 0.001)   // 3 月只过了 1 天
+        assertEquals(30.0, monthly[2].scheduled, 0.001) // 3 月剩下 30 天算待到账
+
+        // 已收 + 待到账 = 全年预计，柱图与「全年预计」不打架
+        assertEquals(365.0, monthly.sumOf { it.received + it.scheduled }, 0.001)
+        assertEquals(60.0, monthly.sumOf { it.received }, 0.001)
+    }
+
+    @Test
+    fun `货币基金_不增加已到账笔数`() {
+        // 「已到账笔数」按笔算；货基按日计息，逐日计数会把笔数冲到几百
+        val assets = listOf(moneyFundAsset("汇添富货币A", "519518", 10_000.0, 1.0))
+        val progress = DividendProgressCalculator.calculate(assets, emptyMap(), moneyFundToday)
+
+        assertEquals(0, progress.receivedCount)
+    }
+
+    @Test
+    fun `货币基金_多只持仓累加`() {
+        val assets = listOf(
+            moneyFundAsset("汇添富货币A", "519518", 10_000.0, 1.0),   // 日收益 1 元
+            moneyFundAsset("长城收益宝A", "004972", 20_000.0, 1.0)    // 日收益 2 元
+        )
+        val progress = DividendProgressCalculator.calculate(assets, emptyMap(), moneyFundToday)
+
+        assertEquals(1095.0, progress.yearProjected, 0.001)  // (1+2) × 365
+        assertEquals(180.0, progress.yearReceived, 0.001)    // (1+2) × 60
+    }
+
+    @Test
+    fun `货币基金_份额为零时不计入`() {
+        val assets = listOf(moneyFundAsset("汇添富货币A", "519518", 0.0, 1.0))
+        val progress = DividendProgressCalculator.calculate(assets, emptyMap(), moneyFundToday)
+
+        assertEquals(0.0, progress.yearProjected, 0.001)
+        assertEquals(0.0, progress.yearReceived, 0.001)
+    }
+
+    @Test
+    fun `普通基金_没有万份收益时仍不计入收息进度`() {
+        // 普通基金既无万份收益又无分红记录 → 与改之前行为完全一致（0）
+        val assets = listOf(plainFund("某某混合", "000001", 1000.0))
+        val progress = DividendProgressCalculator.calculate(assets, emptyMap(), moneyFundToday)
+
+        assertEquals(0.0, progress.yearProjected, 0.001)
+        assertEquals(0.0, progress.yearReceived, 0.001)
+        assertFalse(progress.hasData)
+    }
+
+    @Test
+    fun `货币基金_与现金分红资产混合时两者都计入`() {
+        val assets = listOf(
+            moneyFundAsset("汇添富货币A", "519518", 10_000.0, 1.0), // 预计 365 / 已收 60
+            Asset(name = "长江电力", type = AssetType.STOCK, symbol = "600900", account = "默认", balance = 1000.0)
+        )
+        val records = mapOf("600900" to listOf(record("2026-01-15", 3.0)))
+
+        val progress = DividendProgressCalculator.calculate(assets, records, moneyFundToday)
+
+        // 股票：每十股 3 元 × 1000 ÷ 10 = 300（已到账，1 笔）
+        // 货基：365 / 60
+        assertEquals(665.0, progress.yearProjected, 0.001)
+        assertEquals(360.0, progress.yearReceived, 0.001)   // 300 + 60
+        assertEquals(1, progress.receivedCount)             // 只有股票那 1 笔
     }
 }

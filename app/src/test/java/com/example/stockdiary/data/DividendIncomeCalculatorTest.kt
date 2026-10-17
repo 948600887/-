@@ -33,6 +33,15 @@ class DividendIncomeCalculatorTest {
         balance = balance
     )
 
+    private fun moneyFund(symbol: String, balance: Double, millionCopiesIncome: Double) = Asset(
+        name = symbol,
+        type = AssetType.FUND,
+        symbol = symbol,
+        account = "默认",
+        balance = balance,
+        millionCopiesIncome = millionCopiesIncome
+    )
+
     private fun deposit(balance: Double, rate: Double?) = Asset(
         name = "存款",
         type = AssetType.BANK_DEPOSIT,
@@ -73,6 +82,43 @@ class DividendIncomeCalculatorTest {
     @Test
     fun `基金与股票同口径`() {
         assertEquals(500.0, DividendIncomeCalculator.calculateAnnualIncome(fund("510300", 1000.0), 5.0), 0.001)
+    }
+
+    @Test
+    fun `货币基金年化收入按每日万份收益乘365`() {
+        // 10000 份 × 每万份收益 1.0 ÷ 10000 = 1 元/天 → 年化 = 1 × 365 = 365
+        assertEquals(
+            365.0,
+            DividendIncomeCalculator.calculateAnnualIncome(moneyFund("519518", 10_000.0, 1.0)),
+            0.001
+        )
+    }
+
+    @Test
+    fun `货币基金没有分红记录也照样计入年化收入`() {
+        // 关键：货币基金根本不派「每十股分红」，dividendPerShare 传 0 也要算出钱来。
+        // 改之前这里返回 0，会让「年化收入」与收息进度的「全年预计」对同一只货基给出两个数。
+        assertEquals(
+            730.0,
+            DividendIncomeCalculator.calculateAnnualIncome(moneyFund("004972", 20_000.0, 1.0), 0.0),
+            0.001
+        )
+    }
+
+    @Test
+    fun `普通基金没有万份收益时仍按每十股分红算`() {
+        // 回归护栏：普通基金不该被货基分支抢走
+        assertEquals(500.0, DividendIncomeCalculator.calculateAnnualIncome(fund("510300", 1000.0), 5.0), 0.001)
+    }
+
+    @Test
+    fun `组合年化总收入包含货币基金`() {
+        val assets = listOf(
+            moneyFund("519518", 10_000.0, 1.0),  // 年化 365
+            stock("600519", 1000.0)              // 分红 1000
+        )
+        val bySymbol = mapOf("600519" to 10.0)
+        assertEquals(1365.0, DividendIncomeCalculator.calculateTotalAnnualIncome(assets, bySymbol), 0.001)
     }
 
     @Test

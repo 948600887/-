@@ -1,22 +1,45 @@
 package com.example.stockdiary.network
 
-import com.example.stockdiary.common.APIEndpoints
+import android.content.Context
 import com.example.stockdiary.database.AssetType
+import com.example.stockdiary.data.price.StockDataManager
 import com.example.stockdiary.network.cache.CacheManager
 import com.example.stockdiary.network.model.AssetPrice
 import com.example.stockdiary.network.model.CryptoData
 import com.example.stockdiary.network.model.FundData
-import com.example.stockdiary.network.model.StockData
 import com.example.stockdiary.utils.AppLogger
 import kotlinx.coroutines.*
 import okhttp3.Request
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CancellationException
 
+/**
+ * 行情统一入口（门面）。
+ *
+ * 调用方（资产同步 / 添加资产回显 / 币安导入估值）只面对本对象：
+ * - 进程内 60s TTL 内存缓存 + in-flight 单飞去重（[pendingRequests]）；
+ * - STOCK / 场内基金 → 委托 [StockDataManager]（多源容错 + 失败熔断 + 三级缓存）；
+ * - FUND / CRYPTO → 本类内部实现（场外基金经 [FundAPI]，加密货币直连币安）。
+ */
 object UnifiedPriceService {
     private const val TAG = "UnifiedPriceService"
     
     private val client = NetworkClient.defaultClient
+
+    /**
+     * 股票/场内基金行情策略（多源容错 + 失败熔断 + 三级缓存）。
+     *
+     * 门面自己不再直连腾讯：STOCK 分支委托给它，本类退化为
+     * 「60s TTL + 单飞」的统一入口。经 [init] 在应用启动时注入；
+     * 未注入时 STOCK 分支返回失败而非崩溃（单测里整个对象会被 mock，走不到这里）。
+     */
+    @Volatile
+    private var stockDataManager: StockDataManager? = null
+
+    /** 注入股票行情策略。在 Application.onCreate 调用一次。 */
+    fun init(context: Context) {
+        stockDataManager = StockDataManager.getInstance(context)
+    }
 
     /**
      * 行情价的进程内有效期。
@@ -56,7 +79,7 @@ object UnifiedPriceService {
 
         try {
             val result: Result<AssetPrice> = when (type) {
-                AssetType.STOCK -> getStockPrice(code).map { AssetPrice.Stock(it) }
+                AssetType.STOCK -> getStockData(code, forceRefresh)
                 AssetType.FUND -> getFundPrice(code, forceRefresh).map { AssetPrice.Fund(it) }
                 AssetType.CRYPTO -> getCryptoPrice(code).map { AssetPrice.Crypto(it) }
                 else -> Result.failure(Exception("不支持的资产类型: $type"))
@@ -88,118 +111,21 @@ object UnifiedPriceService {
         }
     }
     
-    private suspend fun getStockPrice(code: String): Result<StockData> = withContext(Dispatchers.IO) {
-        val url = "${APIEndpoints.Tencent.QT_API}$code"
-        
-        try {
-            val request = Request.Builder()
-                .url(url)
-                .addHeader("User-Agent", "Mozilla/5.0")
-                .addHeader("Referer", "https://gu.qq.com")
-                .build()
-            
-            val startTime = System.currentTimeMillis()
-            val response = client.newCall(request).execute()
-            response.use {
-                val duration = System.currentTimeMillis() - startTime
-
-                AppLogger.api("GET $url", it.message, duration, TAG)
-
-                if (!it.isSuccessful) {
-                    return@withContext Result.failure(Exception("HTTP ${it.code}"))
-                }
-
-                val body = it.body?.string() ?: return@withContext Result.failure(Exception("空响应"))
-
-                if (body.length < 20) {
-                    return@withContext Result.failure(Exception("响应数据过短"))
-                }
-
-                val stockData = parseTencentStock(code, body)
-
-                return@withContext if (stockData != null) {
-                    Result.success(stockData)
-                } else {
-                    Result.failure(Exception("解析股票数据失败"))
-                }
-            }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            AppLogger.e("获取股票价格失败: $code", e, TAG)
-            Result.failure(e)
-        }
-    }
-    
-    private fun parseTencentStock(code: String, response: String): StockData? {
-        return try {
-            val rawData = response.split("=").getOrNull(1)
-                ?.trim()
-                ?.removePrefix("\"")
-                ?.removeSuffix(";")
-                ?: return null
-            
-            val data = rawData.split(",")
-            
-            if (data.size < 35) {
-                AppLogger.w("股票数据格式异常，字段数不足: ${data.size}", TAG)
-                return null
-            }
-            
-            val name = data.getOrNull(1)?.takeIf { it.isNotBlank() } ?: ""
-            val rawPrice = data.getOrNull(3)?.toDoubleOrNull() ?: 0.0
-            val yesterdayClose = data.getOrNull(4)?.toDoubleOrNull()
-            val open = data.getOrNull(5)?.toDoubleOrNull()
-            val volume = data.getOrNull(6)?.toLongOrNull()
-            val high = data.getOrNull(33)?.toDoubleOrNull()
-            val low = data.getOrNull(34)?.toDoubleOrNull()
-            
-            // 停牌时腾讯返回的"现价"是 0、昨收正常。与 TencentStockAPI 保持一致：
-            // 退到昨收、涨跌记 0；两者都是 0 才算真的没有报价（返回 null，不写缓存）。
-            val price = if (rawPrice > 0) rawPrice else (yesterdayClose ?: 0.0)
-            if (price <= 0) {
-                AppLogger.w("无有效报价（疑似停牌）: $code（现价=$rawPrice, 昨收=$yesterdayClose）", TAG)
-                return null
-            }
-
-            val change = calculateChange(price, yesterdayClose)
-            val changePercent = calculateChangePercent(change, yesterdayClose)
-
-            StockData(
-                code = code,
-                name = name,
-                price = price,
-                change = change,
-                changePercent = changePercent,
-                yesterdayClose = yesterdayClose,
-                open = open,
-                volume = volume,
-                high = high,
-                low = low,
-                timestamp = System.currentTimeMillis()
-            )
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            AppLogger.e("解析股票数据失败", e, TAG)
-            null
-        }
-    }
-    
-    private fun calculateChange(price: Double, yesterdayClose: Double?): Double? {
-        return yesterdayClose?.let { close ->
-            if (close > 0) price - close else null
-        }
-    }
-    
-    private fun calculateChangePercent(change: Double?, yesterdayClose: Double?): Double? {
-        if (change == null || yesterdayClose == null) return null
-        if (yesterdayClose <= 0) return null
-        
-        return try {
-            (change / yesterdayClose) * 100
-        } catch (e: ArithmeticException) {
-            null
+    /**
+     * 股票行情：委托 [StockDataManager]（多源容错策略实现）。
+     *
+     * 门面的 60s TTL 与单飞在 [getPrice] 里已经先生效，能走到这里意味着
+     * 确实需要新鲜数据；[StockDataManager] 内部的三级缓存与熔断行为不变。
+     * forceRefresh 一并透传——调用方显式要求刷新时，策略层的缓存也要让路。
+     */
+    private suspend fun getStockData(code: String, forceRefresh: Boolean): Result<AssetPrice> {
+        val manager = stockDataManager
+            ?: return Result.failure(IllegalStateException("行情门面未初始化（UnifiedPriceService.init 未调用）"))
+        // StockDataManager 用 common.Result，门面对外是 kotlin.Result，这里做转换
+        return when (val result = manager.getStockData(code, forceRefresh)) {
+            is com.example.stockdiary.common.Result.Success -> Result.success(AssetPrice.Stock(result.data))
+            is com.example.stockdiary.common.Result.Error -> Result.failure(result.exception)
+            is com.example.stockdiary.common.Result.Loading -> Result.failure(IllegalStateException("行情结果尚未加载完成"))
         }
     }
     

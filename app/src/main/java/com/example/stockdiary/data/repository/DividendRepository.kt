@@ -1,4 +1,4 @@
-package com.example.stockdiary.data
+package com.example.stockdiary.data.repository
 
 import com.example.stockdiary.data.dividend.DividendData
 import com.example.stockdiary.data.dividend.DividendRecord

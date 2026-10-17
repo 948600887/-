@@ -1,5 +1,6 @@
 package com.example.stockdiary.data
 
+import com.example.stockdiary.data.repository.AssetRepository
 import com.example.stockdiary.data.importer.HoldingSnapshotResult
 import com.example.stockdiary.data.importer.HoldingSnapshotService
 import com.example.stockdiary.data.importer.ParsedHolding

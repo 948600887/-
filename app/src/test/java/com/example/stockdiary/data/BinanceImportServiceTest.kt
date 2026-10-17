@@ -1,5 +1,6 @@
 package com.example.stockdiary.data
 
+import com.example.stockdiary.data.repository.AssetRepository
 import com.example.stockdiary.data.importer.BinanceImportService
 import com.example.stockdiary.data.importer.estimatedValueCny
 import com.example.stockdiary.data.importer.filterDustByValue

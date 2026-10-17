@@ -1,7 +1,7 @@
 package com.example.stockdiary.data.sync
 
-import com.example.stockdiary.data.AssetRepository
-import com.example.stockdiary.data.DividendRepository
+import com.example.stockdiary.data.repository.AssetRepository
+import com.example.stockdiary.data.repository.DividendRepository
 import com.example.stockdiary.data.price.StockDataManager
 import android.content.Context
 import com.example.stockdiary.database.Asset

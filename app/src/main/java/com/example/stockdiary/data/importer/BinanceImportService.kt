@@ -1,6 +1,6 @@
 package com.example.stockdiary.data.importer
 
-import com.example.stockdiary.data.AssetRepository
+import com.example.stockdiary.data.repository.AssetRepository
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.network.BinanceBalance

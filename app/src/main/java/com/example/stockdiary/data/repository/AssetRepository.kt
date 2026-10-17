@@ -1,4 +1,4 @@
-package com.example.stockdiary.data
+package com.example.stockdiary.data.repository
 
 import android.annotation.SuppressLint
 import android.content.Context

@@ -1,5 +1,10 @@
 package com.example.stockdiary.data
 
+import com.example.stockdiary.data.repository.BATCH_URL_FIXED_OVERHEAD
+import com.example.stockdiary.data.repository.MAX_BATCH_URL_LENGTH
+import com.example.stockdiary.data.repository.MAX_CONCURRENT_BATCH_CHUNKS
+import com.example.stockdiary.data.repository.MAX_SECURITY_CODES_PER_REQUEST
+import com.example.stockdiary.data.repository.chunkSecurityCodes
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test

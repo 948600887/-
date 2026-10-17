@@ -1,5 +1,6 @@
 package com.example.stockdiary.data
 
+import com.example.stockdiary.data.repository.DividendRepository
 import com.example.stockdiary.data.dividend.DividendIncomeLoader
 import com.example.stockdiary.data.dividend.DividendRecord
 import com.example.stockdiary.database.Asset

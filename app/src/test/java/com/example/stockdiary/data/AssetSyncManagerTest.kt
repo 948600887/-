@@ -1,5 +1,7 @@
 package com.example.stockdiary.data
 
+import com.example.stockdiary.data.repository.AssetRepository
+import com.example.stockdiary.data.repository.DividendRepository
 import com.example.stockdiary.data.price.StockDataManager
 import com.example.stockdiary.data.sync.AssetSyncManager
 import com.example.stockdiary.data.sync.SyncBudget
@@ -75,7 +77,7 @@ class AssetSyncManagerTest {
     }
 
     private val context = mockk<Context>(relaxed = true)
-    private val repository = mockk<com.example.stockdiary.data.AssetRepository>(relaxed = true)
+    private val repository = mockk<com.example.stockdiary.data.repository.AssetRepository>(relaxed = true)
     private val stockDataManager = mockk<StockDataManager>(relaxed = true)
     private val dividendRepository = mockk<DividendRepository>(relaxed = true)
 

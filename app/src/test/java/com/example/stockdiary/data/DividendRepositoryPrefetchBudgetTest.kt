@@ -1,5 +1,6 @@
 package com.example.stockdiary.data
 
+import com.example.stockdiary.data.repository.DividendRepository
 import android.content.Context
 import io.mockk.coEvery
 import io.mockk.coVerify

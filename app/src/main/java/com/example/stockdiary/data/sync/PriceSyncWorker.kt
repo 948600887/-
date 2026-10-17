@@ -1,6 +1,6 @@
 package com.example.stockdiary.data.sync
 
-import com.example.stockdiary.data.AssetRepository
+import com.example.stockdiary.data.repository.AssetRepository
 import android.content.Context
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters

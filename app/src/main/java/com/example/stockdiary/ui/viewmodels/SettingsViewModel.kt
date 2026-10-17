@@ -7,7 +7,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.example.stockdiary.common.Result
 import com.example.stockdiary.data.price.ApiManager
-import com.example.stockdiary.data.AssetRepository
+import com.example.stockdiary.data.repository.AssetRepository
 import com.example.stockdiary.data.DashboardPreferences
 import com.example.stockdiary.data.DashboardPreferencesManager
 import com.example.stockdiary.data.DataExporter

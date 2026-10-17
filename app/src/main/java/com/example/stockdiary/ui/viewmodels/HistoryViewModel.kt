@@ -3,7 +3,7 @@ package com.example.stockdiary.ui.viewmodels
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
-import com.example.stockdiary.data.AssetRepository
+import com.example.stockdiary.data.repository.AssetRepository
 import com.example.stockdiary.data.DashboardPreferencesManager
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetSnapshot

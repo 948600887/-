@@ -1,6 +1,6 @@
 package com.example.stockdiary.ui.viewmodels
 
-import com.example.stockdiary.data.AssetRepository
+import com.example.stockdiary.data.repository.AssetRepository
 import com.example.stockdiary.data.sync.AssetSyncManager
 import com.example.stockdiary.data.DashboardPreferences
 import com.example.stockdiary.data.DashboardPreferencesManager

@@ -2,7 +2,7 @@ package com.example.stockdiary.di
 
 import android.content.Context
 import androidx.compose.runtime.staticCompositionLocalOf
-import com.example.stockdiary.data.AssetRepository
+import com.example.stockdiary.data.repository.AssetRepository
 import com.example.stockdiary.data.importer.BinanceCredentialsManager
 import com.example.stockdiary.data.importer.BinanceImportService
 import com.example.stockdiary.data.DashboardPreferencesManager
@@ -10,7 +10,7 @@ import com.example.stockdiary.data.DataExporter
 import com.example.stockdiary.data.importer.BrokerageImportService
 import com.example.stockdiary.data.dividend.DividendIncomeLoader
 import com.example.stockdiary.data.dividend.DividendIncomeUseCase
-import com.example.stockdiary.data.DividendRepository
+import com.example.stockdiary.data.repository.DividendRepository
 import com.example.stockdiary.data.importer.HoldingSnapshotService
 import com.example.stockdiary.data.importer.ImageTextRecognizer
 import com.example.stockdiary.data.importer.OcrStatementService

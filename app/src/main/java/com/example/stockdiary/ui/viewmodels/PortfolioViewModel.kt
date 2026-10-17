@@ -112,14 +112,18 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
     /**
      * 页面带入当前分组 key 时调用。
      *
-     * @param marketKeys 一级（市场大区）分组的 key。**首次进场时这些一律收起**，
-     *        于是首屏只看到 场内 / 场外 / 加密货币 / 其他 四个概览头（各带合计），
-     *        点其中一个才展开它下面的账户与资产。
-     *        注意不是「每次进场都重置」——手动展开过的分组切走再回来仍保持展开
-     *        （梦瑶反馈过"折叠了退出再进又展开"，状态必须留得住）。
+     * @param marketKeys 一级（市场大区）分组的 key。**这些永远不自动展开**：
+     *        首屏组合时 `assets` 往往还是空的（Room 的 Flow 要等查询才吐数据），
+     *        市场头是数据到位那一帧才出现的。若照常规「补新」逻辑处理，
+     *        它们会被当成新分组**全部自动展开**，「默认折叠到一级」当场失效
+     *        （实测首次进去仍全展开，根因就是这个）。
      *
-     * 首次之后只补"新出现"的分组，不动用户已收起的：
-     * 展开某个市场后它下面的账户头是新出现的，会被自动补成展开，
+     * 首次进场：只展开一级以下的（账户头），一级头全收起
+     *          → 只看到 场内 / 场外 / 加密货币 / 其他 四个概览头（各带合计）。
+     * 之后：只补"新出现"的分组，不动用户已收起的
+     *       （梦瑶反馈过"折叠了退出再进又展开"，手动状态必须留得住）。
+     *
+     * 连带效果：展开某个市场后它下面的账户头是新出现的 key，会被自动补成展开，
      * 所以点一级标题会一路展开到资产，不用再逐个点账户。
      */
     fun syncGroups(currentKeys: Set<String>, marketKeys: Set<String> = emptySet()) {
@@ -127,7 +131,8 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
             _expandedGroups.value = currentKeys - marketKeys
             groupsInitialized = true
         } else {
-            val added = currentKeys - knownGroups
+            // 一级头必须排除在「补新」之外，理由见 KDoc：否则数据到位那帧会把它们全展开
+            val added = (currentKeys - knownGroups) - marketKeys
             if (added.isNotEmpty()) _expandedGroups.update { it + added }
         }
         knownGroups = currentKeys

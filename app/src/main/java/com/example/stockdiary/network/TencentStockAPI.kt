@@ -150,17 +150,21 @@ object TencentStockAPI : StockAPI {
                     val pbRatio = fields.getOrNull(46)?.toDoubleOrNull() ?: 0.0  // 市净率
                     val amplitude = fields.getOrNull(43)?.toDoubleOrNull() ?: 0.0  // 振幅
                     
-                    val change = price - prevClose
-                    val changePercent = if (prevClose > 0) (change / prevClose * 100) else 0.0
-
-                    // 停牌时腾讯返回的现价是 0，昨收有效。同 SinaStockAPI 的处理：
+                    // 停牌/集合竞价前：腾讯返回的现价是 0，昨收正常。
+                    // 同 SinaStockAPI 的处理（见 SinaStockAPI.parseRealtimeData:415）：
                     // 拿 0 当现价会让市值归零并按 -100% 展示，这里退到昨收、涨跌记 0。
-                    val effectivePrice = if (price > 0) price else prevClose
+                    // 关键：change 必须用「回退后的价」反推，不能先拿原始 price 算再回退——
+                    // 否则会出现「价格显示昨收、涨跌却 -100%」的自相矛盾（本就是这里的旧 bug）。
+                    val hasValidPrice = price > 0
+                    val effectivePrice = if (hasValidPrice) price else prevClose
                     if (effectivePrice <= 0) {
                         suspended[0] = true
                         AppLogger.w("无有效报价（疑似停牌）: $code（现价=$price, 昨收=$prevClose）", "TencentStockAPI")
                         return null
                     }
+
+                    val change = if (hasValidPrice && prevClose > 0) price - prevClose else 0.0
+                    val changePercent = if (hasValidPrice && prevClose > 0) (change / prevClose * 100) else 0.0
 
                     return SinaStockData(
                         code = code,

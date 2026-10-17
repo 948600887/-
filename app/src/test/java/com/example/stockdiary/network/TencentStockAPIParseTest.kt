@@ -16,7 +16,7 @@ import org.junit.Test
  *  - code 取自响应里的 v_ 前缀，与入参 stockCode 无关（该入参被 @Suppress UNUSED_PARAMETER）；
  *  - 涨跌/涨跌幅由「现价 - 昨收」现算，不读腾讯自带的 31/32 字段；
  *  - date 与 time 取同一个字段（下标 30）；
- *  - 现价=0 且昨收>0：退回昨收当有效价、不算停牌（涨跌未记 0，与 SinaStockAPI 不同，现状锁定）；
+ *  - 现价=0 且昨收>0：退回昨收当有效价、不算停牌，涨跌记 0（与 SinaStockAPI 一致）；
  *  - 现价与昨收都为 0：suspended[0]=true 并返回 null；
  *  - 字段 <11 个直接返回 null；11~34 个会因 33/34 下标越界被内层 catch 兜住转 null；都不崩。
  */
@@ -154,11 +154,10 @@ class TencentStockAPIParseTest {
     }
 
     @Test
-    fun `现价为 0 昨收大于 0_退回昨收且不算停牌`() {
+    fun `现价为 0 昨收大于 0_退回昨收且不算停牌_涨跌记 0`() {
         // 停牌/集合竞价前：腾讯返回的现价是 0，但昨收正常。
-        // 有效价退到昨收（不能把 0 当价格塞进缓存），suspended 不置位。
-        // 注意：与 SinaStockAPI 不同，腾讯解析器此时没有把 change/changePercent 记 0，
-        // 这里按现状锁定其真实值；如需对齐 Sina 的行为应另行修 parseTencentData，本次只加测试。
+        // 有效价退到昨收（不能把 0 当价格塞进缓存），suspended 不置位；
+        // 涨跌与涨跌幅记 0——与 SinaStockAPI 一致（修复前此处错误地记成 -100%）。
         val text = quote(
             "sh600000",
             fieldsOf(overrides = mapOf(1 to "浦发银行", 3 to "0.00", 4 to "10.00"))
@@ -171,8 +170,8 @@ class TencentStockAPIParseTest {
         assertFalse(suspended[0])
         assertEquals(10.0, d!!.price, 1e-9)        // 有效价 = 昨收
         assertEquals(10.0, d.prevClose, 1e-9)
-        assertEquals(-10.0, d.change, 1e-9)        // 现状：0 - 10，未记 0
-        assertEquals(-100.0, d.changePercent, 1e-9)
+        assertEquals(0.0, d.change, 1e-9)          // 退昨收后涨跌应记 0（非 -10）
+        assertEquals(0.0, d.changePercent, 1e-9)   // 非 -100%
     }
 
     @Test
@@ -232,8 +231,9 @@ class TencentStockAPIParseTest {
     @Test
     fun `关键字段为空串或非数字_兜底 0 并按回落链取值`() {
         // 现价有效（12.34）但一批关键字段缺失/非数字：
-        // 昨收=""→0（涨跌幅随之走 0.0 分支）；最高/最低/成交额按 ?: 回落链取兜底源；
-        // 成交量字段是 "9.80"（非 Long）→ 0；市盈率="-" → 0。
+        // 昨收=""→0（change/changePercent 随之走 0.0 分支，与 SinaStockAPI 一致：
+        // 无法计算有意义的涨跌时不展示误导性的「+12.34 from 0」）；
+        // 最高/最低/成交额按 ?: 回落链取兜底源；成交量字段是 "9.80"（非 Long）→ 0；市盈率="-" → 0。
         val text = quote(
             "sh600000",
             fieldsOf(
@@ -262,7 +262,7 @@ class TencentStockAPIParseTest {
         assertEquals("兜底股票", d!!.name)
         assertEquals(12.34, d.price, 1e-9)
         assertEquals(0.0, d.prevClose, 1e-9)
-        assertEquals(12.34, d.change, 1e-9)          // 12.34 - 0
+        assertEquals(0.0, d.change, 1e-9)            // 昨收缺失 → 与 Sina 一致记 0，不展示 "12.34 - 0"
         assertEquals(0.0, d.changePercent, 1e-9)     // 昨收为 0 → 0.0 分支
         assertEquals(12.0, d.high, 1e-9)             // 回落下标 5
         assertEquals(9.80, d.low, 1e-9)              // 回落下标 6

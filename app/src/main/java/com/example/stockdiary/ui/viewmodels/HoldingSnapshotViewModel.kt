@@ -19,10 +19,6 @@ import com.example.stockdiary.di.AppContainer
 import com.example.stockdiary.utils.AppLogger
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -40,6 +36,8 @@ import kotlinx.coroutines.withContext
  * 但「读进来 → 按代码对齐 → 预览 → 落库」这段完全一致，
  * 所以没有另开一个 ViewModel：另开一个迟早两边跑偏，
  * 这正是当初把 ImageTextRecognizer 从交割单服务里抽出来的同一个理由。
+ *
+ * 状态流与 IO 协程模板已上收至 [ImportWizardViewModel]，这里只留来源特有逻辑。
  */
 class HoldingSnapshotViewModel(
     private val context: Context,
@@ -47,7 +45,7 @@ class HoldingSnapshotViewModel(
     private val service: HoldingSnapshotService,
     private val recognizer: ImageTextRecognizer,
     private val source: Source
-) : ViewModel() {
+) : ImportWizardViewModel<HoldingSnapshotViewModel.UiState>(HoldingSnapshotViewModel.UiState()) {
 
     /** 导入来源。决定选文件的方式与解析走哪条路 */
     enum class Source {
@@ -80,18 +78,13 @@ class HoldingSnapshotViewModel(
         val syncMessage: String? = null
     )
 
-    private val _uiState = MutableStateFlow(UiState())
-    val uiState: StateFlow<UiState> = _uiState.asStateFlow()
-
     init {
         // 预填库里最近用过的账户名：让「选一个账户」多数时候只需点一下确认，
         // 而不是每次都重新敲一遍
         viewModelScope.launch {
-            val accounts = withContext(Dispatchers.IO) {
-                runCatching { repository.getAllAccounts() }.getOrDefault(emptyList())
-            }.filter { it.isNotBlank() }
+            val accounts = loadKnownAccounts(repository)
 
-            _uiState.update { state ->
+            updateState { state ->
                 state.copy(
                     knownAccounts = accounts,
                     account = if (state.account.isBlank()) accounts.firstOrNull().orEmpty() else state.account
@@ -107,20 +100,33 @@ class HoldingSnapshotViewModel(
      * 基金E账户那张是「名称带代码、表头、数值」三行一组的卡片。
      */
     fun onImageSelected(uri: Uri) {
-        viewModelScope.launch(Dispatchers.IO) {
-            _uiState.update { state -> state.copy(
-                recognizing = true, error = null, preview = null, result = null,
-                recognizedText = null, lines = emptyList(), step = Step.SELECT_IMAGE
-            ) }
-            try {
-                val recognized = recognizer.recognize(uri)
-                val parsed = when (source) {
-                    Source.STOCK_SNAPSHOT -> HoldingSnapshotParser.parse(recognized.lines)
-                    Source.FUND_EXPORT -> FundSnapshotParser.parse(recognized.lines)
+        launchIo(
+            logTag = "HoldingSnapshotVM",
+            logMessage = { e -> "持仓截图导入失败: ${e.message}" },
+            onError = { e ->
+                updateState { state ->
+                    state.copy(
+                        recognizing = false,
+                        error = "识别失败: ${e.message ?: "未知错误"}"
+                    )
                 }
+            }
+        ) {
+            updateState { state ->
+                state.copy(
+                    recognizing = true, error = null, preview = null, result = null,
+                    recognizedText = null, lines = emptyList(), step = Step.SELECT_IMAGE
+                )
+            }
+            val recognized = recognizer.recognize(uri)
+            val parsed = when (source) {
+                Source.STOCK_SNAPSHOT -> HoldingSnapshotParser.parse(recognized.lines)
+                Source.FUND_EXPORT -> FundSnapshotParser.parse(recognized.lines)
+            }
 
-                if (parsed.holdings.isEmpty()) {
-                    _uiState.update { state -> state.copy(
+            if (parsed.holdings.isEmpty()) {
+                updateState { state ->
+                    state.copy(
                         recognizing = false,
                         error = when (source) {
                             Source.STOCK_SNAPSHOT ->
@@ -132,36 +138,30 @@ class HoldingSnapshotViewModel(
                         } + "\n\n可点「查看识别原文」，把内容发出来便于定位格式差异。",
                         recognizedText = recognized.text,
                         lines = recognized.lines
-                    ) }
-                    return@launch
+                    )
                 }
+                return@launchIo
+            }
 
-                val preview = service.buildPreview(parsed)
-                AppLogger.i(
-                    "持仓截图解析（$source）：${parsed.holdings.size} 条 → 合并后 ${preview.items.size} 条",
-                    "HoldingSnapshotVM"
-                )
-                _uiState.update { state -> state.copy(
+            val preview = service.buildPreview(parsed)
+            AppLogger.i(
+                "持仓截图解析（$source）：${parsed.holdings.size} 条 → 合并后 ${preview.items.size} 条",
+                "HoldingSnapshotVM"
+            )
+            updateState { state ->
+                state.copy(
                     recognizing = false,
                     step = Step.PREVIEW,
                     preview = preview,
                     recognizedText = recognized.text,
                     lines = recognized.lines
-                ) }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                AppLogger.e("持仓截图导入失败: ${e.message}", e, "HoldingSnapshotVM")
-                _uiState.update { state -> state.copy(
-                    recognizing = false,
-                    error = "识别失败: ${e.message ?: "未知错误"}"
-                ) }
+                )
             }
         }
     }
 
     fun onAccountChange(value: String) {
-        _uiState.update { state -> state.copy(account = value) }
+        updateState { state -> state.copy(account = value) }
     }
 
     /**
@@ -172,56 +172,63 @@ class HoldingSnapshotViewModel(
      * 区别只在数据来源：这里是官方导出的数字，比 OCR 少了一整层不确定。
      */
     fun onFileSelected(uri: Uri) {
-        viewModelScope.launch(Dispatchers.IO) {
-            _uiState.update { state -> state.copy(
-                recognizing = true, error = null, preview = null, result = null,
-                recognizedText = null, lines = emptyList(), step = Step.SELECT_IMAGE
-            ) }
-            try {
-                val rows = context.contentResolver.openInputStream(uri)?.use { input ->
-                    XlsxTableReader.read(input).rows
-                } ?: throw IllegalStateException("打不开这个文件")
+        launchIo(
+            logTag = "HoldingSnapshotVM",
+            logMessage = { e -> "读取基金E账户导出失败: ${e.message}" },
+            onError = { e ->
+                updateState { state ->
+                    state.copy(
+                        recognizing = false,
+                        error = "读取失败：${e.message ?: "未知错误"}\n\n" +
+                            "请确认选的是基金E账户「公募基金查询」导出的 .xlsx 文件。"
+                    )
+                }
+            }
+        ) {
+            updateState { state ->
+                state.copy(
+                    recognizing = true, error = null, preview = null, result = null,
+                    recognizedText = null, lines = emptyList(), step = Step.SELECT_IMAGE
+                )
+            }
+            val rows = context.contentResolver.openInputStream(uri)?.use { input ->
+                XlsxTableReader.read(input).rows
+            } ?: throw IllegalStateException("打不开这个文件")
 
-                val parsed = FundEStatementParser.parse(rows)
-                if (parsed.holdings.isEmpty()) {
-                    _uiState.update { state -> state.copy(
+            val parsed = FundEStatementParser.parse(rows)
+            if (parsed.holdings.isEmpty()) {
+                updateState { state ->
+                    state.copy(
                         recognizing = false,
                         error = "没从这个文件里读到持仓。请确认导出自基金E账户的「公募基金查询」页" +
                             "（右上角导出）。",
                         recognizedText = null,
                         lines = emptyList()
-                    ) }
-                    return@launch
-                }
-
-                val preview = service.buildPreview(
-                    HoldingSnapshotResult(
-                        holdings = parsed.holdings,
-                        dataDate = parsed.navDate,
-                        incomplete = parsed.problems
                     )
+                }
+                return@launchIo
+            }
+
+            val preview = service.buildPreview(
+                HoldingSnapshotResult(
+                    holdings = parsed.holdings,
+                    dataDate = parsed.navDate,
+                    incomplete = parsed.problems
                 )
-                AppLogger.i(
-                    "基金E账户导入解析：${parsed.holdings.size} 条 → 合并后 ${preview.items.size} 条，" +
-                        "数据日期 ${parsed.navDate}",
-                    "HoldingSnapshotVM"
-                )
-                _uiState.update { state -> state.copy(
+            )
+            AppLogger.i(
+                "基金E账户导入解析：${parsed.holdings.size} 条 → 合并后 ${preview.items.size} 条，" +
+                    "数据日期 ${parsed.navDate}",
+                "HoldingSnapshotVM"
+            )
+            updateState { state ->
+                state.copy(
                     recognizing = false,
                     step = Step.PREVIEW,
                     preview = preview,
                     recognizedText = null,
                     lines = emptyList()
-                ) }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                AppLogger.e("读取基金E账户导出失败: ${e.message}", e, "HoldingSnapshotVM")
-                _uiState.update { state -> state.copy(
-                    recognizing = false,
-                    error = "读取失败：${e.message ?: "未知错误"}\n\n" +
-                        "请确认选的是基金E账户「公募基金查询」导出的 .xlsx 文件。"
-                ) }
+                )
             }
         }
     }
@@ -231,20 +238,21 @@ class HoldingSnapshotViewModel(
         val preview = _uiState.value.preview ?: return
         if (_uiState.value.step == Step.COMMITTING) return
 
-        viewModelScope.launch(Dispatchers.IO) {
-            _uiState.update { state -> state.copy(step = Step.COMMITTING, error = null) }
-            try {
-                val result = service.commit(preview, _uiState.value.account)
-                _uiState.update { state -> state.copy(step = Step.RESULT, result = result) }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                AppLogger.e("持仓快照落库失败: ${e.message}", e, "HoldingSnapshotVM")
-                _uiState.update { state -> state.copy(
-                    step = Step.PREVIEW,
-                    error = "导入失败: ${e.message ?: "未知错误"}"
-                ) }
+        launchIo(
+            logTag = "HoldingSnapshotVM",
+            logMessage = { e -> "持仓快照落库失败: ${e.message}" },
+            onError = { e ->
+                updateState { state ->
+                    state.copy(
+                        step = Step.PREVIEW,
+                        error = "导入失败: ${e.message ?: "未知错误"}"
+                    )
+                }
             }
+        ) {
+            updateState { state -> state.copy(step = Step.COMMITTING, error = null) }
+            val result = service.commit(preview, _uiState.value.account)
+            updateState { state -> state.copy(step = Step.RESULT, result = result) }
         }
     }
 
@@ -261,6 +269,9 @@ class HoldingSnapshotViewModel(
      *
      * 不做全量。用户刚导完这十几条，没必要顺带把他另外几百条持仓也拉一遍——
      * 那是「持仓页刷新」那个按钮的职责。
+     *
+     * 注意：这里不是 launchIo 场景——同步入口要在主线程先落「同步中」状态，
+     * 再切 IO 查库，与三个 VM 共用的 IO 模板形态不同，保留私有实现。
      */
     fun syncPrices() {
         if (_uiState.value.syncing) return
@@ -268,7 +279,7 @@ class HoldingSnapshotViewModel(
         if (symbols.isEmpty()) return
 
         viewModelScope.launch {
-            _uiState.update { state -> state.copy(syncing = true, syncMessage = "正在同步行情…") }
+            updateState { state -> state.copy(syncing = true, syncMessage = "正在同步行情…") }
             try {
                 // 存款/负债没有行情可查，过滤掉，别白发请求
                 val assets = withContext(Dispatchers.IO) {
@@ -277,7 +288,7 @@ class HoldingSnapshotViewModel(
                     }
                 }
                 if (assets.isEmpty()) {
-                    _uiState.update { state ->
+                    updateState { state ->
                         state.copy(syncing = false, syncMessage = "这次导入的持仓没有可查的行情")
                     }
                     return@launch
@@ -288,7 +299,7 @@ class HoldingSnapshotViewModel(
                     repository = repository,
                     assets = assets,
                     onProgress = { progress ->
-                        _uiState.update { state -> state.copy(syncMessage = progress.message) }
+                        updateState { state -> state.copy(syncMessage = progress.message) }
                     },
                     forceRefresh = true,
                     // 这次同步的是刚导入的持仓：名字大概率是 OCR 认的，形近字易错
@@ -302,12 +313,12 @@ class HoldingSnapshotViewModel(
                     if (result.failedCount > 0) append("，失败 ${result.failedCount}")
                     if (result.truncatedByTimeLimit) append("（已到时间上限，剩下的下次再同步）")
                 }
-                _uiState.update { state -> state.copy(syncing = false, syncMessage = message) }
+                updateState { state -> state.copy(syncing = false, syncMessage = message) }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 AppLogger.e("持仓导入后同步行情失败: ${e.message}", e, "HoldingSnapshotVM")
-                _uiState.update { state ->
+                updateState { state ->
                     state.copy(syncing = false, syncMessage = "同步失败：${e.message ?: "未知错误"}")
                 }
             }
@@ -315,7 +326,7 @@ class HoldingSnapshotViewModel(
     }
 
     fun clearError() {
-        _uiState.update { state -> state.copy(error = null) }
+        updateState { state -> state.copy(error = null) }
     }
 
     /**
@@ -325,7 +336,7 @@ class HoldingSnapshotViewModel(
      * 不复位的话下次打开会残留上次的预览。账户名与已知账户保留，那是用户上下文。
      */
     fun reset() {
-        _uiState.update { state -> UiState(
+        updateState { state -> UiState(
             account = state.account,
             knownAccounts = state.knownAccounts
         ) }

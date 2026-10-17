@@ -19,3 +19,6 @@ gradle-8.13-bin.zip
 # OS
 Thumbs.db
 .DS_Store
+
+# Debug APKs (large binaries, must not be committed)
+*.apk

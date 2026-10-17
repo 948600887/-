@@ -1,7 +1,6 @@
 package com.example.stockdiary.ui.screens.settings.components
 
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -19,31 +18,21 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SuggestionChip
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -58,13 +47,18 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.stockdiary.data.importer.BinanceImportService
 import com.example.stockdiary.data.importer.estimatedValueCny
 import com.example.stockdiary.di.AppContainer
+import com.example.stockdiary.ui.components.import.ImportAccountField
+import com.example.stockdiary.ui.components.import.ImportCommitSummary
+import com.example.stockdiary.ui.components.import.ImportCommittingStep
+import com.example.stockdiary.ui.components.import.ImportErrorDialog
+import com.example.stockdiary.ui.components.import.ImportPreviewBottomBar
+import com.example.stockdiary.ui.components.import.ImportResultStep
+import com.example.stockdiary.ui.components.import.ImportWizardScaffold
 import com.example.stockdiary.ui.dialogs.sanitizeDecimalInput
 import com.example.stockdiary.ui.theme.ProfitGreen
 import com.example.stockdiary.ui.viewmodels.BinanceImportViewModel
@@ -73,15 +67,18 @@ import com.example.stockdiary.utils.format
 /**
  * 同步币安资产全屏 Dialog：填密钥 → 拉取 → 预览核对 → 完成。
  *
- * 镜像 [HoldingSnapshotDialog] 的结构与状态机，区别只在第一步是填 API 密钥
- * 而不是选文件。孪生页面刻意共用一套布局套路，减少「两边各犯一遍同样的 bug」。
+ * 镜像 [com.example.stockdiary.ui.screens.settings.components.HoldingSnapshotDialog]
+ * 的结构与状态机，区别只在第一步是填 API 密钥而不是选文件。孪生页面刻意共用
+ * 一套布局套路，减少「两边各犯一遍同样的 bug」。
+ *
+ * 全屏外壳、错误弹窗、写入中与结果页已抽到
+ * `com.example.stockdiary.ui.components.import` 公共骨架，这里只留来源特有步骤。
  *
  * ## 只读与安全提示
  *
  * 界面明确告诉用户：要的是**只读**密钥、App 不会动你的币、密钥只存本地。
  * 这不是免责声明——是让用户敢用这个功能的前提。
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun BinanceImportDialog(
     container: AppContainer,
@@ -92,70 +89,58 @@ fun BinanceImportDialog(
     )
     val state by viewModel.uiState.collectAsStateWithLifecycle()
 
-    // ViewModel 挂在宿主 Activity 作用域上，关掉后实例还活着——不复位会残留上次的预览
-    DisposableEffect(Unit) {
-        onDispose { viewModel.reset() }
-    }
-
-    Dialog(
-        onDismissRequest = onDismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false)
-    ) {
-        Surface(modifier = Modifier.fillMaxSize()) {
-            Scaffold(
-                topBar = {
-                    TopAppBar(
-                        title = {
-                            val title = when (state.step) {
-                                BinanceImportViewModel.Step.INPUT -> "同步币安资产"
-                                BinanceImportViewModel.Step.FETCHING -> "正在拉取…"
-                                BinanceImportViewModel.Step.PREVIEW -> "核对币安持仓"
-                                BinanceImportViewModel.Step.COMMITTING -> "正在导入…"
-                                BinanceImportViewModel.Step.RESULT -> "导入完成"
-                            }
-                            Text(title, fontWeight = FontWeight.Bold)
-                        },
-                        navigationIcon = {
-                            IconButton(onClick = onDismiss) {
-                                Icon(Icons.Default.Close, contentDescription = "关闭")
-                            }
-                        }
-                    )
-                },
-                bottomBar = {
-                    if (state.step == BinanceImportViewModel.Step.PREVIEW) {
-                        BinanceBottomBar(state, viewModel)
-                    }
-                }
-            ) { padding ->
-                Box(modifier = Modifier.fillMaxSize().padding(padding)) {
-                    when (state.step) {
-                        BinanceImportViewModel.Step.INPUT ->
-                            BinanceInputStep(state = state, viewModel = viewModel)
-
-                        BinanceImportViewModel.Step.FETCHING -> BinanceFetchingStep()
-
-                        BinanceImportViewModel.Step.PREVIEW ->
-                            BinancePreviewStep(state, viewModel)
-
-                        BinanceImportViewModel.Step.COMMITTING -> BinanceCommittingStep()
-
-                        BinanceImportViewModel.Step.RESULT ->
-                            BinanceResultStep(state)
-                    }
-                }
+    ImportWizardScaffold(
+        title = when (state.step) {
+            BinanceImportViewModel.Step.INPUT -> "同步币安资产"
+            BinanceImportViewModel.Step.FETCHING -> "正在拉取…"
+            BinanceImportViewModel.Step.PREVIEW -> "核对币安持仓"
+            BinanceImportViewModel.Step.COMMITTING -> "正在导入…"
+            BinanceImportViewModel.Step.RESULT -> "导入完成"
+        },
+        onDismiss = onDismiss,
+        onReset = viewModel::reset,
+        bottomBar = {
+            if (state.step == BinanceImportViewModel.Step.PREVIEW) {
+                ImportPreviewBottomBar(
+                    resetText = "重填",
+                    unit = "项",
+                    pendingCount = state.preview?.pendingCount ?: 0,
+                    onReset = viewModel::reset,
+                    onCommit = viewModel::commit
+                )
             }
+        }
+    ) {
+        when (state.step) {
+            BinanceImportViewModel.Step.INPUT ->
+                BinanceInputStep(state = state, viewModel = viewModel)
+
+            BinanceImportViewModel.Step.FETCHING -> BinanceFetchingStep()
+
+            BinanceImportViewModel.Step.PREVIEW ->
+                BinancePreviewStep(state, viewModel)
+
+            BinanceImportViewModel.Step.COMMITTING -> ImportCommittingStep()
+
+            BinanceImportViewModel.Step.RESULT -> ImportResultStep(
+                summary = ImportCommitSummary(
+                    inserted = state.result?.inserted ?: 0,
+                    updated = state.result?.updated ?: 0,
+                    skipped = state.result?.skipped ?: 0,
+                    // 币安结果没有「同名不唯一」冲突概念
+                    conflicts = 0,
+                    extraNote = "新导入的加密货币现价留空，去「持仓」页刷新一次行情就会显示市值。"
+                ),
+                unit = "项"
+            )
         }
     }
 
     state.error?.let { message ->
-        AlertDialog(
-            onDismissRequest = { viewModel.clearError() },
-            title = { Text("没能同步", fontWeight = FontWeight.Bold) },
-            text = { Text(message) },
-            confirmButton = {
-                TextButton(onClick = { viewModel.clearError() }) { Text("知道了") }
-            }
+        ImportErrorDialog(
+            title = "没能同步",
+            message = message,
+            onDismiss = { viewModel.clearError() }
         )
     }
 }
@@ -325,7 +310,6 @@ private fun BinancePreviewStep(
     viewModel: BinanceImportViewModel
 ) {
     val preview = state.preview ?: return
-    val focusManager = LocalFocusManager.current
     // 同一份 priceOf 既用于「是否被过滤」也用于每行市值显示
     val priceOf: (String) -> Double? = { state.prices[it] }
 
@@ -394,37 +378,12 @@ private fun BinancePreviewStep(
         }
 
         item {
-            Column {
-                Text("导入到账户", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
-                Spacer(Modifier.height(8.dp))
-                OutlinedTextField(
-                    value = state.account,
-                    onValueChange = viewModel::onAccountChange,
-                    label = { Text("账户名") },
-                    placeholder = { Text("不填则记为「币安」") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                    keyboardActions = KeyboardActions(onDone = { focusManager.clearFocus() }),
-                    supportingText = {
-                        Text(
-                            "只用于新建的持仓；已存在的持仓保持它原来的账户不变",
-                            style = MaterialTheme.typography.bodySmall
-                        )
-                    }
-                )
-                if (state.knownAccounts.isNotEmpty()) {
-                    Spacer(Modifier.height(8.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        state.knownAccounts.take(4).forEach { name ->
-                            SuggestionChip(
-                                onClick = { viewModel.onAccountChange(name) },
-                                label = { Text(name, fontSize = 12.sp) }
-                            )
-                        }
-                    }
-                }
-            }
+            ImportAccountField(
+                account = state.account,
+                knownAccounts = state.knownAccounts,
+                onAccountChange = viewModel::onAccountChange,
+                placeholder = "不填则记为「币安」"
+            )
         }
 
         item {
@@ -486,84 +445,5 @@ private fun BinancePreviewItemRow(
                 Text(statusText, style = MaterialTheme.typography.bodySmall, color = statusColor)
             }
         }
-    }
-}
-
-@Composable
-private fun BinanceBottomBar(
-    state: BinanceImportViewModel.UiState,
-    viewModel: BinanceImportViewModel
-) {
-    val preview = state.preview
-    Surface(
-        color = MaterialTheme.colorScheme.surfaceVariant,
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(16.dp),
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            OutlinedButton(
-                onClick = viewModel::reset,
-                modifier = Modifier.weight(1f)
-            ) {
-                Text("重填")
-            }
-            Button(
-                onClick = viewModel::commit,
-                enabled = (preview?.pendingCount ?: 0) > 0,
-                modifier = Modifier.weight(1f)
-            ) {
-                val count = preview?.pendingCount ?: 0
-                Text(if (count > 0) "导入 $count 项" else "没有需要导入的")
-            }
-        }
-    }
-}
-
-// ---------------- 第三 / 四步 ----------------
-
-@Composable
-private fun BinanceCommittingStep() {
-    Column(
-        modifier = Modifier.fillMaxSize(),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
-    ) {
-        CircularProgressIndicator()
-        Spacer(Modifier.height(16.dp))
-        Text("正在写入…", style = MaterialTheme.typography.bodyLarge)
-    }
-}
-
-@Composable
-private fun BinanceResultStep(state: BinanceImportViewModel.UiState) {
-    val result = state.result
-    Column(
-        modifier = Modifier.fillMaxSize().padding(24.dp).verticalScroll(rememberScrollState()),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
-    ) {
-        Icon(
-            Icons.Default.Info,
-            contentDescription = null,
-            modifier = Modifier.size(48.dp),
-            tint = ProfitGreen
-        )
-        Spacer(Modifier.height(16.dp))
-        Text("导入完成", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-        Spacer(Modifier.height(12.dp))
-        Text(
-            "新增 ${result?.inserted ?: 0} 项 · 覆盖 ${result?.updated ?: 0} 项 · " +
-                "未变 ${result?.skipped ?: 0} 项",
-            style = MaterialTheme.typography.bodyLarge
-        )
-        Spacer(Modifier.height(12.dp))
-        Text(
-            "新导入的加密货币现价留空，去「持仓」页刷新一次行情就会显示市值。",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            textAlign = androidx.compose.ui.text.style.TextAlign.Center
-        )
     }
 }

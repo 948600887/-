@@ -28,6 +28,14 @@ object FundDataParser {
         """\{[^}]*"x":(\d+)[^}]*"y":([0-9.]+)[^}]*"equityReturn":([0-9.\-]+)[^}]*\}"""
     )
     
+    /** 预编译正则：匹配 Data_millionCopiesIncome 数组（货币基金的每万份收益走势） */
+    private val millionCopiesArrayRegex = Regex(
+        """Data_millionCopiesIncome\s*=\s*\[(.*?)\]\s*;""",
+        RegexOption.DOT_MATCHES_ALL
+    )
+    /** 预编译正则：匹配单条 [时间戳, 每万份收益] */
+    private val millionCopiesItemRegex = Regex("""\[(\d+),([0-9.]+)\]""")
+    
     /** 日期格式化：时间戳 → yyyy-MM-dd */
     private val dateFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd")
     
@@ -47,39 +55,57 @@ object FundDataParser {
     }
     
     /**
-     * 解析 Data_netWorthTrend 最后一条记录，获取最新净值
+     * 解析净值数据，获取最新净值。
+     *
+     * 优先从 Data_netWorthTrend 取最后一条记录（普通开放式基金）。
+     * 当该走势缺失时（货币基金只有每万份收益走势），回退到货币基金解析路径。
      */
     fun parseNawData(response: String): NawData {
         return try {
-            val trendMatch = trendArrayRegex.find(response) ?: return NawData()
-            
-            val trendContent = trendMatch.groupValues[1]
-            val matches = nawItemRegex.findAll(trendContent).toList()
-            
-            if (matches.isEmpty()) return NawData()
-            
-            val lastItem = matches.last()
-            val timestamp = lastItem.groupValues[1].toLongOrNull() ?: return NawData()
-            val naw = lastItem.groupValues[2].toDoubleOrNull() ?: 0.0
-            val equityReturn = lastItem.groupValues[3].toDoubleOrNull()
-            
-            val dateStr = try {
-                val instant = Instant.ofEpochMilli(timestamp)
-                val localDate = ZonedDateTime.ofInstant(instant, ZoneId.systemDefault()).toLocalDate()
-                localDate.format(dateFormatter)
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                null
+            val trendMatch = trendArrayRegex.find(response)
+            if (trendMatch != null) {
+                val trendContent = trendMatch.groupValues[1]
+                val matches = nawItemRegex.findAll(trendContent).toList()
+                if (matches.isEmpty()) return NawData()
+                val lastItem = matches.last()
+                val timestamp = lastItem.groupValues[1].toLongOrNull() ?: return NawData()
+                val naw = lastItem.groupValues[2].toDoubleOrNull() ?: 0.0
+                val equityReturn = lastItem.groupValues[3].toDoubleOrNull()
+                val dateStr = formatTrendDate(timestamp)
+                AppLogger.d("最新净值: $naw, 日期: $dateStr, 回报: $equityReturn", TAG)
+                NawData(naw = naw, equityReturn = equityReturn, date = dateStr)
+            } else {
+                parseMoneyFundNaw(response)
             }
-            
-            AppLogger.d("最新净值: $naw, 日期: $dateStr, 回报: $equityReturn", TAG)
-            NawData(naw = naw, equityReturn = equityReturn, date = dateStr)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             AppLogger.e("解析净值数据失败: ${e.message}", e, TAG)
             NawData()
+        }
+    }
+
+    /**
+     * 货币基金解析路径：没有 Data_netWorthTrend，只有每万份收益走势，
+     * 单位净值恒为 1.0000。日期取每万份收益走势最后一条的时间戳。
+     */
+    private fun parseMoneyFundNaw(response: String): NawData {
+        val arrMatch = millionCopiesArrayRegex.find(response) ?: return NawData()
+        val content = arrMatch.groupValues[1]
+        val lastItem = millionCopiesItemRegex.findAll(content).lastOrNull()
+        val dateStr = lastItem?.groupValues?.get(1)?.toLongOrNull()?.let { formatTrendDate(it) }
+        return NawData(naw = 1.0, equityReturn = null, date = dateStr)
+    }
+
+    /**
+     * 将毫秒时间戳格式化为 yyyy-MM-dd；任何异常都返回 null，交由上层处理。
+     */
+    private fun formatTrendDate(timestamp: Long): String? {
+        return try {
+            val instant = Instant.ofEpochMilli(timestamp)
+            ZonedDateTime.ofInstant(instant, ZoneId.systemDefault()).toLocalDate().format(dateFormatter)
+        } catch (e: Exception) {
+            null
         }
     }
 }

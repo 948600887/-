@@ -30,10 +30,28 @@ import kotlin.math.abs
  * 这在 BrokerageImportService 里写成了约定。截图里给的是裸的 6 位码，
  * 直接拿去查库一条都匹配不上——表现为「每次导入都在造重复资产」，而且新行的
  * 行情同步、分红匹配也全跟着失效。所以这里统一规范化后再查库、再落库。
+ *
+ * ## 对齐算法在哪
+ *
+ * 「按代码合并 → 与库存匹配 → NEW/UPDATE/UNCHANGED/CONFLICT 判定 → 落库」这套内核
+ * 与币安导入共用，见 [SnapshotAlignment]（同构度约 80%，两处各写一遍必然漂移）。
+ * 本类退化成薄壳，只负责：把截图/xlsx 解析结果映射成内核的 [RawHolding]，
+ * 基金来源特有的 nav/navDate/currency 透传，以及 `fund_` 前缀的类型推断。
  */
 class HoldingSnapshotService(
     private val assetRepository: AssetRepository
 ) {
+
+    /** 内核写入口（适配仓库的三个 suspend 写操作） */
+    private val writer: SnapshotAlignment.SnapshotAssetWriter =
+        assetRepository.asSnapshotAssetWriter()
+
+    /** 本链路的落库策略：默认账户名、资产类型推断、币种兜底 */
+    private val commitPolicy = SnapshotAlignment.CommitPolicy(
+        defaultAccount = DEFAULT_ACCOUNT,
+        assetTypeOf = ::assetTypeFor,
+        defaultCurrency = DEFAULT_CURRENCY
+    )
 
     enum class ItemStatus {
         /** 库里没有，要新建 */
@@ -124,6 +142,144 @@ class HoldingSnapshotService(
      * 把解析结果对齐到库里的资产，产出预览。**不写库**。
      */
     suspend fun buildPreview(parsed: HoldingSnapshotResult): Preview {
+        // 一次批量查完，避免每个代码查一次库（截图几十条会变成几十次查询）。
+        // 分片是因为 SQLite 的 IN 子句有变量个数上限；长截图上百条，不能赌「用户不会截那么长」
+        val existing = parsed.holdings
+            .map { StockCodeManager.normalizeSymbol(it.symbol) }
+            .distinct()
+            .chunked(SQL_IN_CHUNK)
+            .flatMap { assetRepository.getAssetsBySymbols(it) }
+
+        val items = SnapshotAlignment.align(
+            rows = parsed.holdings,
+            existing = existing,
+            // 库里同一代码可能分属多个账户，而快照只有一个总数：
+            // 合计对不上时不猜，判冲突交给用户手动处理
+            multiAccountConflict = true
+        ) { holding ->
+            SnapshotAlignment.RawHolding(
+                // 顺手把裸码规范成库存形态（600519 → sh600519），否则查库一条都匹配不上
+                symbol = StockCodeManager.normalizeSymbol(holding.symbol),
+                name = holding.name,
+                quantity = holding.quantity,
+                rawQuantity = holding.rawQuantity,
+                nav = holding.nav,
+                navDate = holding.navDate,
+                currency = holding.currency
+            )
+        }.map { aligned ->
+            SnapshotItem(
+                symbol = aligned.symbol,
+                // 名称以库里为准：覆盖只动数量，用户自己整理过的名字不被 OCR 结果冲掉
+                name = aligned.matched.singleOrNull()?.name ?: aligned.name,
+                quantity = aligned.quantity,
+                rawQuantity = aligned.rawQuantity,
+                // 同代码多条时不猜：existing 只在唯一命中时给出
+                existing = aligned.matched.singleOrNull(),
+                status = aligned.status.toUiStatus(),
+                sources = aligned.sources,
+                matchedAccounts = aligned.matchedAccounts,
+                nav = aligned.nav,
+                navDate = aligned.navDate,
+                currency = aligned.currency
+            )
+        }
+
+        AppLogger.i(
+            "持仓快照对齐完成：共 ${items.size} 条，新增 ${items.count { it.status == ItemStatus.NEW }}，" +
+                "覆盖 ${items.count { it.status == ItemStatus.UPDATE }}，" +
+                "未变 ${items.count { it.status == ItemStatus.UNCHANGED }}，" +
+                "冲突 ${items.count { it.status == ItemStatus.CONFLICT }}",
+            "HoldingSnapshot"
+        )
+
+        return Preview(items = items, dataDate = parsed.dataDate, incomplete = parsed.incomplete)
+    }
+
+    /**
+     * 落库。只处理 [ItemStatus.NEW] 与 [ItemStatus.UPDATE]，未变的跳过。
+     *
+     * @param account 用户输入的账户名，只用于**新建**的资产；
+     *                已存在的资产保持它原来的账户，不跟着改。
+     */
+    suspend fun commit(preview: Preview, account: String): CommitResult {
+        val result = SnapshotAlignment.commit(
+            rows = preview.items.map { it.toCommitRow() },
+            writer = writer,
+            account = account,
+            policy = commitPolicy
+        )
+
+        AppLogger.i(
+            "持仓快照落库：新增 ${result.inserted}，覆盖 ${result.updated}，" +
+                "跳过 ${result.skipped}，冲突 ${result.conflicts}",
+            "HoldingSnapshot"
+        )
+
+        return CommitResult(
+            inserted = result.inserted,
+            updated = result.updated,
+            skipped = result.skipped,
+            conflicts = result.conflicts
+        )
+    }
+
+    /**
+     * 决定落库时的资产类型。
+     *
+     * **带 `fund_` 前缀的一律是场外基金**，不能用 [StockCodeManager.classifyCode] 去推：
+     * 场外基金与深市股票共用 00xxxx 号段，而 classifyCode 只把「004xxx-009xxx」当场外，
+     * 于是 `000001`（华夏成长混合）会被判成股票、`002001`（华夏回报）也一样。
+     * 这些早年发行的基金代码恰好都落在那段里，是历史上绕不开的坑。
+     */
+    private fun assetTypeFor(symbol: String): AssetType =
+        if (symbol.startsWith(FundEStatementParser.SYMBOL_PREFIX, ignoreCase = true)) {
+            AssetType.FUND
+        } else {
+            StockCodeManager.classifyCode(symbol).toAssetType()
+        }
+
+    /** 预览项 → 内核行视图。status 映射回内核枚举，其余字段原样带 */
+    private fun SnapshotItem.toCommitRow(): SnapshotAlignment.CommitRow =
+        SnapshotAlignment.CommitRow(
+            symbol = symbol,
+            name = name,
+            quantity = quantity,
+            status = status.toKernelStatus(),
+            existing = existing,
+            nav = nav,
+            currency = currency
+        )
+
+    /** 内核状态 → 本链路 UI 状态（两边枚举常量一一对应） */
+    private fun SnapshotAlignment.ItemStatus.toUiStatus(): ItemStatus = when (this) {
+        SnapshotAlignment.ItemStatus.NEW -> ItemStatus.NEW
+        SnapshotAlignment.ItemStatus.UPDATE -> ItemStatus.UPDATE
+        SnapshotAlignment.ItemStatus.UNCHANGED -> ItemStatus.UNCHANGED
+        SnapshotAlignment.ItemStatus.CONFLICT -> ItemStatus.CONFLICT
+    }
+
+    /** 本链路 UI 状态 → 内核状态 */
+    private fun ItemStatus.toKernelStatus(): SnapshotAlignment.ItemStatus = when (this) {
+        ItemStatus.NEW -> SnapshotAlignment.ItemStatus.NEW
+        ItemStatus.UPDATE -> SnapshotAlignment.ItemStatus.UPDATE
+        ItemStatus.UNCHANGED -> SnapshotAlignment.ItemStatus.UNCHANGED
+        ItemStatus.CONFLICT -> SnapshotAlignment.ItemStatus.CONFLICT
+    }
+
+    // ---------------------------------------------------------------------------
+    // Phase 2b 双跑期保留区（下一提交删除）
+    //
+    // 下面是重构前的内联算法，一字未改。上面的 buildPreview / commit 已改走
+    // [SnapshotAlignment] 内核；旧代码暂时留着是为了：① 评审时能逐行 diff 旧与新；
+    // ② 新实现万一有漏，把上面两个方法体换回旧的一步即可回退。
+    //
+    // 等价性证明：现有 HoldingSnapshotServiceTest 零修改全绿——那套用例覆盖
+    // 同代码合并、三种状态、多账户冲突、规范化查库、分片查询、落库各分支。
+    // ---------------------------------------------------------------------------
+
+    /** 重构前的对齐实现（双跑期保留，不被调用） */
+    private suspend fun buildPreviewLegacy(parsed: HoldingSnapshotResult): Preview {
         // 同代码先合并：中国结算会按托管机构把同一只票拆成多行。
         // 顺手把裸码规范成库存形态（600519 → sh600519），否则查库一条都匹配不上
         val merged = parsed.holdings.groupBy { StockCodeManager.normalizeSymbol(it.symbol) }
@@ -141,7 +297,7 @@ class HoldingSnapshotService(
             val matched = existingGroups[symbol].orEmpty()
             val existing = matched.singleOrNull()
             val status = when {
-                matched.size > 1 -> resolveMultiAccountStatus(matched, quantity)
+                matched.size > 1 -> resolveMultiAccountStatusLegacy(matched, quantity)
                 existing == null -> ItemStatus.NEW
                 // 浮点比较：持仓数量来自 OCR 文本，整数份额不会有精度问题，
                 // 但用容差挡住 1e-9 级别的表示误差
@@ -182,43 +338,8 @@ class HoldingSnapshotService(
         return Preview(items = items, dataDate = parsed.dataDate, incomplete = parsed.incomplete)
     }
 
-    /**
-     * 库里同一个代码有多条时（不同账户各持一份）判定该干什么。
-     *
-     * 这张快照给的是**总数**，没法知道怎么摊到各账户：
-     * - 加起来正好等于快照数量 → 说明各账户的拆分本来就是对的，什么也不用动
-     * - 对不上 → 不敢猜，判 [ItemStatus.CONFLICT] 交给用户手动处理。
-     *   挑一条覆盖会让总持仓凭空多出一份，比什么都不做错得多
-     */
-    /**
-     * 决定落库时的资产类型。
-     *
-     * **带 `fund_` 前缀的一律是场外基金**，不能用 [StockCodeManager.classifyCode] 去推：
-     * 场外基金与深市股票共用 00xxxx 号段，而 classifyCode 只把「004xxx-009xxx」当场外，
-     * 于是 `000001`（华夏成长混合）会被判成股票、`002001`（华夏回报）也一样。
-     * 这些早年发行的基金代码恰好都落在那段里，是历史上绕不开的坑。
-     */
-    private fun assetTypeFor(symbol: String): AssetType =
-        if (symbol.startsWith(FundEStatementParser.SYMBOL_PREFIX, ignoreCase = true)) {
-            AssetType.FUND
-        } else {
-            StockCodeManager.classifyCode(symbol).toAssetType()
-        }
-
-    private fun resolveMultiAccountStatus(matched: List<Asset>, quantity: Double): ItemStatus =
-        if (abs(matched.sumOf { it.balance } - quantity) < 1e-6) {
-            ItemStatus.UNCHANGED
-        } else {
-            ItemStatus.CONFLICT
-        }
-
-    /**
-     * 落库。只处理 [ItemStatus.NEW] 与 [ItemStatus.UPDATE]，未变的跳过。
-     *
-     * @param account 用户输入的账户名，只用于**新建**的资产；
-     *                已存在的资产保持它原来的账户，不跟着改。
-     */
-    suspend fun commit(preview: Preview, account: String): CommitResult {
+    /** 重构前的落库实现（双跑期保留，不被调用） */
+    private suspend fun commitLegacy(preview: Preview, account: String): CommitResult {
         val toInsert = mutableListOf<Asset>()
         var updated = 0
         var skipped = 0
@@ -276,9 +397,31 @@ class HoldingSnapshotService(
         )
     }
 
+    /**
+     * 库里同一个代码有多条时（不同账户各持一份）判定该干什么。
+     *
+     * 这张快照给的是**总数**，没法知道怎么摊到各账户：
+     * - 加起来正好等于快照数量 → 说明各账户的拆分本来就是对的，什么也不用动
+     * - 对不上 → 不敢猜，判 [ItemStatus.CONFLICT] 交给用户手动处理。
+     *   挑一条覆盖会让总持仓凭空多出一份，比什么都不做错得多
+     */
+    private fun resolveMultiAccountStatusLegacy(matched: List<Asset>, quantity: Double): ItemStatus =
+        if (abs(matched.sumOf { it.balance } - quantity) < 1e-6) {
+            ItemStatus.UNCHANGED
+        } else {
+            ItemStatus.CONFLICT
+        }
+
+    // ---------------------------------------------------------------------------
+    // 双跑期保留区结束
+    // ---------------------------------------------------------------------------
+
     companion object {
         /** 用户没填账户名时的兜底，跟交割单导入那边保持一致 */
         const val DEFAULT_ACCOUNT = "默认账户"
+
+        /** 结算币种兜底：多来源币种不一致时不猜，回落人民币 */
+        private const val DEFAULT_CURRENCY = "CNY"
 
         /**
          * 单次 IN 查询的代码个数上限。

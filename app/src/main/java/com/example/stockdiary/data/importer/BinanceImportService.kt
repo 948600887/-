@@ -11,14 +11,19 @@ import kotlin.math.abs
 /**
  * 币安现货持仓导入：把账户接口拉回的余额对齐到库里的加密资产，产出预览、确认后落库。
  *
- * 结构刻意镜像 [HoldingSnapshotService]：**拉取 → 按代码合并 → 预览 → commit 落库**。
- * 复用同一套心智模型，用户在两个导入入口看到的行为一致，代码也不用各写一遍。
+ * ## 与持仓快照的关系
+ *
+ * 两条链路共用同一套对齐内核（[SnapshotAlignment]）：**按代码合并 → 与库存匹配 →
+ * NEW/UPDATE/UNCHANGED 判定 → commit 落库**。复用同一套心智模型，用户在两个导入
+ * 入口看到的行为一致，代码也不用各写一遍。
  *
  * ## 与持仓快照的区别
  *
  * - 快照吃的是 OCR/xlsx，这里是签名 HTTP，没有「解析失败」这一步。
  * - 币安一个账户只有一份持仓，不存在「同代码跨多个账户」的冲突，
  *   所以状态只有 NEW / UPDATE / UNCHANGED，没有 [HoldingSnapshotService.ItemStatus.CONFLICT]。
+ * - 多一步来源特有的处理：dust 过滤（[DUST_THRESHOLD]）与 USDT 交易对映射
+ *   （[baseAssetToSymbol]）。
  *
  * ## symbol 映射（关键，见 [baseAssetToSymbol]）
  *
@@ -30,6 +35,17 @@ import kotlin.math.abs
 class BinanceImportService(
     private val assetRepository: AssetRepository
 ) {
+
+    /** 内核写入口（适配仓库的三个 suspend 写操作） */
+    private val writer: SnapshotAlignment.SnapshotAssetWriter =
+        assetRepository.asSnapshotAssetWriter()
+
+    /** 本链路的落库策略：默认账户名「币安」、类型恒为 CRYPTO、币种恒为 USD */
+    private val commitPolicy = SnapshotAlignment.CommitPolicy(
+        defaultAccount = DEFAULT_ACCOUNT,
+        assetTypeOf = { AssetType.CRYPTO },
+        defaultCurrency = CURRENCY
+    )
 
     enum class ItemStatus {
         /** 库里没有这个交易对，要新建 */
@@ -87,6 +103,113 @@ class BinanceImportService(
         balances: List<BinanceBalance>,
         existingAssets: List<Asset>
     ): Preview {
+        val items = SnapshotAlignment.align(
+            // dust 过滤：币安会返还一堆 0.00000000 的零头资产，free+locked 低于阈值一律忽略，
+            // 否则预览里会出现几十条数量为 0 的「新增」，用户根本不知道自己持有这些
+            rows = balances.filter { it.total >= DUST_THRESHOLD },
+            existing = existingAssets,
+            // 币安一个账户只有一份持仓，不存在「同代码跨多个账户」的冲突
+            multiAccountConflict = false
+        ) { balance ->
+            SnapshotAlignment.RawHolding(
+                // 基础资产名 → 交易对代码（BTC → BTCUSDT），落库/取价都用这个形态
+                symbol = baseAssetToSymbol(balance.asset),
+                name = balance.asset,
+                quantity = balance.total
+            )
+        }.map { aligned ->
+            PreviewItem(
+                symbol = aligned.symbol,
+                name = aligned.name,
+                quantity = aligned.quantity,
+                existing = aligned.matched.firstOrNull(),
+                status = aligned.status.toUiStatus()
+            )
+        }
+
+        AppLogger.i(
+            "币安持仓对齐完成：共 ${items.size} 条，新增 ${items.count { it.status == ItemStatus.NEW }}，" +
+                "覆盖 ${items.count { it.status == ItemStatus.UPDATE }}，" +
+                "未变 ${items.count { it.status == ItemStatus.UNCHANGED }}",
+            "BinanceImport"
+        )
+
+        return Preview(items = items)
+    }
+
+    /**
+     * 落库。只处理 [ItemStatus.NEW] 与 [ItemStatus.UPDATE]，未变的跳过。
+     *
+     * @param account 用户输入的账户名，只用于**新建**的资产；
+     *                已存在的资产保持它原来的账户，不跟着改（与持仓快照一致）。
+     */
+    suspend fun commit(preview: Preview, account: String): CommitResult {
+        val result = SnapshotAlignment.commit(
+            rows = preview.items.map { it.toCommitRow() },
+            writer = writer,
+            account = account,
+            policy = commitPolicy
+        )
+
+        AppLogger.i(
+            "币安持仓落库：新增 ${result.inserted}，覆盖 ${result.updated}，跳过 ${result.skipped}",
+            "BinanceImport"
+        )
+
+        return CommitResult(
+            inserted = result.inserted,
+            updated = result.updated,
+            skipped = result.skipped
+        )
+    }
+
+    /** 预览项 → 内核行视图。status 映射回内核枚举，其余字段原样带 */
+    private fun PreviewItem.toCommitRow(): SnapshotAlignment.CommitRow =
+        SnapshotAlignment.CommitRow(
+            symbol = symbol,
+            name = name,
+            quantity = quantity,
+            status = status.toKernelStatus(),
+            existing = existing,
+            // 币安接口此刻没给价格：nav 恒为 null，currentPrice 留空让行情同步按交易对填真实价
+            nav = null,
+            // 币安现货价以 USDT 计价（≈美元）：币种恒走策略里的 USD，不按行取
+            currency = null
+        )
+
+    /** 内核状态 → 本链路 UI 状态（两边枚举常量一一对应） */
+    private fun SnapshotAlignment.ItemStatus.toUiStatus(): ItemStatus = when (this) {
+        SnapshotAlignment.ItemStatus.NEW -> ItemStatus.NEW
+        SnapshotAlignment.ItemStatus.UPDATE -> ItemStatus.UPDATE
+        SnapshotAlignment.ItemStatus.UNCHANGED -> ItemStatus.UNCHANGED
+        // 本链路 multiAccountConflict=false，内核永远不会产出 CONFLICT；
+        // 真出现了说明调用方传错参数，按「未变」兜底（不写库）比崩溃好
+        SnapshotAlignment.ItemStatus.CONFLICT -> ItemStatus.UNCHANGED
+    }
+
+    /** 本链路 UI 状态 → 内核状态 */
+    private fun ItemStatus.toKernelStatus(): SnapshotAlignment.ItemStatus = when (this) {
+        ItemStatus.NEW -> SnapshotAlignment.ItemStatus.NEW
+        ItemStatus.UPDATE -> SnapshotAlignment.ItemStatus.UPDATE
+        ItemStatus.UNCHANGED -> SnapshotAlignment.ItemStatus.UNCHANGED
+    }
+
+    // ---------------------------------------------------------------------------
+    // Phase 2b 双跑期保留区（下一提交删除）
+    //
+    // 下面是重构前的内联算法，一字未改。上面的 buildPreview / commit 已改走
+    // [SnapshotAlignment] 内核；旧代码暂时留着是为了：① 评审时能逐行 diff 旧与新；
+    // ② 新实现万一有漏，把上面两个方法体换回旧的一步即可回退。
+    //
+    // 等价性证明：现有 BinanceImportServiceTest 零修改全绿——那套用例覆盖
+    // dust 过滤、交易对映射、三种状态、落库字段口径（CRYPTO/USD/账户兜底）。
+    // ---------------------------------------------------------------------------
+
+    /** 重构前的对齐实现（双跑期保留，不被调用） */
+    private suspend fun buildPreviewLegacy(
+        balances: List<BinanceBalance>,
+        existingAssets: List<Asset>
+    ): Preview {
         val existingBySymbol = existingAssets.groupBy { it.symbol }
 
         val items = balances
@@ -128,13 +251,8 @@ class BinanceImportService(
         return Preview(items = items)
     }
 
-    /**
-     * 落库。只处理 [ItemStatus.NEW] 与 [ItemStatus.UPDATE]，未变的跳过。
-     *
-     * @param account 用户输入的账户名，只用于**新建**的资产；
-     *                已存在的资产保持它原来的账户，不跟着改（与持仓快照一致）。
-     */
-    suspend fun commit(preview: Preview, account: String): CommitResult {
+    /** 重构前的落库实现（双跑期保留，不被调用） */
+    private suspend fun commitLegacy(preview: Preview, account: String): CommitResult {
         val toInsert = mutableListOf<Asset>()
         var updated = 0
         var skipped = 0
@@ -177,6 +295,10 @@ class BinanceImportService(
         )
         return CommitResult(inserted = toInsert.size, updated = updated, skipped = skipped)
     }
+
+    // ---------------------------------------------------------------------------
+    // 双跑期保留区结束
+    // ---------------------------------------------------------------------------
 
     companion object {
         /** 用户没填账户名时的兜底。用「币安」而非通用「默认账户」——来源一目了然 */

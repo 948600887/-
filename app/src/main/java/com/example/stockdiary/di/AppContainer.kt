@@ -6,7 +6,7 @@ import com.example.stockdiary.data.repository.AssetRepository
 import com.example.stockdiary.data.importer.BinanceCredentialsManager
 import com.example.stockdiary.data.importer.BinanceImportService
 import com.example.stockdiary.data.prefs.DashboardPreferencesManager
-import com.example.stockdiary.data.DataExporter
+import com.example.stockdiary.data.export.DataExporter
 import com.example.stockdiary.data.importer.BrokerageImportService
 import com.example.stockdiary.data.dividend.DividendIncomeLoader
 import com.example.stockdiary.data.dividend.DividendIncomeUseCase

@@ -15,7 +15,6 @@ object APIEndpoints {
     // ===== 腾讯财经 =====
     object Tencent {
         const val BASE_URL = "https://gu.qq.com"
-        const val QT_API = "https://qt.gtimg.cn/q="
         const val QFQ_KLINE = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
         const val PROXY_URL = "https://proxy.finance.qq.com/ifzq/quot/quote/share/"
     }

@@ -5,6 +5,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import com.example.stockdiary.utils.AppLogger
 import android.content.Context
+import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
 import java.io.IOException
@@ -20,7 +21,7 @@ import kotlinx.coroutines.CancellationException
  */
 class EastmoneyDividendApiService(private val context: Context) {
     
-    private val client = NetworkClient.fundClient
+    internal var client: OkHttpClient = NetworkClient.fundClient
     
     suspend fun getDividendHistory(stockCode: String): Result<List<DividendData>> {
         val code = StockCodeManager.extractDigits(stockCode)
@@ -139,7 +140,7 @@ class EastmoneyDividendApiService(private val context: Context) {
      *              批量查询时必须是**接口返回的** SECURITY_CODE（可能带市场后缀），
      *              否则调用方没法把结果发回给对应的标的。
      */
-    private fun mapDividendItem(item: JSONObject, ticker: String): DividendData? {
+    internal fun mapDividendItem(item: JSONObject, ticker: String): DividendData? {
         val exDate = item.optString("EX_DIVIDEND_DATE", "")
         val pretaxBonus = item.optDouble("PRETAX_BONUS_RMB", -1.0)
         val noticeDate = item.optString("PLAN_NOTICE_DATE", "")

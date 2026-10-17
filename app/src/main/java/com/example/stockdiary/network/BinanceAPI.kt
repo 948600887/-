@@ -144,6 +144,38 @@ object BinanceAPI {
         val hasQuoteSuffix = BINANCE_QUOTE_ASSETS.any { s.length > it.length && s.endsWith(it) }
         return if (hasQuoteSuffix) s else "${s}USDT"
     }
+
+    /**
+     * 判断 symbol 是不是币安**理财/锁仓（Simple Earn / Locked Staking）产品**。
+     *
+     * 币安给这类持仓的代码是 `LD` + 底层资产名（`LDBNB` / `LDPOL` / `LDLTC` / `LDPAXG`…），
+     * 账户接口把它和现货一起返回，于是它们会被当成普通持仓写进库里。
+     * 但 `LD` 只是个持仓壳层标记，**不是可交易的现货行情代码**：币安没有 `LDLTCUSDT`
+     * 这种交易对，拿它去问 `/ticker/24hr` 只会拿到 400，或者在这个 API 全天候
+     * 连不上的网络里，白白挂到超时。
+     *
+     * 实测一轮同步里 37 条「获取加密货币价格失败」有 32 条是这类 `LD*` 持仓，
+     * 其中 `LDLTCUSDT` 一次挂了 3478 秒，把 AssetSyncManager 的并发信号量整个堵死。
+     *
+     * 这些持仓是真实资产、要继续显示，只是**本来就不该为它发取价请求**——
+     * 所以调用方收到的是 [NonTradableAssetException]，且**不计同步失败**。
+     *
+     * ## 为什么要排除 LDO
+     *
+     * Lido DAO 的现货代号恰好也是 `LD` 开头，它有真实的 `LDOUSDT` 交易对。
+     * 纯前缀判断会把它误伤成「理财壳」而永远不取价。见 [BINANCE_LD_EXCEPTIONS]。
+     *
+     * ## 为什么这条知识放在这里
+     *
+     * 与 [BINANCE_STABLECOINS] 同一个理由：币安的领域知识应当只有一处定义。
+     * 两边各写一份正是历史上出过 bug 的原因。
+     *
+     * @return true 表示这是理财/锁仓口径的持仓代码，没有现货行情可查
+     */
+    internal fun isEarnProduct(symbol: String): Boolean {
+        val s = symbol.uppercase().trim()
+        return s.startsWith("LD") && s.length > 2 && s !in BINANCE_LD_EXCEPTIONS
+    }
     
     fun getSupportedSymbols(): List<String> {
         return listOf(
@@ -178,6 +210,22 @@ data class Binance24hrStats(
 internal val BINANCE_STABLECOINS: Set<String> = setOf(
     "USDT", "USDC", "BUSD", "TUSD", "DAI", "FDUSD",
     "USDP", "USDD", "GUSD", "USDS", "SUSD"
+)
+
+/**
+ * 以 `LD` 开头、但**不是**理财/锁仓产品的例外名单。
+ *
+ * Lido DAO 的现货代号就是 `LDO`，币安有真实的 `LDOUSDT` 交易对。如果只看前缀，
+ * 它会被 [BinanceAPI.isEarnProduct] 误判成理财壳而永远不取价——真现货被当成
+ * 不可交易资产，比反过来严重得多。
+ *
+ * 这里列出裸代码和常见的带报价币后缀形态：库里存的 symbol 两种形态都有
+ * （导入存 `LDOUSDT`，手动添加可能只存 `LDO`）。
+ *
+ * 与 [BINANCE_STABLECOINS] 同样放在 network 包顶层：币安的领域知识只有一处定义。
+ */
+internal val BINANCE_LD_EXCEPTIONS: Set<String> = setOf(
+    "LDO", "LDOUSDT", "LDOBTC", "LDOETH"
 )
 
 /** 币安常见报价币（quote asset）。判断「symbol 是裸资产还是已是交易对」时用 */

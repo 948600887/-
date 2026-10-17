@@ -180,6 +180,13 @@ object UnifiedPriceService {
      * "更换到允许地区的节点后重试"。
      */
     private suspend fun getCryptoPrice(code: String): Result<CryptoData> = withContext(Dispatchers.IO) {
+        // 理财/锁仓产品（LD 前缀）不是现货交易对，币安没有 LDXXXUSDT 这种市场。
+        // 必须在解析交易对之前短路：一旦发请求，主机不可达时会挂到超时，
+        // 实测 LDLTCUSDT 一次堵住 3478 秒，把同步信号量拖死。
+        if (BinanceAPI.isEarnProduct(code)) {
+            AppLogger.d("理财/锁仓产品 $code 无现货交易对，跳过查价", TAG)
+            return@withContext Result.failure(NonTradableAssetException("$code 是币安理财/锁仓产品，没有现货行情"))
+        }
         val pair = BinanceAPI.cryptoTradingPairFor(code)
         // 稳定币锚定 1 美元，币安上没有 XXXUSDT 自我交易对，查价必然空——直接按 1.0 计
         if (pair == null) {

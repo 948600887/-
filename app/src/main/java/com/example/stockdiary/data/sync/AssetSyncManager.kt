@@ -8,6 +8,7 @@ import android.content.Context
 import android.content.res.Configuration
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
+import com.example.stockdiary.network.BinanceAPI
 import com.example.stockdiary.network.UnifiedPriceService
 import com.example.stockdiary.network.model.AssetPrice
 import com.example.stockdiary.utils.AppLogger
@@ -453,6 +454,11 @@ object AssetSyncManager {
                         errorTypes.offer(SyncErrorType.DATA)
                         return
                     }
+                    // 理财/锁仓产品（LD 前缀）没有现货行情，直接跳过——不计成功也不计失败
+                    if (BinanceAPI.isEarnProduct(cryptoSymbol)) {
+                        AppLogger.i("跳过不可交易标的: ${asset.name}（$cryptoSymbol 是理财/锁仓产品，无现货行情）", TAG)
+                        return
+                    }
                     val cryptoResult = UnifiedPriceService.getPrice(
                         cryptoSymbol,
                         AssetType.CRYPTO,
@@ -481,6 +487,11 @@ object AssetSyncManager {
                 // 「同步多次失败，请检查网络」的通知，用户被一条根本不是故障的事骚扰。
                 // 价格保持上次的值不动（AssetRepository 也不会写入 0 价）。
                 AppLogger.i("跳过停牌标的: ${asset.name}（${lastError?.message}）", TAG)
+            } else if (com.example.stockdiary.network.NonTradableAssetException.isNonTradable(lastError)) {
+                // 币安理财/锁仓产品没有现货行情：不是网络故障、也不是暂时停牌，
+                // 而是本就不可取价。手动刷新等没走上面 CRYPTO 分支短路的路径
+                // 也会走到这里，同样不计失败，价格保持上次的值。
+                AppLogger.i("跳过不可交易标的: ${asset.name}（${lastError?.message}）", TAG)
             } else {
                 failedCount.incrementAndGet()
                 errorTypes.offer(SyncStrategy.classifyError(lastError))

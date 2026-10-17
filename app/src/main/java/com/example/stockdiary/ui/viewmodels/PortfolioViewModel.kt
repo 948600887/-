@@ -195,19 +195,23 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
         viewModelScope.launch(refreshExceptionHandler) {
             _isRefreshing.value = true
             _errorMessage.value = null
-            val stockAssets = assets.value.filter {
-                it.type == AssetType.STOCK || it.type == AssetType.FUND
-            }
+            // 两个范围，别混（与资产页 DashboardViewModel 同一套规则）：
+            // - priceAssets 用于同步，只含有行情的类型。原先只含 STOCK+FUND，
+            //   把加密货币漏了——而持仓页是显示加密货币的，于是在本页点刷新，
+            //   币价永远不更新，得跑去资产页刷；
+            // - assetsOnly 用于收入计算，必须含银行存款，否则漏掉利息收入。
+            val priceAssets = assets.value.filter { it.type in AssetType.getPriceSyncedTypes() }
+            val assetsOnly = assets.value.filter { !it.type.isLiability }
             // 阶段日志：闪退发生在「运行一段时间后」，只有知道走到哪一步才能定位
             AppLogger.i(
-                "刷新开始：待同步 ${stockAssets.size} 项，分红预取 ${stockAssets.mapNotNull { it.symbol }.size} 个代码",
+                "刷新开始：待同步 ${priceAssets.size} 项，分红预取 ${priceAssets.mapNotNull { it.symbol }.size} 个代码",
                 "PortfolioVM"
             )
             try {
                 val result = AssetSyncManager.syncAllAssets(
                     context = container.context,
                     repository = repository,
-                    assets = stockAssets,
+                    assets = priceAssets,
                     onProgress = { progress -> _syncProgress.value = progress },
                     forceRefresh = true
                 )
@@ -227,7 +231,7 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
             }
 
             try {
-                val result = incomeUseCase.load(stockAssets, forceRefresh = false, tag = "PortfolioVM")
+                val result = incomeUseCase.load(assetsOnly, forceRefresh = false, tag = "PortfolioVM")
                 _estimatedAnnualDividend.value = result.totalAnnualIncome
                 _incomeCalculationStatus.value = null
                 AppLogger.i(
@@ -236,7 +240,7 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
                 )
 
                 // 手动刷新说明用户想看最新数，抓到就更新缓存
-                val symbols = stockAssets.mapNotNull { it.symbol }.toSet()
+                val symbols = assetsOnly.mapNotNull { it.symbol }.toSet()
                 _preferences.update { state ->
                     state.copy(
                         annualDividendCache = result.totalAnnualIncome,

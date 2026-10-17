@@ -51,7 +51,6 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
         )
         _errorMessage.value = "刷新没能完成：${throwable.message ?: "未知错误"}"
         _isRefreshing.value = false
-        _isSyncing.value = false
     }
 
     private val repository = container.assetRepository
@@ -68,9 +67,6 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
 
     private val _preferences = MutableStateFlow(preferencesManager.loadPreferences())
     val preferences: StateFlow<com.example.stockdiary.data.prefs.DashboardPreferences> = _preferences.asStateFlow()
-
-    private val _isSyncing = MutableStateFlow(false)
-    val isSyncing: StateFlow<Boolean> = _isSyncing.asStateFlow()
 
     private val _isRefreshing = MutableStateFlow(false)
     val isRefreshing: StateFlow<Boolean> = _isRefreshing.asStateFlow()
@@ -214,53 +210,49 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
         }
     }
 
-    fun sync() {
-        viewModelScope.launch(refreshExceptionHandler) {
-            _isSyncing.value = true
-            _errorMessage.value = null
-            _syncResult.value = null
-            try {
-                var lastProgress: SyncProgress? = null
-                val result = AssetSyncManager.syncAllAssets(
-                    context = container.context,
-                    repository = repository,
-                    assets = assets.value,
-                    onProgress = { lastProgress = it }
-                )
-                _syncProgress.value = lastProgress
-                _syncResult.value = result
-                // 「同步」按钮与「刷新」按钮走同一条链路，超时截断的提示不能只有一个有：
-                // 否则用户点同步看到「成功 X 项」，实际有一半标的没同步到
-                if (result.truncatedByTimeLimit) {
-                    _errorMessage.value = "同步超时，已保留上次数据"
-                }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                // 不捕获的话 _isSyncing 永远停在 true，后续同步全被挡死、界面一直转圈
-                AppLogger.e("同步异常: ${e.message}", e, "DashboardVM")
-                _syncResult.value = null
-            } finally {
-                _isSyncing.value = false
-            }
-        }
-    }
-
+    /**
+     * 刷新：强制联网更新有行情资产的最新价，再重算派生收入数据。
+     *
+     * ## 为什么只有一个刷新按钮
+     *
+     * 原先是「同步」+「刷新」两个按钮：同步走缓存（forceRefresh=false）、
+     * 刷新强制联网。但这个区别在界面上几乎不可感知——60 秒内点「同步」，
+     * 网络层全是缓存命中，用户看到的结果和点「刷新」一样，只会困惑
+     * "这俩到底啥区别"。而定期同步的职责已由后台 PriceSyncWorker 承担，
+     * 手动再给一个轻量入口是重复的。
+     *
+     * 现在统一为一个「刷新」：强制联网 + 实时进度 + 结果 Snackbar + 刷完重算收入。
+     *
+     * ## 两个范围，别混
+     *
+     * - **同步范围** = [AssetType.getPriceSyncedTypes]（STOCK/FUND/CRYPTO）：
+     *   银行存款与负债没有行情，传进去会被同步器静默跳过却白占进度分母。
+     * - **收入计算范围** = 全部非负债资产：必须含银行存款，否则漏掉利息收入。
+     */
     fun refresh() {
         viewModelScope.launch(refreshExceptionHandler) {
             _isRefreshing.value = true
             _errorMessage.value = null
+            _syncResult.value = null
+
+            // 两个范围，别混（详见方法 KDoc）：
+            // - priceAssets 用于同步，只含有行情的类型；
+            // - assetsOnly 用于收入计算，必须含银行存款，否则漏掉利息收入。
+            val priceAssets = assets.value.filter { it.type in AssetType.getPriceSyncedTypes() }
             val assetsOnly = assets.value.filter { !it.type.isLiability }
+
             try {
                 val result = AssetSyncManager.syncAllAssets(
                     context = container.context,
                     repository = repository,
-                    assets = assetsOnly,
-                    onProgress = { },
+                    assets = priceAssets,
+                    // 实时进度：刷新要跑完上百个标的，只转圈用户无从判断是在干活还是卡死
+                    onProgress = { _syncProgress.value = it },
                     forceRefresh = true
                 )
-                // 时间预算兜底：超时不抛错，但明确告诉用户「这次没跑完」，
-                // 看到的是保留的上次数据
+                _syncResult.value = result
+                // 时间预算兜底：超时不抛错，但要让用户知道「这次没跑完」，
+                // 看到的是保留的上次数据，而不是转圈到天荒地老
                 if (result.truncatedByTimeLimit) {
                     _errorMessage.value = "同步超时，已保留上次数据"
                 }
@@ -271,12 +263,15 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
+                // 不捕获的话 _isRefreshing 永远停在 true，后续刷新全被挡死、界面一直转圈
                 AppLogger.w("同步失败: ${e.message}", "DashboardVM")
+                _syncResult.value = null
             }
 
             try {
                 // 这条是「同步完成后再算一次收入」，**不能** cacheOnly：
-                // 用户刚刷新过行情，需要的是最新分红，不是缓存里的旧值
+                // 用户刚刷新过行情，需要的是最新分红，不是缓存里的旧值。
+                // 传 assetsOnly（含银行存款）而不是 priceAssets，否则漏掉利息收入。
                 val result = incomeUseCase.load(assetsOnly, forceRefresh = false, tag = "DashboardVM")
                 _realAnnualIncome.value = result.totalAnnualIncome
                 _estimatedDailyDividend.value = result.totalAnnualIncome / 365

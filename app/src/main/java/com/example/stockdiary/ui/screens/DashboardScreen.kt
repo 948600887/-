@@ -6,7 +6,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -35,8 +34,8 @@ fun DashboardScreen(
 ) {
     val assets by viewModel.assets.collectAsStateWithLifecycle()
     val preferences by viewModel.preferences.collectAsStateWithLifecycle()
-    val isSyncing by viewModel.isSyncing.collectAsStateWithLifecycle()
     val isRefreshing by viewModel.isRefreshing.collectAsStateWithLifecycle()
+    val syncProgress by viewModel.syncProgress.collectAsStateWithLifecycle()
     val syncResult by viewModel.syncResult.collectAsStateWithLifecycle()
     val dividendLoading by viewModel.dividendLoading.collectAsStateWithLifecycle()
     val realAnnualIncome by viewModel.realAnnualIncome.collectAsStateWithLifecycle()
@@ -112,8 +111,9 @@ fun DashboardScreen(
     syncResult?.let { result ->
         LaunchedEffect(result) {
             val msg = buildString {
-                append("同步完成")
-                if (result.failedCount > 0) append("，${result.failedCount}个失败")
+                // 统一结果反馈：成功/失败都报数，用户才知道这一轮到底刷到了什么
+                append("刷新完成：成功 ${result.successCount}")
+                if (result.failedCount > 0) append("，失败 ${result.failedCount}")
             }
             snackbarHostState.showSnackbar(msg)
             viewModel.clearSyncResult()
@@ -133,19 +133,28 @@ fun DashboardScreen(
         snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             TopAppBar(
-                title = { Text("我的资产") },
-                actions = {
-                    if (assets.isNotEmpty()) {
-                        if (isSyncing) {
-                            LinearProgressIndicator(
-                                modifier = Modifier
-                                    .width(80.dp)
-                                    .padding(end = 8.dp)
+                title = {
+                    // 刷新要跑完上百个标的，只显示转圈的话用户无从判断是在干活还是卡死。
+                    // 把「已完成 / 总数」露出来，等待就有了预期（与持仓页同一套）
+                    val progress = syncProgress
+                    if (isRefreshing && progress != null && progress.total > 0) {
+                        Column {
+                            Text("我的资产", style = MaterialTheme.typography.titleMedium)
+                            Text(
+                                "${progress.current} / ${progress.total}  ${progress.message}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
-                        IconButton(onClick = { viewModel.sync() }, enabled = !isSyncing) {
-                            Icon(Icons.Filled.Sync, contentDescription = "同步")
-                        }
+                    } else {
+                        Text("我的资产")
+                    }
+                },
+                actions = {
+                    if (assets.isNotEmpty()) {
+                        // 只有一个「刷新」：原「同步」按钮与后台定时同步职责重复，
+                        // 且走不走缓存的区别在界面上几乎不可感知，已合并
+                        // （见 DashboardViewModel.refresh 的 KDoc）
                         IconButton(onClick = { viewModel.refresh() }, enabled = !isRefreshing) {
                             if (isRefreshing) {
                                 CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)

@@ -109,10 +109,22 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
     private var knownGroups: Set<String> = emptySet()
     private var groupsInitialized = false
 
-    /** 页面带入当前分组 key 时调用：首次全展开，之后只补"新出现"的分组，不动用户已收起的 */
-    fun syncGroups(currentKeys: Set<String>) {
+    /**
+     * 页面带入当前分组 key 时调用。
+     *
+     * @param marketKeys 一级（市场大区）分组的 key。**首次进场时这些一律收起**，
+     *        于是首屏只看到 场内 / 场外 / 加密货币 / 其他 四个概览头（各带合计），
+     *        点其中一个才展开它下面的账户与资产。
+     *        注意不是「每次进场都重置」——手动展开过的分组切走再回来仍保持展开
+     *        （梦瑶反馈过"折叠了退出再进又展开"，状态必须留得住）。
+     *
+     * 首次之后只补"新出现"的分组，不动用户已收起的：
+     * 展开某个市场后它下面的账户头是新出现的，会被自动补成展开，
+     * 所以点一级标题会一路展开到资产，不用再逐个点账户。
+     */
+    fun syncGroups(currentKeys: Set<String>, marketKeys: Set<String> = emptySet()) {
         if (!groupsInitialized) {
-            _expandedGroups.value = currentKeys
+            _expandedGroups.value = currentKeys - marketKeys
             groupsInitialized = true
         } else {
             val added = currentKeys - knownGroups

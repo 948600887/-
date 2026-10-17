@@ -202,23 +202,25 @@ fun PortfolioScreen(
                         totalValue = marketAssets.sumOf { it.totalValueCny }
                     )
                 )
-                // 这个市场大区的展开 key，下面判断资产行要不要加入时要用
+                // 这个市场大区的展开 key
                 val marketKey = "market:${market.name}"
-                marketAssets.groupBy { it.account }.forEach { (account, list) ->
-                    val header = PortfolioRow.AccountHeader(
-                        account = account,
-                        assetCount = list.size,
-                        totalValue = list.sumOf { it.totalValueCny },
-                        market = market
-                    )
-                    add(header)
-                    // 资产行要**同时**满足「市场头展开」和「账户头展开」，
-                    // 且两个 key 都必须带市场：
-                    // - 只判账户头 → 市场头收起无效，两个区资产行照加（上次修的）
-                    // - 账户 key 不带市场 → 场内/场外的同名账户共用一个展开态，
-                    //   点一个另一个跟着展开（本次修的）
-                    if (header.expandKey in expandedAccounts && marketKey in expandedAccounts) {
-                        list.forEach { add(PortfolioRow.AssetRow(it, account)) }
+                // 市场大区收起时，它下面的**账户头也要一起藏起来**。
+                // 之前只藏资产行、账户头无条件 add，于是收起「场内」后底下一排账户头
+                // 还挂在那儿 —— 看着就像点了没反应、一级标题根本折叠不了。
+                if (marketKey in expandedAccounts) {
+                    marketAssets.groupBy { it.account }.forEach { (account, list) ->
+                        val header = PortfolioRow.AccountHeader(
+                            account = account,
+                            assetCount = list.size,
+                            totalValue = list.sumOf { it.totalValueCny },
+                            market = market
+                        )
+                        add(header)
+                        // 账户 key 必须带市场：否则场内/场外的同名账户共用一个展开态，
+                        // 点一个另一个跟着展开（已修）。市场这一层已在上面判过。
+                        if (header.expandKey in expandedAccounts) {
+                            list.forEach { add(PortfolioRow.AssetRow(it, account)) }
+                        }
                     }
                 }
             }
@@ -272,16 +274,23 @@ fun PortfolioScreen(
         }.toSet()
     }
 
+    // 一级（市场大区）分组的 key：首屏默认收起这些，只留 场内/场外/… 概览头。
+    // 负债区（LIABILITY_GROUP_KEY）也是一个一级头，一并算进来。
+    val marketKeys = remember(rows) {
+        rows.mapNotNull { (it as? PortfolioRow.MarketHeader)?.expandKey }.toSet()
+    }
+
     // 处在批量选择态时，返回键应当先退出选择态，而不是直接退出 App
     BackHandler(enabled = selectionMode) {
         selectionMode = false
         selectedIds = emptySet()
     }
 
-    // 分组展开态在 ViewModel（expandedGroups）：首次全展开，之后只自动展开"新出现"的
-    // 分组，用户手动收起的切走再回来也保持收起（不再被首屏逻辑强行展开）。
-    LaunchedEffect(groupKeys) {
-        viewModel.syncGroups(groupKeys)
+    // 分组展开态在 ViewModel（expandedGroups）：首次进场**只展开到一级标题以下**
+    // （市场大区全收起、账户保持展开），之后只自动展开"新出现"的分组，
+    // 用户手动收起的切走再回来也保持收起（不再被首屏逻辑强行展开）。
+    LaunchedEffect(groupKeys, marketKeys) {
+        viewModel.syncGroups(groupKeys, marketKeys)
     }
 
     if (errorMessage != null) {

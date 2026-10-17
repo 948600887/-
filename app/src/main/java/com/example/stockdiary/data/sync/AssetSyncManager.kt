@@ -2,7 +2,10 @@ package com.example.stockdiary.data.sync
 
 import com.example.stockdiary.data.repository.AssetRepository
 import com.example.stockdiary.data.repository.DividendRepository
+import android.app.ActivityManager
+import android.content.ComponentCallbacks2
 import android.content.Context
+import android.content.res.Configuration
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.network.UnifiedPriceService
@@ -62,6 +65,79 @@ object AssetSyncManager {
      * 与这里的 Semaphore 共同兜底。
      */
     private val manualSyncMutex = Mutex()
+
+    /**
+     * 场外基金下载的专属并发上限。
+     *
+     * 场外基金走天天基金 `pingzhongdata/{code}.js`，每只响应 0.5~2MB（完整历史净值）。
+     * 这道闸把**同时在途的大文件数**压到最多 [FUND_MAX_CONCURRENT_SYNC] 只，避免峰值内存
+     * 把进程顶到被系统回收（静默闪退、零崩溃报告——本项目历史老毛病）。
+     *
+     * 与 [manualSyncMutex]、总 [Semaphore] 都是**叠加**关系：一个基金任务同时占
+     * 一个总信号量名额 + 一个基金专属名额。总并发仍是 3，但其中最多 2 个能是基金下载，
+     * 其余名额留给股票/加密，确保 2MB 大文件不会三个一起挤在内存里。
+     */
+    private const val FUND_MAX_CONCURRENT_SYNC = 2
+    private val fundSemaphore = Semaphore(FUND_MAX_CONCURRENT_SYNC)
+
+    /**
+     * 进程级内存回收回调（整个进程只注册一次）。
+     *
+     * LMK 杀进程前系统一定会先发 [ComponentCallbacks2.onTrimMemory]，
+     * 等级到 [ComponentCallbacks2.TRIM_MEMORY_COMPLETE]（80）基本就是临死前的最后通牒。
+     * 把它记进 app.log：将来若仍出现「点刷新闪退、零崩溃报告」，
+     * 只要 log 末尾能看到这条 onTrimMemory，就能坐实是内存压力而非逻辑 bug，
+     * 省去又一轮瞎猜。只挂一次，避免重复注册导致回调翻倍。
+     */
+    @Volatile private var memoryTrimCallback: ComponentCallbacks2? = null
+
+    private fun ensureMemoryTrimLogging(context: Context) {
+        if (memoryTrimCallback != null) return
+        synchronized(this) {
+            if (memoryTrimCallback != null) return
+            val cb = object : ComponentCallbacks2 {
+                override fun onTrimMemory(level: Int) {
+                    // 只关心「快被杀了」的等级，避免后台周期回调刷屏
+                    if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) {
+                        AppLogger.w(
+                            "onTrimMemory(level=$level) — 进程面临被系统回收风险，" +
+                                "level≥${ComponentCallbacks2.TRIM_MEMORY_COMPLETE} 即临死前通牒",
+                            TAG
+                        )
+                    }
+                }
+
+                override fun onConfigurationChanged(newConfig: Configuration) = Unit
+
+                override fun onLowMemory() {
+                    AppLogger.w("onLowMemory — 系统全局内存紧张", TAG)
+                }
+            }
+            // 挂在 Application 上，避免持有 Activity 造成泄漏
+            context.applicationContext.registerComponentCallbacks(cb)
+            memoryTrimCallback = cb
+        }
+    }
+
+    /**
+     * 在关键时机（刷新起点）打一帧内存水位，作为 LMK 归因的物证。
+     * 读数来自两部分：本进程堆（[Runtime]）与系统全局（[ActivityManager.MemoryInfo]）。
+     */
+    private fun logMemoryState(context: Context, phase: String) {
+        val rt = Runtime.getRuntime()
+        val maxHeapMb = rt.maxMemory() / (1024 * 1024)
+        val usedHeapMb = (rt.totalMemory() - rt.freeMemory()) / (1024 * 1024)
+        val am = context.applicationContext.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+        val mi = ActivityManager.MemoryInfo()
+        am?.getMemoryInfo(mi)
+        val availSysMb = mi.availMem / (1024 * 1024)
+        val thresholdMb = mi.threshold / (1024 * 1024)
+        AppLogger.i(
+            "内存水位[$phase]：堆 已用=${usedHeapMb}MB/上限=${maxHeapMb}MB，" +
+                "系统 availMem=${availSysMb}MB/回收阈值=${thresholdMb}MB lowMemory=${mi.lowMemory}",
+            TAG
+        )
+    }
 
     /**
      * 同步所有资产的价格（并行版本，限流控制）
@@ -168,6 +244,12 @@ object AssetSyncManager {
 
         // 心跳要能读出「卡在哪个标的」：进行中的标的在这里登记/注销
         val inFlightAssets = ConcurrentHashMap.newKeySet<String>()
+
+        // 内存水位取证：刷新起点打一帧，并挂上进程级回收回调（只挂一次）。
+        // 万一将来仍偶发「点刷新闪退、零崩溃报告」，log 末的 onTrimMemory / 内存水位
+        // 就能坐实是 LMK 而非逻辑 bug，省去又一轮瞎猜。
+        ensureMemoryTrimLogging(context)
+        logMemoryState(context, "同步起点")
 
         AppLogger.i(
             "价格同步开始：${totalCount} 个资产，forceRefresh=$forceRefresh，" +
@@ -315,21 +397,28 @@ object AssetSyncManager {
                             }
                         }.onFailure { lastError = it }
                     } else {
-                        // 场外基金：使用基金API（天天基金），传纯数字代码
-                        val fundResult = UnifiedPriceService.getPrice(
-                            pureCode,
-                            AssetType.FUND,
-                            forceRefresh = forceRefresh
-                        )
-                        fundResult.onSuccess { price ->
-                            when (price) {
-                                is AssetPrice.Fund -> {
-                                    repository.updatePriceBySymbol(symbol, price.data.price)
-                                    isSuccess = true
+                        // 场外基金：使用基金API（天天基金），传纯数字代码。
+                        // forceRefresh 强制为 false：场外净值是**日更**的，同一天再刷也拿不到
+                        // 更新的数；传 true 会绕过 FundAPI 的 5 分钟缓存 + 今日净值闸，每次手动
+                        // 刷新都把 0.5~2MB 历史文件重新下载一遍，正是「点刷新偶发闪退」的残因。
+                        // 改 false 让两道缓存都生效，只在该代码当日还没缓存时才真去下载。
+                        // 额外的 fundSemaphore 再压一道在途大文件数（见对象级注释）。
+                        fundSemaphore.withPermit {
+                            val fundResult = UnifiedPriceService.getPrice(
+                                pureCode,
+                                AssetType.FUND,
+                                forceRefresh = false
+                            )
+                            fundResult.onSuccess { price ->
+                                when (price) {
+                                    is AssetPrice.Fund -> {
+                                        repository.updatePriceBySymbol(symbol, price.data.price)
+                                        isSuccess = true
+                                    }
+                                    else -> { lastError = IllegalStateException("返回类型不匹配") }
                                 }
-                                else -> { lastError = IllegalStateException("返回类型不匹配") }
-                            }
-                        }.onFailure { lastError = it }
+                            }.onFailure { lastError = it }
+                        }
                     }
                 }
                 AssetType.STOCK -> {

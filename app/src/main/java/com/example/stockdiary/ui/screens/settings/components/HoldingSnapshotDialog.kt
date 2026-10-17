@@ -6,37 +6,36 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.text.KeyboardActions
-import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.Upload
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.stockdiary.data.importer.HoldingSnapshotService
 import com.example.stockdiary.di.AppContainer
+import com.example.stockdiary.ui.components.import.ImportAccountField
+import com.example.stockdiary.ui.components.import.ImportCommitSummary
+import com.example.stockdiary.ui.components.import.ImportCommittingStep
+import com.example.stockdiary.ui.components.import.ImportErrorDialog
+import com.example.stockdiary.ui.components.import.ImportPreviewBottomBar
+import com.example.stockdiary.ui.components.import.ImportRawTextDialog
+import com.example.stockdiary.ui.components.import.ImportResultStep
+import com.example.stockdiary.ui.components.import.ImportWizardScaffold
 import com.example.stockdiary.ui.theme.LossRed
 import com.example.stockdiary.ui.theme.ProfitGreen
 import com.example.stockdiary.ui.viewmodels.HoldingSnapshotViewModel
@@ -50,8 +49,10 @@ import com.example.stockdiary.utils.format
  * 两种来源共用这一个 Dialog：差别只在第一步怎么选、以及预览页要不要显示净值。
  * 不另开一个 Dialog 是刻意的——孪生页面必然各犯一遍同样的 bug，
  * 这个项目已经为这事返工过一次。
+ *
+ * 全屏外壳、错误弹窗、识别原文、写入中与结果页已抽到
+ * `com.example.stockdiary.ui.components.import` 公共骨架，这里只留来源特有步骤。
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HoldingSnapshotDialog(
     container: AppContainer,
@@ -66,11 +67,6 @@ fun HoldingSnapshotDialog(
     )
     val state by viewModel.uiState.collectAsStateWithLifecycle()
 
-    // ViewModel 挂在宿主 Activity 作用域上，关掉对话框后实例还活着——不复位会残留上次的预览
-    DisposableEffect(Unit) {
-        onDispose { viewModel.reset() }
-    }
-
     val imageLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.GetContent()
     ) { uri -> if (uri != null) viewModel.onImageSelected(uri) }
@@ -84,6 +80,15 @@ fun HoldingSnapshotDialog(
     // 识别原文只在本地决定要不要显示，不进 ViewModel：它是排障用的临时视图，
     // 塞进 UiState 会让它跟着 reset() 一起被清掉——而用户正是关掉报错后才想看它
     var showRawText by remember { mutableStateOf(false) }
+
+    // 没有可查行情的持仓（理论上不会走到这——截图里全是证券）就不给按钮，
+    // 免得点了什么也没发生
+    val canSync = state.preview?.items?.isNotEmpty() == true
+    val syncAction: (@Composable () -> Unit)? = if (canSync) {
+        { SnapshotSyncSection(state, viewModel) }
+    } else {
+        null
+    }
 
     /**
      * 主按钮点下去要开哪个选择器。
@@ -102,142 +107,73 @@ fun HoldingSnapshotDialog(
         HoldingSnapshotViewModel.Source.FUND_EXPORT -> { { fileLauncher.launch(XLSX_MIME) } }
     }
 
-    Dialog(
-        onDismissRequest = onDismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false)
-    ) {
-        Surface(modifier = Modifier.fillMaxSize()) {
-            Scaffold(
-                topBar = {
-                    TopAppBar(
-                        title = {
-                            val title = when (state.step) {
-                                HoldingSnapshotViewModel.Step.SELECT_IMAGE ->
-                                    if (isFund) "导入场外基金" else "导入持仓截图"
-                                HoldingSnapshotViewModel.Step.PREVIEW ->
-                                    if (isFund) "核对场外基金" else "核对持仓"
-                                HoldingSnapshotViewModel.Step.COMMITTING -> "正在导入…"
-                                HoldingSnapshotViewModel.Step.RESULT -> "导入完成"
-                            }
-                            Text(title, fontWeight = FontWeight.Bold)
-                        },
-                        navigationIcon = {
-                            IconButton(onClick = onDismiss) {
-                                Icon(Icons.Default.Close, contentDescription = "关闭")
-                            }
-                        }
-                    )
-                },
-                bottomBar = {
-                    if (state.step == HoldingSnapshotViewModel.Step.PREVIEW) {
-                        SnapshotBottomBar(state, viewModel)
-                    }
-                }
-            ) { padding ->
-                Box(modifier = Modifier.fillMaxSize().padding(padding)) {
-                    when (state.step) {
-                        HoldingSnapshotViewModel.Step.SELECT_IMAGE ->
-                            SelectSnapshotStep(
-                                state = state,
-                                isFund = isFund,
-                                onPickPrimary = primaryPick,
-                                onPickImage = { imageLauncher.launch(IMAGE_MIME) },
-                                onShowRawText = { showRawText = true }
-                            )
-
-                        HoldingSnapshotViewModel.Step.PREVIEW ->
-                            SnapshotPreviewStep(state, viewModel)
-
-                        HoldingSnapshotViewModel.Step.COMMITTING -> SnapshotCommittingStep()
-
-                        HoldingSnapshotViewModel.Step.RESULT -> SnapshotResultStep(state, viewModel)
-                    }
-                }
+    ImportWizardScaffold(
+        title = when (state.step) {
+            HoldingSnapshotViewModel.Step.SELECT_IMAGE ->
+                if (isFund) "导入场外基金" else "导入持仓截图"
+            HoldingSnapshotViewModel.Step.PREVIEW ->
+                if (isFund) "核对场外基金" else "核对持仓"
+            HoldingSnapshotViewModel.Step.COMMITTING -> "正在导入…"
+            HoldingSnapshotViewModel.Step.RESULT -> "导入完成"
+        },
+        onDismiss = onDismiss,
+        onReset = viewModel::reset,
+        bottomBar = {
+            if (state.step == HoldingSnapshotViewModel.Step.PREVIEW) {
+                ImportPreviewBottomBar(
+                    resetText = "重选",
+                    unit = "条",
+                    pendingCount = state.preview?.pendingCount ?: 0,
+                    onReset = viewModel::reset,
+                    onCommit = viewModel::commit
+                )
             }
+        }
+    ) {
+        when (state.step) {
+            HoldingSnapshotViewModel.Step.SELECT_IMAGE ->
+                SelectSnapshotStep(
+                    state = state,
+                    isFund = isFund,
+                    onPickPrimary = primaryPick,
+                    onPickImage = { imageLauncher.launch(IMAGE_MIME) },
+                    onShowRawText = { showRawText = true }
+                )
+
+            HoldingSnapshotViewModel.Step.PREVIEW ->
+                SnapshotPreviewStep(state, viewModel)
+
+            HoldingSnapshotViewModel.Step.COMMITTING -> ImportCommittingStep()
+
+            HoldingSnapshotViewModel.Step.RESULT -> ImportResultStep(
+                summary = ImportCommitSummary(
+                    inserted = state.result?.inserted ?: 0,
+                    updated = state.result?.updated ?: 0,
+                    skipped = state.result?.skipped ?: 0,
+                    conflicts = state.result?.conflicts ?: 0,
+                    extraNote = "持仓截图里没有价格信息，参考单价留空是为了不凭空造出市值。" +
+                        "点下面的按钮拉一次行情，市值才会显示出来。"
+                ),
+                syncAction = syncAction
+            )
         }
     }
 
     state.error?.let { message ->
-        AlertDialog(
-            onDismissRequest = { viewModel.clearError() },
-            title = { Text("没能导入", fontWeight = FontWeight.Bold) },
-            text = { Text(message) },
-            confirmButton = {
-                TextButton(onClick = { viewModel.clearError() }) { Text("知道了") }
-            }
+        ImportErrorDialog(
+            title = "没能导入",
+            message = message,
+            onDismiss = { viewModel.clearError() }
         )
     }
 
     // 错误提示里写了「可点『查看识别原文』，把内容发出来便于定位格式差异」——
     // 这个按钮必须真的存在，否则那句话是在指一个不存在的控件
     if (showRawText) {
-        RawTextDialog(
+        ImportRawTextDialog(
             lines = state.lines,
             onDismiss = { showRawText = false }
         )
-    }
-}
-
-/**
- * OCR 识别原文（还原后的视觉行，即解析器实际吃进去的输入）。
- *
- * 解析不出持仓时，这是**唯一**能定位问题的东西：解析器认的是「名称一行、代码一行」
- * 这种结构，官方一改版（比如把名称和代码排到同一行）就会一条都读不出来，
- * 而「没从这张图里读到持仓」这句话本身说不出差在哪。
- * 用 [SelectionContainer] 包住，便于长按整段复制出来。
- */
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun RawTextDialog(lines: List<String>, onDismiss: () -> Unit) {
-    Dialog(
-        onDismissRequest = onDismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false)
-    ) {
-        Surface(modifier = Modifier.fillMaxSize()) {
-            Scaffold(
-                topBar = {
-                    TopAppBar(
-                        title = { Text("识别原文", fontWeight = FontWeight.Bold) },
-                        navigationIcon = {
-                            IconButton(onClick = onDismiss) {
-                                Icon(Icons.Default.Close, contentDescription = "关闭")
-                            }
-                        }
-                    )
-                }
-            ) { padding ->
-                if (lines.isEmpty()) {
-                    Box(
-                        modifier = Modifier.fillMaxSize().padding(padding).padding(24.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            "这次没有留下识别原文。",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            textAlign = TextAlign.Center
-                        )
-                    }
-                } else {
-                    SelectionContainer {
-                        LazyColumn(
-                            modifier = Modifier.fillMaxSize().padding(padding),
-                            contentPadding = PaddingValues(16.dp)
-                        ) {
-                            // 带行号：解析器就是按这个顺序从上往下配对的，
-                            // 哪一行被误判成表头、哪两行该合并，对着行号一眼看得出来
-                            items(lines.size) { index ->
-                                Text(
-                                    text = "${index + 1}. ${lines[index]}",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    fontSize = 12.sp
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-        }
     }
 }
 
@@ -367,7 +303,6 @@ private fun SnapshotPreviewStep(
     viewModel: HoldingSnapshotViewModel
 ) {
     val preview = state.preview ?: return
-    val focusManager = LocalFocusManager.current
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -463,37 +398,11 @@ private fun SnapshotPreviewStep(
         }
 
         item {
-            Column {
-                Text("导入到账户", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
-                Spacer(Modifier.height(8.dp))
-                OutlinedTextField(
-                    value = state.account,
-                    onValueChange = viewModel::onAccountChange,
-                    label = { Text("账户名") },
-                    placeholder = { Text("不填则记为「默认账户」") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                    keyboardActions = KeyboardActions(onDone = { focusManager.clearFocus() }),
-                    supportingText = {
-                        Text(
-                            "只用于新建的持仓；已存在的持仓保持它原来的账户不变",
-                            style = MaterialTheme.typography.bodySmall
-                        )
-                    }
-                )
-                if (state.knownAccounts.isNotEmpty()) {
-                    Spacer(Modifier.height(8.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        state.knownAccounts.take(4).forEach { name ->
-                            SuggestionChip(
-                                onClick = { viewModel.onAccountChange(name) },
-                                label = { Text(name, fontSize = 12.sp) }
-                            )
-                        }
-                    }
-                }
-            }
+            ImportAccountField(
+                account = state.account,
+                knownAccounts = state.knownAccounts,
+                onAccountChange = viewModel::onAccountChange
+            )
         }
 
         item {
@@ -628,146 +537,50 @@ private fun formatQuantity(value: Double): String =
  */
 private fun formatNav(value: Double): String = value.format(4)
 
-@Composable
-private fun SnapshotBottomBar(
-    state: HoldingSnapshotViewModel.UiState,
-    viewModel: HoldingSnapshotViewModel
-) {
-    val preview = state.preview
-    Surface(
-        color = MaterialTheme.colorScheme.surfaceVariant,
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(16.dp),
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            OutlinedButton(
-                onClick = viewModel::reset,
-                modifier = Modifier.weight(1f)
-            ) {
-                Text("重选")
-            }
-            Button(
-                onClick = viewModel::commit,
-                enabled = (preview?.pendingCount ?: 0) > 0,
-                modifier = Modifier.weight(1f)
-            ) {
-                val count = preview?.pendingCount ?: 0
-                Text(if (count > 0) "导入 $count 条" else "没有需要导入的")
-            }
-        }
-    }
-}
-
 // ---------------- 第三 / 四步 ----------------
 
+/**
+ * 结果页的「同步行情」动作组（进度 / 按钮 / 结果文案）。
+ *
+ * 通过公共骨架 [ImportResultStep] 的 syncAction 插槽挂上去：
+ * 骨架只负责「有没有这个插槽」，同步行为本身仍是持仓截图链路特有的。
+ */
 @Composable
-private fun SnapshotCommittingStep() {
-    Column(
-        modifier = Modifier.fillMaxSize(),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
-    ) {
-        CircularProgressIndicator()
-        Spacer(Modifier.height(16.dp))
-        Text("正在写入…", style = MaterialTheme.typography.bodyLarge)
-    }
-}
-
-@Composable
-private fun SnapshotResultStep(
+private fun SnapshotSyncSection(
     state: HoldingSnapshotViewModel.UiState,
     viewModel: HoldingSnapshotViewModel
 ) {
-    val result = state.result
-    // 没有可查行情的持仓（理论上不会走到这——截图里全是证券）就不给按钮，
-    // 免得点了什么也没发生
-    val canSync = state.preview?.items?.isNotEmpty() == true
-
-    Column(
-        modifier = Modifier.fillMaxSize().padding(24.dp).verticalScroll(rememberScrollState()),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
-    ) {
-        Icon(
-            Icons.Default.Info,
-            contentDescription = null,
-            modifier = Modifier.size(48.dp),
-            tint = ProfitGreen
-        )
-        Spacer(Modifier.height(16.dp))
-        Text("导入完成", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-        Spacer(Modifier.height(12.dp))
-        Text(
-            "新增 ${result?.inserted ?: 0} 条 · 覆盖 ${result?.updated ?: 0} 条 · " +
-                "未变 ${result?.skipped ?: 0} 条",
-            style = MaterialTheme.typography.bodyLarge
-        )
-        // 跳过不是「没做」，是「不敢替你做」。不报出来就等于静默丢数据
-        val conflicts = result?.conflicts ?: 0
-        if (conflicts > 0) {
-            Spacer(Modifier.height(8.dp))
-            Row {
-                Icon(
-                    Icons.Default.Info,
-                    contentDescription = null,
-                    tint = LossRed,
-                    modifier = Modifier.size(16.dp)
-                )
-                Spacer(Modifier.width(6.dp))
-                Text(
-                    "有 $conflicts 条因为库里同名持仓不唯一而跳过，" +
-                        "请在持仓页手动处理后再导入一次。",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error
-                )
-            }
+    if (state.syncing) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(18.dp),
+                strokeWidth = 2.dp
+            )
+            Spacer(Modifier.width(10.dp))
+            Text(
+                state.syncMessage ?: "正在同步行情…",
+                style = MaterialTheme.typography.bodySmall
+            )
         }
-        Spacer(Modifier.height(12.dp))
-        Text(
-            "持仓截图里没有价格信息，参考单价留空是为了不凭空造出市值。" +
-                "点下面的按钮拉一次行情，市值才会显示出来。",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            textAlign = TextAlign.Center
-        )
-
-        if (canSync) {
-            Spacer(Modifier.height(20.dp))
-            if (state.syncing) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(18.dp),
-                        strokeWidth = 2.dp
-                    )
-                    Spacer(Modifier.width(10.dp))
-                    Text(
-                        state.syncMessage ?: "正在同步行情…",
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                }
-            } else {
-                OutlinedButton(onClick = viewModel::syncPrices) {
-                    Icon(
-                        Icons.Default.Sync,
-                        contentDescription = null,
-                        modifier = Modifier.size(18.dp)
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    Text("同步行情")
-                }
-                // 同步完的结果留在原地，用户看得见成功几条、失败几条
-                state.syncMessage?.let { message ->
-                    Spacer(Modifier.height(10.dp))
-                    Text(
-                        message,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        textAlign = TextAlign.Center
-                    )
-                }
-            }
+    } else {
+        OutlinedButton(onClick = viewModel::syncPrices) {
+            Icon(
+                Icons.Default.Sync,
+                contentDescription = null,
+                modifier = Modifier.size(18.dp)
+            )
+            Spacer(Modifier.width(8.dp))
+            Text("同步行情")
+        }
+        // 同步完的结果留在原地，用户看得见成功几条、失败几条
+        state.syncMessage?.let { message ->
+            Spacer(Modifier.height(10.dp))
+            Text(
+                message,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center
+            )
         }
     }
 }

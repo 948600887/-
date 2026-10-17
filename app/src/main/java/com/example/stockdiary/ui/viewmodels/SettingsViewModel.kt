@@ -6,7 +6,6 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.example.stockdiary.common.Result
-import com.example.stockdiary.data.price.ApiManager
 import com.example.stockdiary.data.repository.AssetRepository
 import com.example.stockdiary.data.prefs.DashboardPreferences
 import com.example.stockdiary.data.prefs.DashboardPreferencesManager
@@ -245,7 +244,6 @@ class SettingsViewModel(
                 // 后台还在按旧偏好跑同步、到点还弹提醒。最后从磁盘回读真实状态。
                 PriceSyncScheduler.cancelDailySync(appContext)
                 NotificationHelper.cancelReminder(appContext)
-                ApiManager.clearCache()
                 refreshPriceSyncState()
                 _uiState.update { state -> state.copy(isDeleting = false, deleteResult = Result.success(Unit)) }
             } catch (e: CancellationException) {

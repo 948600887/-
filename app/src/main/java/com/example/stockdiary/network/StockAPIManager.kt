@@ -129,35 +129,6 @@ class StockAPIManager {
     }
     
     /**
-     * 定期健康检查，尝试恢复主API
-     */
-    suspend fun healthCheck() {
-        if (currentAPIRef.get() == backupAPI) {
-            withContext(Dispatchers.IO) {
-                try {
-                    val testResult = primaryAPI.getStockData("sh600000")
-                    if (testResult.isSuccess) {
-                        synchronized(switchLock) {
-                            AppLogger.d("主API（腾讯财经）已恢复，切换回主API", "StockAPIManager")
-                            currentAPIRef.set(primaryAPI)
-                            failCount.set(0)
-                            lastSwitchTime = System.currentTimeMillis()
-                        }
-                    } else {
-                        AppLogger.d("主API（腾讯财经）仍未恢复", "StockAPIManager")
-                    }
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    AppLogger.d("主API（腾讯财经）仍未恢复: ${e.message}", "StockAPIManager")
-                }
-            }
-        } else {
-            AppLogger.d("当前使用主API（腾讯财经），跳过健康检查", "StockAPIManager")
-        }
-    }
-    
-    /**
      * 从缓存获取数据
      */
     private fun getCachedData(stockCode: String): SinaStockData? {

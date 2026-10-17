@@ -44,26 +44,6 @@ object ApiManager {
     }
     
     /**
-     * 获取股价API服务实例（带缓存）
-     */
-    fun getPriceApiService(context: Context): Any {
-        val api = getPriceApi(context)
-        val cached = priceApiService
-        if (cached != null && lastPriceApi == api) {
-            return cached
-        }
-        val service = when (api) {
-            API_SINA -> com.example.stockdiary.network.SinaStockAPI
-            API_TENCENT -> com.example.stockdiary.network.TencentStockAPI
-            API_SKILL -> com.example.stockdiary.network.SinaStockAPI
-            else -> com.example.stockdiary.network.SinaStockAPI
-        }
-        priceApiService = service
-        lastPriceApi = api
-        return service
-    }
-    
-    /**
      * 清除缓存的API服务实例
      */
     fun clearCache() {

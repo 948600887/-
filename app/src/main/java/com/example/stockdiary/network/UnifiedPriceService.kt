@@ -310,28 +310,6 @@ object UnifiedPriceService {
         return pattern.find(json)?.groupValues?.getOrNull(1)?.trim()
     }
     
-    suspend fun getBatchPrices(
-        codes: List<String>, 
-        type: AssetType,
-        concurrency: Int = 5
-    ): Map<String, Result<AssetPrice>> = coroutineScope {
-        codes.chunked(concurrency).flatMap { batch ->
-            batch.map { code ->
-                async {
-                    code to getPrice(code, type)
-                }
-            }.awaitAll()
-        }.toMap()
-    }
-    
-    fun getCachedPrice(code: String, type: AssetType): AssetPrice? {
-        return priceCache["${type.name}_$code"]?.price
-    }
-    
-    fun getCacheSize(): Int = priceCache.size
-    
-    fun getCacheKeys(): Set<String> = priceCache.keys.toSet()
-    
     fun clearCache() {
         val sizeBefore = priceCache.size
         priceCache.clear()
@@ -341,18 +319,5 @@ object UnifiedPriceService {
         // 只清这里的 60 秒缓存而不清 FundAPI 那份，「清完缓存还是拿到旧净值」。
         FundAPI.clearCache()
         AppLogger.i("价格缓存已清空 (${sizeBefore} 条)", TAG)
-    }
-    
-    fun removeFromCache(code: String, type: AssetType) {
-        val cacheKey = "${type.name}_$code"
-        priceCache.remove(cacheKey)
-        CacheManager.invalidate(cacheKey)
-        AppLogger.d("移除缓存: $cacheKey", TAG)
-    }
-    
-    /** 缓存里是否有一份尚未过期的价格 */
-    fun isCacheValid(code: String, type: AssetType): Boolean {
-        val entry = priceCache["${type.name}_$code"] ?: return false
-        return isFresh(entry)
     }
 }

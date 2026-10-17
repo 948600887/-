@@ -38,6 +38,18 @@ object StockCodeManager {
     }
 
     /**
+     * 代码层面可识别的退市：老三板（退市板块）代码 400xxx / 420xxx，
+     * 归一化后形如 bj400264。注意：暂停上市（停牌）无法仅凭代码判断，
+     * 需交易所状态接口，此处不覆盖。
+     */
+    fun isDelisted(symbol: String?): Boolean {
+        if (symbol.isNullOrBlank()) return false
+        val code = extractDigits(symbol)
+        if (code.length != 6) return false
+        return code.startsWith("400") || code.startsWith("420")
+    }
+
+    /**
      * 从字符串中提取纯数字
      */
     fun extractDigits(input: String): String = input.filter { it.isDigit() }

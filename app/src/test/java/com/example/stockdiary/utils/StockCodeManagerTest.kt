@@ -291,6 +291,48 @@ class StockCodeManagerTest {
         assertEquals(0, StockCodeManager.extractFiscalYear(""))
     }
 
+    // ========== isDelisted ==========
+
+    @Test
+    fun `isDelisted returns true for 老三板 400xxx`() {
+        assertTrue(StockCodeManager.isDelisted("bj400264"))
+    }
+
+    @Test
+    fun `isDelisted returns true for 老三板 420xxx`() {
+        assertTrue(StockCodeManager.isDelisted("bj420123"))
+    }
+
+    @Test
+    fun `isDelisted returns false for 北交所 normal codes`() {
+        assertFalse(StockCodeManager.isDelisted("bj830799"))
+    }
+
+    @Test
+    fun `isDelisted returns false for SH stocks`() {
+        assertFalse(StockCodeManager.isDelisted("sh600519"))
+    }
+
+    @Test
+    fun `isDelisted returns false for SZ stocks`() {
+        assertFalse(StockCodeManager.isDelisted("sz000001"))
+    }
+
+    @Test
+    fun `isDelisted returns false for 货币 场外基金`() {
+        assertFalse(StockCodeManager.isDelisted("519518"))
+    }
+
+    @Test
+    fun `isDelisted returns false for null`() {
+        assertFalse(StockCodeManager.isDelisted(null))
+    }
+
+    @Test
+    fun `isDelisted returns false for blank`() {
+        assertFalse(StockCodeManager.isDelisted(""))
+    }
+
     // ========== Edge Cases ==========
 
     @Test

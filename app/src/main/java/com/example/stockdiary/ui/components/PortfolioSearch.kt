@@ -115,7 +115,7 @@ fun SearchAssetItem(asset: Asset, onClick: () -> Unit, onDividendClick: () -> Un
             Column(modifier = Modifier.weight(1f), horizontalAlignment = Alignment.End) {
                 Text("¥${asset.totalValueCny.format(2)}", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold, color = OnSurface)
                 Text(
-                    asset.currentPrice?.let { "¥${it.format(pricePrecision)}" } ?: "价格待更新",
+                    asset.currentPrice?.let { "¥${it.format(pricePrecision)}" } ?: if (StockCodeManager.isDelisted(asset.symbol)) "退市" else "价格待更新",
                     style = MaterialTheme.typography.bodySmall, color = OnSurfaceVariant, fontWeight = FontWeight.Medium
                 )
             }

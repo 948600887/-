@@ -12,13 +12,6 @@ object APIEndpoints {
         const val BONUS_PAGE = "https://finance.sina.com.cn/realstock/company/"
     }
 
-    // ===== 腾讯财经 =====
-    object Tencent {
-        const val BASE_URL = "https://gu.qq.com"
-        const val QFQ_KLINE = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
-        const val PROXY_URL = "https://proxy.finance.qq.com/ifzq/quot/quote/share/"
-    }
-
     // ===== 东方财富 =====
     object Eastmoney {
         const val BASE_URL = "https://fundf10.eastmoney.com"
@@ -44,7 +37,6 @@ object APIEndpoints {
     // ===== 请求头 =====
     object Headers {
         const val SINA_REFERER = "https://finance.sina.com.cn"
-        const val TENCENT_REFERER = "https://gu.qq.com"
         const val EASTMONEY_REFERER = "https://fundf10.eastmoney.com/"
         const val TSANGHI_REFERER = "https://tsanghi.com/"
         const val USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"

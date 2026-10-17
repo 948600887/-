@@ -2,6 +2,7 @@ package com.example.stockdiary.data.price
 
 import com.example.stockdiary.common.Result
 import com.example.stockdiary.network.EastmoneySkillApi
+import com.example.stockdiary.network.model.StockData
 import com.example.stockdiary.utils.AppLogger
 import com.example.stockdiary.utils.StockCodeManager
 import kotlinx.coroutines.Dispatchers
@@ -114,20 +115,21 @@ class SkillDataSource : StockDataSource {
             }
 
             StockData(
-                symbol = symbol,
+                code = symbol,
                 name = dataObj.optString("name", ""),
                 price = price,
+                // 妙想返回的文本不保证带涨跌字段：解析不到就留 null，
+                // 由使用方按「无涨跌信息」处理，不拿 0.0 冒充持平
+                change = null,
+                changePercent = null,
                 open = dataObj.optDouble("open", 0.0),
-                prevClose = dataObj.optDouble("previousClose", 
-                    dataObj.optDouble("prevClose", 0.0)),
                 high = dataObj.optDouble("high", 0.0),
                 low = dataObj.optDouble("low", 0.0),
                 volume = dataObj.optLong("volume", 0L),
                 amount = dataObj.optDouble("amount", 0.0),
-                bidPrice = dataObj.optDouble("bidPrice", 0.0),
-                askPrice = dataObj.optDouble("askPrice", 0.0),
-                timestamp = dataObj.optString("time", 
-                    dataObj.optString("timestamp", ""))
+                yesterdayClose = dataObj.optDouble("previousClose",
+                    dataObj.optDouble("prevClose", 0.0)),
+                timestamp = System.currentTimeMillis()
             )
         } catch (e: CancellationException) {
             throw e

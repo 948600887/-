@@ -6,7 +6,9 @@ import com.example.stockdiary.common.Result
 import com.example.stockdiary.network.NetworkRetryHelper
 import com.example.stockdiary.network.QuoteSuspendedException
 import com.example.stockdiary.network.SinaStockAPI
+import com.example.stockdiary.network.SinaStockData
 import com.example.stockdiary.network.TencentStockAPI
+import com.example.stockdiary.network.model.StockData
 import com.example.stockdiary.utils.AppLogger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -87,8 +89,8 @@ class StockDataManager(
         return dataSourceCache.getOrPut(apiName) {
             when (apiName) {
                 ApiManager.API_SKILL -> SkillDataSource()
-                ApiManager.API_SINA -> GenericStockDataSource("新浪财经", { SinaStockAPI.getStockData(it) })
-                ApiManager.API_TENCENT -> GenericStockDataSource("腾讯财经", { TencentStockAPI.getStockData(it) })
+                ApiManager.API_SINA -> networkStockDataSource("新浪财经") { SinaStockAPI.getStockData(it) }
+                ApiManager.API_TENCENT -> networkStockDataSource("腾讯财经") { TencentStockAPI.getStockData(it) }
                 else -> SkillDataSource()
             }
         }
@@ -133,16 +135,18 @@ class StockDataManager(
             val persistedCache = PriceCacheManager.getCachedPrice(symbol)
             if (persistedCache != null) {
                 val stockData = StockData(
-                    symbol = persistedCache.code,
+                    code = persistedCache.code,
                     name = persistedCache.name,
                     price = persistedCache.price,
+                    change = persistedCache.change,
+                    changePercent = persistedCache.changePercent,
                     open = persistedCache.open,
-                    prevClose = persistedCache.prevClose,
                     high = persistedCache.high,
                     low = persistedCache.low,
                     volume = persistedCache.volume,
                     amount = persistedCache.amount,
-                    timestamp = "${persistedCache.date} ${persistedCache.time}"
+                    yesterdayClose = persistedCache.prevClose,
+                    timestamp = System.currentTimeMillis()
                 )
                 // 更新内存缓存
                 cache[symbol] = CacheItem(stockData, System.currentTimeMillis())
@@ -190,17 +194,18 @@ class StockDataManager(
                     cache[symbol] = CacheItem(stockData, System.currentTimeMillis())
                     
                     // 同时更新PriceCacheManager持久化缓存
-                    val sinaData = com.example.stockdiary.network.SinaStockData(
+                    val prevClose = stockData.yesterdayClose ?: 0.0
+                    val sinaData = SinaStockData(
                         name = stockData.name,
-                        code = stockData.symbol,
+                        code = stockData.code,
                         price = stockData.price,
-                        change = stockData.price - stockData.prevClose,
-                        changePercent = if (stockData.prevClose > 0) 
-                            (stockData.price - stockData.prevClose) / stockData.prevClose * 100 else 0.0,
-                        open = stockData.open,
-                        high = stockData.high,
-                        low = stockData.low,
-                        volume = stockData.volume
+                        change = stockData.price - prevClose,
+                        changePercent = if (prevClose > 0)
+                            (stockData.price - prevClose) / prevClose * 100 else 0.0,
+                        open = stockData.open ?: 0.0,
+                        high = stockData.high ?: 0.0,
+                        low = stockData.low ?: 0.0,
+                        volume = stockData.volume ?: 0L
                     )
                     PriceCacheManager.cachePrice(symbol, sinaData, apiName)
                     
@@ -350,46 +355,37 @@ class StockDataManager(
     }
 }
 
-class GenericStockDataSource(
-    private val apiName: String,
-    private val fetchStockData: suspend (String) -> com.example.stockdiary.common.Result<com.example.stockdiary.network.SinaStockData>
-) : StockDataSource {
+/**
+ * 新浪/腾讯数据源的薄适配：调用网络层 API，把返回的 [SinaStockData]
+ * 映射为 data/price 栈内部统一使用的 [StockData]。
+ *
+ * [SinaStockData] 仍活在 network 层（SinaStockAPI/TencentStockAPI 的返回类型，
+ * PriceCacheManager 持久化与 AddAssetDialog 名称回显都在用，迁移代价高故本期保留），
+ * 模型统一只收敛到 data/price 栈内部这一侧。
+ */
+private fun networkStockDataSource(
+    apiName: String,
+    fetchStockData: suspend (String) -> Result<SinaStockData>
+): StockDataSource = object : StockDataSource {
     override suspend fun getStockData(symbol: String): Result<StockData> {
         return try {
-            val result = fetchStockData(symbol)
-            if (result.isSuccess) {
-                val data = result.getOrNull()
-                if (data != null) {
-                    Result.success(
-                        StockData(
-                            symbol = data.code,
-                            name = data.name,
-                            price = data.price,
-                            open = data.open,
-                            prevClose = data.prevClose,
-                            high = data.high,
-                            low = data.low,
-                            volume = data.volume,
-                            amount = data.amount,
-                            timestamp = "${data.date} ${data.time}"
-                        )
-                    )
-                } else {
-                    Result.failure(IOException("未获取到股票数据"))
-                }
-            } else {
-                Result.failure(result.exceptionOrNull() ?: IOException("未知错误"))
-            }
+            fetchStockData(symbol).map { it.toUnifiedStockData() }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             Result.failure(e)
         }
     }
-    
+
     override suspend fun getStockDataBatch(symbols: List<String>): Result<List<StockData>> {
         val results = symbols.mapNotNull { symbol ->
-            getStockData(symbol).getOrNull()
+            try {
+                fetchStockData(symbol).getOrNull()?.toUnifiedStockData()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                null
+            }
         }
         return if (results.isNotEmpty()) {
             Result.success(results)
@@ -397,8 +393,27 @@ class GenericStockDataSource(
             Result.failure(IOException("批量获取失败"))
         }
     }
-    
+
     override fun getSourceName(): String = apiName
-    
+
     override suspend fun isAvailable(): Boolean = true
 }
+
+/**
+ * [SinaStockData] → 统一行情模型的字段映射。
+ * code 保留源返回的值（与历史行为一致）；timestamp 取映射时刻。
+ */
+private fun SinaStockData.toUnifiedStockData(): StockData = StockData(
+    code = code,
+    name = name,
+    price = price,
+    change = change,
+    changePercent = changePercent,
+    high = high,
+    low = low,
+    open = open,
+    volume = volume,
+    amount = amount,
+    yesterdayClose = prevClose,
+    timestamp = System.currentTimeMillis()
+)

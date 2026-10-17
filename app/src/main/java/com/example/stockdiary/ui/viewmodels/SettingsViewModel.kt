@@ -267,7 +267,13 @@ class SettingsViewModel(
     private fun clearAllPreferences() {
         // commit() 而非 apply()：清除后用户大概率立刻重启 App，异步落盘可能来不及写。
         val dir = File(appContext.applicationInfo?.dataDir ?: appContext.filesDir.parent, "shared_prefs")
-        val files = runCatching { dir.listFiles() }.getOrNull() ?: return
+        val files = try {
+            dir.listFiles()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            null
+        } ?: return
         var cleared = 0
         for (file in files) {
             if (!file.name.endsWith(".xml")) continue
@@ -275,12 +281,14 @@ class SettingsViewModel(
             // 别动 WorkManager 自己的偏好：里面存着「被强制停止后需要重排」的标记，
             // 清掉它会漏掉一次后台任务重排。那不是用户数据，不该跟着一起清。
             if (name.startsWith("androidx.work")) continue
-            runCatching {
+            try {
                 appContext.getSharedPreferences(name, Context.MODE_PRIVATE)
                     .edit().clear().commit()
                 cleared++
-            }.onFailure {
-                AppLogger.w("清除偏好失败: $name - ${it.message}", "SettingsVM")
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                AppLogger.w("清除偏好失败: $name - ${e.message}", "SettingsVM")
             }
         }
         AppLogger.i("已清除 $cleared 项偏好设置", "SettingsVM")

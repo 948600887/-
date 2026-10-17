@@ -178,8 +178,13 @@ class ImportBrokerageViewModel(
                 // 自动回填的行也要跑一遍查重，与库内重复的照样标黄跳过
                 filled.filter { it.symbol.isNotBlank() && it.symbolSource.isNotEmpty() }
                     .forEach { tx ->
-                        runCatching { validateSymbolRow(tx.rowNumber) }
-                            .onFailure { AppLogger.w("自动回填行校验失败 row=${tx.rowNumber}: ${it.message}", "ImportBrokerage") }
+                        try {
+                            validateSymbolRow(tx.rowNumber)
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            AppLogger.w("自动回填行校验失败 row=${tx.rowNumber}: ${e.message}", "ImportBrokerage")
+                        }
                     }
                 // 剩下的空代码行给候选，点一下就填上
                 refreshSuggestions()
@@ -351,8 +356,13 @@ class ImportBrokerageViewModel(
         }
         // 联动填上的行同样要查一次重，避免把已导入过的流水重复写一遍
         targetRows.forEach { row ->
-            runCatching { validateSymbolRow(row) }
-                .onFailure { AppLogger.w("联动行校验失败 row=$row: ${it.message}", "ImportBrokerage") }
+            try {
+                validateSymbolRow(row)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                AppLogger.w("联动行校验失败 row=$row: ${e.message}", "ImportBrokerage")
+            }
         }
     }
 
@@ -393,7 +403,13 @@ class ImportBrokerageViewModel(
             tx.symbol.isBlank() -> listOf(BrokerageImportService.ERR_SYMBOL_REQUIRED)
             !SYMBOL_PATTERN.matches(tx.symbol) -> listOf(symbolFormatError(tx.symbol))
             else -> {
-                duplicate = runCatching { service.isDuplicate(tx) }.getOrDefault(false)
+                duplicate = try {
+                    service.isDuplicate(tx)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    false
+                }
                 emptyList()
             }
         }

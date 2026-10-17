@@ -89,6 +89,14 @@ abstract class ImportWizardViewModel<S>(initialState: S) : ViewModel() {
      */
     protected suspend fun loadKnownAccounts(repository: AssetRepository): List<String> =
         withContext(Dispatchers.IO) {
-            runCatching { repository.getAllAccounts() }.getOrDefault(emptyList())
+            try {
+                repository.getAllAccounts()
+            } catch (e: CancellationException) {
+                // 必须第一个 catch：吞掉取消会出诡异的跨线程 bug（项目铁律）
+                throw e
+            } catch (e: Exception) {
+                AppLogger.e("loadKnownAccounts 失败，降级为空列表", e, "ImportWizardViewModel")
+                emptyList()
+            }
         }.filter { it.isNotBlank() }
 }

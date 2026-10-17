@@ -210,7 +210,13 @@ class CalendarViewModel(
             // 只 parse 一次：筛当月和取日期用的是同一个 LocalDate。
             // 原先 filter 里 parse 一遍、下面的循环再 parse 一遍同一批字符串。
             val monthSnapshots = snapshotDao.getAllSnapshotsSync().mapNotNull { snapshot ->
-                val date = runCatching { LocalDate.parse(snapshot.date) }.getOrNull()
+                val date = try {
+                    LocalDate.parse(snapshot.date)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    null
+                }
                 if (date != null && date.year == month.year && date.monthValue == month.monthValue) {
                     date to snapshot.netAssets
                 } else {
@@ -243,7 +249,13 @@ class CalendarViewModel(
                 // 照样只 parse 一次：筛当月和记分红日用的是同一个 LocalDate。
                 // 原先 filter 里 parse 一遍、下面记日期时又 parse 一遍同样的记录。
                 val monthEntries = records.mapNotNull { record ->
-                    val date = runCatching { LocalDate.parse(record.exDividendDate) }.getOrNull()
+                    val date = try {
+                        LocalDate.parse(record.exDividendDate)
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        null
+                    }
                     if (date == null) {
                         AppLogger.w("解析分红日期失败: ${record.exDividendDate}", "CalendarViewModel")
                         return@mapNotNull null

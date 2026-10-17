@@ -241,8 +241,11 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
             val priceAssets = assets.value.filter { it.type in AssetType.getPriceSyncedTypes() }
             val assetsOnly = assets.value.filter { !it.type.isLiability }
 
+            // 两个阶段分开收尾，理由见下面两处 finally 的注释
+            var syncResult: SyncResult? = null
+            var syncError: String? = null
             try {
-                val result = AssetSyncManager.syncAllAssets(
+                syncResult = AssetSyncManager.syncAllAssets(
                     context = container.context,
                     repository = repository,
                     assets = priceAssets,
@@ -250,14 +253,8 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
                     onProgress = { _syncProgress.value = it },
                     forceRefresh = true
                 )
-                _syncResult.value = result
-                // 时间预算兜底：超时不抛错，但要让用户知道「这次没跑完」，
-                // 看到的是保留的上次数据，而不是转圈到天荒地老
-                if (result.truncatedByTimeLimit) {
-                    _errorMessage.value = "同步超时，已保留上次数据"
-                }
                 AppLogger.i(
-                    "价格同步完成（成功 ${result.successCount}，失败 ${result.failedCount}）",
+                    "价格同步完成（成功 ${syncResult.successCount}，失败 ${syncResult.failedCount}）",
                     "DashboardVM"
                 )
             } catch (e: CancellationException) {
@@ -265,7 +262,12 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
             } catch (e: Exception) {
                 // 不捕获的话 _isRefreshing 永远停在 true，后续刷新全被挡死、界面一直转圈
                 AppLogger.w("同步失败: ${e.message}", "DashboardVM")
-                _syncResult.value = null
+                // 静默是最糟的反馈：用户点了刷新，转圈停下，什么也没发生
+                syncError = e.message ?: "未知错误"
+            } finally {
+                // 价格同步这一段结束就把进度清掉：后面的收入计算是另一件事。
+                // 不清的话标题会一直挂着「10 / 10」而转圈还在继续，看着像卡死
+                _syncProgress.value = null
             }
 
             try {
@@ -288,6 +290,19 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
                 AppLogger.e("加载分红收入失败: ${e.message}", e, "DashboardViewModel")
                 _incomeCalculationStatus.value = "加载分红收入失败: ${e.localizedMessage ?: e.message}"
             } finally {
+                // 结果反馈统一放到最后：转圈停下与提示出现应当同时发生。
+                // 原先同步一结束就置 _syncResult，Snackbar 弹「刷新完成」时转圈还在
+                // 为收入计算而转，用户会看到「已完成」的提示和一个仍在转的按钮，自相矛盾
+                if (_errorMessage.value == null) {
+                    when {
+                        syncError != null -> _errorMessage.value = "刷新失败：$syncError"
+                        // 时间预算兜底：超时不抛错，但要让用户知道「这次没跑完」，
+                        // 看到的是保留的上次数据，而不是转圈到天荒地老
+                        syncResult?.truncatedByTimeLimit == true ->
+                            _errorMessage.value = "同步超时，已保留上次数据"
+                    }
+                }
+                _syncResult.value = syncResult
                 _isRefreshing.value = false
             }
         }

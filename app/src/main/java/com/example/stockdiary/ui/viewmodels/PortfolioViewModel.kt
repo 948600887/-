@@ -8,6 +8,7 @@ import com.example.stockdiary.data.prefs.DashboardPreferences
 import com.example.stockdiary.data.dividend.DividendIncomeUseCase
 import com.example.stockdiary.data.prefs.SortOrder
 import com.example.stockdiary.data.sync.SyncProgress
+import com.example.stockdiary.data.sync.SyncResult
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.di.AppContainer
@@ -61,6 +62,15 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
      */
     private val _syncProgress = MutableStateFlow<SyncProgress?>(null)
     val syncProgress: StateFlow<SyncProgress?> = _syncProgress.asStateFlow()
+
+    /**
+     * 最近一次刷新的结果，供界面弹 Snackbar。
+     *
+     * 持仓页原先只有 errorMessage、没有成功反馈：用户点完刷新只看到转圈停下，
+     * 到底刷成了几个、失败几个，无从得知（资产页一直有，两边不一致）。
+     */
+    private val _syncResult = MutableStateFlow<SyncResult?>(null)
+    val syncResult: StateFlow<SyncResult?> = _syncResult.asStateFlow()
 
     private val _estimatedAnnualDividend = MutableStateFlow(0.0)
     val estimatedAnnualDividend: StateFlow<Double> = _estimatedAnnualDividend.asStateFlow()
@@ -195,6 +205,7 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
         viewModelScope.launch(refreshExceptionHandler) {
             _isRefreshing.value = true
             _errorMessage.value = null
+            _syncResult.value = null
             // 两个范围，别混（与资产页 DashboardViewModel 同一套规则）：
             // - priceAssets 用于同步，只含有行情的类型。原先只含 STOCK+FUND，
             //   把加密货币漏了——而持仓页是显示加密货币的，于是在本页点刷新，
@@ -207,27 +218,31 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
                 "刷新开始：待同步 ${priceAssets.size} 项，分红预取 ${priceAssets.mapNotNull { it.symbol }.size} 个代码",
                 "PortfolioVM"
             )
+            // 两个阶段分开收尾，理由见下面两处 finally 的注释
+            var syncResult: SyncResult? = null
+            var syncError: String? = null
             try {
-                val result = AssetSyncManager.syncAllAssets(
+                syncResult = AssetSyncManager.syncAllAssets(
                     context = container.context,
                     repository = repository,
                     assets = priceAssets,
                     onProgress = { progress -> _syncProgress.value = progress },
                     forceRefresh = true
                 )
-                // 时间预算兜底：超时不是失败，但要让用户知道「这次没跑完」、
-                // 界面上是保留的上次数据，而不是转圈到天荒地老
-                if (result.truncatedByTimeLimit) {
-                    _errorMessage.value = "同步超时，已保留上次数据"
-                }
                 AppLogger.i(
-                    "价格同步完成（成功 ${result.successCount}，失败 ${result.failedCount}），开始计算分红",
+                    "价格同步完成（成功 ${syncResult.successCount}，失败 ${syncResult.failedCount}），开始计算分红",
                     "PortfolioVM"
                 )
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 AppLogger.w("同步失败: ${e.message}", "PortfolioVM")
+                // 静默是最糟的反馈：用户点了刷新，转圈停下，什么也没发生
+                syncError = e.message ?: "未知错误"
+            } finally {
+                // 价格同步这一段结束就把进度清掉：后面的收入计算是另一件事。
+                // 不清的话标题会一直挂着「10 / 10」而转圈还在继续，看着像卡死
+                _syncProgress.value = null
             }
 
             try {
@@ -252,10 +267,22 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
                 throw e
             } catch (e: Exception) {
                 AppLogger.e("刷新失败: ${e.message}", e, "PortfolioVM")
-                _errorMessage.value = "刷新失败"
+                _errorMessage.value = "加载分红收入失败：${e.message ?: "未知错误"}"
             } finally {
+                // 结果反馈统一放到最后：转圈停下与提示出现应当同时发生。
+                // 原先在同步一结束就弹「刷新完成」，那时转圈还在为收入计算而转，
+                // 用户会看到「已完成」的提示和一个仍在转的按钮，自相矛盾
+                if (_errorMessage.value == null) {
+                    when {
+                        syncError != null -> _errorMessage.value = "刷新失败：$syncError"
+                        // 时间预算兜底：超时不是失败，但要让用户知道「这次没跑完」、
+                        // 界面上是保留的上次数据，而不是转圈到天荒地老
+                        syncResult?.truncatedByTimeLimit == true ->
+                            _errorMessage.value = "同步超时，已保留上次数据"
+                    }
+                }
+                _syncResult.value = syncResult
                 _isRefreshing.value = false
-                _syncProgress.value = null
             }
         }
     }
@@ -277,6 +304,12 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
 
     fun clearError() {
         _errorMessage.value = null
+    }
+
+    /** Snackbar 弹完调用：清掉结果，避免下次进场重复弹同一条 */
+    fun clearSyncResult() {
+        _syncResult.value = null
+        _syncProgress.value = null
     }
 
     // 「设置 → 仪表盘显示」里把某类资产全关掉后，这里会整片空白，

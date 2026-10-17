@@ -128,6 +128,7 @@ fun PortfolioScreen(
     val assets by viewModel.assets.collectAsStateWithLifecycle()
     val isRefreshing by viewModel.isRefreshing.collectAsStateWithLifecycle()
     val syncProgress by viewModel.syncProgress.collectAsStateWithLifecycle()
+    val syncResult by viewModel.syncResult.collectAsStateWithLifecycle()
     val estimatedAnnualDividend by viewModel.estimatedAnnualDividend.collectAsStateWithLifecycle()
     val dividendLoading by viewModel.dividendLoading.collectAsStateWithLifecycle()
     val incomeCalculationStatus by viewModel.incomeCalculationStatus.collectAsStateWithLifecycle()
@@ -287,6 +288,20 @@ fun PortfolioScreen(
         LaunchedEffect(errorMessage) {
             snackbarHostState.showSnackbar(errorMessage ?: "")
             viewModel.clearError()
+        }
+    }
+
+    // 刷新结果反馈：成功/失败都报数。持仓页原先只有 errorMessage、没有成功反馈，
+    // 用户点完刷新只看到转圈停下，到底刷成了几个无从得知（资产页一直有）
+    syncResult?.let { result ->
+        LaunchedEffect(result) {
+            val msg = if (result.failedCount > 0) {
+                "刷新完成：成功 ${result.successCount}，失败 ${result.failedCount}"
+            } else {
+                "刷新完成：成功 ${result.successCount}"
+            }
+            snackbarHostState.showSnackbar(msg)
+            viewModel.clearSyncResult()
         }
     }
 

@@ -30,6 +30,7 @@ object FundAPI {
         val netWorth: Double?,
         val changePercent: Double?,
         val date: String?,
+        val millionCopiesIncome: Double? = null,
         val isFromCache: Boolean = false
     )
 
@@ -184,7 +185,8 @@ object FundAPI {
                         price = nawData.naw,
                         netWorth = nawData.naw,
                         changePercent = nawData.equityReturn,
-                        date = nawData.date
+                        date = nawData.date,
+                        millionCopiesIncome = nawData.millionCopiesIncome
                     )
                 }
             } catch (e: CancellationException) {

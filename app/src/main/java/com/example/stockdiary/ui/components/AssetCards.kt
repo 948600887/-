@@ -231,6 +231,10 @@ fun StockAssetItem(
                     },
                     style = MaterialTheme.typography.bodySmall, color = OnSurfaceVariant, fontWeight = FontWeight.Medium
                 )
+                if (asset.millionCopiesIncome != null) {
+                    Text("万份收益 ${asset.millionCopiesIncome.format(4)}",
+                        style = MaterialTheme.typography.bodySmall, color = OnSurfaceVariant)
+                }
             }
             // 分红入口只对能分红的类型有意义，负债点了也是空列表
             if (!selectionMode && !isLiability) {

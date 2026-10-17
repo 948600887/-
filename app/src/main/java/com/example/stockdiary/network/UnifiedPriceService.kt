@@ -145,7 +145,8 @@ object UnifiedPriceService {
                     change = fundInfo.changePercent?.let { fundInfo.price * it / 100.0 },
                     changePercent = fundInfo.changePercent,
                     netWorth = fundInfo.netWorth,
-                    netWorthDate = fundInfo.date
+                    netWorthDate = fundInfo.date,
+                    millionCopiesIncome = fundInfo.millionCopiesIncome
                 )
                 Result.success(fundData)
             } else {

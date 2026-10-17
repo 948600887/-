@@ -42,7 +42,8 @@ object FundDataParser {
     data class NawData(
         val naw: Double = 0.0,
         val equityReturn: Double? = null,
-        val date: String? = null
+        val date: String? = null,
+        val millionCopiesIncome: Double? = null
     )
     
     /**
@@ -90,11 +91,14 @@ object FundDataParser {
      * 单位净值恒为 1.0000。日期取每万份收益走势最后一条的时间戳。
      */
     private fun parseMoneyFundNaw(response: String): NawData {
+        // 货币基金没有 Data_netWorthTrend，只有每万份收益走势；单位净值恒为 1.0000。
         val arrMatch = millionCopiesArrayRegex.find(response) ?: return NawData()
         val content = arrMatch.groupValues[1]
         val lastItem = millionCopiesItemRegex.findAll(content).lastOrNull()
-        val dateStr = lastItem?.groupValues?.get(1)?.toLongOrNull()?.let { formatTrendDate(it) }
-        return NawData(naw = 1.0, equityReturn = null, date = dateStr)
+        val timestamp = lastItem?.groupValues?.getOrNull(1)?.toLongOrNull()
+        val income = lastItem?.groupValues?.getOrNull(2)?.toDoubleOrNull()
+        val dateStr = timestamp?.let { formatTrendDate(it) }
+        return NawData(naw = 1.0, equityReturn = null, date = dateStr, millionCopiesIncome = income)
     }
 
     /**

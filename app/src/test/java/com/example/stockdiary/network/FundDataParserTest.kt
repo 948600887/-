@@ -1,6 +1,7 @@
 package com.example.stockdiary.network
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 /**
@@ -16,7 +17,16 @@ class FundDataParserTest {
     @Test
     fun 货币基金无Data_netWorthTrend_返回单位净值1_0() {
         val fake = """var Data_millionCopiesIncome = [[1700000000000,1.0113]];"""
-        assertEquals(1.0, FundDataParser.parseNawData(fake).naw, 0.0001)
+        val result = FundDataParser.parseNawData(fake)
+        assertEquals(1.0, result.naw, 0.0001)
+        // 货币基金同时解析出每万份收益（最后一个数据点的第二个值）
+        assertEquals(1.0113, result.millionCopiesIncome!!, 0.0001)
+    }
+
+    @Test
+    fun 普通基金_每万份收益为null() {
+        val fake = """var Data_netWorthTrend = [{"x":1700000000000,"y":2.345,"equityReturn":1.2}];"""
+        assertNull(FundDataParser.parseNawData(fake).millionCopiesIncome)
     }
 
     @Test

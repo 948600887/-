@@ -64,7 +64,8 @@ data class FundData(
     val netWorth: Double? = null,
     val netWorthDate: String? = null,
     val fundType: String? = null,
-    val estimatedValue: Double? = null
+    val estimatedValue: Double? = null,
+    val millionCopiesIncome: Double? = null
 ) : PriceData {
     
     val isUp: Boolean get() = (changePercent ?: 0.0) > 0

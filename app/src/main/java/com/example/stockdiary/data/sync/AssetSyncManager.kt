@@ -412,7 +412,7 @@ object AssetSyncManager {
                             fundResult.onSuccess { price ->
                                 when (price) {
                                     is AssetPrice.Fund -> {
-                                        repository.updatePriceBySymbol(symbol, price.data.price)
+                                        repository.updatePriceBySymbol(symbol, price.data.price, price.data.millionCopiesIncome)
                                         isSuccess = true
                                     }
                                     else -> { lastError = IllegalStateException("返回类型不匹配") }

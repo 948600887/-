@@ -118,6 +118,10 @@ fun SearchAssetItem(asset: Asset, onClick: () -> Unit, onDividendClick: () -> Un
                     asset.currentPrice?.let { "¥${it.format(pricePrecision)}" } ?: if (StockCodeManager.isDelisted(asset.symbol)) "退市" else "价格待更新",
                     style = MaterialTheme.typography.bodySmall, color = OnSurfaceVariant, fontWeight = FontWeight.Medium
                 )
+                if (asset.millionCopiesIncome != null) {
+                    Text("万份收益 ${asset.millionCopiesIncome.format(4)}",
+                        style = MaterialTheme.typography.bodySmall, color = OnSurfaceVariant)
+                }
             }
             IconButton(onClick = onDividendClick, modifier = Modifier.size(32.dp)) {
                 Icon(Icons.Filled.Savings, contentDescription = "分红", tint = Primary, modifier = Modifier.size(18.dp))

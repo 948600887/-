@@ -28,7 +28,8 @@ data class Asset(
     val lastUpdateTime: Long = 0L,
     val notes: String? = null,
     val interestRate: Double? = null,
-    val dueDate: String? = null
+    val dueDate: String? = null,
+    val millionCopiesIncome: Double? = null
 ) {
     init {
         require(name.isNotBlank()) { "资产名称不能为空" }

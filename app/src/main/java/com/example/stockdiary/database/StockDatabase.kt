@@ -18,7 +18,7 @@ import com.example.stockdiary.utils.AppLogger
         Transaction::class,
         StockBasic::class
     ],
-    version = 14,
+    version = 15,
     exportSchema = false
 )
 @TypeConverters(Converters::class)
@@ -184,6 +184,13 @@ abstract class StockDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_14_15 = object : Migration(14, 15) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE assets ADD COLUMN millionCopiesIncome REAL")
+                AppLogger.d("资产表 millionCopiesIncome 字段迁移完成", "StockDatabase")
+            }
+        }
+
         @JvmStatic
         fun getInstance(context: Context): StockDatabase {
             return INSTANCE ?: synchronized(this) {
@@ -205,7 +212,8 @@ abstract class StockDatabase : RoomDatabase() {
                         MIGRATION_10_11,
                         MIGRATION_11_12,
                         MIGRATION_12_13,
-                        MIGRATION_13_14
+                        MIGRATION_13_14,
+                        MIGRATION_14_15
                     )
                     .build()
                     .also { INSTANCE = it }

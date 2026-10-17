@@ -35,6 +35,7 @@ import androidx.compose.ui.unit.dp
 import com.example.stockdiary.data.importer.BrokerageImportService
 import com.example.stockdiary.data.importer.GalaxyStatementParser
 import com.example.stockdiary.data.importer.SymbolResolver
+import com.example.stockdiary.ui.components.import.ImportRawTextDialog
 import com.example.stockdiary.ui.viewmodels.ImportBrokerageViewModel
 
 /**
@@ -53,7 +54,7 @@ internal fun PreviewStep(
     var showRawText by remember { mutableStateOf(false) }
 
     if (showRawText) {
-        OcrRawTextDialog(
+        ImportRawTextDialog(
             lines = state.ocrLines,
             rawText = state.ocrRawText,
             onDismiss = { showRawText = false }

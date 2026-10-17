@@ -1,7 +1,5 @@
 package com.example.stockdiary.ui.screens.settings.components
 
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -17,7 +15,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.UploadFile
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
@@ -36,116 +33,18 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalClipboardManager
-import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.stockdiary.ui.viewmodels.ImportBrokerageViewModel
 
 /**
  * 交割单导入向导的各步骤 UI 组件，从 ImportBrokerageDialog 拆出，避免单文件过长。
  * 这些组件只被 ImportBrokerageDialog 调用。
- */
-
-@Composable
-internal fun ErrorDialog(
-    error: String,
-    rawText: String?,
-    onDismiss: () -> Unit
-) {
-    val clipboard = LocalClipboardManager.current
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("导入未完成") },
-        text = {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .verticalScroll(rememberScrollState())
-            ) {
-                Text(error)
-                if (!rawText.isNullOrBlank()) {
-                    Spacer(Modifier.height(12.dp))
-                    Text("OCR 识别原文（点「复制原文」发给我排查）：", fontWeight = FontWeight.Bold)
-                    Spacer(Modifier.height(4.dp))
-                    Text(rawText, style = MaterialTheme.typography.bodySmall)
-                }
-            }
-        },
-        confirmButton = {
-            if (!rawText.isNullOrBlank()) {
-                TextButton(onClick = { clipboard.setText(AnnotatedString(rawText)) }) {
-                    Text("复制原文")
-                }
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text("关闭") }
-        }
-    )
-}
-
-/**
- * 展示 OCR 的中间产物，供用户核对与反馈。
  *
- * 分两段：「还原后的行」是真正喂给解析器的内容（同一行的多列已合并），
- * 「原始文本」是 ML Kit 的输出。解析结果不对时，这两段能立刻区分是
- * 「行还原错了」（比如相邻两行被粘在一起）还是「行配对错了」——
- * 只看预览页的表格是看不出来的。
+ * 错误弹窗（ErrorDialog）、识别原文（OcrRawTextDialog）与写入中占位（CommittingStep）
+ * 已抽到 `com.example.stockdiary.ui.components.import` 公共骨架，本文件只保留
+ * 交割单特有的步骤：选来源、列映射、逐日结果报告，以及按 step 分派的底部动作条。
  */
-@Composable
-internal fun OcrRawTextDialog(
-    lines: List<String>,
-    rawText: String?,
-    onDismiss: () -> Unit
-) {
-    val clipboard = LocalClipboardManager.current
-    val numbered = lines.mapIndexed { index, line -> "${index + 1}. $line" }.joinToString("\n")
-    val bundle = buildString {
-        append("【还原后的行（共 ${lines.size} 行）】\n")
-        append(numbered)
-        if (!rawText.isNullOrBlank()) {
-            append("\n\n【ML Kit 原始文本】\n")
-            append(rawText)
-        }
-    }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("识别原文") },
-        text = {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .verticalScroll(rememberScrollState())
-            ) {
-                Text(
-                    "还原后的行（共 ${lines.size} 行）—— 解析器实际收到的内容：",
-                    fontWeight = FontWeight.Bold
-                )
-                Spacer(Modifier.height(4.dp))
-                Text(
-                    numbered.ifEmpty { "（空）" },
-                    style = MaterialTheme.typography.bodySmall
-                )
-                if (!rawText.isNullOrBlank()) {
-                    Spacer(Modifier.height(12.dp))
-                    Text("ML Kit 原始文本：", fontWeight = FontWeight.Bold)
-                    Spacer(Modifier.height(4.dp))
-                    Text(rawText, style = MaterialTheme.typography.bodySmall)
-                }
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = { clipboard.setText(AnnotatedString(bundle)) }) {
-                Text("复制全部")
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text("关闭") }
-        }
-    )
-}
 
 @Composable
 internal fun BottomActionBar(
@@ -386,17 +285,12 @@ internal fun CharsetSelector(
     }
 }
 
-@Composable
-internal fun CommittingStep() {
-    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            CircularProgressIndicator()
-            Spacer(Modifier.height(16.dp))
-            Text("正在回放重建持仓…")
-        }
-    }
-}
-
+/**
+ * 交割单的结果报告页：成功/跳过/失败计数 + 逐行失败明细。
+ *
+ * 与持仓截图/币安那种「新增 X · 覆盖 Y · 未变 Z」的结果页不是一套形状
+ * （这里是逐行明细），因此没有并入公共 ImportResultStep。
+ */
 @Composable
 internal fun ResultStep(
     state: ImportBrokerageViewModel.UiState

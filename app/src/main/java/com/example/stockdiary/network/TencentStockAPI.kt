@@ -100,7 +100,11 @@ object TencentStockAPI : StockAPI {
     }
     
     /**
-     * 解析腾讯财经返回的数据
+     * 解析腾讯财经返回的数据（已提为 internal 以可单测，见 TencentStockAPIParseTest）。
+     *
+     * 注意与 [SinaStockAPI.parseRealtimeData] 的差异：腾讯响应一次只取第一条
+     * `v_xxx="..."` 匹配（[Regex.find] 而非 [Regex.findAll]），即批量响应只解析第一只。
+     *
      * 腾讯API字段说明（以~分隔）：
      * 0: 未知 1: 股票名称 2: 股票代码 3: 当前价格 4: 昨收 5: 今开 6: 成交量(手)
      * 7: 外盘 8: 内盘 9: 买一价 10: 买一量 11: 买二价 12: 买二量 ... 19: 卖一价 20: 卖一量...
@@ -108,7 +112,7 @@ object TencentStockAPI : StockAPI {
      * 36: 成交量(手) 37: 成交额(万) 38: 换手率 39: 市盈率 40: 未知 41: 最高价 42: 最低价
      * 43: 振幅 44: 流通市值 45: 总市值 46: 市净率 47: 涨停价 48: 跌停价
      */
-    private fun parseTencentData(
+    internal fun parseTencentData(
         responseText: String,
         @Suppress("UNUSED_PARAMETER") stockCode: String,
         suspended: BooleanArray = booleanArrayOf(false)

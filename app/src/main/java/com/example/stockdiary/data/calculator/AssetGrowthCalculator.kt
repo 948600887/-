@@ -1,4 +1,4 @@
-package com.example.stockdiary.data
+package com.example.stockdiary.data.calculator
 
 import com.example.stockdiary.database.AssetSnapshot
 import java.time.LocalDate

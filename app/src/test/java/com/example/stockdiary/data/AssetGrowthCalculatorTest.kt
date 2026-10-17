@@ -1,5 +1,6 @@
 package com.example.stockdiary.data
 
+import com.example.stockdiary.data.calculator.AssetGrowthCalculator
 import com.example.stockdiary.database.AssetSnapshot
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull

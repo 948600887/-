@@ -17,7 +17,7 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.example.stockdiary.data.AssetGrowthCalculator
+import com.example.stockdiary.data.calculator.AssetGrowthCalculator
 import com.example.stockdiary.data.prefs.SortOrder
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType

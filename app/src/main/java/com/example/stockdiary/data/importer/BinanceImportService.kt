@@ -6,7 +6,6 @@ import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.network.BinanceBalance
 import com.example.stockdiary.utils.AppLogger
 import com.example.stockdiary.utils.ExchangeRateManager
-import kotlin.math.abs
 
 /**
  * 币安现货持仓导入：把账户接口拉回的余额对齐到库里的加密资产，产出预览、确认后落库。
@@ -194,112 +193,6 @@ class BinanceImportService(
         ItemStatus.UNCHANGED -> SnapshotAlignment.ItemStatus.UNCHANGED
     }
 
-    // ---------------------------------------------------------------------------
-    // Phase 2b 双跑期保留区（下一提交删除）
-    //
-    // 下面是重构前的内联算法，一字未改。上面的 buildPreview / commit 已改走
-    // [SnapshotAlignment] 内核；旧代码暂时留着是为了：① 评审时能逐行 diff 旧与新；
-    // ② 新实现万一有漏，把上面两个方法体换回旧的一步即可回退。
-    //
-    // 等价性证明：现有 BinanceImportServiceTest 零修改全绿——那套用例覆盖
-    // dust 过滤、交易对映射、三种状态、落库字段口径（CRYPTO/USD/账户兜底）。
-    // ---------------------------------------------------------------------------
-
-    /** 重构前的对齐实现（双跑期保留，不被调用） */
-    private suspend fun buildPreviewLegacy(
-        balances: List<BinanceBalance>,
-        existingAssets: List<Asset>
-    ): Preview {
-        val existingBySymbol = existingAssets.groupBy { it.symbol }
-
-        val items = balances
-            // dust 过滤：币安会返还一堆 0.00000000 的零头资产，free+locked 低于阈值一律忽略，
-            // 否则预览里会出现几十条数量为 0 的「新增」，用户根本不知道自己持有这些
-            .filter { it.total >= DUST_THRESHOLD }
-            // 同一基础资产理论上账户接口只返回一行，但仍按交易对合并，
-            // 与持仓快照「同代码合并」保持同一套路，防御性更强
-            .groupBy { baseAssetToSymbol(it.asset) }
-            .map { (symbol, rows) ->
-                val quantity = rows.sumOf { it.total }
-                val base = rows.first().asset
-                val matched = existingBySymbol[symbol].orEmpty()
-                val existing = matched.firstOrNull()
-                val status = when {
-                    // 一个匹配都没有 → 新建。注意：只要有任何一条匹配就不算 NEW，
-                    // 避免库里已存同名资产时又造一条重复的
-                    matched.isEmpty() -> ItemStatus.NEW
-                    // 浮点比较：余额来自接口字符串，用 1e-6 容差挡住表示误差
-                    abs(matched.sumOf { it.balance } - quantity) < BALANCE_TOLERANCE -> ItemStatus.UNCHANGED
-                    else -> ItemStatus.UPDATE
-                }
-                PreviewItem(
-                    symbol = symbol,
-                    name = base,
-                    quantity = quantity,
-                    existing = existing,
-                    status = status
-                )
-            }
-
-        AppLogger.i(
-            "币安持仓对齐完成：共 ${items.size} 条，新增 ${items.count { it.status == ItemStatus.NEW }}，" +
-                "覆盖 ${items.count { it.status == ItemStatus.UPDATE }}，" +
-                "未变 ${items.count { it.status == ItemStatus.UNCHANGED }}",
-            "BinanceImport"
-        )
-
-        return Preview(items = items)
-    }
-
-    /** 重构前的落库实现（双跑期保留，不被调用） */
-    private suspend fun commitLegacy(preview: Preview, account: String): CommitResult {
-        val toInsert = mutableListOf<Asset>()
-        var updated = 0
-        var skipped = 0
-
-        for (item in preview.items) {
-            when (item.status) {
-                ItemStatus.NEW -> toInsert.add(
-                    Asset(
-                        name = item.name,
-                        type = AssetType.CRYPTO,
-                        symbol = item.symbol,
-                        account = account.ifBlank { DEFAULT_ACCOUNT },
-                        balance = item.quantity,
-                        // 参考单价留 0：币安接口此刻没给价格，塞假数字会凭空造出市值。
-                        // currentPrice 传 null，让后续行情同步按交易对填真实价
-                        purchasePrice = 0.0,
-                        currentPrice = null,
-                        // 币安现货价以 USDT 计价（≈ 美元）。标成 USD，
-                        // totalValueCny 才能按美元汇率折算，否则 USDT 价会被当成人民币数值直接汇总
-                        currency = CURRENCY
-                    )
-                )
-
-                ItemStatus.UPDATE -> {
-                    val existing = item.existing ?: continue
-                    // 只覆盖数量：不动名称/账户/币种，避免冲掉用户整理过的分类
-                    assetRepository.updateBalance(existing.id, item.quantity)
-                    updated++
-                }
-
-                ItemStatus.UNCHANGED -> skipped++
-            }
-        }
-
-        if (toInsert.isNotEmpty()) assetRepository.insertAssets(toInsert)
-
-        AppLogger.i(
-            "币安持仓落库：新增 ${toInsert.size}，覆盖 $updated，跳过 $skipped",
-            "BinanceImport"
-        )
-        return CommitResult(inserted = toInsert.size, updated = updated, skipped = skipped)
-    }
-
-    // ---------------------------------------------------------------------------
-    // 双跑期保留区结束
-    // ---------------------------------------------------------------------------
-
     companion object {
         /** 用户没填账户名时的兜底。用「币安」而非通用「默认账户」——来源一目了然 */
         const val DEFAULT_ACCOUNT = "币安"
@@ -311,9 +204,6 @@ class BinanceImportService(
          * 接触过的所有币都列出来，绝大多数是 0，不滤掉会污染预览。
          */
         private const val DUST_THRESHOLD = 1e-8
-
-        /** 数量比较容差，挡住浮点表示误差 */
-        private const val BALANCE_TOLERANCE = 1e-6
 
         /** 币安现货计价币种（USDT 稳定币 ≈ 美元） */
         private const val CURRENCY = "USD"

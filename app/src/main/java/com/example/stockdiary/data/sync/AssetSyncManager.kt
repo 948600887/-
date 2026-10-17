@@ -2,10 +2,11 @@ package com.example.stockdiary.data.sync
 
 import com.example.stockdiary.data.repository.AssetRepository
 import com.example.stockdiary.data.repository.DividendRepository
-import com.example.stockdiary.data.price.StockDataManager
 import android.content.Context
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
+import com.example.stockdiary.network.UnifiedPriceService
+import com.example.stockdiary.network.model.AssetPrice
 import com.example.stockdiary.utils.AppLogger
 import com.example.stockdiary.utils.StockCodeManager
 import kotlinx.coroutines.Dispatchers
@@ -158,7 +159,6 @@ object AssetSyncManager {
         val truncated = java.util.concurrent.atomic.AtomicBoolean(false)
 
         val semaphore = Semaphore(MAX_CONCURRENT_SYNC)
-        val stockDataManager = StockDataManager.getInstance(context)
         val dividendRepository = DividendRepository.getInstance(context)
 
         // 进度回调回主线程更新 StateFlow；扇出与续体留在 IO
@@ -217,7 +217,6 @@ object AssetSyncManager {
                             syncSingleAsset(
                                 asset,
                                 repository,
-                                stockDataManager,
                                 successCount,
                                 failedCount,
                                 errorTypes,
@@ -263,7 +262,6 @@ object AssetSyncManager {
     private suspend fun syncSingleAsset(
         asset: Asset,
         repository: AssetRepository,
-        stockDataManager: StockDataManager,
         successCount: AtomicInteger,
         failedCount: AtomicInteger,
         errorTypes: ConcurrentLinkedQueue<SyncErrorType>,
@@ -300,30 +298,32 @@ object AssetSyncManager {
                         )
 
                     if (isExchangeTraded) {
-                        // 场内交易基金：使用股票API（新浪等），symbol 已带市场前缀
-                        val result = stockDataManager.getStockData(fundCode, forceRefresh = forceRefresh)
-                        if (result.isSuccess) {
-                            val stockData = result.getOrNull()
-                            if (stockData != null) {
-                                repository.updatePriceBySymbol(symbol, stockData.price)
-                                if (correctNames) correctAssetName(asset, stockData.name, repository)
-                                isSuccess = true
-                            } else {
-                                lastError = IllegalStateException("返回数据为空")
+                        // 场内交易基金：与股票同源走行情门面（多源容错 + 60s TTL + 单飞）
+                        val result = UnifiedPriceService.getPrice(
+                            fundCode,
+                            AssetType.STOCK,
+                            forceRefresh = forceRefresh
+                        )
+                        result.onSuccess { price ->
+                            when (price) {
+                                is AssetPrice.Stock -> {
+                                    repository.updatePriceBySymbol(symbol, price.data.price)
+                                    if (correctNames) correctAssetName(asset, price.data.name, repository)
+                                    isSuccess = true
+                                }
+                                else -> { lastError = IllegalStateException("返回类型不匹配") }
                             }
-                        } else {
-                            lastError = result.exceptionOrNull()
-                        }
+                        }.onFailure { lastError = it }
                     } else {
                         // 场外基金：使用基金API（天天基金），传纯数字代码
-                        val fundResult = com.example.stockdiary.network.UnifiedPriceService.getPrice(
+                        val fundResult = UnifiedPriceService.getPrice(
                             pureCode,
                             AssetType.FUND,
                             forceRefresh = forceRefresh
                         )
                         fundResult.onSuccess { price ->
                             when (price) {
-                                is com.example.stockdiary.network.model.AssetPrice.Fund -> {
+                                is AssetPrice.Fund -> {
                                     repository.updatePriceBySymbol(symbol, price.data.price)
                                     isSuccess = true
                                 }
@@ -339,20 +339,23 @@ object AssetSyncManager {
                         errorTypes.offer(SyncErrorType.DATA)
                         return
                     }
-                    val result = stockDataManager.getStockData(stockSymbol, forceRefresh = forceRefresh)
+                    // 股票与场内基金同源：统一走行情门面，多源容错在门面下游
+                    val result = UnifiedPriceService.getPrice(
+                        stockSymbol,
+                        AssetType.STOCK,
+                        forceRefresh = forceRefresh
+                    )
 
-                    if (result.isSuccess) {
-                        val stockData = result.getOrNull()
-                        if (stockData != null) {
-                            repository.updatePriceBySymbol(stockSymbol, stockData.price)
-                            if (correctNames) correctAssetName(asset, stockData.name, repository)
-                            isSuccess = true
-                        } else {
-                            lastError = IllegalStateException("返回数据为空")
+                    result.onSuccess { price ->
+                        when (price) {
+                            is AssetPrice.Stock -> {
+                                repository.updatePriceBySymbol(stockSymbol, price.data.price)
+                                if (correctNames) correctAssetName(asset, price.data.name, repository)
+                                isSuccess = true
+                            }
+                            else -> { lastError = IllegalStateException("返回类型不匹配") }
                         }
-                    } else {
-                        lastError = result.exceptionOrNull()
-                    }
+                    }.onFailure { lastError = it }
                 }
                 AssetType.CRYPTO -> {
                     val cryptoSymbol = symbol
@@ -361,7 +364,7 @@ object AssetSyncManager {
                         errorTypes.offer(SyncErrorType.DATA)
                         return
                     }
-                    val cryptoResult = com.example.stockdiary.network.UnifiedPriceService.getPrice(
+                    val cryptoResult = UnifiedPriceService.getPrice(
                         cryptoSymbol,
                         AssetType.CRYPTO,
                         forceRefresh = forceRefresh

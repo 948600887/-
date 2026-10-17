@@ -13,6 +13,7 @@ import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.di.AppContainer
 import com.example.stockdiary.network.BinanceAccountAPI
 import com.example.stockdiary.utils.AppLogger
+import com.example.stockdiary.utils.ExchangeRateManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -142,6 +143,11 @@ class BinanceImportViewModel(
 
             // 拉到了再存密钥：见方法注释
             credentialsManager.save(current.apiKey, current.apiSecret)
+
+            // 下面按人民币市值过滤零碎，走 estimatedValueCny → USD 汇率折算，
+            // 先确保汇率新鲜。TTL 6 小时兜底，通常不会真的发请求；
+            // 刷新失败也无所谓——沿用当前汇率，绝不影响导入本身
+            ExchangeRateManager.refresh()
 
             // 批量取公开价，用于按人民币市值过滤零碎。
             // 交易对列表从余额生成（稳定币无需查价）；取价失败降级为空 map

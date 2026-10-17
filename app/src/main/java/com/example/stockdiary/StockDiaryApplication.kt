@@ -6,6 +6,7 @@ import com.example.stockdiary.data.sync.SnapshotScheduler
 import com.example.stockdiary.di.AppContainer
 import com.example.stockdiary.utils.AppLogger
 import com.example.stockdiary.utils.CrashRecoveryManager
+import com.example.stockdiary.utils.ExchangeRateManager
 import com.example.stockdiary.utils.GlobalExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -40,7 +41,19 @@ class StockDiaryApplication : Application() {
         CrashRecoveryManager.init(this)
         CrashRecoveryManager.getInstance().init(this)
 
+        // 读回上次持久化的 live 汇率（毫秒级 SharedPreferences 读，与
+        // CrashRecoveryManager.init 同一模式）：此后 getRate 拿到的就是
+        // 上次联网结果，离线 / 进程重启不退回静态默认值
+        ExchangeRateManager.init(this)
+
         AppLogger.i("应用启动，DI容器已初始化", "StockDiaryApplication")
+
+        // 汇率刷新独立协程：最坏要等完整网络超时（10s 连接 / 15s 读），
+        // 不能排在快照补全与同步调度前面拖慢启动。失败静默降级——
+        // 刷新不成功就继续用当前汇率，TTL（6 小时）兜底不会重复打接口
+        applicationScope.launch {
+            ExchangeRateManager.refresh()
+        }
 
         applicationScope.launch {
             scheduleDailySnapshot()

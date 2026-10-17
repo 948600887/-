@@ -18,6 +18,7 @@ import androidx.compose.material.icons.filled.AccountBalance
 import androidx.compose.material.icons.filled.AccountBalanceWallet
 import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.CurrencyBitcoin
+import androidx.compose.material.icons.filled.CurrencyExchange
 import androidx.compose.material.icons.filled.SyncAlt
 import androidx.compose.material.icons.filled.Android
 import androidx.compose.material.icons.filled.CloudSync
@@ -75,6 +76,7 @@ import com.example.stockdiary.ui.theme.rememberThemeMode
 import com.example.stockdiary.ui.theme.ThemeManager
 import com.example.stockdiary.ui.viewmodels.HoldingSnapshotViewModel
 import com.example.stockdiary.ui.viewmodels.SettingsViewModel
+import com.example.stockdiary.utils.ExchangeRateManager
 import com.example.stockdiary.utils.format
 import com.example.stockdiary.utils.sumTotalValueCny
 import com.example.stockdiary.utils.totalValueCny
@@ -105,6 +107,12 @@ fun SettingsScreen(
     val reminderMinute by viewModel.reminderMinute.collectAsStateWithLifecycle()
     val reminderError by viewModel.reminderError.collectAsStateWithLifecycle()
     val currentTheme = rememberThemeMode()
+
+    // 当前生效的美元汇率与上次刷新时间。汇率刷新会改变全 App 的 CNY 折算
+    // 数值，用户有权看见用的是哪个汇率、新不新。getRate 是一次 map 查找，
+    // 组合期直接读，无需状态提升
+    val usdRate = ExchangeRateManager.getRate("USD")
+    val usdRateUpdatedAt = ExchangeRateManager.getLastRefreshTimeMillis()
 
     var showThemeDialog by remember { mutableStateOf(false) }
     var showClearDataDialog by remember { mutableStateOf(false) }
@@ -201,7 +209,9 @@ fun SettingsScreen(
         reminderEnabled,
         reminderHour,
         reminderMinute,
-        currentPriceApi
+        currentPriceApi,
+        usdRate,
+        usdRateUpdatedAt
     ) {
         listOf(
             SettingsSectionData("外观", listOf(
@@ -297,6 +307,23 @@ fun SettingsScreen(
                             PriceSyncScheduler.cancelDailySync(context)
                         }
                     }
+                ),
+                SettingsItemData(
+                    icon = Icons.Default.CurrencyExchange,
+                    title = "汇率",
+                    subtitle = buildString {
+                        append("1 美元 ≈ ¥")
+                        append(usdRate.format(2))
+                        if (usdRateUpdatedAt > 0) {
+                            append(" · 更新于 ")
+                            append(formatPriceSyncTime(usdRateUpdatedAt))
+                        } else {
+                            append(" · 内置默认汇率")
+                        }
+                    },
+                    onClick = { },
+                    // 纯展示行：不置灰会被渲染成可点击，误导用户
+                    enabled = false
                 ),
                 SettingsItemData(
                     icon = Icons.Default.Storage,

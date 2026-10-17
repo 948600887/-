@@ -7,7 +7,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.stockdiary.network.FundAPI
-import com.example.stockdiary.network.SinaStockData
+import com.example.stockdiary.network.model.StockData
 import com.example.stockdiary.ui.components.DialogInfoItem
 import com.example.stockdiary.ui.theme.LossRed
 import com.example.stockdiary.ui.theme.ProfitGreen
@@ -54,9 +54,11 @@ internal fun FundInfoCard(info: FundAPI.FundInfo) {
 }
 
 @Composable
-internal fun StockInfoCard(info: SinaStockData, category: CodeCategory? = null) {
+internal fun StockInfoCard(info: StockData, category: CodeCategory? = null) {
     // ETF/LOF/场内基金价格显示到厘（3位小数），股票显示到分（2位小数）
     val priceDigits = if (category == CodeCategory.ETF || category == CodeCategory.LOF || category == CodeCategory.EXCHANGE_FUND) 3 else 2
+    // 统一行情模型的涨跌可空（停牌/无昨收），展示层按 0 处理
+    val changePercent = info.changePercent ?: 0.0
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
@@ -79,8 +81,8 @@ internal fun StockInfoCard(info: SinaStockData, category: CodeCategory? = null) 
                 DialogInfoItem("现价", "${info.price.format(priceDigits)}")
                 DialogInfoItem(
                     label = "涨跌",
-                    value = "${info.changePercent.format(2)}%",
-                    color = if (info.changePercent >= 0) LossRed else ProfitGreen
+                    value = "${changePercent.format(2)}%",
+                    color = if (changePercent >= 0) LossRed else ProfitGreen
                 )
             }
         }

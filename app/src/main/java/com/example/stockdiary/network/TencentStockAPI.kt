@@ -1,185 +1,32 @@
 package com.example.stockdiary.network
 
-import com.example.stockdiary.utils.AppLogger
 import com.example.stockdiary.common.Result
+import com.example.stockdiary.utils.AppLogger
+import com.example.stockdiary.utils.StockCodeManager
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.IOException
-import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.AtomicInteger
-import java.util.concurrent.atomic.AtomicReference
-import kotlin.time.Duration
-import kotlin.time.Duration.Companion.minutes
-import com.example.stockdiary.utils.StockCodeManager
-import kotlinx.coroutines.CancellationException
 
 /**
- * 股票API管理器
- * 实现主备API切换、故障检测和缓存机制
- */
-class StockAPIManager {
-    private val primaryAPI = TencentStockAPI
-    private val backupAPI = SinaStockAPI
-    private val currentAPIRef = AtomicReference<StockAPI>(primaryAPI)
-    private val failCount = AtomicInteger(0)
-    private val maxFailures = 3
-    @Volatile
-    private var lastSwitchTime = 0L
-    private val switchCooldown = 60_000L
-    
-    private val stockDataCache = ConcurrentHashMap<String, Pair<Long, SinaStockData>>()
-    private val CACHE_DURATION = 5.minutes.inWholeMilliseconds
-    
-    private val switchLock = Any()
-    
-    /**
-     * 获取股票数据
-     * @param stockCode 股票代码
-     * @return Result<SinaStockData> 股票数据或错误信息
-     */
-    suspend fun getStockData(stockCode: String): Result<SinaStockData> {
-        val cachedData = getCachedData(stockCode)
-        if (cachedData != null) {
-            AppLogger.d("使用缓存数据: ${cachedData.name}", "StockAPIManager")
-            return Result.success(cachedData)
-        }
-        
-        return withContext(Dispatchers.IO) {
-            try {
-                val currentAPI = currentAPIRef.get()
-                val result = currentAPI.getStockData(stockCode)
-                if (result.isSuccess) {
-                    failCount.set(0)
-                    result.getOrNull()?.let { cacheData(stockCode, it) }
-                    AppLogger.d("获取API数据成功并缓存: ${result.getOrNull()?.name}", "StockAPIManager")
-                    return@withContext result
-                } else {
-                    val currentFail = failCount.incrementAndGet()
-                    AppLogger.e("API调用失败 ($currentFail/$maxFailures): ${result.exceptionOrNull()?.message}", tag = "StockAPIManager")
-                    
-                    if (currentFail >= maxFailures) {
-                        switchAPI()
-                    }
-                    
-                    val apiAfterSwitch = currentAPIRef.get()
-                    if (apiAfterSwitch != primaryAPI) {
-                        val backupResult = apiAfterSwitch.getStockData(stockCode)
-                        if (backupResult.isSuccess) {
-                            backupResult.getOrNull()?.let { cacheData(stockCode, it) }
-                            AppLogger.d("备用API获取数据成功并缓存: ${backupResult.getOrNull()?.name}", "StockAPIManager")
-                        }
-                        return@withContext backupResult
-                    } else {
-                        return@withContext result
-                    }
-                }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                val currentFail = failCount.incrementAndGet()
-                AppLogger.e("API调用异常 ($currentFail/$maxFailures): ${e.message}", e, "StockAPIManager")
-                
-                if (currentFail >= maxFailures) {
-                    switchAPI()
-                }
-                
-                val apiAfterSwitch = currentAPIRef.get()
-                if (apiAfterSwitch != primaryAPI) {
-                    try {
-                        val backupResult = apiAfterSwitch.getStockData(stockCode)
-                        if (backupResult.isSuccess) {
-                            backupResult.getOrNull()?.let { cacheData(stockCode, it) }
-                            AppLogger.d("备用API获取数据成功并缓存: ${backupResult.getOrNull()?.name}", "StockAPIManager")
-                        }
-                        return@withContext backupResult
-                    } catch (backupException: Exception) {
-                        return@withContext Result.failure(backupException)
-                    }
-                } else {
-                    return@withContext Result.failure(e)
-                }
-            }
-        }
-    }
-    
-    /**
-     * 执行API切换
-     */
-    private fun switchAPI() {
-        synchronized(switchLock) {
-            val now = System.currentTimeMillis()
-            if (now - lastSwitchTime < switchCooldown) {
-                return
-            }
-            
-            val current = currentAPIRef.get()
-            if (current == primaryAPI) {
-                AppLogger.d("切换到备用API（新浪财经）", "StockAPIManager")
-                currentAPIRef.set(backupAPI)
-            } else {
-                AppLogger.d("切换回主API（腾讯财经）", "StockAPIManager")
-                currentAPIRef.set(primaryAPI)
-            }
-            
-            failCount.set(0)
-            lastSwitchTime = now
-        }
-    }
-    
-    /**
-     * 从缓存获取数据
-     */
-    private fun getCachedData(stockCode: String): SinaStockData? {
-        val cached = stockDataCache[stockCode]
-        if (cached != null) {
-            val (timestamp, data) = cached
-            if (System.currentTimeMillis() - timestamp < CACHE_DURATION) {
-                return data
-            } else {
-                // 缓存过期，移除
-                stockDataCache.remove(stockCode)
-            }
-        }
-        return null
-    }
-    
-    /**
-     * 缓存数据
-     */
-    private fun cacheData(stockCode: String, data: SinaStockData) {
-        stockDataCache[stockCode] = Pair(System.currentTimeMillis(), data)
-        // 限制缓存大小
-        if (stockDataCache.size > 100) {
-            // 移除最旧的缓存
-            val oldestKey = stockDataCache.minByOrNull { it.value.first }?.key
-            oldestKey?.let { stockDataCache.remove(it) }
-        }
-    }
-    
-    /**
-     * 清除缓存
-     */
-    fun clearCache() {
-        stockDataCache.clear()
-    }
-    
-    companion object {
-        // 单例模式
-        val instance by lazy { StockAPIManager() }
-    }
-}
-
-/**
- * 股票API接口
+ * 股票行情源接口。
+ *
+ * 实现：[SinaStockAPI]（新浪财经）、[TencentStockAPI]（腾讯财经）。
+ * 由 `data/price/StockDataManager` 的多源容错链按用户偏好排序调用。
  */
 interface StockAPI {
     suspend fun getStockData(stockCode: String): Result<SinaStockData>
 }
 
 /**
- * 腾讯财经API实现
+ * 腾讯财经API实现。
+ *
+ * 注意：本对象从已删除的 [StockAPIManager] 迁到这里——它是
+ * `data/price/StockDataManager` 多源容错链的「腾讯」数据源，
+ * 绝不可随入口归一被连带删除（那会让容错链少一条腿，
+ * 且测试全绿也看不出来）。
  */
 object TencentStockAPI : StockAPI {
     private const val BASE_URL = "https://qt.gtimg.cn/q="

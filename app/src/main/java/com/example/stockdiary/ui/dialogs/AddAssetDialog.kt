@@ -29,8 +29,9 @@ import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.network.FundAPI
 import com.example.stockdiary.network.SinaStockAPI
-import com.example.stockdiary.network.SinaStockData
-import com.example.stockdiary.network.StockAPIManager
+import com.example.stockdiary.network.UnifiedPriceService
+import com.example.stockdiary.network.model.AssetPrice
+import com.example.stockdiary.network.model.StockData
 import com.example.stockdiary.ui.components.DialogSectionHeader
 import com.example.stockdiary.utils.StockCodeManager
 import com.example.stockdiary.utils.StockCodeManager.CodeCategory
@@ -65,7 +66,7 @@ fun AddAssetDialog(
     var isLoading by remember { mutableStateOf(false) }
     var loadError by remember { mutableStateOf<String?>(null) }
     var fundInfo by remember { mutableStateOf<FundAPI.FundInfo?>(null) }
-    var stockInfo by remember { mutableStateOf<SinaStockData?>(null) }
+    var stockInfo by remember { mutableStateOf<StockData?>(null) }
 
     // 焦点链：让键盘「下一步」能一路走到最后一个字段，而不是每填一项都要手点屏幕。
     val nameFocus = remember { FocusRequester() }
@@ -114,6 +115,26 @@ fun AddAssetDialog(
         }
     }
 
+    // 股票/场内基金代码 → 行情回显：统一走行情门面 [UnifiedPriceService]
+    // （60s TTL 内存缓存 + 单飞去重 + 多源容错），不再直连任何单个 API。
+    // 返回 false 表示没取到，由调用方决定提示文案或降级路径。
+    // （必须先于 tryFundAPI 定义：后者内部要调它做兜底）
+    suspend fun tryStockAPI(formattedCode: String): Boolean {
+        val result = UnifiedPriceService.getPrice(formattedCode, AssetType.STOCK)
+        if (result.isSuccess) {
+            val info = (result.getOrNull() as? AssetPrice.Stock)?.data
+            stockInfo = info
+            fundInfo = null
+            loadError = null
+            info?.let { stock ->
+                if (name.isBlank()) name = stock.name
+                if (purchasePrice.isBlank()) purchasePrice = stock.price.toString()
+            }
+            return true
+        }
+        return false
+    }
+
     // 天天基金API查询（必须先定义，因为 LaunchedEffect 中会调用）
     // 优先用 FundAPI（无 Referer 头，不会被天天基金反爬拦截），EnhancedFundAPI 兜底
     suspend fun tryFundAPI() {
@@ -152,20 +173,9 @@ fun AddAssetDialog(
                     }
                 }
             } else {
-                // 两个基金API都失败，尝试股票API兜底
+                // 两个基金API都失败，走行情门面兜底（股票/场内基金行情）
                 try {
-                    val formattedCode = SinaStockAPI.formatStockCode(symbol)
-                    val stockResult = StockAPIManager.instance.getStockData(formattedCode)
-                    if (stockResult.isSuccess) {
-                        val info = stockResult.getOrNull()
-                        stockInfo = info
-                        fundInfo = null
-                        loadError = null
-                        if (info != null) {
-                            if (name.isBlank()) name = info.name
-                            if (purchasePrice.isBlank()) purchasePrice = info.price.toString()
-                        }
-                    } else {
+                    if (!tryStockAPI(SinaStockAPI.formatStockCode(symbol))) {
                         loadError = "未找到该代码，请手动输入名称"
                     }
                 } catch (e: CancellationException) {
@@ -197,18 +207,10 @@ fun AddAssetDialog(
         val cat = detectedCategory
         if (cat == null || cat == CodeCategory.UNKNOWN) {
             if (symbol.length >= 4 && selectedType == AssetType.STOCK) {
-                // 无法识别但用户选了股票，尝试用股票API兜底
+                // 无法识别但用户选了股票，走行情门面兜底
                 isLoading = true
                 try {
-                    val formattedCode = SinaStockAPI.formatStockCode(symbol)
-                    val result = StockAPIManager.instance.getStockData(formattedCode)
-                    if (result.isSuccess) {
-                        stockInfo = result.getOrNull()
-                        stockInfo?.let { info ->
-                            if (name.isBlank()) name = info.name
-                            if (purchasePrice.isBlank()) purchasePrice = info.price.toString()
-                        }
-                    } else {
+                    if (!tryStockAPI(SinaStockAPI.formatStockCode(symbol))) {
                         loadError = "未找到该代码，请手动输入名称"
                     }
                 } catch (e: CancellationException) {
@@ -233,19 +235,9 @@ fun AddAssetDialog(
         try {
             when (cat) {
                 CodeCategory.STOCK, CodeCategory.ETF, CodeCategory.LOF, CodeCategory.EXCHANGE_FUND -> {
-                    // 股票/场内基金 → 用股票API
-                    val formattedCode = SinaStockAPI.formatStockCode(symbol)
-                    val result = StockAPIManager.instance.getStockData(formattedCode)
-                    if (result.isSuccess) {
-                        val info = result.getOrNull()
-                        stockInfo = info
-                        fundInfo = null
-                        if (info != null) {
-                            if (name.isBlank()) name = info.name
-                            if (purchasePrice.isBlank()) purchasePrice = info.price.toString()
-                        }
-                    } else {
-                        // 场内基金API失败，尝试天天基金（可能是被误判的场外基金）
+                    // 股票/场内基金 → 走行情门面（多源容错 + 60s TTL + 单飞）
+                    if (!tryStockAPI(SinaStockAPI.formatStockCode(symbol))) {
+                        // 门面取价失败，尝试天天基金（可能是被误判的场外基金）
                         if (cat == CodeCategory.EXCHANGE_FUND) {
                             tryFundAPI()
                         } else {

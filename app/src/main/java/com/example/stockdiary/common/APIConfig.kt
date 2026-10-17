@@ -47,6 +47,19 @@ object Timeouts {
     const val CONNECT_MS = 10000
     const val READ_MS = 15000
     const val WRITE_MS = 15000
+    /**
+     * 单次调用的墙钟硬上限（[okhttp3.OkHttpClient.Builder.callTimeout]）。
+     *
+     * connect/read 超时只约束「单个连接上的单次 IO」，而 OkHttp 默认
+     * `retryOnConnectionFailure(true)`：主机解析出多个 IP（币安常同时给 IPv6/IPv4 一串）
+     * 时会逐个地址重试，每个地址各自重新计 connecting 超时，叠加起来单个 call
+     * 能挂近一小时——实测 LDLTCUSDT 挂了 3478 秒，把 AssetSyncManager 的并发
+     * 信号量整个堵死，一轮同步跑到 70 分钟。
+     *
+     * callTimeout 覆盖从 enqueue 到响应读完的**整段**时间，包括重试与排队，
+     * 是唯一能兜住「主机压根不可达」的手段。
+     */
+    const val CALL_MS = 20000
 }
 
 object CacheConfig {

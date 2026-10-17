@@ -97,9 +97,19 @@ object NetworkClient {
             .build()
     }
 
+    /**
+     * 币安单独加 [callTimeout]：connect/read 超时只约束单连接单次 IO，
+     * 而 OkHttp 默认 `retryOnConnectionFailure(true)`，api.binance.com 解析出一串
+     * IPv6/IPv4 地址时会逐个重试、每个地址各自重新计时——实测主机不可达时单个
+     * call 挂了 3478 秒，把 AssetSyncManager 的并发信号量堵死。
+     * callTimeout 覆盖整段 call（含重试与排队），是唯一能兜住这种情况的开关。
+     *
+     * 只加给币安：A 股/基金那几个源主机单一、耗时特征不同，改动面要收窄。
+     */
     val binanceClient: OkHttpClient by lazy {
         baseClient.newBuilder()
             .addInterceptor(BaseUrlInterceptor(APIEndpoints.Binance.BASE_URL))
+            .callTimeout(Timeouts.CALL_MS.toLong(), TimeUnit.MILLISECONDS)
             .build()
     }
     

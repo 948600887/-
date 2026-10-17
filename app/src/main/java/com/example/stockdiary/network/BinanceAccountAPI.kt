@@ -186,9 +186,7 @@ object BinanceAccountAPI {
         val result = mutableMapOf<String, Double>()
         try {
             pairs.distinct().chunked(PRICE_BATCH).forEach { batch ->
-                // symbols 是 JSON 数组字符串，整体 URL 编码后作 query 值
-                val symbolsJson = batch.joinToString(prefix = "[", postfix = "]") { "\"$it\"" }
-                val encoded = URLEncoder.encode(symbolsJson, "UTF-8")
+                val encoded = buildSymbolsParam(batch)
                 val url = "$PRICE_URL?symbols=$encoded"
 
                 AppLogger.d("GET /ticker/price (batch=${batch.size})", "BinanceAccountAPI")
@@ -214,6 +212,27 @@ object BinanceAccountAPI {
             AppLogger.e("批量取价失败: ${e::class.simpleName}", e, "BinanceAccountAPI")
             result
         }
+    }
+
+    /**
+     * 构造 /ticker/price 的 symbols 查询参数值（JSON 数组字符串）。
+     *
+     * **必须用无空格分隔**：`["BTCUSDT","LTCUSDT"]` 而非 `["BTCUSDT", "LTCUSDT"]`。
+     * [getPrices] 里曾经用默认的 `", "` 分隔符，空格经 [URLEncoder] 变成 `+`，
+     * 币安的 symbols 解析器不认，整批返回 400 —— 2026-10-17 修。
+     */
+    internal fun buildSymbolsParam(pairs: List<String>): String {
+        // 用 buildString 显式拼，绝不给逗号后面留空格——
+        // 一旦有空格，URLEncoder 会编成 '+'，币安 symbols 解析器不认 → 整批 400。
+        val json = buildString {
+            append('[')
+            pairs.forEachIndexed { index, symbol ->
+                if (index > 0) append(',')
+                append('"').append(symbol).append('"')
+            }
+            append(']')
+        }
+        return URLEncoder.encode(json, "UTF-8")
     }
 
     /**

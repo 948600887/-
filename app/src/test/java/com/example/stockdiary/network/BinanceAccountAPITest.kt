@@ -5,6 +5,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.net.URLDecoder
 
 /**
  * 币安签名与 symbol 映射的回归。
@@ -81,5 +82,22 @@ class BinanceAccountAPITest {
     fun 已是USDT计价的稳定币原样返回() {
         // USDT 自身没有 USDTUSDT 交易对，原样保留（价格同步会留空，但余额准确）
         assertEquals("USDT", baseAssetToSymbol("USDT"))
+    }
+
+    // ---------- symbols 参数构造（币安批量询价 URL） ----------
+
+    @Test
+    fun symbols参数无空格否则币安会400() {
+        // 回归币安批量询价整批 400 的根因：joinToString 默认 ", " 带空格，
+        // 经 URLEncoder 变成 '+'，币安的 symbols 解析器不认 → 400。
+        // 这里断言编码产物里不含 '+'（即不含空格），且解码回 JSON 无空格。
+        val encoded = BinanceAccountAPI.buildSymbolsParam(listOf("BTCUSDT", "LTCUSDT"))
+        assertTrue("symbols 参数编码后不该出现 '+'（那是 URL 编码后的空格）", !encoded.contains("+"))
+        assertEquals("[\"BTCUSDT\",\"LTCUSDT\"]", URLDecoder.decode(encoded, "UTF-8"))
+    }
+
+    @Test
+    fun symbols参数空列表返回空数组() {
+        assertEquals("%5B%5D", BinanceAccountAPI.buildSymbolsParam(emptyList()))
     }
 }

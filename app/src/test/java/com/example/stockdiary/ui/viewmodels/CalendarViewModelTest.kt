@@ -155,8 +155,15 @@ class CalendarViewModelTest {
 
     @Test
     fun `收支日历按当前月分红记录聚合到对应日期的金额`() = runBlocking {
-        // 记录落在「当前真实月份」，保证与 VM 内部 YearMonth.now() 对齐
-        val recDate = LocalDate.now().withDayOfMonth(15)
+        val vm = buildVm()
+        waitUntil { vm.uiState.value.assets.isNotEmpty() }
+        // 月份锚定 VM 实际使用的 currentMonth（VM 构造时固定，此后只有 selectMonth 能改），
+        // 日期从它推导：测试若自己再采一次 LocalDate.now()，两次采样跨过月边界时
+        // 记录月份与 VM 的生成月份不一致，分红会被「只算当月」的过滤掉，断言必挂。
+        // 打桩放在构造之后：默认标签「资产日历」那轮生成同样会读分红记录并写下
+        // 非空 dividends（但 calendarData 全 0），打桩过早会让等待条件被错误的
+        // 步骤满足——高负载下表现为 expected 1000.0 but was 0.0 的偶发失败。
+        val recDate = vm.uiState.value.currentMonth.atDay(15)
         coEvery { divRepo.getDividendsBySymbol(any(), any()) } returns listOf(
             DividendRecord(
                 exDividendDate = recDate.toString(),
@@ -166,10 +173,11 @@ class CalendarViewModelTest {
                 paymentDate = null
             )
         )
-        val vm = buildVm()
-        waitUntil { vm.uiState.value.assets.isNotEmpty() }
         vm.selectTab("收支日历")
-        waitUntil { vm.uiState.value.dividends.isNotEmpty() }
+        // 聚合金额是「收支日历」生成独有的产物（资产日历生成只把快照写进 calendarData，
+        // 分红日在它那里恒为 0.0）：等这个值落地，等价于等到正确的异步步骤完成，
+        // 再走其余断言，避免高负载下读到中间状态
+        waitUntil { vm.uiState.value.calendarData[recDate] == 1000.0 }
 
         // 每十股 10 元 × 1000 股 ÷ 10 = 1000
         assertEquals(1000.0, vm.uiState.value.calendarData[recDate] ?: 0.0, 0.001)

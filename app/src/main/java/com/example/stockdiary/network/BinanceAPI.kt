@@ -96,7 +96,7 @@ object BinanceAPI {
     
     internal fun formatSymbol(symbol: String): String {
         val cleanSymbol = symbol.uppercase().replace(" ", "").replace("-", "")
-        
+
         return when {
             cleanSymbol.endsWith("USDT") -> cleanSymbol
             cleanSymbol.endsWith("BTC") -> cleanSymbol
@@ -111,6 +111,38 @@ object BinanceAPI {
             }
             else -> "${cleanSymbol}USDT"
         }
+    }
+
+    /**
+     * 把库里存的加密货币代码映射成币安的**交易对**；稳定币返回 null（无需查价，按 1 美元计）。
+     *
+     * ## 为什么不能直接用 [formatSymbol]
+     *
+     * [formatSymbol] 面向「用户输入的交易对/简称」，把 BTC/ETH 当**报价币**，于是
+     * `formatSymbol("BTC")` 命中 `endsWith("BTC")` 分支、返回 "BTC" 本身。而账户接口
+     * 给的是裸基础资产，直接套它会拼出 `?symbol=BTC` —— 币安没有这个交易对，返回 400。
+     *
+     * 行情同步路径（[com.example.stockdiary.network.UnifiedPriceService] 取币价）
+     * 的输入是**库里存的 symbol**，两种形态都有：
+     * - 币安导入存的：`BTCUSDT`（`baseAssetToSymbol` 转过）
+     * - 手动添加的：用户原样输入的 `BTC`
+     *
+     * 所以这里必须同时认这两种形态，且**必须先判「自身就是报价币」再判「以报价币结尾」**——
+     * 顺序反了 BTC 会被误判成"已是交易对"，正是上面那个坑。
+     *
+     * @return 交易对（如 BTCUSDT）；稳定币返回 null，调用方按 1.0 美元计
+     */
+    internal fun cryptoTradingPairFor(symbol: String): String? {
+        val s = symbol.uppercase().trim()
+        if (s.isEmpty()) return null
+        // 稳定币锚定 1 美元，币安上没有 XXXUSDT 自我交易对，查价必然空
+        if (s in BINANCE_STABLECOINS) return null
+        // 自身就是报价币（BTC / ETH / USDT…）→ 是裸基础资产，补 USDT。
+        // 这一条必须排在「以报价币结尾」之前，否则 BTC 会被当成已是交易对
+        if (s in BINANCE_QUOTE_ASSETS) return "${s}USDT"
+        // 已是交易对形态（ETHBTC / ADAUSDT / 1INCHUSDT…）→ 原样用
+        val hasQuoteSuffix = BINANCE_QUOTE_ASSETS.any { s.length > it.length && s.endsWith(it) }
+        return if (hasQuoteSuffix) s else "${s}USDT"
     }
     
     fun getSupportedSymbols(): List<String> {
@@ -131,4 +163,25 @@ data class Binance24hrStats(
     val highPrice: Double,
     val lowPrice: Double,
     val volume: Double
+)
+
+/**
+ * 常见 USD 稳定币集合。
+ *
+ * 这些币锚定 1 美元，且币安上没有 `XXXUSDT` 自我交易对（USDT 本身就是报价币），
+ * 查价必然查空。估算市值时按 1.0 美元计，省掉一次注定取不到价的请求。
+ *
+ * 放在这里（network 包顶层）而不是 data/importer：币安的领域知识应当只有一处定义，
+ * 两边各写一份正是历史上出过 bug 的原因（见 [BinanceAPI.cryptoTradingPairFor]）。
+ * 顶层声明（而非 object 成员）是为了让 data 层能 `import` 到它。
+ */
+internal val BINANCE_STABLECOINS: Set<String> = setOf(
+    "USDT", "USDC", "BUSD", "TUSD", "DAI", "FDUSD",
+    "USDP", "USDD", "GUSD", "USDS", "SUSD"
+)
+
+/** 币安常见报价币（quote asset）。判断「symbol 是裸资产还是已是交易对」时用 */
+private val BINANCE_QUOTE_ASSETS = setOf(
+    "USDT", "USD", "USDC", "BUSD", "DAI", "FDUSD", "TUSD", "USDP",
+    "BTC", "ETH", "BNB", "CNY"
 )

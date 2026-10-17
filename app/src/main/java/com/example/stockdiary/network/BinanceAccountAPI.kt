@@ -222,8 +222,11 @@ object BinanceAccountAPI {
      * body 形如 `{"code":-2015,"msg":"Invalid API-key, IP, or permissions for action."}`。
      * 币安的 msg 是排障的关键（密钥无效 / IP 不在白名单 / 权限不足是三种不同问题），
      * 必须带给用户；解析不出结构化字段时退回 HTTP 状态码。
+     *
+     * internal：行情门面的加密货币取价也走这套口径（同样要区分"被地区限制"和"代码写错"），
+     * 错误提示只此一份实现。
      */
-    private fun binanceError(body: String, httpCode: Int): Exception {
+    internal fun binanceError(body: String, httpCode: Int): Exception {
         // 地区限制：币安按条款 "b. Eligibility" 挡部分地区/IP，常返回 451 或
         // {"code":0,"msg":"Service unavailable from a restricted location..."}。
         // 只给英文原文用户不知道该干嘛，补一句可操作的中文——换允许地区的代理节点即可。

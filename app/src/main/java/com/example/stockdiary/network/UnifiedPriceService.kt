@@ -1,6 +1,7 @@
 package com.example.stockdiary.network
 
 import android.content.Context
+import com.example.stockdiary.common.APIEndpoints
 import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.data.price.StockDataManager
 import com.example.stockdiary.network.cache.CacheManager
@@ -10,6 +11,9 @@ import com.example.stockdiary.network.model.FundData
 import com.example.stockdiary.utils.AppLogger
 import kotlinx.coroutines.*
 import okhttp3.Request
+import java.net.ConnectException
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CancellationException
 
@@ -23,8 +27,6 @@ import kotlinx.coroutines.CancellationException
  */
 object UnifiedPriceService {
     private const val TAG = "UnifiedPriceService"
-    
-    private val client = NetworkClient.defaultClient
 
     /**
      * 股票/场内基金行情策略（多源容错 + 失败熔断 + 三级缓存）。
@@ -157,27 +159,56 @@ object UnifiedPriceService {
         }
     }
     
+    /**
+     * 取加密货币最新价。
+     *
+     * ## 交易对映射（本项目踩过的坑，别再改回去）
+     *
+     * 库里存的 symbol 有两种形态：币安**导入**存的是 `BTCUSDT`（`baseAssetToSymbol` 转过），
+     * **手动添加**的则是用户原样输入的 `BTC`。早期实现直接拿 `code.uppercase()` 拼 URL，
+     * 于是手动添加的币永远拼出 `?symbol=BTC` —— 币安没有这个交易对，返回 400，
+     * 症状是"手动加的加密货币永远取不到价，而导入的可以"。
+     *
+     * 现在统一走 [BinanceAPI.cryptoTradingPairFor]：它先判「自身就是报价币」再判
+     * 「以报价币结尾」，两种形态都认，稳定币还能省掉一次注定为空的请求。
+     *
+     * ## 错误提示
+     *
+     * 复用 [BinanceAccountAPI.binanceError]：币安按条款挡部分地区/IP（常返 451），
+     * 早期这里只甩一句 `HTTP 451`，用户不知道该干嘛。同一套口径现在也告诉用户
+     * "更换到允许地区的节点后重试"。
+     */
     private suspend fun getCryptoPrice(code: String): Result<CryptoData> = withContext(Dispatchers.IO) {
-        val url = "https://api.binance.com/api/v3/ticker/24hr?symbol=${code.uppercase()}"
-        
+        val pair = BinanceAPI.cryptoTradingPairFor(code)
+        // 稳定币锚定 1 美元，币安上没有 XXXUSDT 自我交易对，查价必然空——直接按 1.0 计
+        if (pair == null) {
+            AppLogger.d("稳定币 $code 按 1.0 美元计，跳过查价", TAG)
+            return@withContext Result.success(
+                CryptoData(code = code.uppercase().trim(), name = code.uppercase().trim(), price = 1.0, change = null, changePercent = null)
+            )
+        }
+        val url = "${APIEndpoints.Binance.BASE_URL}/ticker/24hr?symbol=$pair"
+
         try {
             val request = Request.Builder()
                 .url(url)
                 .addHeader("User-Agent", "Mozilla/5.0")
                 .build()
-            
+
             val startTime = System.currentTimeMillis()
-            val response = client.newCall(request).execute()
+            // 与币安其他客户端一致：同主机、同连接池（绝对 URL 下 BaseUrlInterceptor 直通）
+            val response = NetworkClient.binanceClient.newCall(request).execute()
             response.use {
                 val duration = System.currentTimeMillis() - startTime
 
-                AppLogger.api("GET $url", it.message, duration, TAG)
+                AppLogger.api("GET /ticker/24hr (symbol=$pair)", it.message, duration, TAG)
+
+                val body = it.body?.string() ?: return@withContext Result.failure(Exception("币安返回了空响应"))
 
                 if (!it.isSuccessful) {
-                    return@withContext Result.failure(Exception("HTTP ${it.code}"))
+                    // 带上币安的 code+msg，并按需补地区限制的中文可操作提示
+                    return@withContext Result.failure(BinanceAccountAPI.binanceError(body, it.code))
                 }
-
-                val body = it.body?.string() ?: return@withContext Result.failure(Exception("空响应"))
 
                 if (!body.contains("lastPrice")) {
                     return@withContext Result.failure(Exception("响应格式错误"))
@@ -195,7 +226,15 @@ object UnifiedPriceService {
             throw e
         } catch (e: Exception) {
             AppLogger.e("获取加密货币价格失败: $code", e, TAG)
-            Result.failure(e)
+            // 连接类失败（连不上/超时/域名解析不了）换成一句人话：OkHttp 原始 message
+            // 形如 "failed to connect to api.binance.com/2001:… after 10000ms"，
+            // 既看不懂又把设备 IP/端口抖给用户。币安国际站在部分网络/地区连不上是常态。
+            val userFacing = if (e is ConnectException || e is SocketTimeoutException || e is UnknownHostException) {
+                Exception("连不上币安服务器，可能被网络或地区限制，请检查网络或代理后重试")
+            } else {
+                e
+            }
+            Result.failure(userFacing)
         }
     }
     

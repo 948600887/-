@@ -3,7 +3,9 @@ package com.example.stockdiary.data.importer
 import com.example.stockdiary.data.repository.AssetRepository
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
+import com.example.stockdiary.network.BinanceAPI
 import com.example.stockdiary.network.BinanceBalance
+import com.example.stockdiary.network.BINANCE_STABLECOINS
 import com.example.stockdiary.utils.AppLogger
 import com.example.stockdiary.utils.ExchangeRateManager
 
@@ -229,6 +231,12 @@ class BinanceImportService(
  * 全部同步不到价。所以这里用一段专用于「基础资产补 USDT」的映射，产出与
  * getSupportedSymbols 完全一致的格式。
  *
+ * **查价键（而非落库 symbol）现在统一走
+ * [com.example.stockdiary.network.BinanceAPI.cryptoTradingPairFor]**：那个函数同时认
+ * 「裸基础资产」和「已是交易对」两种形态，币安的符号知识只此一处定义。历史上正是因为
+ * 这段逻辑分散在两处，行情同步路径自己拿 `symbol.uppercase()` 拼 URL，导致手动添加的
+ * 加密货币（库里存的是 BTC 而非 BTCUSDT）永远取不到价。
+ *
  * ## 稳定币特例
  *
  * USDT 自身没有 `USDTUSDT` 交易对（它就是报价币）。这类原样返回，
@@ -241,32 +249,20 @@ internal fun baseAssetToSymbol(asset: String): String {
 }
 
 /**
- * 常见 USD 稳定币集合。
- *
- * 这些币锚定 1 美元，且币安上没有 `XXXUSDT` 自我交易对（USDT 本身就是报价币），
- * 查价必然查空。估算市值时按 1.0 美元计，省掉一次注定取不到价的请求。
- *
- * 覆盖主流几个；认不出的稳定币会走「查价拿不到 → 保留」的兜底，不会被误滤。
- */
-internal val BINANCE_STABLECOINS: Set<String> = setOf(
-    "USDT", "USDC", "BUSD", "TUSD", "DAI", "FDUSD",
-    "USDP", "USDD", "GUSD", "USDS", "SUSD"
-)
-
-/** 是否是 USD 稳定币（无需查价，按 1 美元计） */
-internal fun isStablecoin(asset: String): Boolean =
-    asset.uppercase().trim() in BINANCE_STABLECOINS
-
-/**
  * 该资产用于查价的交易对；稳定币返回 null（无需查价）。
  *
  * 与 [estimatedValueCny] 内部的取价键保持一致：ViewModel 据此生成 getPrices
  * 的请求列表，estimatedValueCny 据此查 priceOf，两边永不错位。
+ *
+ * 实际映射委托给 [BinanceAPI.cryptoTradingPairFor]——本函数的入参一定是账户接口
+ * 给的基础资产名（BTC/USDT/ADA…），而那个函数额外还认「已是交易对」的形态，
+ * 覆盖面更宽，行为在本函数的输入域上完全一致（现有单测即为此背书）。
  */
-internal fun priceKeyFor(asset: String): String? {
-    val base = asset.uppercase().trim()
-    return if (base in BINANCE_STABLECOINS) null else "${base}USDT"
-}
+internal fun priceKeyFor(asset: String): String? = BinanceAPI.cryptoTradingPairFor(asset)
+
+/** 是否是 USD 稳定币（无需查价，按 1 美元计） */
+internal fun isStablecoin(asset: String): Boolean =
+    asset.uppercase().trim() in BINANCE_STABLECOINS
 
 /**
  * 估算某持仓值多少人民币。

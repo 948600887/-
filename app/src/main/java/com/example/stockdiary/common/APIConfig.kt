@@ -65,6 +65,11 @@ object CacheConfig {
     const val FUND_DETAIL_CACHE_MS = 3600000L
     const val FUND_HISTORY_CACHE_MS = 1800000L
     const val DIVIDEND_CACHE_MS = 86400000L
+    /**
+     * 汇率刷新 TTL：6 小时。App 启动与币安导入都会触发刷新，
+     * 靠它避免短时间内重复回源；离线时沿用当前汇率，不阻塞任何链路。
+     */
+    const val EXCHANGE_RATE_TTL_MS = 6 * 60 * 60 * 1000L
     const val MAX_CACHE_ENTRIES = 100
     const val MAX_FUND_CACHE_ENTRIES = 50
 }

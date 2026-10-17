@@ -24,7 +24,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.example.stockdiary.data.DividendProgressCalculator
+import com.example.stockdiary.data.dividend.DividendProgressCalculator
 import com.example.stockdiary.ui.theme.OnSurface
 import com.example.stockdiary.ui.theme.OnSurfaceVariant
 import com.example.stockdiary.ui.theme.Outline

@@ -1,6 +1,6 @@
 package com.example.stockdiary.database
 
-import com.example.stockdiary.data.DividendRecord
+import com.example.stockdiary.data.dividend.DividendRecord
 
 /**
  * 分红金额折算：**「每十份（股）派多少」→「你手上的持仓能拿到多少」**。

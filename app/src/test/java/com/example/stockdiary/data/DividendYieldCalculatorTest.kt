@@ -1,5 +1,7 @@
 package com.example.stockdiary.data
 
+import com.example.stockdiary.data.dividend.DividendRecord
+import com.example.stockdiary.data.dividend.DividendYieldCalculator
 import org.junit.Assert.*
 import org.junit.Test
 import java.time.LocalDate

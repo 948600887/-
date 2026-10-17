@@ -1,5 +1,10 @@
 package com.example.stockdiary.data
 
+import com.example.stockdiary.data.dividend.DividendData
+import com.example.stockdiary.data.dividend.DividendRecord
+import com.example.stockdiary.data.dividend.DividendService
+import com.example.stockdiary.network.EastmoneyDividendApiService
+import com.example.stockdiary.network.FundDividendApiService
 import com.example.stockdiary.data.sync.withHeartbeat
 import android.annotation.SuppressLint
 import android.content.Context

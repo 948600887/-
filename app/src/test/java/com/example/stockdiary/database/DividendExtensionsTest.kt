@@ -1,6 +1,6 @@
 package com.example.stockdiary.database
 
-import com.example.stockdiary.data.DividendRecord
+import com.example.stockdiary.data.dividend.DividendRecord
 import org.junit.Assert.assertEquals
 import org.junit.Test
 

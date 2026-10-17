@@ -1,5 +1,7 @@
 package com.example.stockdiary.data
 
+import com.example.stockdiary.network.FundDividendApiService
+import com.example.stockdiary.network.isRealDividendPage
 import io.mockk.every
 import io.mockk.mockk
 import kotlinx.coroutines.runBlocking

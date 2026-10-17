@@ -1,4 +1,4 @@
-package com.example.stockdiary.data
+package com.example.stockdiary.data.dividend
 
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.utils.AppLogger

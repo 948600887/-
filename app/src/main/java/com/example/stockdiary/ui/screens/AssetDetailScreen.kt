@@ -16,8 +16,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
-import com.example.stockdiary.data.DividendYieldCalculator
-import com.example.stockdiary.data.DividendIncomeCalculator
+import com.example.stockdiary.data.dividend.DividendYieldCalculator
+import com.example.stockdiary.data.dividend.DividendIncomeCalculator
 import com.example.stockdiary.ui.dialogs.AdjustPositionDialog
 import com.example.stockdiary.ui.dialogs.EditAssetDialog
 import com.example.stockdiary.ui.theme.*

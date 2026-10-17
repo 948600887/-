@@ -1,5 +1,6 @@
 package com.example.stockdiary.utils
 
+import com.example.stockdiary.data.dividend.DividendData
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
 import com.example.stockdiary.ui.theme.AppTheme
@@ -145,9 +146,9 @@ fun <T> List<T>.joinToStringLimited(separator: String = ", ", limit: Int = 3): S
     return "${take(limit).joinToString(separator)}...(+${size - limit})"
 }
 
-fun com.example.stockdiary.data.DividendData.isNewest(): Boolean = true
+fun com.example.stockdiary.data.dividend.DividendData.isNewest(): Boolean = true
 
-fun List<com.example.stockdiary.data.DividendData>.getLatest(): List<com.example.stockdiary.data.DividendData> =
+fun List<com.example.stockdiary.data.dividend.DividendData>.getLatest(): List<com.example.stockdiary.data.dividend.DividendData> =
     this.sortedByDescending { it.date }.take(1)
 
 fun <T : Collection<*>> Result<T>.hasContent(): Boolean = isSuccess && getOrNull()?.isNotEmpty() == true

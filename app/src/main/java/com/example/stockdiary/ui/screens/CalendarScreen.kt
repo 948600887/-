@@ -1,6 +1,6 @@
 package com.example.stockdiary.ui.screens
 
-import com.example.stockdiary.data.DividendRecord
+import com.example.stockdiary.data.dividend.DividendRecord
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -227,7 +227,7 @@ private fun SelectedDateDetail(
     date: LocalDate,
     value: Double,
     isAssetCalendar: Boolean,
-    dividends: List<Pair<String, List<com.example.stockdiary.data.DividendRecord>>>,
+    dividends: List<Pair<String, List<com.example.stockdiary.data.dividend.DividendRecord>>>,
     assets: List<Asset>
 ) {
     val assetMap = remember(assets) { assets.associateBy { it.symbol } }

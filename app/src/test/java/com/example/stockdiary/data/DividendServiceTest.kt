@@ -1,5 +1,6 @@
 package com.example.stockdiary.data
 
+import com.example.stockdiary.data.dividend.DividendService
 import com.example.stockdiary.common.Result as AppResult
 import io.mockk.coEvery
 import io.mockk.every

@@ -1,5 +1,6 @@
 package com.example.stockdiary.data
 
+import com.example.stockdiary.data.dividend.DividendIncomeCalculator
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
 import org.junit.Assert.assertEquals

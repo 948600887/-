@@ -14,7 +14,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.example.stockdiary.data.DividendRecord
+import com.example.stockdiary.data.dividend.DividendRecord
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.ui.theme.LossRed
 import com.example.stockdiary.ui.theme.OnSurface

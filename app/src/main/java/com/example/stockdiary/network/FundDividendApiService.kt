@@ -1,5 +1,7 @@
-package com.example.stockdiary.data
+package com.example.stockdiary.network
 
+import com.example.stockdiary.data.dividend.DividendHtmlParser
+import com.example.stockdiary.data.dividend.DividendRecord
 import com.example.stockdiary.network.NetworkClient
 import com.example.stockdiary.utils.AppLogger
 import kotlinx.coroutines.Dispatchers

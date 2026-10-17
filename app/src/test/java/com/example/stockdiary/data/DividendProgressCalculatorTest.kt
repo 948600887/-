@@ -1,5 +1,7 @@
 package com.example.stockdiary.data
 
+import com.example.stockdiary.data.dividend.DividendProgressCalculator
+import com.example.stockdiary.data.dividend.DividendRecord
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
 import org.junit.Assert.assertEquals

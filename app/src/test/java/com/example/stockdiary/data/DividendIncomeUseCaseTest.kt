@@ -1,5 +1,7 @@
 package com.example.stockdiary.data
 
+import com.example.stockdiary.data.dividend.DividendIncomeLoader
+import com.example.stockdiary.data.dividend.DividendIncomeUseCase
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
 import kotlinx.coroutines.async

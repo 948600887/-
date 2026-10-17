@@ -5,8 +5,8 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.example.stockdiary.data.sync.AssetSyncManager
-import com.example.stockdiary.data.DividendIncomeUseCase
-import com.example.stockdiary.data.DividendProgressCalculator
+import com.example.stockdiary.data.dividend.DividendIncomeUseCase
+import com.example.stockdiary.data.dividend.DividendProgressCalculator
 import com.example.stockdiary.data.SortOrder
 import com.example.stockdiary.data.sync.SyncProgress
 import com.example.stockdiary.data.sync.SyncResult

@@ -1,5 +1,6 @@
 package com.example.stockdiary.data
 
+import com.example.stockdiary.data.dividend.DividendHtmlParser
 import org.jsoup.Jsoup
 import org.junit.Assert.assertEquals
 import org.junit.Test

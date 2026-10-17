@@ -1,4 +1,4 @@
-package com.example.stockdiary.data
+package com.example.stockdiary.data.dividend
 
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter

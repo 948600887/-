@@ -1,4 +1,4 @@
-package com.example.stockdiary.data
+package com.example.stockdiary.data.dividend
 
 /**
  * 分红数据模型

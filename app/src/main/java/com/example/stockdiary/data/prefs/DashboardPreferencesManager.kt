@@ -1,4 +1,4 @@
-package com.example.stockdiary.data
+package com.example.stockdiary.data.prefs
 
 import android.content.Context
 import android.content.SharedPreferences

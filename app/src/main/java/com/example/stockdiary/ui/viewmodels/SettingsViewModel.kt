@@ -8,8 +8,8 @@ import androidx.lifecycle.viewModelScope
 import com.example.stockdiary.common.Result
 import com.example.stockdiary.data.price.ApiManager
 import com.example.stockdiary.data.repository.AssetRepository
-import com.example.stockdiary.data.DashboardPreferences
-import com.example.stockdiary.data.DashboardPreferencesManager
+import com.example.stockdiary.data.prefs.DashboardPreferences
+import com.example.stockdiary.data.prefs.DashboardPreferencesManager
 import com.example.stockdiary.data.DataExporter
 import com.example.stockdiary.data.sync.PriceSyncPreferencesManager
 import com.example.stockdiary.data.sync.PriceSyncScheduler

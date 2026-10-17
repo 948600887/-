@@ -14,7 +14,7 @@ import com.example.stockdiary.utils.AppLogger
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import com.example.stockdiary.data.SortOrder
+import com.example.stockdiary.data.prefs.SortOrder
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.ui.components.*

@@ -15,7 +15,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.stockdiary.data.AssetGrowthCalculator
-import com.example.stockdiary.data.SortOrder
+import com.example.stockdiary.data.prefs.SortOrder
 import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.ui.components.*
 import com.example.stockdiary.ui.dialogs.AddAssetDialog

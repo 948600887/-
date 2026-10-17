@@ -29,8 +29,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import com.example.stockdiary.data.DashboardPreferences
-import com.example.stockdiary.data.SortOrder
+import com.example.stockdiary.data.prefs.DashboardPreferences
+import com.example.stockdiary.data.prefs.SortOrder
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable

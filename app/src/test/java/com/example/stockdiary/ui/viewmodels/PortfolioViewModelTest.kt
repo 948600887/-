@@ -2,11 +2,11 @@ package com.example.stockdiary.ui.viewmodels
 
 import com.example.stockdiary.data.repository.AssetRepository
 import com.example.stockdiary.data.sync.AssetSyncManager
-import com.example.stockdiary.data.DashboardPreferences
-import com.example.stockdiary.data.DashboardPreferencesManager
+import com.example.stockdiary.data.prefs.DashboardPreferences
+import com.example.stockdiary.data.prefs.DashboardPreferencesManager
 import com.example.stockdiary.data.dividend.DividendIncomeLoader
 import com.example.stockdiary.data.dividend.DividendIncomeUseCase
-import com.example.stockdiary.data.SortOrder
+import com.example.stockdiary.data.prefs.SortOrder
 import com.example.stockdiary.data.sync.SyncResult
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType

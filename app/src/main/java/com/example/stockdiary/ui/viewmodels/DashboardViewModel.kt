@@ -1,13 +1,13 @@
 package com.example.stockdiary.ui.viewmodels
 
-import com.example.stockdiary.data.DashboardPreferences
+import com.example.stockdiary.data.prefs.DashboardPreferences
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.example.stockdiary.data.sync.AssetSyncManager
 import com.example.stockdiary.data.dividend.DividendIncomeUseCase
 import com.example.stockdiary.data.dividend.DividendProgressCalculator
-import com.example.stockdiary.data.SortOrder
+import com.example.stockdiary.data.prefs.SortOrder
 import com.example.stockdiary.data.sync.SyncProgress
 import com.example.stockdiary.data.sync.SyncResult
 import com.example.stockdiary.database.Asset
@@ -67,7 +67,7 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     private val _preferences = MutableStateFlow(preferencesManager.loadPreferences())
-    val preferences: StateFlow<com.example.stockdiary.data.DashboardPreferences> = _preferences.asStateFlow()
+    val preferences: StateFlow<com.example.stockdiary.data.prefs.DashboardPreferences> = _preferences.asStateFlow()
 
     private val _isSyncing = MutableStateFlow(false)
     val isSyncing: StateFlow<Boolean> = _isSyncing.asStateFlow()

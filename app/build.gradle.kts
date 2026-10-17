@@ -149,6 +149,9 @@ dependencies {
     // JVM 单测驱动 viewModelScope（Dispatchers.Main 接管）+ MockK 伪造 final 类 / AppContainer
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.7.3")
     testImplementation("io.mockk:mockk:1.13.11")
+    // JVM 单测里 android.jar 的 org.json 是 stub（optString/optJSONObject 返回 null，
+    // 分页/映射逻辑跑不出真实语义），补真 org.json 让东财分红接口的分页与映射可单测
+    testImplementation("org.json:json:20231013")
     androidTestImplementation("androidx.test.ext:junit:1.1.5")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.5.1")
     androidTestImplementation("androidx.compose.ui:ui-test-junit4:1.5.1")

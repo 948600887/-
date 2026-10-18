@@ -16,6 +16,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.first
 import java.time.LocalDate
+import java.time.temporal.ChronoUnit
 import kotlinx.coroutines.CancellationException
 
 class StockDiaryApplication : Application() {
@@ -113,18 +114,26 @@ class StockDiaryApplication : Application() {
             val today = LocalDate.now()
 
             if (latestDate.isBefore(today)) {
-                var currentDate = latestDate.plusDays(1)
-                while (!currentDate.isAfter(today)) {
-                    val dateStr = currentDate.toString()
-                    AppLogger.i("补全缺失快照: $dateStr", "StockDiaryApplication")
-                    try {
-                        repository.createSnapshot(dateStr)
-                    } catch (e: CancellationException) {
-                        throw e
-                    } catch (e: Exception) {
-                        AppLogger.e("补全 $dateStr 快照失败: ${e.message}", e, "StockDiaryApplication")
-                    }
-                    currentDate = currentDate.plusDays(1)
+                // 只补今天一条，绝不逐日回填缺口。
+                //
+                // 为什么不能逐日补：repository.createSnapshot(date) 内部取的是
+                // 「当前资产」（assetDao.getAllAssets().first()），并不按 date
+                // 回放历史价格。缺快照的日子如果也补，每天都会拿到同一个
+                // 「今天」的净资产——历史净值曲线在缺口段变成一条直线
+                // （诊断日志里连续四天 netAssets 一模一样即此症状），
+                // 比缺口本身更有害：用户会误以为那几天真的没波动。
+                val gapDays = ChronoUnit.DAYS.between(latestDate, today)
+                AppLogger.i(
+                    "跳过历史快照回填：最新为 $latestDateStr，距今 $gapDays 天（无历史价格，不伪造净值）；已创建今日快照",
+                    "StockDiaryApplication"
+                )
+                try {
+                    // LocalDate.toString() 本身就是 yyyy-MM-dd，不必再走 DateTimeFormatter
+                    repository.createSnapshot(today.toString())
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    AppLogger.e("补全今日快照失败: ${e.message}", e, "StockDiaryApplication")
                 }
             }
         } catch (e: CancellationException) {

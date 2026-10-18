@@ -16,6 +16,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
+import com.example.stockdiary.network.BinanceHostGate
 import com.example.stockdiary.utils.StockCodeManager
 import com.example.stockdiary.utils.format
 import com.example.stockdiary.utils.totalValueCny
@@ -227,6 +228,12 @@ fun StockAssetItem(
                         isLiability -> "待偿还"
                         currentPrice != null -> "¥${currentPrice.format(pricePrecision)}"
                         StockCodeManager.isDelistedForSync(asset.symbol) -> "退市"
+                        // 币安主机级熔断期间（连不上 api.binance.com，见 BinanceHostGate）要给一个
+                        // 区别于「价格待更新」的提示：前者是网络/主机问题，后者可能是数据源缺数据。
+                        // 注意 isBlocked 是普通 volatile 读、不可观察；列表在每轮同步结束后会重组，
+                        // 届时标签会刷新——这个局限写进注释，别做成轮询。
+                        asset.type == AssetType.CRYPTO &&
+                            BinanceHostGate.isBlocked(System.currentTimeMillis()) -> "币安暂不可达"
                         else -> "价格待更新"
                     },
                     style = MaterialTheme.typography.bodySmall, color = AppTheme.colors.onSurfaceVariant, fontWeight = FontWeight.Medium

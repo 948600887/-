@@ -21,6 +21,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
+import com.example.stockdiary.network.BinanceHostGate
 import com.example.stockdiary.utils.StockCodeManager
 import com.example.stockdiary.utils.format
 import com.example.stockdiary.utils.totalValueCny
@@ -115,7 +116,16 @@ fun SearchAssetItem(asset: Asset, onClick: () -> Unit, onDividendClick: () -> Un
             Column(modifier = Modifier.weight(1f), horizontalAlignment = Alignment.End) {
                 Text("¥${asset.totalValueCny.format(2)}", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold, color = AppTheme.colors.onSurface)
                 Text(
-                    asset.currentPrice?.let { "¥${it.format(pricePrecision)}" } ?: if (StockCodeManager.isDelistedForSync(asset.symbol)) "退市" else "价格待更新",
+                    when {
+                        asset.currentPrice != null -> "¥${asset.currentPrice.format(pricePrecision)}"
+                        StockCodeManager.isDelistedForSync(asset.symbol) -> "退市"
+                        // 与 AssetCards.StockAssetItem 同一套口径：币安主机级熔断期间
+                        // （连不上 api.binance.com，见 BinanceHostGate）显示「币安暂不可达」，
+                        // 区别于「价格待更新」。isBlocked 不可观察，列表每轮同步结束后重组时刷新
+                        asset.type == AssetType.CRYPTO &&
+                            BinanceHostGate.isBlocked(System.currentTimeMillis()) -> "币安暂不可达"
+                        else -> "价格待更新"
+                    },
                     style = MaterialTheme.typography.bodySmall, color = AppTheme.colors.onSurfaceVariant, fontWeight = FontWeight.Medium
                 )
                 if (asset.millionCopiesIncome != null) {

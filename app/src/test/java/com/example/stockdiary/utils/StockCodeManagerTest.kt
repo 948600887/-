@@ -401,6 +401,101 @@ class StockCodeManagerTest {
         assertFalse(StockCodeManager.isDelistedForSync(""))
     }
 
+    // ========== fund_ 前缀（场外份额） ==========
+
+    @Test
+    fun `hasFundPrefix 只认 fund_ 前缀且大小写不敏感`() {
+        assertTrue(StockCodeManager.hasFundPrefix("fund_400030"))
+        assertTrue(StockCodeManager.hasFundPrefix("FUND_400030"))
+        assertTrue(StockCodeManager.hasFundPrefix("Fund_420102"))
+        assertTrue(StockCodeManager.hasFundPrefix(" fund_400030 "))
+        assertFalse(StockCodeManager.hasFundPrefix("400030"))
+        assertFalse(StockCodeManager.hasFundPrefix("sh600519"))
+        assertFalse(StockCodeManager.hasFundPrefix(null))
+        assertFalse(StockCodeManager.hasFundPrefix(""))
+        assertFalse(StockCodeManager.hasFundPrefix("   "))
+    }
+
+    @Test
+    fun `classifyCode 对 fund_ 前缀一律返回场外基金`() {
+        // 本次修的根因：场外基金与深市股票共用 00xxxx 号段、与老三板共用 400xxx/420xxx 号段，
+        // 只按数字推会把 400030（东方添益债券）判成「股票」。前缀是显式标记，必须优先。
+        // 调用方：HoldingSnapshotParser（持仓预览的类别标签）、AddAssetDialog（自动识别）、
+        // isStock（→ DividendRepository 的分红上限）。
+        assertEquals(CodeCategory.OTC_FUND, StockCodeManager.classifyCode("fund_400030"))
+        assertEquals(CodeCategory.OTC_FUND, StockCodeManager.classifyCode("fund_420102"))
+        assertEquals(CodeCategory.OTC_FUND, StockCodeManager.classifyCode("fund_000001"))
+        // 场外份额与场内同号（LOF 163415 的场外份额）：前缀意味着按净值申赎，仍是场外
+        assertEquals(CodeCategory.OTC_FUND, StockCodeManager.classifyCode("fund_163415"))
+    }
+
+    @Test
+    fun `classifyCode 对 fund_ 前缀大小写不敏感`() {
+        assertEquals(CodeCategory.OTC_FUND, StockCodeManager.classifyCode("FUND_400030"))
+        assertEquals(CodeCategory.OTC_FUND, StockCodeManager.classifyCode("Fund_420102"))
+    }
+
+    @Test
+    fun `classifyCode 对已剥掉前缀的纯数字仍按号段走`() {
+        // AssetSyncManager 同步链路是先把 fund_ 剥掉再调 classifyCode（那边要用号段
+        // 区分 ETF/LOF/场内基金，靠的是「是否场外」的另一路判据 isOffExchange）。
+        // 纯数字不含前缀，加了前缀分支后这条路的结论必须一点不变。
+        assertEquals(CodeCategory.STOCK, StockCodeManager.classifyCode("400030"))
+        assertEquals(CodeCategory.STOCK, StockCodeManager.classifyCode("420102"))
+        assertEquals(CodeCategory.LOF, StockCodeManager.classifyCode("163415"))
+        assertEquals(CodeCategory.ETF, StockCodeManager.classifyCode("510050"))
+        assertEquals(CodeCategory.OTC_FUND, StockCodeManager.classifyCode("007467"))
+    }
+
+    @Test
+    fun `isStock 对 fund_ 前缀返回 false`() {
+        // 单独钉住 isStock：它先把 symbol 压成纯数字再交给 classifyCode，
+        // 前缀到那时已经没了，所以 classifyCode 里的前缀分支**救不了它**，
+        // 必须在本函数里判。这一条直接决定 DividendRepository 的每 10 份分红上限
+        // 走基金的 100 还是股票的 1000 —— 判成股票会把异常大的脏数据放行进库。
+        assertFalse(StockCodeManager.isStock("fund_400030"))
+        assertFalse(StockCodeManager.isStock("fund_420102"))
+        assertFalse(StockCodeManager.isStock("fund_000001"))
+        assertFalse(StockCodeManager.isStock("FUND_400030"))
+    }
+
+    @Test
+    fun `stripFundPrefix 剥掉前缀_不带前缀时原样返回`() {
+        assertEquals("400030", StockCodeManager.stripFundPrefix("fund_400030"))
+        assertEquals("400030", StockCodeManager.stripFundPrefix("FUND_400030"))
+        assertEquals("400030", StockCodeManager.stripFundPrefix(" fund_400030 "))
+        assertEquals("400030", StockCodeManager.stripFundPrefix("400030"))
+        assertEquals("sh600519", StockCodeManager.stripFundPrefix("sh600519"))
+    }
+
+    @Test
+    fun `isOTCFund 认 fund_ 前缀_而 isOTCFundCode 认不出`() {
+        // 「是不是场外标的」与「属不属于场外号段」不是一回事：分红链路正是靠这个结论
+        // 选数据源（天天基金 vs 东财 + 新浪），用错就会拿股票接口去问一只基金。
+        assertTrue(StockCodeManager.isOTCFund("fund_400030"))
+        assertTrue(StockCodeManager.isOTCFund("fund_420102"))
+        assertTrue(StockCodeManager.isOTCFund("FUND_400030"))
+        // 剥掉前缀后按号段判是 false —— 这就是误判的来源，钉住它别再退回去
+        assertFalse(StockCodeManager.isOTCFundCode("400030"))
+        assertFalse(StockCodeManager.isOTCFundCode("420102"))
+        // 没前缀的老三板真退市股、真股票不能被当场外
+        assertFalse(StockCodeManager.isOTCFund("400030"))
+        assertFalse(StockCodeManager.isOTCFund("bj400264"))
+        assertFalse(StockCodeManager.isOTCFund("sh600519"))
+        // 号段就能认出来的场外基金照旧
+        assertTrue(StockCodeManager.isOTCFund("004502"))
+        assertTrue(StockCodeManager.isOTCFund("010001"))
+        assertFalse(StockCodeManager.isOTCFund(null))
+        assertFalse(StockCodeManager.isOTCFund(""))
+    }
+
+    @Test
+    fun `isStock 对真股票仍返回 true`() {
+        assertTrue(StockCodeManager.isStock("sh600519"))
+        assertTrue(StockCodeManager.isStock("sz000001"))
+        assertTrue(StockCodeManager.isStock("bj400264"))
+    }
+
     // ========== Edge Cases ==========
 
     @Test

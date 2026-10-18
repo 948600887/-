@@ -1,6 +1,7 @@
 package com.example.stockdiary.data
 
 import com.example.stockdiary.data.importer.HoldingSnapshotParser
+import com.example.stockdiary.data.importer.ParsedHolding
 import com.example.stockdiary.utils.StockCodeManager
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -331,5 +332,39 @@ class HoldingSnapshotParserTest {
         val r = HoldingSnapshotParser.parse(emptyList())
         assertTrue(r.holdings.isEmpty())
         assertNull(r.dataDate)
+    }
+
+    // ---------- 类别标签：fund_ 前缀不能被号段判成股票 ----------
+
+    @Test
+    fun fund_前缀的持仓类别是场外基金() {
+        // 预览页的「股票 / 基金」标签直接读 ParsedHolding.category（→ classifyCode）。
+        // 400030（东方添益债券）落在 400xxx 号段，只按数字推会被判成 STOCK，
+        // 用户看到一只债券基金顶着「股票」标签。前缀是显式标记，必须优先于号段。
+        val holding = ParsedHolding(
+            name = "东方添益债券",
+            symbol = "fund_400030",
+            quantity = 1000.0,
+            lineNumber = 1,
+            rawQuantity = "1000"
+        )
+        assertEquals(StockCodeManager.CodeCategory.OTC_FUND, holding.category)
+    }
+
+    @Test
+    fun 场内代码仍按号段分类() {
+        // 没有前缀时一切照旧：LOF 160719 是 LOF、ETF 510210 是 ETF、400264 是老三板股票
+        assertEquals(
+            StockCodeManager.CodeCategory.LOF,
+            ParsedHolding("黄金LOF", "160719", 262.0, 1, "262").category
+        )
+        assertEquals(
+            StockCodeManager.CodeCategory.ETF,
+            ParsedHolding("综指ETF", "510210", 14400.0, 1, "1.44万").category
+        )
+        assertEquals(
+            StockCodeManager.CodeCategory.STOCK,
+            ParsedHolding("R东方1", "400264", 100.0, 1, "100").category
+        )
     }
 }

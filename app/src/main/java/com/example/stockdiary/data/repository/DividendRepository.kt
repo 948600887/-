@@ -118,9 +118,18 @@ class DividendRepository private constructor(
         val eastmoneySymbols = mutableListOf<String>()
 
         for (symbol in pending) {
-            val pure = symbol.removePrefix("fund_")
+            // fund_ 前缀（场外份额的显式标记）必须比号段推断先判：
+            // 400030（东方添益债券）/ 420102 落在 400/420 号段，isOTCFundCode 认不出来
+            // （它只认 01/02 开头与 004xxx-009xxx），于是这些真基金会被塞进东财批量查询、
+            // 拿不到结果后再级联到新浪股票接口，一路问的都是不存在的证券代码。
+            // 场外基金走天天基金，没有批量入口 —— 与下面逐条抓取用的是同一个判据。
+            //
+            // 数据影响（已知且已认可）：修完之后 fund_400030 / fund_420102 的分红来源
+            // 由「东财批量 + 新浪」切到天天基金，已入库的分红记录可能随之变化。
+            if (StockCodeManager.isOTCFund(symbol)) continue
+
+            val pure = StockCodeManager.stripFundPrefix(symbol)
             val code = StockCodeManager.extractPureCode(pure)
-            if (StockCodeManager.isOTCFundCode(code)) continue  // 场外基金走天天基金，没有批量入口
 
             eastmoneySymbols += symbol
             val candidates = codesBySymbol.getOrPut(symbol) { mutableListOf() }
@@ -460,10 +469,15 @@ class DividendRepository private constructor(
         // 不剥的话 stockCode 会带着 "fund_" 传下去，于是 isOTCFundCode / isETF 全部判错，
         // 最后拿着 "fund_004502" 去请求接口——场外基金的分红永远抓不到，
         // 而且失败是静默的（接口返回空 → 不写库 → 分红弹窗显示「暂无」）
-        val pureSymbol = normalizedSymbol.removePrefix("fund_")
+        val pureSymbol = StockCodeManager.stripFundPrefix(normalizedSymbol)
         val stockCode = StockCodeManager.extractPureCode(pureSymbol)
-        val isOTCFund = StockCodeManager.isOTCFundCode(stockCode)
-        val isEtf = StockCodeManager.isETF(pureSymbol)
+        // 剥完前缀还不够：fund_ 本身就是「场外份额」的显式标记，但 400030 / 420102
+        // 落在 400/420 号段，isOTCFundCode 按号段认不出它们（它只认 01/02 开头与
+        // 004xxx-009xxx）。不把前缀算进场外判定，这些真基金会被送进东财 + 新浪股票接口，
+        // 而场外基金的分红只在天天基金有 —— 请求全打出去，结果还是空的，而且不报错。
+        val isOTCFund = StockCodeManager.isOTCFund(normalizedSymbol)
+        val isEtf = !StockCodeManager.hasFundPrefix(normalizedSymbol) &&
+            StockCodeManager.isETF(pureSymbol)
 
         var data: List<DividendRecord> = when {
             isOTCFund -> fetchFromFundApi(stockCode)
@@ -702,6 +716,8 @@ class DividendRepository private constructor(
         if (records.isEmpty()) return
 
         // 过滤异常分红数据：基金/ETF 上限 100 元/10份，股票上限 1000 元/10股（茅台类高分红不误杀）
+        // symbol 是规范化后的（fund_ 前缀原样保留）。isStock 对带该前缀的场外份额返回 false，
+        // 所以 fund_400030 这类**必须**拿基金的 100 上限——此前它误判成股票，用的是 1000。
         val maxAmount = if (StockCodeManager.isStock(symbol)) {
             MAX_DIVIDEND_PER_TEN_SHARES_STOCK
         } else {

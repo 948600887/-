@@ -8,7 +8,34 @@ import com.example.stockdiary.database.AssetType
  * 统一处理股票代码格式转换、市场推断、类型判断
  */
 object StockCodeManager {
-    
+
+    /**
+     * 场外份额的显式标记前缀（`fund_400030`）。
+     *
+     * 基金E账户导出与天天基金份额都用它标「场外份额」，与场内代码**可以同号**：
+     * 场外基金跟深市股票共用 00xxxx 号段，跟老三板共用 400xxx / 420xxx 号段。
+     * 所以只按数字推类别必然出错，凡是要判类别的地方都得**先看这个前缀**。
+     */
+    const val FUND_PREFIX = "fund_"
+
+    /**
+     * 是否带场外份额标记前缀（大小写不敏感，容忍 `FUND_` / ` Fund_`）。
+     *
+     * 判定类函数一律先问它，再 fallback 到代码号段。
+     */
+    fun hasFundPrefix(symbol: String?): Boolean =
+        !symbol.isNullOrBlank() && symbol.trim().startsWith(FUND_PREFIX, ignoreCase = true)
+
+    /**
+     * 剥掉场外份额前缀（大小写不敏感），没带前缀时原样返回。
+     *
+     * 比 `removePrefix("fund_")` 稳：normalizeSymbol 会**原样保留**前缀的大小写，
+     * 于是 `FUND_400030` 也能入库，而大小写敏感的 removePrefix 剥不掉它，
+     * 后面拿着带前缀的字符串去判号段 / 请求接口，失败还是静默的。
+     */
+    fun stripFundPrefix(symbol: String): String =
+        if (hasFundPrefix(symbol)) symbol.trim().drop(FUND_PREFIX.length) else symbol
+
     /**
      * ETF代码前缀
      * - 沪市ETF：510, 511, 512, 513, 515, 516, 517, 518, 588
@@ -29,9 +56,16 @@ object StockCodeManager {
 
     /**
      * 判断是否为股票（非 ETF/LOF/场内基金/场外基金）
+     *
+     * 带 [FUND_PREFIX] 的一律不是股票：它是场外份额的显式标记。
+     * 必须在这里判，不能指望 [classifyCode] —— 本函数先把 symbol 压成纯数字
+     * （[extractDigits]）再交给 classifyCode，前缀到那时已经丢了，
+     * 而 400030 / 420102 这些场外代码压完数字正好落在「4 开头 = 股票」的分支上。
+     * 漏掉这一句的直接后果见 DividendRepository 的分红上限分支。
      */
     fun isStock(symbol: String?): Boolean {
         if (symbol.isNullOrBlank()) return false
+        if (hasFundPrefix(symbol)) return false
         val code = extractDigits(symbol)
         if (code.length < 6) return false
         return classifyCode(code) == CodeCategory.STOCK
@@ -63,7 +97,7 @@ object StockCodeManager {
      */
     fun isDelistedForSync(symbol: String?): Boolean {
         if (symbol.isNullOrBlank()) return false
-        if (symbol.startsWith("fund_", ignoreCase = true)) return false
+        if (hasFundPrefix(symbol)) return false
         return isDelisted(symbol)
     }
 
@@ -106,8 +140,15 @@ object StockCodeManager {
     /**
      * 统一分类股票/基金代码类型
      * 根据代码规则自动识别：股票、ETF、LOF、场内基金、场外基金
+     *
+     * [FUND_PREFIX] 前缀优先于一切号段推断（详见该常量的说明）。
+     * 注意本函数**也可能**被喂进已经剥掉前缀的纯数字（如 AssetSyncManager
+     * 同步链路先 `removePrefix("fund_")` 再 classifyCode），那条路不受此处影响：
+     * 纯数字不含前缀，走的还是原来的号段分支。
      */
     fun classifyCode(input: String): CodeCategory {
+        if (hasFundPrefix(input)) return CodeCategory.OTC_FUND
+
         val code = extractDigits(input)
         if (code.length < 6) return CodeCategory.UNKNOWN
         val c = code.take(6)
@@ -154,6 +195,21 @@ object StockCodeManager {
             }
             else -> false
         }
+    }
+
+    /**
+     * 判断一个 symbol 是不是场外基金：先看 [FUND_PREFIX] 这个显式标记，再看号段。
+     *
+     * 「这个标的是不是场外」跟「这个代码属不属于场外号段」不是一回事：
+     * 400030（东方添益债券）/ 420102 这类场外代码落在 400/420 号段上，
+     * [isOTCFundCode] 按号段判不出来。凡是**靠这个结论选数据源**的调用方
+     * （分红走天天基金还是东财、净值走天天基金还是股票行情）都必须用本函数，
+     * 不能直接用 [isOTCFundCode]，否则真基金会被送去问不存在的证券代码。
+     */
+    fun isOTCFund(symbol: String?): Boolean {
+        if (symbol.isNullOrBlank()) return false
+        if (hasFundPrefix(symbol)) return true
+        return isOTCFundCode(extractPureCode(symbol))
     }
 
     /**
@@ -225,7 +281,7 @@ object StockCodeManager {
         }
         
         // 保留fund_前缀
-        if (trimmed.startsWith("fund_", ignoreCase = true)) {
+        if (hasFundPrefix(trimmed)) {
             return trimmed
         }
         

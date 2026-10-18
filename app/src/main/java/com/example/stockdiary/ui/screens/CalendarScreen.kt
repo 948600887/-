@@ -47,11 +47,7 @@ import com.example.stockdiary.ui.components.FireCalculationDialog
 import com.example.stockdiary.ui.screens.calendar.components.DividendDayDetail
 import com.example.stockdiary.ui.screens.calendar.components.StatColumn
 import com.example.stockdiary.ui.screens.calendar.components.TabButton
-import com.example.stockdiary.ui.theme.OnSurface
-import com.example.stockdiary.ui.theme.OnSurfaceVariant
-import com.example.stockdiary.ui.theme.Primary
-import com.example.stockdiary.ui.theme.PrimaryContainer
-import com.example.stockdiary.ui.theme.SurfaceContainer
+import com.example.stockdiary.ui.theme.AppTheme
 import com.example.stockdiary.ui.viewmodels.CalendarViewModel
 import com.example.stockdiary.utils.format
 import com.example.stockdiary.utils.profitColor
@@ -167,9 +163,9 @@ private fun EmptyCalendarContent(modifier: Modifier = Modifier) {
     ) {
         Text("📅", fontSize = 48.sp)
         Spacer(modifier = Modifier.height(16.dp))
-        Text("暂无资产", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = OnSurface)
+        Text("暂无资产", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.onSurface)
         Spacer(modifier = Modifier.height(8.dp))
-        Text("请先在资产页面添加股票、基金或银行存款", fontSize = 13.sp, color = OnSurfaceVariant)
+        Text("请先在资产页面添加股票、基金或银行存款", fontSize = 13.sp, color = AppTheme.colors.onSurfaceVariant)
     }
 }
 
@@ -191,11 +187,11 @@ private fun CalendarHeader(
                 text = "日历",
                 fontSize = 24.sp,
                 fontWeight = FontWeight.Bold,
-                color = OnSurface
+                color = AppTheme.colors.onSurface
             )
             Surface(
                 modifier = Modifier.clip(RoundedCornerShape(8.dp)),
-                color = SurfaceContainer
+                color = AppTheme.colors.surfaceContainer
             ) {
                 Row {
                     TabButton(
@@ -215,7 +211,7 @@ private fun CalendarHeader(
                 Icon(
                     imageVector = Icons.Filled.Calculate,
                     contentDescription = "FIRE 计算器",
-                    tint = Primary
+                    tint = AppTheme.colors.primary
                 )
             }
         }
@@ -237,7 +233,7 @@ private fun SelectedDateDetail(
             .fillMaxWidth()
             .padding(16.dp),
         shape = RoundedCornerShape(12.dp),
-        colors = CardDefaults.cardColors(containerColor = PrimaryContainer)
+        colors = CardDefaults.cardColors(containerColor = AppTheme.colors.primaryContainer)
     ) {
         Column(
             modifier = Modifier.padding(16.dp)
@@ -251,25 +247,25 @@ private fun SelectedDateDetail(
                     text = "${date.monthValue}月${date.dayOfMonth}日",
                     fontSize = 16.sp,
                     fontWeight = FontWeight.Bold,
-                    color = OnSurface
+                    color = AppTheme.colors.onSurface
                 )
                 Text(
                     text = date.dayOfWeek.getDisplayName(TextStyle.FULL, Locale.CHINA),
                     fontSize = 14.sp,
-                    color = OnSurfaceVariant
+                    color = AppTheme.colors.onSurfaceVariant
                 )
             }
 
             Spacer(modifier = Modifier.height(12.dp))
 
             if (isAssetCalendar) {
-                Text("当日净资产", fontSize = 13.sp, color = OnSurfaceVariant)
+                Text("当日净资产", fontSize = 13.sp, color = AppTheme.colors.onSurfaceVariant)
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
                     text = if (value > 0) "¥${value.format(2)}" else "暂无数据",
                     fontSize = 24.sp,
                     fontWeight = FontWeight.Bold,
-                    color = if (value > 0) OnSurface else OnSurfaceVariant
+                    color = if (value > 0) AppTheme.colors.onSurface else AppTheme.colors.onSurfaceVariant
                 )
             }
 
@@ -303,7 +299,7 @@ private fun MonthlySummary(
             .fillMaxWidth()
             .padding(16.dp),
         shape = RoundedCornerShape(12.dp),
-        colors = CardDefaults.cardColors(containerColor = SurfaceContainer)
+        colors = CardDefaults.cardColors(containerColor = AppTheme.colors.surfaceContainer)
     ) {
         Column(
             modifier = Modifier.padding(16.dp)
@@ -312,7 +308,7 @@ private fun MonthlySummary(
                 text = if (isAssetCalendar) "本月资产总览" else "本月分红汇总",
                 fontSize = 14.sp,
                 fontWeight = FontWeight.Bold,
-                color = OnSurface
+                color = AppTheme.colors.onSurface
             )
             Spacer(modifier = Modifier.height(8.dp))
             Text(
@@ -323,8 +319,8 @@ private fun MonthlySummary(
                 },
                 fontSize = 20.sp,
                 fontWeight = FontWeight.Bold,
-                color = if (isAssetCalendar) OnSurface
-                else if (monthlyTotal >= 0) com.example.stockdiary.ui.theme.LossRed else com.example.stockdiary.ui.theme.ProfitGreen
+                color = if (isAssetCalendar) AppTheme.colors.onSurface
+                else if (monthlyTotal >= 0) AppTheme.colors.lossRed else AppTheme.colors.profitGreen
             )
 
             Spacer(modifier = Modifier.height(12.dp))
@@ -334,18 +330,18 @@ private fun MonthlySummary(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = androidx.compose.foundation.layout.Arrangement.SpaceEvenly
                 ) {
-                    StatColumn("有数据天数", snapshotDays.toString(), Primary)
-                    StatColumn("无数据", noDataDays.toString(), OnSurfaceVariant)
-                    StatColumn("持仓", assetCount.toString(), Primary)
+                    StatColumn("有数据天数", snapshotDays.toString(), AppTheme.colors.primary)
+                    StatColumn("无数据", noDataDays.toString(), AppTheme.colors.onSurfaceVariant)
+                    StatColumn("持仓", assetCount.toString(), AppTheme.colors.primary)
                 }
             } else {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = androidx.compose.foundation.layout.Arrangement.SpaceEvenly
                 ) {
-                    StatColumn("正收益天数", positiveDays.toString(), com.example.stockdiary.ui.theme.LossRed)
-                    StatColumn("无收益", zeroDays.toString(), OnSurfaceVariant)
-                    StatColumn("持仓", assetCount.toString(), Primary)
+                    StatColumn("正收益天数", positiveDays.toString(), AppTheme.colors.lossRed)
+                    StatColumn("无收益", zeroDays.toString(), AppTheme.colors.onSurfaceVariant)
+                    StatColumn("持仓", assetCount.toString(), AppTheme.colors.primary)
                 }
             }
         }

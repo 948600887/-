@@ -45,7 +45,7 @@ import com.example.stockdiary.ui.screens.history.components.historyOverviewCard
 import com.example.stockdiary.ui.screens.history.components.historyPeriodReturnCard
 import com.example.stockdiary.ui.screens.history.components.historyRiskCard
 import com.example.stockdiary.ui.screens.history.components.historyTrendChart
-import com.example.stockdiary.ui.theme.OnSurfaceVariant
+import com.example.stockdiary.ui.theme.AppTheme
 import com.example.stockdiary.ui.viewmodels.HistoryViewModel
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -89,7 +89,7 @@ fun HistoryScreen(
                         Text(
                             text = "今日已保存",
                             style = MaterialTheme.typography.labelSmall,
-                            color = OnSurfaceVariant,
+                            color = AppTheme.colors.onSurfaceVariant,
                             modifier = Modifier.padding(end = 8.dp)
                         )
                     }
@@ -103,7 +103,7 @@ fun HistoryScreen(
                             Icon(
                                 Icons.Default.Save,
                                 contentDescription = "保存快照",
-                                tint = if (uiState.hasTodaySnapshot) OnSurfaceVariant else MaterialTheme.colorScheme.primary
+                                tint = if (uiState.hasTodaySnapshot) AppTheme.colors.onSurfaceVariant else MaterialTheme.colorScheme.primary
                             )
                         }
                     }
@@ -177,7 +177,7 @@ private fun EmptyHistoryContent(
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Icon(
                 Icons.AutoMirrored.Filled.ShowChart, contentDescription = null,
-                modifier = Modifier.size(64.dp), tint = OnSurfaceVariant
+                modifier = Modifier.size(64.dp), tint = AppTheme.colors.onSurfaceVariant
             )
             Spacer(modifier = Modifier.height(16.dp))
             if (hasAnySnapshot) {
@@ -187,7 +187,7 @@ private fun EmptyHistoryContent(
                 Text(
                     "试试切换到更长的周期，或点右上角补一份快照",
                     style = MaterialTheme.typography.bodyMedium,
-                    color = OnSurfaceVariant
+                    color = AppTheme.colors.onSurfaceVariant
                 )
             } else {
                 Text("暂无历史数据", style = MaterialTheme.typography.titleMedium)
@@ -195,7 +195,7 @@ private fun EmptyHistoryContent(
                 Text(
                     "点击右上角保存第一份快照",
                     style = MaterialTheme.typography.bodyMedium,
-                    color = OnSurfaceVariant
+                    color = AppTheme.colors.onSurfaceVariant
                 )
             }
         }

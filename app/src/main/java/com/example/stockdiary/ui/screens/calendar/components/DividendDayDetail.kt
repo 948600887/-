@@ -16,10 +16,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.stockdiary.data.dividend.DividendRecord
 import com.example.stockdiary.database.Asset
-import com.example.stockdiary.ui.theme.LossRed
-import com.example.stockdiary.ui.theme.OnSurface
-import com.example.stockdiary.ui.theme.OnSurfaceVariant
-import com.example.stockdiary.ui.theme.Outline
+import com.example.stockdiary.ui.theme.AppTheme
 import com.example.stockdiary.database.amountFor
 import com.example.stockdiary.utils.format
 import com.example.stockdiary.utils.shareUnitWord
@@ -39,9 +36,9 @@ fun DividendDayDetail(
     }
 
     if (dayDividendDetails.isEmpty()) {
-        Text("当日无分红", fontSize = 13.sp, color = OnSurfaceVariant)
+        Text("当日无分红", fontSize = 13.sp, color = AppTheme.colors.onSurfaceVariant)
         Spacer(modifier = Modifier.height(4.dp))
-        Text("¥0.00", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = OnSurfaceVariant)
+        Text("¥0.00", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.onSurfaceVariant)
         return
     }
 
@@ -57,21 +54,21 @@ fun DividendDayDetail(
 
     HorizontalDivider(
         modifier = Modifier.padding(vertical = 12.dp),
-        color = Outline.copy(alpha = 0.3f)
+        color = AppTheme.colors.outline.copy(alpha = 0.3f)
     )
 
-    Text("当日分红", fontSize = 13.sp, color = OnSurfaceVariant)
+    Text("当日分红", fontSize = 13.sp, color = AppTheme.colors.onSurfaceVariant)
     Spacer(modifier = Modifier.height(4.dp))
     Text(
         text = "+¥${totalDividend.format(2)}",
         fontSize = 24.sp,
         fontWeight = FontWeight.Bold,
-        color = LossRed
+        color = AppTheme.colors.lossRed
     )
 
     HorizontalDivider(
         modifier = Modifier.padding(vertical = 8.dp),
-        color = Outline.copy(alpha = 0.3f)
+        color = AppTheme.colors.outline.copy(alpha = 0.3f)
     )
 
     details.forEach { (symbol, record, amount) ->
@@ -86,19 +83,19 @@ fun DividendDayDetail(
                     text = asset?.name ?: symbol,
                     fontSize = 14.sp,
                     fontWeight = FontWeight.SemiBold,
-                    color = OnSurface
+                    color = AppTheme.colors.onSurface
                 )
                 Text(
                     text = "每十${asset?.shareUnitWord ?: "份"}派息: ¥${(record.dividendPerShare.toDoubleOrNull() ?: 0.0).format(2)}",
                     fontSize = 12.sp,
-                    color = OnSurfaceVariant
+                    color = AppTheme.colors.onSurfaceVariant
                 )
             }
             Text(
                 text = amount?.let { "+¥${it.format(2)}" } ?: "—",
                 fontSize = 14.sp,
                 fontWeight = FontWeight.Bold,
-                color = if (amount == null) OnSurfaceVariant else LossRed
+                color = if (amount == null) AppTheme.colors.onSurfaceVariant else AppTheme.colors.lossRed
             )
         }
         Spacer(modifier = Modifier.height(4.dp))

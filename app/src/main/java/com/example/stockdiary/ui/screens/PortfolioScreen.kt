@@ -393,8 +393,8 @@ fun PortfolioScreen(
             if (!selectionMode) {
                 FloatingActionButton(
                     onClick = { showAddDialog = true },
-                    containerColor = Primary,
-                    contentColor = OnPrimary
+                    containerColor = AppTheme.colors.primary,
+                    contentColor = AppTheme.colors.onPrimary
                 ) {
                     Icon(Icons.Filled.Add, contentDescription = "添加资产")
                 }
@@ -638,7 +638,7 @@ fun PortfolioScreen(
                         selectionMode = false
                         selectedIds = emptySet()
                     },
-                    colors = ButtonDefaults.buttonColors(containerColor = Error)
+                    colors = ButtonDefaults.buttonColors(containerColor = AppTheme.colors.error)
                 ) { Text("删除") }
             },
             dismissButton = {

@@ -37,14 +37,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.example.stockdiary.ui.theme.LossRed
-import com.example.stockdiary.ui.theme.OnSurface
-import com.example.stockdiary.ui.theme.OnSurfaceVariant
-import com.example.stockdiary.ui.theme.Outline
-import com.example.stockdiary.ui.theme.Primary
-import com.example.stockdiary.ui.theme.ProfitGreen
-import com.example.stockdiary.ui.theme.SurfaceContainer
-import com.example.stockdiary.ui.theme.SurfaceContainerLow
+import com.example.stockdiary.ui.theme.AppTheme
 import com.example.stockdiary.utils.compactFormat
 import com.example.stockdiary.utils.format
 import com.example.stockdiary.utils.profitColor
@@ -67,7 +60,7 @@ fun CalendarCard(
             .fillMaxWidth()
             .padding(16.dp),
         shape = RoundedCornerShape(12.dp),
-        colors = CardDefaults.cardColors(containerColor = SurfaceContainer)
+        colors = CardDefaults.cardColors(containerColor = AppTheme.colors.surfaceContainer)
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
             // 月份导航
@@ -77,7 +70,7 @@ fun CalendarCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 IconButton(onClick = { onMonthChange(currentMonth.minusMonths(1)) }) {
-                    Icon(Icons.Filled.ChevronLeft, "上一个月", tint = OnSurface)
+                    Icon(Icons.Filled.ChevronLeft, "上一个月", tint = AppTheme.colors.onSurface)
                 }
 
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -85,7 +78,7 @@ fun CalendarCard(
                         text = currentMonth.format(DateTimeFormatter.ofPattern("yyyy年MM月")),
                         fontSize = 16.sp,
                         fontWeight = FontWeight.Bold,
-                        color = OnSurface
+                        color = AppTheme.colors.onSurface
                     )
                     if (currentMonth != YearMonth.now()) {
                         TextButton(
@@ -93,15 +86,15 @@ fun CalendarCard(
                             modifier = Modifier.padding(0.dp),
                             contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
                         ) {
-                            Icon(Icons.Filled.Today, "回到今天", modifier = Modifier.size(14.dp), tint = Primary)
+                            Icon(Icons.Filled.Today, "回到今天", modifier = Modifier.size(14.dp), tint = AppTheme.colors.primary)
                             Spacer(modifier = Modifier.width(4.dp))
-                            Text("今天", fontSize = 11.sp, color = Primary)
+                            Text("今天", fontSize = 11.sp, color = AppTheme.colors.primary)
                         }
                     }
                 }
 
                 IconButton(onClick = { onMonthChange(currentMonth.plusMonths(1)) }) {
-                    Icon(Icons.Filled.ChevronRight, "下一个月", tint = OnSurface)
+                    Icon(Icons.Filled.ChevronRight, "下一个月", tint = AppTheme.colors.onSurface)
                 }
             }
 
@@ -115,7 +108,7 @@ fun CalendarCard(
                         Text(
                             text = dayName,
                             fontSize = 12.sp,
-                            color = if (isWeekend) OnSurfaceVariant.copy(alpha = 0.7f) else OnSurfaceVariant,
+                            color = if (isWeekend) AppTheme.colors.onSurfaceVariant.copy(alpha = 0.7f) else AppTheme.colors.onSurfaceVariant,
                             fontWeight = FontWeight.Medium
                         )
                     }
@@ -155,7 +148,7 @@ fun CalendarCard(
             // 图例
             HorizontalDivider(
                 modifier = Modifier.padding(vertical = 8.dp),
-                color = Outline.copy(alpha = 0.3f)
+                color = AppTheme.colors.outline.copy(alpha = 0.3f)
             )
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -163,16 +156,16 @@ fun CalendarCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 if (isAssetCalendar) {
-                    LegendItem(color = Primary, label = "有数据")
+                    LegendItem(color = AppTheme.colors.primary, label = "有数据")
                     Spacer(modifier = Modifier.width(12.dp))
-                    LegendItem(color = OnSurfaceVariant.copy(alpha = 0.3f), label = "无数据")
+                    LegendItem(color = AppTheme.colors.onSurfaceVariant.copy(alpha = 0.3f), label = "无数据")
                 } else {
-                    LegendItem(color = LossRed, label = "正收益")
+                    LegendItem(color = AppTheme.colors.lossRed, label = "正收益")
                     Spacer(modifier = Modifier.width(12.dp))
-                    LegendItem(color = ProfitGreen, label = "负收益")
+                    LegendItem(color = AppTheme.colors.profitGreen, label = "负收益")
                 }
                 Spacer(modifier = Modifier.width(12.dp))
-                LegendItem(color = Primary.copy(alpha = 0.35f), label = "今天")
+                LegendItem(color = AppTheme.colors.primary.copy(alpha = 0.35f), label = "今天")
             }
         }
     }
@@ -197,9 +190,9 @@ private fun CalendarDayCell(
             .clip(RoundedCornerShape(6.dp))
             .clickable(onClick = onClick),
         color = when {
-            isSelected -> Primary.copy(alpha = 0.25f)
-            isToday -> Primary.copy(alpha = 0.15f)
-            else -> SurfaceContainerLow
+            isSelected -> AppTheme.colors.primary.copy(alpha = 0.25f)
+            isToday -> AppTheme.colors.primary.copy(alpha = 0.15f)
+            else -> AppTheme.colors.surfaceContainerLow
         }
     ) {
         Column(
@@ -214,10 +207,10 @@ private fun CalendarDayCell(
                 fontSize = 12.sp,
                 fontWeight = if (isToday) FontWeight.Bold else FontWeight.Normal,
                 color = when {
-                    !day.isCurrentMonth -> OnSurfaceVariant.copy(alpha = 0.4f)
-                    isWeekend && !isToday -> OnSurfaceVariant.copy(alpha = 0.7f)
-                    isToday -> Primary
-                    else -> OnSurface
+                    !day.isCurrentMonth -> AppTheme.colors.onSurfaceVariant.copy(alpha = 0.4f)
+                    isWeekend && !isToday -> AppTheme.colors.onSurfaceVariant.copy(alpha = 0.7f)
+                    isToday -> AppTheme.colors.primary
+                    else -> AppTheme.colors.onSurface
                 }
             )
             if (day.isCurrentMonth && day.value != 0.0) {
@@ -225,7 +218,7 @@ private fun CalendarDayCell(
                     text = if (isAssetCalendar) day.value.compactFormat()
                     else if (day.value > 0) "+${day.value.format(0)}" else day.value.format(0),
                     fontSize = 9.sp,
-                    color = if (isAssetCalendar) Primary else day.value.profitColor(),
+                    color = if (isAssetCalendar) AppTheme.colors.primary else day.value.profitColor(),
                     fontWeight = FontWeight.SemiBold,
                     maxLines = 1,
                     modifier = Modifier.padding(top = 1.dp)
@@ -235,7 +228,7 @@ private fun CalendarDayCell(
                 Text(
                     text = "分",
                     fontSize = 8.sp,
-                    color = LossRed,
+                    color = AppTheme.colors.lossRed,
                     fontWeight = FontWeight.Bold,
                     maxLines = 1,
                     modifier = Modifier.padding(top = 1.dp)
@@ -255,7 +248,7 @@ private fun LegendItem(color: Color, label: String) {
                 .background(color)
         )
         Spacer(modifier = Modifier.width(4.dp))
-        Text(text = label, fontSize = 11.sp, color = OnSurfaceVariant)
+        Text(text = label, fontSize = 11.sp, color = AppTheme.colors.onSurfaceVariant)
     }
 }
 
@@ -270,7 +263,7 @@ internal fun TabButton(text: String, isSelected: Boolean, onClick: () -> Unit) {
             text = text,
             fontSize = 13.sp,
             fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
-            color = if (isSelected) Primary else OnSurfaceVariant
+            color = if (isSelected) AppTheme.colors.primary else AppTheme.colors.onSurfaceVariant
         )
     }
 }

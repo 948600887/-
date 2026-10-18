@@ -169,8 +169,8 @@ fun DashboardScreen(
         floatingActionButton = {
             FloatingActionButton(
                 onClick = { showAddDialog = true },
-                containerColor = Primary,
-                contentColor = OnPrimary
+                containerColor = AppTheme.colors.primary,
+                contentColor = AppTheme.colors.onPrimary
             ) {
                 Icon(Icons.Filled.Add, contentDescription = "添加资产")
             }

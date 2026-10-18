@@ -73,7 +73,7 @@ fun AssetDetailScreen(
                                 fontWeight = FontWeight.Bold
                             )
                             currentAsset.symbol?.let {
-                                Text(text = it, style = MaterialTheme.typography.labelSmall, color = OnSurfaceVariant)
+                                Text(text = it, style = MaterialTheme.typography.labelSmall, color = AppTheme.colors.onSurfaceVariant)
                             }
                         }
                     } else {
@@ -92,7 +92,7 @@ fun AssetDetailScreen(
                             Icon(Icons.Filled.Edit, contentDescription = "编辑")
                         }
                         IconButton(onClick = { showDeleteDialog = true }) {
-                            Icon(Icons.Filled.Delete, contentDescription = "删除", tint = Error)
+                            Icon(Icons.Filled.Delete, contentDescription = "删除", tint = AppTheme.colors.error)
                         }
                     }
                     if (currentAsset != null && (currentAsset.type == AssetType.STOCK || currentAsset.type == AssetType.FUND)) {
@@ -129,7 +129,7 @@ fun AssetDetailScreen(
                         Icons.Filled.Error,
                         contentDescription = null,
                         modifier = Modifier.size(64.dp),
-                        tint = OnSurfaceVariant
+                        tint = AppTheme.colors.onSurfaceVariant
                     )
                     Spacer(modifier = Modifier.height(16.dp))
                     Text(errorMessage ?: "", style = MaterialTheme.typography.bodyLarge)
@@ -150,7 +150,7 @@ fun AssetDetailScreen(
                 item {
                     Card(
                         shape = RoundedCornerShape(12.dp),
-                        colors = CardDefaults.cardColors(containerColor = SurfaceContainer)
+                        colors = CardDefaults.cardColors(containerColor = AppTheme.colors.surfaceContainer)
                     ) {
                         Column(modifier = Modifier.padding(16.dp)) {
                             Row(
@@ -185,7 +185,7 @@ fun AssetDetailScreen(
                     item {
                         Card(
                             shape = RoundedCornerShape(12.dp),
-                            colors = CardDefaults.cardColors(containerColor = SurfaceContainer)
+                            colors = CardDefaults.cardColors(containerColor = AppTheme.colors.surfaceContainer)
                         ) {
                             Column(modifier = Modifier.padding(16.dp)) {
                                 Row(
@@ -199,7 +199,7 @@ fun AssetDetailScreen(
                                 if (isDividendLoading) {
                                     CircularProgressIndicator(modifier = Modifier.size(24.dp))
                                 } else if (dividends.isEmpty()) {
-                                    Text("暂无分红数据", style = MaterialTheme.typography.bodyMedium, color = OnSurfaceVariant)
+                                    Text("暂无分红数据", style = MaterialTheme.typography.bodyMedium, color = AppTheme.colors.onSurfaceVariant)
                                 } else {
                                     val ttm = shareBonus
                                     if (ttm != null) {
@@ -225,7 +225,7 @@ fun AssetDetailScreen(
                             Button(
                                 onClick = { showEditDialog = true },
                                 modifier = Modifier.weight(1f),
-                                colors = ButtonDefaults.buttonColors(containerColor = Primary)
+                                colors = ButtonDefaults.buttonColors(containerColor = AppTheme.colors.primary)
                             ) {
                                 Text("编辑资产")
                             }
@@ -313,13 +313,13 @@ fun AssetDetailScreen(
                         }
                     },
                     enabled = !isDeleting,
-                    colors = ButtonDefaults.buttonColors(containerColor = Error)
+                    colors = ButtonDefaults.buttonColors(containerColor = AppTheme.colors.error)
                 ) {
                     if (isDeleting) {
                         CircularProgressIndicator(
                             modifier = Modifier.size(16.dp),
                             strokeWidth = 2.dp,
-                            color = MaterialTheme.colorScheme.onError
+                            color = AppTheme.colors.onError
                         )
                     } else {
                         Text("删除")
@@ -332,12 +332,12 @@ fun AssetDetailScreen(
 }
 
 @Composable
-private fun DetailRow(label: String, value: String, valueColor: androidx.compose.ui.graphics.Color = OnSurface) {
+private fun DetailRow(label: String, value: String, valueColor: androidx.compose.ui.graphics.Color = AppTheme.colors.onSurface) {
     Row(
         modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
         horizontalArrangement = Arrangement.SpaceBetween
     ) {
-        Text(label, style = MaterialTheme.typography.bodyMedium, color = OnSurfaceVariant)
+        Text(label, style = MaterialTheme.typography.bodyMedium, color = AppTheme.colors.onSurfaceVariant)
         Text(value, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium, color = valueColor)
     }
 }

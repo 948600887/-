@@ -36,6 +36,7 @@ import com.example.stockdiary.data.importer.BrokerageImportService
 import com.example.stockdiary.data.importer.GalaxyStatementParser
 import com.example.stockdiary.data.importer.SymbolResolver
 import com.example.stockdiary.ui.components.import.ImportRawTextDialog
+import com.example.stockdiary.ui.theme.AppTheme
 import com.example.stockdiary.ui.viewmodels.ImportBrokerageViewModel
 
 /**
@@ -109,7 +110,7 @@ internal fun PreviewHeaderBlock(
             "有 $incompleteCount 行只认出了名称和金额、没认到日期与数量，已保留为异常行（不会导入）。" +
                 "通常是这一行在截图里被截断或表格列错位，重新截一张完整对账单即可。",
             style = MaterialTheme.typography.bodySmall,
-            color = Color(0xFFC62828)
+            color = AppTheme.colors.error
         )
     }
     if (state.autoFilledCount > 0) {
@@ -118,7 +119,7 @@ internal fun PreviewHeaderBlock(
             "已自动匹配 ${state.autoFilledCount} 行证券代码（来自记忆/持仓/历史流水/证券库），" +
                 "核对无误直接确认即可；你手动填过的会被记住，下次不用再填。",
             style = MaterialTheme.typography.bodySmall,
-            color = Color(0xFF2E7D32)
+            color = AppTheme.colors.success
         )
     }
     if (state.ocrLines.isNotEmpty() || !state.ocrRawText.isNullOrBlank()) {
@@ -143,8 +144,8 @@ internal fun PreviewTransactionRow(
 ) {
     val focusManager = LocalFocusManager.current
     val bg = when {
-        tx.errors.isNotEmpty() -> Color(0xFFFFCDD2) // 红
-        tx.isDuplicate -> Color(0xFFFFF59D)        // 黄
+        tx.errors.isNotEmpty() -> AppTheme.colors.errorContainer // 红
+        tx.isDuplicate -> AppTheme.colors.warningContainer        // 黄
         tx.skip -> MaterialTheme.colorScheme.surfaceVariant
         else -> Color.Transparent
     }
@@ -204,7 +205,7 @@ internal fun PreviewTransactionRow(
                     Text(
                         "✓ 已自动匹配（${tx.symbolSource}），核对无误直接确认即可",
                         style = MaterialTheme.typography.bodySmall,
-                        color = Color(0xFF2E7D32)
+                        color = AppTheme.colors.success
                     )
                 }
             }
@@ -220,7 +221,7 @@ internal fun PreviewTransactionRow(
                 Text(
                     "与库内已有记录重复",
                     style = MaterialTheme.typography.bodySmall,
-                    color = Color(0xFFF57F17)
+                    color = AppTheme.colors.warning
                 )
             }
         }

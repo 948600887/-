@@ -24,20 +24,16 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.stockdiary.database.AssetSnapshot
-import com.example.stockdiary.ui.theme.OnSurface
-import com.example.stockdiary.ui.theme.OnSurfaceVariant
-import com.example.stockdiary.ui.theme.Outline
-import com.example.stockdiary.ui.theme.Primary
-import com.example.stockdiary.ui.theme.SurfaceContainerLow
+import com.example.stockdiary.ui.theme.AppTheme
 import com.example.stockdiary.utils.format
 import com.example.stockdiary.utils.formatDateLabel
 import com.example.stockdiary.utils.formatYAxisLabel
@@ -53,9 +49,13 @@ fun AssetTrendChart(
     var selectedPointIndex by remember { mutableStateOf<Int?>(null) }
     val currentSnapshots by rememberUpdatedState(snapshots)
 
-    val lineColor = Primary
-    val gridColor = Outline.copy(alpha = 0.2f)
-    val areaColor = Primary.copy(alpha = 0.12f)
+    // 设计规范 4.4：颜色在 @Composable 组体内读出并捕获为局部 val 后再进 draw lambda
+    val colors = AppTheme.colors
+    val lineColor = colors.primary
+    val gridColor = colors.outline.copy(alpha = 0.2f)
+    val areaColor = colors.primary.copy(alpha = 0.12f)
+    val pointFill = colors.chartPointFill
+    val axisText = colors.chartAxisText.toArgb()
 
     if (snapshots.isEmpty()) return
 
@@ -122,7 +122,7 @@ fun AssetTrendChart(
                 drawContext.canvas.nativeCanvas.drawText(
                     yValue.formatYAxisLabel(), 2f, yPos + 4f,
                     android.graphics.Paint().apply {
-                        color = android.graphics.Color.GRAY; textSize = 22f; isAntiAlias = true
+                        color = axisText; textSize = 22f; isAntiAlias = true
                     }
                 )
             }
@@ -132,7 +132,7 @@ fun AssetTrendChart(
                 val firstDate = snapshots.first().date.formatDateLabel()
                 val lastDate = snapshots.last().date.formatDateLabel()
                 val paint = android.graphics.Paint().apply {
-                    color = android.graphics.Color.GRAY; textSize = 22f; isAntiAlias = true
+                    color = axisText; textSize = 22f; isAntiAlias = true
                 }
                 val labelY = paddingTop + cHeight + 24f
                 drawContext.canvas.nativeCanvas.drawText(firstDate, paddingLeft, labelY, paint)
@@ -152,7 +152,7 @@ fun AssetTrendChart(
                 drawPath(
                     path = fillPath,
                     brush = Brush.verticalGradient(
-                        colors = listOf(areaColor, Primary.copy(alpha = 0.0f)),
+                        colors = listOf(areaColor, lineColor.copy(alpha = 0.0f)),
                         startY = paddingTop, endY = paddingTop + cHeight
                     )
                 )
@@ -169,9 +169,9 @@ fun AssetTrendChart(
             selectedPointIndex?.let { index ->
                 if (index in points.indices) {
                     val point = points[index]
-                    drawLine(OnSurfaceVariant.copy(alpha = 0.4f), Offset(point.x, paddingTop), Offset(point.x, paddingTop + cHeight), 1f)
-                    drawLine(OnSurfaceVariant.copy(alpha = 0.4f), Offset(paddingLeft, point.y), Offset(width - paddingRight, point.y), 1f)
-                    drawCircle(color = Color.White, radius = 6f, center = point)
+                    drawLine(colors.onSurfaceVariant.copy(alpha = 0.4f), Offset(point.x, paddingTop), Offset(point.x, paddingTop + cHeight), 1f)
+                    drawLine(colors.onSurfaceVariant.copy(alpha = 0.4f), Offset(paddingLeft, point.y), Offset(width - paddingRight, point.y), 1f)
+                    drawCircle(color = pointFill, radius = 6f, center = point)
                     drawCircle(color = lineColor, radius = 6f, center = point, style = Stroke(width = 2f))
                 }
             }
@@ -186,7 +186,7 @@ fun AssetTrendChart(
             val delta = previous?.let { snapshot.netAssets - it.netAssets }
             Card(
                 modifier = Modifier.fillMaxWidth().align(Alignment.BottomCenter).padding(horizontal = 16.dp),
-                colors = CardDefaults.cardColors(containerColor = SurfaceContainerLow.copy(alpha = 0.95f)),
+                colors = CardDefaults.cardColors(containerColor = colors.surfaceContainerLow.copy(alpha = 0.95f)),
                 shape = RoundedCornerShape(10.dp)
             ) {
                 Row(
@@ -195,17 +195,17 @@ fun AssetTrendChart(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Column {
-                        Text(snapshot.date, fontSize = 13.sp, fontWeight = FontWeight.Medium, color = OnSurface)
+                        Text(snapshot.date, fontSize = 13.sp, fontWeight = FontWeight.Medium, color = colors.onSurface)
                         Text(
                             "总资产: ¥${snapshot.totalAssets.format(2)}",
-                            fontSize = 11.sp, color = OnSurfaceVariant
+                            fontSize = 11.sp, color = colors.onSurfaceVariant
                         )
                     }
                     Column(horizontalAlignment = Alignment.End) {
-                        Text("¥${snapshot.netAssets.format(2)}", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = OnSurface)
+                        Text("¥${snapshot.netAssets.format(2)}", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = colors.onSurface)
                         Text(
                             delta?.toProfitDisplay("¥") ?: "起始",
-                            fontSize = 12.sp, color = delta?.profitColor() ?: OnSurface
+                            fontSize = 12.sp, color = delta?.profitColor() ?: colors.onSurface
                         )
                     }
                 }

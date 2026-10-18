@@ -13,10 +13,7 @@ import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.unit.dp
 import com.example.stockdiary.database.AssetSnapshot
-import com.example.stockdiary.ui.theme.AccentBlue
-import com.example.stockdiary.ui.theme.AccentOrange
-import com.example.stockdiary.ui.theme.LossRed
-import com.example.stockdiary.ui.theme.PrimaryGreen
+import com.example.stockdiary.ui.theme.AppTheme
 import com.example.stockdiary.utils.format
 
 @Composable
@@ -25,10 +22,10 @@ fun AssetDonutChart(
     modifier: Modifier = Modifier
 ) {
     val segments = listOfNotNull(
-        if (latest.stockValue > 0) Triple("股票", latest.stockValue, LossRed) else null,
-        if (latest.fundValue > 0) Triple("基金", latest.fundValue, AccentOrange) else null,
-        if (latest.cryptoValue > 0) Triple("加密货币", latest.cryptoValue, AccentBlue) else null,
-        if (latest.bankDepositValue > 0) Triple("银行存款", latest.bankDepositValue, PrimaryGreen) else null
+        if (latest.stockValue > 0) Triple("股票", latest.stockValue, AppTheme.colors.lossRed) else null,
+        if (latest.fundValue > 0) Triple("基金", latest.fundValue, AppTheme.colors.accentOrange) else null,
+        if (latest.cryptoValue > 0) Triple("加密货币", latest.cryptoValue, AppTheme.colors.accentBlue) else null,
+        if (latest.bankDepositValue > 0) Triple("银行存款", latest.bankDepositValue, AppTheme.colors.primaryGreen) else null
     )
     if (segments.isEmpty()) return
     val total = segments.sumOf { it.second }

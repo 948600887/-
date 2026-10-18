@@ -25,11 +25,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.stockdiary.data.dividend.DividendProgressCalculator
-import com.example.stockdiary.ui.theme.OnSurface
-import com.example.stockdiary.ui.theme.OnSurfaceVariant
-import com.example.stockdiary.ui.theme.Outline
-import com.example.stockdiary.ui.theme.Primary
-import com.example.stockdiary.ui.theme.SurfaceContainer
+import com.example.stockdiary.ui.theme.AppTheme
 import com.example.stockdiary.utils.format
 import kotlin.math.ceil
 
@@ -46,7 +42,7 @@ fun DividendProgressCard(
 ) {
     Card(
         modifier = modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = SurfaceContainer)
+        colors = CardDefaults.cardColors(containerColor = AppTheme.colors.surfaceContainer)
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
             Row(
@@ -59,7 +55,7 @@ fun DividendProgressCard(
                     Text(
                         "已到账 ${progress.receivedCount} 笔",
                         style = MaterialTheme.typography.labelSmall,
-                        color = OnSurfaceVariant
+                        color = AppTheme.colors.onSurfaceVariant
                     )
                 }
             }
@@ -69,7 +65,7 @@ fun DividendProgressCard(
                 Text(
                     "暂无分红数据，导入持仓并同步分红后可看到今年的收息进度",
                     style = MaterialTheme.typography.bodySmall,
-                    color = OnSurfaceVariant
+                    color = AppTheme.colors.onSurfaceVariant
                 )
                 return@Column
             }
@@ -80,21 +76,21 @@ fun DividendProgressCard(
                 verticalAlignment = Alignment.Bottom
             ) {
                 Column {
-                    Text("今年已收", style = MaterialTheme.typography.labelSmall, color = OnSurfaceVariant)
+                    Text("今年已收", style = MaterialTheme.typography.labelSmall, color = AppTheme.colors.onSurfaceVariant)
                     Text(
                         "¥${progress.yearReceived.format(2)}",
                         style = MaterialTheme.typography.titleLarge,
                         fontWeight = FontWeight.Bold,
-                        color = Primary
+                        color = AppTheme.colors.primary
                     )
                 }
                 Column(horizontalAlignment = Alignment.End) {
-                    Text("全年预计", style = MaterialTheme.typography.labelSmall, color = OnSurfaceVariant)
+                    Text("全年预计", style = MaterialTheme.typography.labelSmall, color = AppTheme.colors.onSurfaceVariant)
                     Text(
                         "¥${progress.yearProjected.format(2)}",
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Medium,
-                        color = OnSurface
+                        color = AppTheme.colors.onSurface
                     )
                 }
             }
@@ -104,8 +100,8 @@ fun DividendProgressCard(
                 LinearProgressIndicator(
                     progress = { progress.ratio.toFloat() },
                     modifier = Modifier.fillMaxWidth().height(8.dp),
-                    color = Primary,
-                    trackColor = Outline.copy(alpha = 0.25f)
+                    color = AppTheme.colors.primary,
+                    trackColor = AppTheme.colors.outline.copy(alpha = 0.25f)
                 )
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
@@ -115,13 +111,13 @@ fun DividendProgressCard(
                         "全年预计已全部到账，超额 ¥${(progress.yearReceived - progress.yearProjected).format(2)}"
                     },
                     style = MaterialTheme.typography.bodySmall,
-                    color = OnSurfaceVariant
+                    color = AppTheme.colors.onSurfaceVariant
                 )
             } else {
                 Text(
                     "预计数据暂缺，已收金额按实际到账记录统计",
                     style = MaterialTheme.typography.bodySmall,
-                    color = OnSurfaceVariant
+                    color = AppTheme.colors.onSurfaceVariant
                 )
             }
         }
@@ -139,7 +135,7 @@ fun NextPayoutCard(
 ) {
     Card(
         modifier = modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = SurfaceContainer)
+        colors = CardDefaults.cardColors(containerColor = AppTheme.colors.surfaceContainer)
     ) {
         Row(
             modifier = Modifier.fillMaxWidth().padding(16.dp),
@@ -147,7 +143,7 @@ fun NextPayoutCard(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Column(modifier = Modifier.weight(1f)) {
-                Text("下一笔分红", style = MaterialTheme.typography.labelSmall, color = OnSurfaceVariant)
+                Text("下一笔分红", style = MaterialTheme.typography.labelSmall, color = AppTheme.colors.onSurfaceVariant)
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
                     next.assetName,
@@ -158,12 +154,12 @@ fun NextPayoutCard(
                 Text(
                     "${next.displayDate}${if (next.isEstimated) "（按历史同期推算）" else ""}",
                     style = MaterialTheme.typography.bodySmall,
-                    color = OnSurfaceVariant
+                    color = AppTheme.colors.onSurfaceVariant
                 )
                 Text(
                     if (next.payDate != null) "到账日" else "除息日（数据源未提供到账日）",
                     style = MaterialTheme.typography.labelSmall,
-                    color = OnSurfaceVariant
+                    color = AppTheme.colors.onSurfaceVariant
                 )
             }
             Column(horizontalAlignment = Alignment.End) {
@@ -171,12 +167,12 @@ fun NextPayoutCard(
                     "${next.daysUntil}",
                     style = MaterialTheme.typography.headlineSmall,
                     fontWeight = FontWeight.Bold,
-                    color = Primary
+                    color = AppTheme.colors.primary
                 )
                 Text(
                     if (next.payDate != null) "天后到账" else "天后除息",
                     style = MaterialTheme.typography.labelSmall,
-                    color = OnSurfaceVariant
+                    color = AppTheme.colors.onSurfaceVariant
                 )
                 if (next.amount > 0) {
                     Spacer(modifier = Modifier.height(2.dp))
@@ -184,7 +180,7 @@ fun NextPayoutCard(
                         "约 ¥${next.amount.format(2)}",
                         style = MaterialTheme.typography.bodySmall,
                         fontWeight = FontWeight.Medium,
-                        color = OnSurface
+                        color = AppTheme.colors.onSurface
                     )
                 }
             }
@@ -203,7 +199,7 @@ fun MonthlyCashFlowCard(
 ) {
     Card(
         modifier = modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = SurfaceContainer)
+        colors = CardDefaults.cardColors(containerColor = AppTheme.colors.surfaceContainer)
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
             Text("全年收息节奏", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
@@ -211,7 +207,7 @@ fun MonthlyCashFlowCard(
             Text(
                 "按今年已排定的派息记录统计，没有记录的月份留空",
                 style = MaterialTheme.typography.labelSmall,
-                color = OnSurfaceVariant
+                color = AppTheme.colors.onSurfaceVariant
             )
             Spacer(modifier = Modifier.height(12.dp))
 
@@ -225,8 +221,8 @@ fun MonthlyCashFlowCard(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(16.dp)
             ) {
-                LegendItem(color = Primary, label = "已到账")
-                LegendItem(color = Primary.copy(alpha = 0.35f), label = "待到账")
+                LegendItem(color = AppTheme.colors.primary, label = "已到账")
+                LegendItem(color = AppTheme.colors.primary.copy(alpha = 0.35f), label = "待到账")
             }
         }
     }
@@ -250,7 +246,7 @@ private fun LegendItem(color: Color, label: String) {
             drawRect(color = color, size = Size(size.width, size.height))
         }
         Spacer(modifier = Modifier.width(6.dp))
-        Text(label, fontSize = 11.sp, color = OnSurfaceVariant)
+        Text(label, fontSize = 11.sp, color = AppTheme.colors.onSurfaceVariant)
     }
 }
 
@@ -262,10 +258,15 @@ private fun MonthlyCashFlowChart(
     val maxValue = monthly.maxOf { it.received + it.scheduled }
     val currentMonth = java.time.LocalDate.now().monthValue
 
+    // 设计规范 4.4：进入 Canvas/DrawScope 的颜色必须在 @Composable 组体内读出并捕获为局部 val
+    val colors = AppTheme.colors
+    val barScheduled = colors.primary.copy(alpha = 0.35f)
+    val barReceived = colors.primary
+
     Box(modifier = modifier) {
         if (maxValue <= 0) {
             Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                Text("今年还没有派息记录", fontSize = 12.sp, color = OnSurfaceVariant)
+                Text("今年还没有派息记录", fontSize = 12.sp, color = AppTheme.colors.onSurfaceVariant)
             }
             return@Box
         }
@@ -289,14 +290,14 @@ private fun MonthlyCashFlowChart(
 
                 // 已排定未到账：整根浅色
                 drawRect(
-                    color = Primary.copy(alpha = 0.35f),
+                    color = barScheduled,
                     topLeft = Offset(left, size.height - totalHeight),
                     size = Size(barWidth, totalHeight)
                 )
                 // 已到账：底部深色覆盖
                 if (receivedHeight > 0) {
                     drawRect(
-                        color = Primary,
+                        color = barReceived,
                         topLeft = Offset(left, size.height - receivedHeight),
                         size = Size(barWidth, receivedHeight)
                     )
@@ -318,7 +319,7 @@ private fun MonthlyCashFlowChart(
                     Text(
                         text = "${month.month}",
                         fontSize = 10.sp,
-                        color = if (month.month == currentMonth) Primary else OnSurfaceVariant,
+                        color = if (month.month == currentMonth) AppTheme.colors.primary else AppTheme.colors.onSurfaceVariant,
                         fontWeight = if (month.month == currentMonth) FontWeight.Bold else FontWeight.Normal
                     )
                 }

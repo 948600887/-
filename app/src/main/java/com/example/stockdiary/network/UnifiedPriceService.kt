@@ -11,6 +11,7 @@ import com.example.stockdiary.network.model.FundData
 import com.example.stockdiary.utils.AppLogger
 import kotlinx.coroutines.*
 import okhttp3.Request
+import java.io.IOException
 import java.net.ConnectException
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
@@ -197,6 +198,17 @@ object UnifiedPriceService {
         }
         val url = "${APIEndpoints.Binance.BASE_URL}/ticker/24hr?symbol=$pair"
 
+        // 主机级熔断闸门：币安连续网络级失败达阈值后，冷却期内直接短路、不发请求。
+        // 主机压根连不上时，逐个标的各烧最多 20s 连接超时纯属浪费，且会计入
+        // 同步失败数触发误导性通知（见 BinanceHostGate）。
+        if (BinanceHostGate.isBlocked(System.currentTimeMillis())) {
+            return@withContext Result.failure(
+                BinanceHostUnavailableException(
+                    "币安接口连续失败，已暂停访问 ${BinanceHostGate.COOLDOWN_MS / 1000} 秒"
+                )
+            )
+        }
+
         try {
             val request = Request.Builder()
                 .url(url)
@@ -206,6 +218,10 @@ object UnifiedPriceService {
             val startTime = System.currentTimeMillis()
             // 与币安其他客户端一致：同主机、同连接池（绝对 URL 下 BaseUrlInterceptor 直通）
             val response = NetworkClient.binanceClient.newCall(request).execute()
+            // 主机能应答即视为网络级成功：HTTP 451 这类按条款拒绝是主机可达、
+            // 不属于「连不上」，据此复位连续失败计数，避免偶发的应用层失败
+            // 把熔断器顶爆、把本可恢复的同步挡在门外。
+            BinanceHostGate.onSuccess()
             response.use {
                 val duration = System.currentTimeMillis() - startTime
 
@@ -233,6 +249,13 @@ object UnifiedPriceService {
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
+            // 网络级失败（连不上 / 超时 / 域名解析失败 / IO 错误）喂给主机级熔断器：
+            // 主机不可达时每轮同步会为每个加密货币各烧最多 20s，全计失败还触发
+            // 「同步多次失败」通知；连续达阈值后冷却期内直接短路（见 BinanceHostGate）。
+            // CancellationException 已在上面重抛，不会被误计成失败。
+            if (e is ConnectException || e is SocketTimeoutException || e is UnknownHostException || e is IOException) {
+                BinanceHostGate.onNetworkFailure(System.currentTimeMillis())
+            }
             AppLogger.e("获取加密货币价格失败: $code", e, TAG)
             // 连接类失败（连不上/超时/域名解析不了）换成一句人话：OkHttp 原始 message
             // 形如 "failed to connect to api.binance.com/2001:… after 10000ms"，

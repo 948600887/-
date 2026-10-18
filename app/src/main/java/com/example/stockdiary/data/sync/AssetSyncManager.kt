@@ -505,6 +505,12 @@ object AssetSyncManager {
                 // 而是本就不可取价。手动刷新等没走上面 CRYPTO 分支短路的路径
                 // 也会走到这里，同样不计失败，价格保持上次的值。
                 AppLogger.i("跳过不可交易标的: ${asset.name}（${lastError?.message}）", TAG)
+            } else if (com.example.stockdiary.network.BinanceHostUnavailableException.isUnavailable(lastError)) {
+                // 币安主机级熔断（BinanceHostGate）：临时暂停访问、不是故障，也不是
+                // 标的的问题。熔断期内每个加密货币都会走到这里，计进 failedCount
+                // 会推高「同步多次失败，请检查网络」通知，用户被一条与真实原因
+                // 无关的提示骚扰。价格保持上次的值，冷却过去后自然恢复。
+                AppLogger.i("币安接口临时熔断，跳过: ${asset.name}（${lastError?.message}）", TAG)
             } else {
                 failedCount.incrementAndGet()
                 errorTypes.offer(SyncStrategy.classifyError(lastError))

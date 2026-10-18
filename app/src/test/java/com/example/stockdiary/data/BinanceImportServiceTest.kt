@@ -341,7 +341,7 @@ class BinanceImportServiceTest {
     }
 
     @Test
-    fun LD持仓按底层交易对预填价() = runBlocking {
+    fun LD持仓落库底层交易对并按底层价预填() = runBlocking {
         val captured = slot<List<Asset>>()
         coEvery { repo.insertAssets(capture(captured)) } returns Unit
 
@@ -353,8 +353,10 @@ class BinanceImportServiceTest {
         service.commit(preview, account = "币安", prices = mapOf("BNBUSDT" to 600.0))
 
         val asset = captured.captured.single()
-        // 落库 key 仍是原 symbol，价格是底层币 1:1 市价
-        assertEquals("LDBNBUSDT", asset.symbol)
+        // 落库 symbol 必须是底层交易对 BNBUSDT（不是盲加 USDT 的 LDBNBUSDT，
+        // 币安无此交易对，否则之后行情同步永远 400）；name 仍保留原始 LD 代码
+        assertEquals("BNBUSDT", asset.symbol)
+        assertEquals("LDBNB", asset.name)
         assertEquals(600.0, asset.currentPrice!!, 1e-9)
         assertEquals(1200.0, asset.totalValue, 1e-9)
     }

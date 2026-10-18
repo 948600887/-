@@ -113,8 +113,14 @@ class BinanceImportService(
             multiAccountConflict = false
         ) { balance ->
             SnapshotAlignment.RawHolding(
-                // 基础资产名 → 交易对代码（BTC → BTCUSDT），落库/取价都用这个形态
-                symbol = baseAssetToSymbol(balance.asset),
+                // 基础资产名 → 交易对代码（BTC → BTCUSDT），落库/取价都用这个形态。
+                // 特例：LD 锁仓币（LDBCH）必须落库成**底层交易对** BCHUSDT，不能用
+                // baseAssetToSymbol 盲加 USDT 成 LDBCHUSDT——币安根本没有这个交易对，
+                // 落库后每次行情同步都拿它去问币安 → 永远 400。priceKeyFor 已正确处理
+                // LD→底层（见 priceKeyFor / BinanceAPI.earnUnderlyingPair）；稳定币
+                // priceKeyFor 返回 null，回落 baseAssetToSymbol（USDT→USDT）。name 仍
+                // 存原始 LD 代码（如 LDBNB），展示层不受影响。
+                symbol = priceKeyFor(balance.asset) ?: baseAssetToSymbol(balance.asset),
                 name = balance.asset,
                 quantity = balance.total
             )

@@ -1,7 +1,15 @@
 package com.example.stockdiary.network
 
 import com.example.stockdiary.data.importer.baseAssetToSymbol
+import kotlinx.coroutines.runBlocking
+import okhttp3.Interceptor
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Protocol
+import okhttp3.Response
+import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -99,5 +107,107 @@ class BinanceAccountAPITest {
     @Test
     fun symbols参数空列表返回空数组() {
         assertEquals("%5B%5D", BinanceAccountAPI.buildSymbolsParam(emptyList()))
+    }
+
+    // ---------- getPrices 整批 400 隔离坏符号（自定义 Interceptor 模拟币安语义） ----------
+
+    /**
+     * 模拟币安 `/ticker/price` 语义的假 Interceptor：请求 URL 的 symbols 里只要含一个
+     * [badSymbols]，整批回 400（币安「一个非法符号 → 整批失败」的真实行为）；否则回
+     * application/json 的价表。零外部依赖，不连网。
+     */
+    private class FakeBinanceInterceptor(private val badSymbols: Set<String>) : Interceptor {
+        /** 记录实际发出的请求次数，用于断言「全合法批次零额外请求」 */
+        var requestCount = 0
+            private set
+
+        override fun intercept(chain: Interceptor.Chain): Response {
+            requestCount++
+            val url = chain.request().url.toString()
+            val symbolsParam = url.substringAfter("symbols=").substringBefore("&")
+            val decoded = URLDecoder.decode(symbolsParam, "UTF-8") // 形如 ["BTCUSDT","BADCOINUSDT"]
+            val list = decoded.removeSurrounding("[", "]")
+                .split(",")
+                .map { it.trim().removeSurrounding("\"", "\"") }
+                .filter { it.isNotEmpty() }
+
+            val builder = Response.Builder()
+                .request(chain.request())
+                .protocol(Protocol.HTTP_1_1)
+
+            return if (list.any { it in badSymbols }) {
+                // 模拟币安整批 400：一个非法符号拖垮整批
+                builder
+                    .code(400)
+                    .message("Bad Request")
+                    .body("""{"code":-1121,"msg":"Invalid symbol"}""".toResponseBody("application/json".toMediaType()))
+                    .build()
+            } else {
+                val priceArray = list.joinToString(",") { """{"symbol":"$it","price":"${priceOf(it)}"}""" }
+                builder
+                    .code(200)
+                    .message("OK")
+                    .body("[$priceArray]".toResponseBody("application/json".toMediaType()))
+                    .build()
+            }
+        }
+
+        /** 测试用价表：未知符号给 1.0，足够验证「好符号取到价、坏符号被丢弃」 */
+        private fun priceOf(symbol: String): Double = when (symbol) {
+            "BTCUSDT" -> 67000.0
+            "ETHUSDT" -> 3500.0
+            "BCHUSDT" -> 500.0
+            "BNBUSDT" -> 600.0
+            else -> 1.0
+        }
+    }
+
+    @Test
+    fun 整批含坏符号时隔离出好符号_坏符号被丢弃() = runBlocking {
+        val interceptor = FakeBinanceInterceptor(setOf("BADCOINUSDT"))
+        val client = OkHttpClient.Builder().addInterceptor(interceptor).build()
+
+        val prices = BinanceAccountAPI.getPrices(
+            listOf("BTCUSDT", "BADCOINUSDT", "ETHUSDT"),
+            client
+        )
+
+        // 好符号都取到了价，坏符号被对半重试隔离后丢弃
+        assertEquals(67000.0, prices["BTCUSDT"]!!, 1e-9)
+        assertEquals(3500.0, prices["ETHUSDT"]!!, 1e-9)
+        assertFalse("坏符号 BADCOINUSDT 不应出现在结果里", "BADCOINUSDT" in prices)
+    }
+
+    @Test
+    fun 全合法批次零额外请求_只发一次() = runBlocking {
+        val interceptor = FakeBinanceInterceptor(emptySet())
+        val client = OkHttpClient.Builder().addInterceptor(interceptor).build()
+
+        val pairs = (0 until 5).map { "GOOD${it}USDT" } // 5 个合法符号
+        val prices = BinanceAccountAPI.getPrices(pairs, client)
+
+        // 无坏符号：整批一次成功，不发任何重试请求
+        assertEquals(1, interceptor.requestCount)
+        assertEquals(5, prices.size)
+    }
+
+    @Test
+    fun 重复交易对被去重() = runBlocking {
+        val interceptor = FakeBinanceInterceptor(emptySet())
+        val client = OkHttpClient.Builder().addInterceptor(interceptor).build()
+
+        val prices = BinanceAccountAPI.getPrices(
+            listOf("BTCUSDT", "BTCUSDT", "ETHUSDT"),
+            client
+        )
+        assertEquals(2, prices.size)
+        assertEquals(67000.0, prices["BTCUSDT"]!!, 1e-9)
+    }
+
+    @Test
+    fun 空列表返回空Map() = runBlocking {
+        val interceptor = FakeBinanceInterceptor(emptySet())
+        val client = OkHttpClient.Builder().addInterceptor(interceptor).build()
+        assertTrue(BinanceAccountAPI.getPrices(emptyList(), client).isEmpty())
     }
 }

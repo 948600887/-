@@ -5,6 +5,7 @@ import com.example.stockdiary.utils.AppLogger
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
@@ -66,8 +67,11 @@ object BinanceAccountAPI {
      *
      * symbols 是 JSON 数组且要整体 URL 编码，一批太多 URL 会超出服务端/中间件
      * 的长度限制。真实账户的去重交易对通常远少于此数，分片主要是防御性的。
+     *
+     * 防御性调小到 50：一批里混入一个已下架/脏符号会让整批 400（见 [getPrices]
+     * 的「对半重试」隔离逻辑），批越小、被一个坏符号拖垮的好符号越少。
      */
-    private const val PRICE_BATCH = 80
+    private const val PRICE_BATCH = 50
 
     /**
      * recvWindow：请求有效期窗口（毫秒）。
@@ -174,6 +178,14 @@ object BinanceAccountAPI {
      * 绝不能因为一次公开行情请求挂了就让整个导入失败——余额才是关键数据。
      * 所以内部吞掉异常，尽量返回已取到的部分。
      *
+     * ## 整批 400 → 对半重试（隔离坏符号）
+     *
+     * 币安 `ticker/price?symbols=[...]` 是「**一个符号非法 → 整批 400**」语义。
+     * 真实账户 ~1800 个余额里常混有已下架/脏符号，一批里只要有一个就会让整批
+     * 80 个全废（见根因诊断）。这里用队列做「整批失败 → 对半重试」：把含坏符号
+     * 的批拆小，逐步隔离出单个非法符号（直接丢弃），好符号照常取到价。
+     * **正常无坏符号时每批只发一次，零额外请求。**
+     *
      * ## 日志口径
      *
      * 只记批次大小，不记 symbols 内容——那等于把用户的持仓构成写进可分享日志。
@@ -181,36 +193,81 @@ object BinanceAccountAPI {
      * @param pairs 交易对列表（如 BTCUSDT）
      * @return Map<交易对, 最新价>；失败/无数据时返回空 Map（调用方据此降级为不过滤）
      */
-    suspend fun getPrices(pairs: List<String>): Map<String, Double> = withContext(Dispatchers.IO) {
-        if (pairs.isEmpty()) return@withContext emptyMap()
-        val result = mutableMapOf<String, Double>()
-        try {
-            pairs.distinct().chunked(PRICE_BATCH).forEach { batch ->
-                val encoded = buildSymbolsParam(batch)
-                val url = "$PRICE_URL?symbols=$encoded"
+    suspend fun getPrices(pairs: List<String>): Map<String, Double> = getPrices(pairs, client)
 
-                AppLogger.d("GET /ticker/price (batch=${batch.size})", "BinanceAccountAPI")
-
-                val request = Request.Builder()
-                    .url(url)
-                    .addHeader("User-Agent", "Mozilla/5.0")
-                    .build()
-
-                val response = client.newCall(request).execute()
-                response.use { resp ->
-                    // 单批失败只跳过这一批，不影响已取到的其它批——降级而非整体失败
-                    if (!resp.isSuccessful) return@forEach
-                    val body = resp.body?.string() ?: return@forEach
-                    parsePrices(body).forEach { (symbol, price) -> result[symbol] = price }
+    /**
+     * internal 重载：允许单测注入假 client（自定义 [okhttp3.Interceptor] 模拟币安语义）。
+     *
+     * 公开 API 语义与 [getPrices] 完全一致——只是把用于发请求的那个 client 提出来，
+     * 便于测试时用走假 Interceptor 的 client 替换 [NetworkClient.binanceClient]。
+     */
+    internal suspend fun getPrices(pairs: List<String>, httpClient: OkHttpClient): Map<String, Double> =
+        withContext(Dispatchers.IO) {
+            if (pairs.isEmpty()) return@withContext emptyMap()
+            val result = mutableMapOf<String, Double>()
+            try {
+                // 队列驱动「整批 400 → 对半重试」：正常无坏符号时每批只发一次，零额外请求。
+                val queue = ArrayDeque<List<String>>().apply {
+                    addAll(pairs.distinct().chunked(PRICE_BATCH))
                 }
+                while (queue.isNotEmpty()) {
+                    val batch = queue.removeFirst()
+                    val fetched = fetchBatch(batch, httpClient)
+                    if (fetched != null) {
+                        result.putAll(fetched)
+                        continue
+                    }
+                    // 整批失败：币安语义「一个符号非法 → 整批 400」。对半拆开继续试，
+                    // 逐步隔离出坏符号。单条仍失败说明这条本身非法，直接丢弃（不写库、
+                    // 不影响其它批）。
+                    if (batch.size > 1) {
+                        val mid = batch.size / 2
+                        // 先压后半、再压前半，保持原批内顺序优先（仅影响排查，不影响结果）
+                        queue.addFirst(batch.takeLast(batch.size - mid))
+                        queue.addFirst(batch.take(mid))
+                    }
+                    // batch.size == 1 仍失败：单个非法符号，丢弃（上面 if 不进即此分支）
+                }
+                result
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // 只记异常类型，不记 message（可能含 URL）；返回已取到的部分（通常为空）
+                AppLogger.e("批量取价失败: ${e::class.simpleName}", e, "BinanceAccountAPI")
+                result
             }
-            result
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            // 只记异常类型，不记 message（可能含 URL）；返回已取到的部分（通常为空）
-            AppLogger.e("批量取价失败: ${e::class.simpleName}", e, "BinanceAccountAPI")
-            result
+        }
+
+    /**
+     * 对一批交易对发一次 `/ticker/price` 请求。
+     *
+     * 抽出独立挂起函数，便于 [getPrices] 在「对半重试」里反复调用，也便于测试
+     * 用注入的假 client 走真实请求路径。
+     *
+     * @return 成功（2xx）时返回 交易对→价 的 map；整批失败（非 2xx）或空响应返回
+     *         null，交给 [getPrices] 做「对半重试 / 丢弃单条」的隔离处理。
+     *         网络异常不在这里吞——上抛给 [getPrices] 的兜底
+     *         （CancellationException 原样重抛，其余记日志并返回已取到的部分）。
+     */
+    private suspend fun fetchBatch(batch: List<String>, httpClient: OkHttpClient): Map<String, Double>? {
+        val encoded = buildSymbolsParam(batch)
+        val url = "$PRICE_URL?symbols=$encoded"
+
+        // 只记批次大小，不记 symbols（避免把用户持仓构成写进可分享日志，与现有口径一致）
+        AppLogger.d("GET /ticker/price (batch=${batch.size})", "BinanceAccountAPI")
+
+        val request = Request.Builder()
+            .url(url)
+            .addHeader("User-Agent", "Mozilla/5.0")
+            .build()
+
+        val response = httpClient.newCall(request).execute()
+        response.use { resp ->
+            if (!resp.isSuccessful) return null
+            val body = resp.body?.string() ?: return null
+            val map = mutableMapOf<String, Double>()
+            parsePrices(body).forEach { (symbol, price) -> map[symbol] = price }
+            return map
         }
     }
 

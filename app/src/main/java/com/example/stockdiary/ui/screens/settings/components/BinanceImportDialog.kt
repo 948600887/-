@@ -60,7 +60,7 @@ import com.example.stockdiary.ui.components.import.ImportPreviewBottomBar
 import com.example.stockdiary.ui.components.import.ImportResultStep
 import com.example.stockdiary.ui.components.import.ImportWizardScaffold
 import com.example.stockdiary.ui.dialogs.sanitizeDecimalInput
-import com.example.stockdiary.ui.theme.ProfitGreen
+import com.example.stockdiary.ui.theme.AppTheme
 import com.example.stockdiary.ui.viewmodels.BinanceImportViewModel
 import com.example.stockdiary.utils.format
 
@@ -406,7 +406,7 @@ private fun BinancePreviewItemRow(
     priceOf: (String) -> Double?
 ) {
     val (statusText, statusColor) = when (item.status) {
-        BinanceImportService.ItemStatus.NEW -> "新增" to ProfitGreen
+        BinanceImportService.ItemStatus.NEW -> "新增" to AppTheme.colors.profitGreen
         BinanceImportService.ItemStatus.UPDATE ->
             "覆盖 ${item.existing?.balance?.format(2) ?: 0.0.format(2)} → ${item.quantity.format(2)}" to
                 MaterialTheme.colorScheme.tertiary

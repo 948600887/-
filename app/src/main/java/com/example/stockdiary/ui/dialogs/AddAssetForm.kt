@@ -45,6 +45,7 @@ import com.example.stockdiary.network.FundAPI
 import com.example.stockdiary.network.model.StockData
 import com.example.stockdiary.ui.components.DialogSectionHeader
 import com.example.stockdiary.ui.components.DialogTypeChip
+import com.example.stockdiary.ui.theme.AppTheme
 import com.example.stockdiary.utils.StockCodeManager
 import com.example.stockdiary.utils.StockCodeManager.CodeCategory
 
@@ -236,14 +237,14 @@ internal fun DetectedCategoryLabel(category: CodeCategory) {
         Box(
             modifier = Modifier
                 .clip(RoundedCornerShape(4.dp))
-                .background(category.color.copy(alpha = 0.15f))
+                .background((if (AppTheme.colors.isDark) category.colorDark else category.color).copy(alpha = 0.15f))
                 .padding(horizontal = 8.dp, vertical = 3.dp)
         ) {
             Text(
                 text = category.label,
                 style = MaterialTheme.typography.labelSmall,
                 fontWeight = FontWeight.Medium,
-                color = category.color
+                color = if (AppTheme.colors.isDark) category.colorDark else category.color
             )
         }
     }

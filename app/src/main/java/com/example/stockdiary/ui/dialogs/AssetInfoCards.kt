@@ -9,8 +9,7 @@ import androidx.compose.ui.unit.dp
 import com.example.stockdiary.network.FundAPI
 import com.example.stockdiary.network.model.StockData
 import com.example.stockdiary.ui.components.DialogInfoItem
-import com.example.stockdiary.ui.theme.LossRed
-import com.example.stockdiary.ui.theme.ProfitGreen
+import com.example.stockdiary.ui.theme.AppTheme
 import com.example.stockdiary.utils.StockCodeManager.CodeCategory
 import com.example.stockdiary.utils.format
 
@@ -45,7 +44,7 @@ internal fun FundInfoCard(info: FundAPI.FundInfo) {
                     DialogInfoItem(
                         label = "涨跌",
                         value = "${info.changePercent.format(2)}%",
-                        color = if (info.changePercent >= 0) LossRed else ProfitGreen
+                        color = if (info.changePercent >= 0) AppTheme.colors.lossRed else AppTheme.colors.profitGreen
                     )
                 }
             }
@@ -82,7 +81,7 @@ internal fun StockInfoCard(info: StockData, category: CodeCategory? = null) {
                 DialogInfoItem(
                     label = "涨跌",
                     value = "${changePercent.format(2)}%",
-                    color = if (changePercent >= 0) LossRed else ProfitGreen
+                    color = if (changePercent >= 0) AppTheme.colors.lossRed else AppTheme.colors.profitGreen
                 )
             }
         }

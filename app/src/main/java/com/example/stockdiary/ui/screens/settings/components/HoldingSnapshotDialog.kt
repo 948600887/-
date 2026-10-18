@@ -36,8 +36,7 @@ import com.example.stockdiary.ui.components.import.ImportPreviewBottomBar
 import com.example.stockdiary.ui.components.import.ImportRawTextDialog
 import com.example.stockdiary.ui.components.import.ImportResultStep
 import com.example.stockdiary.ui.components.import.ImportWizardScaffold
-import com.example.stockdiary.ui.theme.LossRed
-import com.example.stockdiary.ui.theme.ProfitGreen
+import com.example.stockdiary.ui.theme.AppTheme
 import com.example.stockdiary.ui.viewmodels.HoldingSnapshotViewModel
 import com.example.stockdiary.utils.ExchangeRateManager
 import com.example.stockdiary.utils.StockCodeManager
@@ -370,7 +369,7 @@ private fun SnapshotPreviewStep(
                         Icon(
                             Icons.Default.Info,
                             contentDescription = null,
-                            tint = LossRed,
+                            tint = AppTheme.colors.lossRed,
                             modifier = Modifier.size(18.dp)
                         )
                         Spacer(Modifier.width(8.dp))
@@ -425,13 +424,13 @@ private fun SnapshotItemRow(
     dataDate: String?
 ) {
     val (statusText, statusColor) = when (item.status) {
-        HoldingSnapshotService.ItemStatus.NEW -> "新增" to ProfitGreen
+        HoldingSnapshotService.ItemStatus.NEW -> "新增" to AppTheme.colors.profitGreen
         HoldingSnapshotService.ItemStatus.UPDATE ->
             "覆盖 ${item.existing?.balance?.format(2)} → ${item.quantity.format(2)}" to
                 MaterialTheme.colorScheme.tertiary
         HoldingSnapshotService.ItemStatus.UNCHANGED -> "未变" to MaterialTheme.colorScheme.onSurfaceVariant
         // 库里同代码有多条，不敢替用户决定改哪一条
-        HoldingSnapshotService.ItemStatus.CONFLICT -> "待你处理" to LossRed
+        HoldingSnapshotService.ItemStatus.CONFLICT -> "待你处理" to AppTheme.colors.lossRed
     }
 
     Card(
@@ -478,7 +477,7 @@ private fun SnapshotItemRow(
                                 "净值 ${formatNav(nav)}"
                             },
                             style = MaterialTheme.typography.bodySmall,
-                            color = if (stale) LossRed else MaterialTheme.colorScheme.onSurfaceVariant
+                            color = if (stale) AppTheme.colors.lossRed else MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                     // 非人民币必须显式标出来：项目的多币种还没有界面入口，
@@ -487,7 +486,7 @@ private fun SnapshotItemRow(
                         Text(
                             "结算币种 ${ExchangeRateManager.getDisplayName(code)}（$code）",
                             style = MaterialTheme.typography.bodySmall,
-                            color = LossRed
+                            color = AppTheme.colors.lossRed
                         )
                     }
                 }

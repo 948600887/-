@@ -38,8 +38,78 @@ import com.example.stockdiary.utils.format
 import com.example.stockdiary.utils.formatDateLabel
 import com.example.stockdiary.utils.formatYAxisLabel
 import com.example.stockdiary.utils.profitColor
+import com.example.stockdiary.utils.toLocalDate
 import com.example.stockdiary.utils.toProfitDisplay
-import kotlin.math.roundToInt
+import java.time.temporal.ChronoUnit
+import kotlin.math.abs
+
+/** 折线图绘图区内边距（px）。手势映射与绘制必须共用，否则点按位置和画出来的点对不上 */
+private const val TREND_PADDING_LEFT = 40f
+private const val TREND_PADDING_RIGHT = 20f
+private const val TREND_PADDING_TOP = 20f
+private const val TREND_PADDING_BOTTOM = 64f
+/** X 轴日期标签之间的最小间距（px），放不下就省略中间标签 */
+private const val TREND_LABEL_GAP = 8f
+
+/**
+ * 按时间戳等距排布折线点的 x 坐标。
+ *
+ * 为什么不能按下标等距：快照有缺口时（fillMissingSnapshots 只补今天一条，不逐日回填），
+ * 缺 20 天和连续 20 天按下标画出来一样宽，用户会误以为期间一直有数据。
+ * 这里把 [最早时刻, 最晚时刻] 线性映射到 [left, left + width]。
+ *
+ * 所有快照同一时刻（同一天多份）时时间跨度为 0，退化为按下标等距，避免除零。
+ */
+internal fun trendXPositions(timestamps: List<Long>, left: Float, width: Float): List<Float> {
+    if (timestamps.isEmpty()) return emptyList()
+    if (timestamps.size == 1) return listOf(left)
+    val minTs = timestamps.min()
+    val maxTs = timestamps.max()
+    val span = (maxTs - minTs).toFloat()
+    if (span <= 0f) {
+        return List(timestamps.size) { index -> left + width * index / (timestamps.size - 1) }
+    }
+    return timestamps.map { ts -> left + width * ((ts - minTs).toFloat() / span) }
+}
+
+/**
+ * 给定 x 坐标返回最近的数据点下标；[positions] 为空时返回 -1（调用方需判）。
+ * 两个点距离相等时取下标较小者（先到先得）。
+ */
+internal fun nearestPointIndex(x: Float, positions: List<Float>): Int {
+    if (positions.isEmpty()) return -1
+    var bestIndex = 0
+    var bestDistance = abs(x - positions[0])
+    for (index in 1 until positions.size) {
+        val distance = abs(x - positions[index])
+        if (distance < bestDistance) {
+            bestDistance = distance
+            bestIndex = index
+        }
+    }
+    return bestIndex
+}
+
+/**
+ * 时间跨度中点对应的快照下标，用于在首尾日期标签之间补一个中间参照。
+ * 快照数 < 3 时补了也和首尾重复，返回 null。中点用 min + (max-min)/2 防溢出。
+ */
+internal fun midTimestampIndex(timestamps: List<Long>): Int? {
+    if (timestamps.size < 3) return null
+    val minTs = timestamps.min()
+    val maxTs = timestamps.max()
+    val midTs = minTs + (maxTs - minTs) / 2
+    var bestIndex = 0
+    var bestDistance = Long.MAX_VALUE
+    timestamps.forEachIndexed { index, ts ->
+        val distance = abs(ts - midTs)
+        if (distance < bestDistance) {
+            bestDistance = distance
+            bestIndex = index
+        }
+    }
+    return bestIndex
+}
 
 @Composable
 fun AssetTrendChart(
@@ -65,13 +135,17 @@ fun AssetTrendChart(
                 .fillMaxSize()
                 .pointerInput(snapshots) {
                     detectTapGestures { tapOffset ->
-                        val w = size.width
-                        val padding = 40f
                         val snaps = currentSnapshots
                         if (snaps.size < 2) return@detectTapGestures
-                        val index = ((tapOffset.x - padding) / (w - 2 * padding) * (snaps.size - 1))
-                            .roundToInt().coerceIn(0, snaps.size - 1)
-                        selectedPointIndex = if (selectedPointIndex == index) null else index
+                        val positions = trendXPositions(
+                            timestamps = snaps.map { it.timestamp },
+                            left = TREND_PADDING_LEFT,
+                            width = size.width - TREND_PADDING_LEFT - TREND_PADDING_RIGHT
+                        )
+                        val index = nearestPointIndex(tapOffset.x, positions)
+                        if (index >= 0) {
+                            selectedPointIndex = if (selectedPointIndex == index) null else index
+                        }
                     }
                 }
                 .pointerInput(snapshots) {
@@ -79,25 +153,31 @@ fun AssetTrendChart(
                         onDragEnd = {},
                         onDragCancel = {},
                         onHorizontalDrag = { _, dragAmount ->
-                            val w = size.width
-                            val padding = 40f
                             val snaps = currentSnapshots
                             if (snaps.size < 2) return@detectHorizontalDragGestures
-                            val step = (w - 2 * padding) / (snaps.size - 1)
+                            val positions = trendXPositions(
+                                timestamps = snaps.map { it.timestamp },
+                                left = TREND_PADDING_LEFT,
+                                width = size.width - TREND_PADDING_LEFT - TREND_PADDING_RIGHT
+                            )
+                            // 拖动 = 沿时间轴平移手指位置，再吸附到最近的点；
+                            // 缺口处点更稀，拖同样的像素数会自然跨过更多数据
                             val currentIdx = selectedPointIndex ?: 0
-                            val newIdx = (currentIdx + (dragAmount / step).roundToInt())
-                                .coerceIn(0, snaps.size - 1)
-                            selectedPointIndex = newIdx
+                            val anchorX = positions.getOrNull(currentIdx) ?: positions.first()
+                            val newIdx = nearestPointIndex(anchorX + dragAmount, positions)
+                            if (newIdx >= 0) {
+                                selectedPointIndex = newIdx
+                            }
                         }
                     )
                 }
         ) {
             val width = size.width
             val height = size.height
-            val paddingTop = 20f
-            val paddingBottom = 64f
-            val paddingLeft = 40f
-            val paddingRight = 20f
+            val paddingTop = TREND_PADDING_TOP
+            val paddingBottom = TREND_PADDING_BOTTOM
+            val paddingLeft = TREND_PADDING_LEFT
+            val paddingRight = TREND_PADDING_RIGHT
 
             val cWidth = width - paddingLeft - paddingRight
             val cHeight = height - paddingTop - paddingBottom
@@ -106,8 +186,14 @@ fun AssetTrendChart(
             val maxValue = snapshots.maxOf { it.netAssets }
             val valueRange = if (maxValue - minValue > 0) maxValue - minValue else 1.0
 
+            // x 按时间戳排布：缺口在横向上被拉开，不再伪装成连续数据
+            val positions = trendXPositions(
+                timestamps = snapshots.map { it.timestamp },
+                left = paddingLeft,
+                width = cWidth
+            )
             val points = snapshots.mapIndexed { index, snapshot ->
-                val x = paddingLeft + cWidth * index / (snapshots.size - 1).coerceAtLeast(1)
+                val x = positions[index]
                 val y = (paddingTop + cHeight - ((snapshot.netAssets - minValue) / valueRange * cHeight)).toFloat()
                 Offset(x, y)
             }
@@ -127,7 +213,7 @@ fun AssetTrendChart(
                 )
             }
 
-            // X轴日期标签
+            // X轴日期标签：首尾保留，中间按时间中点补一个做参照；三者放不下就只画首尾
             if (snapshots.isNotEmpty()) {
                 val firstDate = snapshots.first().date.formatDateLabel()
                 val lastDate = snapshots.last().date.formatDateLabel()
@@ -136,9 +222,21 @@ fun AssetTrendChart(
                 }
                 val labelY = paddingTop + cHeight + 24f
                 drawContext.canvas.nativeCanvas.drawText(firstDate, paddingLeft, labelY, paint)
-                drawContext.canvas.nativeCanvas.drawText(
-                    lastDate, width - paddingRight - paint.measureText(lastDate), labelY, paint
-                )
+                val lastX = width - paddingRight - paint.measureText(lastDate)
+                drawContext.canvas.nativeCanvas.drawText(lastDate, lastX, labelY, paint)
+
+                val timestamps = snapshots.map { it.timestamp }
+                val midIndex = midTimestampIndex(timestamps)
+                if (midIndex != null && midIndex != 0 && midIndex != snapshots.lastIndex) {
+                    val midDate = snapshots[midIndex].date.formatDateLabel()
+                    val midWidth = paint.measureText(midDate)
+                    val midX = points[midIndex].x - midWidth / 2f
+                    val minMidX = paddingLeft + paint.measureText(firstDate) + TREND_LABEL_GAP
+                    val maxMidX = lastX - TREND_LABEL_GAP - midWidth
+                    if (midX in minMidX..maxMidX) {
+                        drawContext.canvas.nativeCanvas.drawText(midDate, midX, labelY, paint)
+                    }
+                }
             }
 
             // 渐变填充区域
@@ -184,6 +282,16 @@ fun AssetTrendChart(
             // 资产增值口径：与上一期快照比净资产的增量，不再展示基于成本的盈亏
             val previous = if (idx > 0) snapshots[idx - 1] else null
             val delta = previous?.let { snapshot.netAssets - it.netAssets }
+            // 时间跨度：中间隔了 N 天，这个「增减额」就是 N 天的变化，必须说明白，
+            // 否则用户会把跨缺口增量当成单日增量
+            val spanText = previous?.let { prevSnapshot ->
+                val prevDate = prevSnapshot.date.toLocalDate()
+                val currDate = snapshot.date.toLocalDate()
+                if (prevDate != null && currDate != null) {
+                    val days = ChronoUnit.DAYS.between(prevDate, currDate).toInt()
+                    if (days > 1) "较 ${prevSnapshot.date} · 共 $days 天" else "较 ${prevSnapshot.date}"
+                } else null
+            }
             Card(
                 modifier = Modifier.fillMaxWidth().align(Alignment.BottomCenter).padding(horizontal = 16.dp),
                 colors = CardDefaults.cardColors(containerColor = colors.surfaceContainerLow.copy(alpha = 0.95f)),
@@ -196,6 +304,13 @@ fun AssetTrendChart(
                 ) {
                     Column {
                         Text(snapshot.date, fontSize = 13.sp, fontWeight = FontWeight.Medium, color = colors.onSurface)
+                        if (spanText != null) {
+                            Text(
+                                spanText,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = colors.onSurfaceVariant
+                            )
+                        }
                         Text(
                             "总资产: ¥${snapshot.totalAssets.format(2)}",
                             fontSize = 11.sp, color = colors.onSurfaceVariant

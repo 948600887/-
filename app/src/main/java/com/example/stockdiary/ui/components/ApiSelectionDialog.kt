@@ -26,7 +26,9 @@ data class PriceApiOption(
 @Composable
 fun ApiSelectionDialog(
     onDismiss: () -> Unit,
-    onConfirm: (priceApi: String) -> Unit
+    onConfirm: (priceApi: String) -> Unit,
+    /** 次级入口：查看各行情接口的可用性与延迟（原设置页「数据源状态」项，入口收敛到这里） */
+    onViewStatus: () -> Unit = {}
 ) {
     val context = LocalContext.current
     
@@ -81,6 +83,17 @@ fun ApiSelectionDialog(
                             fontSize = 12.sp,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+                // 原「数据源状态」设置项的容身之处：选数据源与查接口健康是同一件事的两面
+                Box(
+                    modifier = Modifier.fillMaxWidth(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    TextButton(onClick = onViewStatus) {
+                        Text("查看各数据源状态")
                     }
                 }
             }

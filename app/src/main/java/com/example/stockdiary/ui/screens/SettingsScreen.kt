@@ -2,11 +2,8 @@ package com.example.stockdiary.ui.screens
 
 import com.example.stockdiary.data.price.ApiManager
 import android.Manifest
-import android.content.Intent
 import android.content.pm.PackageManager
-import android.net.Uri
 import android.os.Build
-import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.fillMaxSize
@@ -14,26 +11,18 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.AccountBalance
-import androidx.compose.material.icons.filled.AccountBalanceWallet
 import androidx.compose.material.icons.filled.BugReport
-import androidx.compose.material.icons.filled.CurrencyBitcoin
 import androidx.compose.material.icons.filled.CurrencyExchange
 import androidx.compose.material.icons.filled.SyncAlt
-import androidx.compose.material.icons.filled.Android
-import androidx.compose.material.icons.filled.CloudSync
 import androidx.compose.material.icons.filled.Dashboard
 import androidx.compose.material.icons.filled.DeleteForever
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.MoneyOff
 import androidx.compose.material.icons.filled.Palette
-import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Schedule
-import androidx.compose.material.icons.filled.Savings
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
@@ -66,6 +55,8 @@ import com.example.stockdiary.ui.screens.settings.components.DashboardConfigShee
 import com.example.stockdiary.ui.screens.settings.components.DataSourceStatusDialog
 import com.example.stockdiary.ui.screens.settings.components.ExportDataDialog
 import com.example.stockdiary.ui.screens.settings.components.ImportBrokerageDialog
+import com.example.stockdiary.ui.screens.settings.components.ImportSource
+import com.example.stockdiary.ui.screens.settings.components.ImportSourceDialog
 import com.example.stockdiary.ui.screens.settings.components.LogViewerDialog
 import com.example.stockdiary.ui.screens.settings.components.HoldingSnapshotDialog
 import com.example.stockdiary.ui.screens.settings.components.ReminderTimePickerDialog
@@ -78,8 +69,6 @@ import com.example.stockdiary.ui.viewmodels.HoldingSnapshotViewModel
 import com.example.stockdiary.ui.viewmodels.SettingsViewModel
 import com.example.stockdiary.utils.ExchangeRateManager
 import com.example.stockdiary.utils.format
-import com.example.stockdiary.utils.sumTotalValueCny
-import com.example.stockdiary.utils.totalValueCny
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -121,6 +110,8 @@ fun SettingsScreen(
     var showDataSourceDialog by remember { mutableStateOf(false) }
     var showExportDialog by remember { mutableStateOf(false) }
     var showImportDialog by remember { mutableStateOf(false) }
+    /** 「导入持仓与资产」合并入口：4 种导入方式收敛到一个列表对话框 */
+    var showImportSourceDialog by remember { mutableStateOf(false) }
     var showHoldingSnapshotDialog by remember { mutableStateOf(false) }
     var showFundSnapshotDialog by remember { mutableStateOf(false) }
     var showBinanceImportDialog by remember { mutableStateOf(false) }
@@ -146,18 +137,8 @@ fun SettingsScreen(
 
     val assets = uiState.assets
     val snapshots = uiState.snapshots
+    // 资产数量仍用于「清除所有数据」确认框的提示文案
     val assetCount = assets.size
-    // 一次遍历同时累加资产与负债：原来每次重组都要 filter 两遍（列表上百条时是白花的开销）
-    val (totalAssets, totalLiabilities) = remember(assets) {
-        var assetSum = 0.0
-        var liabilitySum = 0.0
-        // 折算成人民币再累加：多币种资产的原币金额直接相加没有意义
-        assets.forEach { asset ->
-            if (asset.type.isLiability) liabilitySum += asset.totalValueCny
-            else assetSum += asset.totalValueCny
-        }
-        assetSum to liabilitySum
-    }
 
     // 每次进入「我的」页都从磁盘重读同步/提醒快照：
     // 后台任务或系统设置改过状态后，页面要能反映真实值
@@ -200,9 +181,6 @@ fun SettingsScreen(
     }
 
     val settingsSections = remember(
-        assetCount,
-        totalAssets,
-        totalLiabilities,
         currentTheme,
         autoPriceSyncEnabled,
         lastPriceSyncTime,
@@ -234,49 +212,27 @@ fun SettingsScreen(
             )),
             SettingsSectionData("数据", listOf(
                 SettingsItemData(
+                    icon = Icons.Default.UploadFile,
+                    title = "导入持仓与资产",
+                    subtitle = "交割单 / 持仓截图 / 场外基金 / 币安",
+                    onClick = { showImportSourceDialog = true }
+                ),
+                SettingsItemData(
                     icon = Icons.Default.Download,
                     title = "导出数据",
                     subtitle = "导出为 CSV 或文本文件",
                     onClick = { showExportDialog = true }
                 ),
                 SettingsItemData(
-                    icon = Icons.Default.UploadFile,
-                    title = "导入交割单",
-                    subtitle = "从券商 CSV 或对账单截图批量导入交易",
-                    onClick = { showImportDialog = true }
-                ),
-                SettingsItemData(
-                    icon = Icons.Default.AccountBalanceWallet,
-                    title = "导入持仓截图",
-                    subtitle = "中国结算「一码通持有查询」，场内股票/ETF/LOF/REITs",
-                    onClick = { showHoldingSnapshotDialog = true }
-                ),
-                SettingsItemData(
-                    icon = Icons.Default.Savings,
-                    title = "导入场外基金",
-                    subtitle = "基金E账户导出的持有明细，场外公募基金",
-                    onClick = { showFundSnapshotDialog = true }
-                ),
-                SettingsItemData(
-                    icon = Icons.Default.CurrencyBitcoin,
-                    title = "同步币安资产",
-                    subtitle = "只读拉取币安现货持仓，按代码合并到加密资产",
-                    onClick = { showBinanceImportDialog = true }
-                ),
-                SettingsItemData(
-                    icon = Icons.Default.CloudSync,
-                    title = "数据源状态",
-                    subtitle = "检查网络接口可用性",
-                    onClick = {
-                        viewModel.checkDataSourceHealth()
-                        showDataSourceDialog = true
-                    }
-                ),
-                SettingsItemData(
                     icon = Icons.Default.SyncAlt,
-                    title = "股价数据源",
+                    title = "行情数据源",
                     subtitle = "当前: $currentPriceApi",
-                    onClick = { showApiSelectionDialog = true }
+                    onClick = {
+                        // 先触发一次健康检查，再打开选择对话框：
+                        // 对话框内的「查看各数据源状态」直接复用这次的检测结果
+                        viewModel.checkDataSourceHealth()
+                        showApiSelectionDialog = true
+                    }
                 ),
                 SettingsItemData(
                     icon = Icons.Default.Sync,
@@ -323,28 +279,6 @@ fun SettingsScreen(
                     },
                     onClick = { },
                     // 纯展示行：不置灰会被渲染成可点击，误导用户
-                    enabled = false
-                ),
-                SettingsItemData(
-                    icon = Icons.Default.Storage,
-                    title = "资产数量",
-                    subtitle = "$assetCount 个资产",
-                    onClick = { },
-                    // 纯展示行：不置灰会被渲染成可点击，误导用户
-                    enabled = false
-                ),
-                SettingsItemData(
-                    icon = Icons.Default.AccountBalance,
-                    title = "总资产",
-                    subtitle = "¥${totalAssets.format(2)}",
-                    onClick = { },
-                    enabled = false
-                ),
-                SettingsItemData(
-                    icon = Icons.Default.MoneyOff,
-                    title = "总负债",
-                    subtitle = "¥${totalLiabilities.format(2)}",
-                    onClick = { },
                     enabled = false
                 ),
                 SettingsItemData(
@@ -400,17 +334,6 @@ fun SettingsScreen(
                     title = "关于",
                     subtitle = "金库 v$versionName",
                     onClick = { showAboutDialog = true }
-                ),
-                SettingsItemData(
-                    icon = Icons.Default.Android,
-                    title = "系统设置",
-                    subtitle = "打开系统设置",
-                    onClick = {
-                        val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
-                            data = Uri.fromParts("package", context.packageName, null)
-                        }
-                        context.startActivity(intent)
-                    }
                 )
             ))
         )
@@ -459,6 +382,12 @@ fun SettingsScreen(
             onConfirm = { selectedApi ->
                 currentPriceApi = selectedApi
                 showApiSelectionDialog = false
+            },
+            onViewStatus = {
+                // 二级入口：先确保拿到最新检测结果，再弹出数据源状态对话框。
+                // 两个对话框叠放，关闭状态对话框后仍回到数据源选择
+                viewModel.checkDataSourceHealth()
+                showDataSourceDialog = true
             }
         )
     }
@@ -518,6 +447,22 @@ fun SettingsScreen(
         ImportBrokerageDialog(
             container = container,
             onDismiss = { showImportDialog = false }
+        )
+    }
+
+    if (showImportSourceDialog) {
+        // 「导入持仓与资产」合并入口：本对话框已在回调前自行 dismiss，
+        // 这里只负责把选择结果分发给对应的既有导入对话框
+        ImportSourceDialog(
+            onDismiss = { showImportSourceDialog = false },
+            onSelect = { source ->
+                when (source) {
+                    ImportSource.BROKERAGE -> showImportDialog = true
+                    ImportSource.STOCK_SNAPSHOT -> showHoldingSnapshotDialog = true
+                    ImportSource.FUND_EXPORT -> showFundSnapshotDialog = true
+                    ImportSource.BINANCE -> showBinanceImportDialog = true
+                }
+            }
         )
     }
 

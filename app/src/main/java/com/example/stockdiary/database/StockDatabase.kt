@@ -16,9 +16,10 @@ import com.example.stockdiary.utils.AppLogger
         AssetSnapshotDetail::class,
         Dividend::class,
         Transaction::class,
-        StockBasic::class
+        StockBasic::class,
+        FundNavCache::class
     ],
-    version = 15,
+    version = 16,
     exportSchema = false
 )
 @TypeConverters(Converters::class)
@@ -28,6 +29,7 @@ abstract class StockDatabase : RoomDatabase() {
     abstract fun dividendDao(): DividendDao
     abstract fun transactionDao(): TransactionDao
     abstract fun stockBasicDao(): StockBasicDao
+    abstract fun fundNavCacheDao(): FundNavCacheDao
     
     companion object {
         @Volatile
@@ -191,6 +193,41 @@ abstract class StockDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * 新增场外基金净值持久化缓存表 `fund_nav_cache`。
+         *
+         * ## 为什么必须手写这条迁移
+         *
+         * 本库**没有** `fallbackToDestructiveMigration`：Room 打开数据库时若发现
+         * 「版本升了但没有对应迁移」会直接抛 `IllegalStateException`，表现为老用户
+         * 升级后一打开 App 就崩，且没法自愈。所以只要动了 `version`，这条迁移
+         * 就必须存在，而且要和 Room 按实体生成的建表语句**逐列一致**
+         * （Room 会校验列名 / 类型 / NOT NULL / 索引名，不一致同样崩）。
+         *
+         * 建表语句取自 Room 自己导出的 16.json（exportSchema 打开后由 kapt 生成），
+         * 不是手敲的：手敲容易漏 `NOT NULL` 或把索引名写错。
+         */
+        private val MIGRATION_15_16 = object : Migration(15, 16) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `fund_nav_cache` (" +
+                        "`code` TEXT NOT NULL, " +
+                        "`name` TEXT NOT NULL, " +
+                        "`nav` REAL NOT NULL, " +
+                        "`changePercent` REAL, " +
+                        "`navDate` TEXT NOT NULL, " +
+                        "`millionCopiesIncome` REAL, " +
+                        "`fetchedAt` INTEGER NOT NULL, " +
+                        "PRIMARY KEY(`code`))"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_fund_nav_cache_navDate` " +
+                        "ON `fund_nav_cache` (`navDate`)"
+                )
+                AppLogger.d("基金净值持久化缓存表迁移完成", "StockDatabase")
+            }
+        }
+
         @JvmStatic
         fun getInstance(context: Context): StockDatabase {
             return INSTANCE ?: synchronized(this) {
@@ -213,7 +250,8 @@ abstract class StockDatabase : RoomDatabase() {
                         MIGRATION_11_12,
                         MIGRATION_12_13,
                         MIGRATION_13_14,
-                        MIGRATION_14_15
+                        MIGRATION_14_15,
+                        MIGRATION_15_16
                     )
                     .build()
                     .also { INSTANCE = it }

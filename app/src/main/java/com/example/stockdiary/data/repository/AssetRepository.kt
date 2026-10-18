@@ -117,6 +117,9 @@ class AssetRepository private constructor(
             snapshotDao.deleteAllSnapshots()
             db.dividendDao().deleteAll()
             db.transactionDao().deleteAllTransactions()
+            // 净值持久化缓存也算「所有数据」：留着它，清完数据后下一次刷新
+            // 会直接复用库里的旧净值 —— 用户以为清干净了，数字却原样回来。
+            db.fundNavCacheDao().clear()
         }
     }
     

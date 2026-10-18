@@ -4,6 +4,7 @@ import android.app.Application
 import com.example.stockdiary.data.sync.PriceSyncScheduler
 import com.example.stockdiary.data.sync.SnapshotScheduler
 import com.example.stockdiary.di.AppContainer
+import com.example.stockdiary.network.FundAPI
 import com.example.stockdiary.network.UnifiedPriceService
 import com.example.stockdiary.utils.AppLogger
 import com.example.stockdiary.utils.CrashRecoveryManager
@@ -37,6 +38,10 @@ class StockDiaryApplication : Application() {
         // 行情门面初始化：STOCK/场内基金分支委托 data/price/StockDataManager
         // （多源容错策略），必须在第一次取价之前注入，否则该分支返回失败
         UnifiedPriceService.init(this)
+        // 场外基金净值持久化缓存：把净值（含公布日）落进 Room，进程被系统回收后
+        // 下次刷新直接读库复用，不再重下那份 0.5~2MB 的历史净值文件。
+        // 未注入时 FundAPI 自动降级为纯内存缓存，不会 NPE。
+        FundAPI.init(this)
         // 崩溃处理必须挂在 Application 级：只在 MainActivity 初始化时，启动早期崩溃无人记录。
         // GlobalExceptionHandler.initialize 有 isInitialized 幂等保护，MainActivity 重复调用无副作用。
         // 崩溃详情（含完整堆栈）由 handler 内部直接 recordCrash，这里不需要再传 onCrash。

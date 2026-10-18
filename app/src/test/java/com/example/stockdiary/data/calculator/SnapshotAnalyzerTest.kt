@@ -3,6 +3,7 @@ package com.example.stockdiary.data.calculator
 import com.example.stockdiary.database.AssetSnapshot
 import com.example.stockdiary.utils.toTimestamp
 import java.time.LocalDate
+import java.time.YearMonth
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -196,5 +197,87 @@ class SnapshotAnalyzerTest {
                 listOf(snapshot("bad", 1.0), snapshot("worse", 2.0))
             )
         )
+    }
+
+    // ===== 月度收益 =====
+
+    @Test
+    fun `月度收益连续月monthsSpanned为1且取每月最后一条`() {
+        val snapshots = listOf(
+            snapshot("2024-01-15", 100.0),
+            snapshot("2024-01-31", 105.0),  // 1 月最后一条
+            snapshot("2024-02-15", 110.0),
+            snapshot("2024-02-29", 120.0)   // 2 月最后一条
+        )
+        val returns = SnapshotAnalyzer.calculateMonthlyReturns(snapshots)
+
+        assertEquals(1, returns.size)
+        val feb = returns[0]
+        assertEquals(YearMonth.of(2024, 2), feb.month)
+        // 120 - 105：每月最后一条算环比，不是拿月初
+        assertEquals(15.0, feb.returnAmount, 1e-6)
+        assertEquals(1, feb.monthsSpanned)
+    }
+
+    @Test
+    fun `月度收益缺月时monthsSpanned为2`() {
+        // 3 月无快照：4 月那根 = 4 月底 - 2 月底，两个月的变化被标成「4月」
+        val snapshots = listOf(
+            snapshot("2024-01-31", 100.0),
+            snapshot("2024-02-29", 110.0),
+            snapshot("2024-04-30", 121.0)
+        )
+        val returns = SnapshotAnalyzer.calculateMonthlyReturns(snapshots)
+
+        assertEquals(2, returns.size)
+        val feb = returns[0]
+        assertEquals(YearMonth.of(2024, 2), feb.month)
+        assertEquals(10.0, feb.returnAmount, 1e-6)
+        assertEquals(1, feb.monthsSpanned)
+
+        val apr = returns[1]
+        assertEquals(YearMonth.of(2024, 4), apr.month)
+        assertEquals(11.0, apr.returnAmount, 1e-6)
+        assertEquals(10.0, apr.returnRate, 1e-6)  // 11 / 110
+        assertEquals(2, apr.monthsSpanned)
+    }
+
+    @Test
+    fun `月度收益跨年缺口按整月差标注`() {
+        val snapshots = listOf(
+            snapshot("2023-11-30", 100.0),
+            snapshot("2024-02-29", 130.0)
+        )
+        val returns = SnapshotAnalyzer.calculateMonthlyReturns(snapshots)
+
+        assertEquals(1, returns.size)
+        assertEquals(YearMonth.of(2024, 2), returns[0].month)
+        // 2023-11 → 2024-02 跨 3 个月
+        assertEquals(3, returns[0].monthsSpanned)
+        assertEquals(30.0, returns[0].returnAmount, 1e-6)
+    }
+
+    @Test
+    fun `月度收益跳过非法日期快照`() {
+        val snapshots = listOf(
+            snapshot("bad-date", 100.0),
+            snapshot("2024-01-31", 100.0),
+            snapshot("2024-02-29", 110.0)
+        )
+        val returns = SnapshotAnalyzer.calculateMonthlyReturns(snapshots)
+
+        assertEquals(1, returns.size)
+        assertEquals(YearMonth.of(2024, 2), returns[0].month)
+        assertEquals(10.0, returns[0].returnAmount, 1e-6)
+    }
+
+    @Test
+    fun `同一个月内多份快照只产生一根柱子`() {
+        val snapshots = listOf(
+            snapshot("2024-01-10", 100.0),
+            snapshot("2024-01-20", 105.0),
+            snapshot("2024-01-31", 108.0)
+        )
+        assertTrue(SnapshotAnalyzer.calculateMonthlyReturns(snapshots).isEmpty())
     }
 }

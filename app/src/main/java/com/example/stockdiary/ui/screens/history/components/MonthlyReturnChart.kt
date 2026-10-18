@@ -7,29 +7,23 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.stockdiary.data.calculator.MonthlyReturn
 import com.example.stockdiary.ui.theme.AppTheme
 import com.example.stockdiary.utils.format
-import com.example.stockdiary.utils.profitColor
 import com.example.stockdiary.utils.toProfitDisplay
 import kotlin.math.abs
 
@@ -117,33 +111,26 @@ fun MonthlyReturnChart(
             }
         }
 
-        selectedIndex?.let { index ->
-            if (index in monthlyReturns.indices) {
-                val mr = monthlyReturns[index]
-                Card(
-                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
-                    shape = RoundedCornerShape(10.dp),
-                    colors = CardDefaults.cardColors(containerColor = colors.surfaceContainerLow)
-                ) {
-                    Column(
-                        modifier = Modifier.fillMaxWidth().padding(12.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        Text(
-                            text = "${mr.month.year}年${mr.month.monthValue}月",
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.Medium,
-                            color = colors.onSurface
-                        )
-                        Text(
-                            text = "增值: ${mr.returnAmount.toProfitDisplay("¥")}  (${if (mr.returnRate >= 0) "+" else ""}${mr.returnRate.format(2)}%)",
-                            fontSize = 15.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = mr.returnAmount.profitColor()
-                        )
-                    }
-                }
+        // 选中详情 / 未选中提示：跨月缺快照时 monthsSpanned > 1，必须说出来，
+        // 否则用户会把两个月的变化当成一个月的收益（红涨绿跌的柱子语义不变）
+        val selected = selectedIndex
+        val detailText = if (selected != null && selected in monthlyReturns.indices) {
+            val mr = monthlyReturns[selected]
+            val sign = if (mr.returnRate >= 0) "+" else ""
+            buildString {
+                append("${mr.month.year}年${mr.month.monthValue}月")
+                append(" · 收益率 $sign${mr.returnRate.format(2)}%")
+                append(" · 金额 ${mr.returnAmount.toProfitDisplay("¥")}")
+                if (mr.monthsSpanned > 1) append("（含 ${mr.monthsSpanned} 个月）")
             }
+        } else {
+            "点按柱子看详情"
         }
+        Text(
+            text = detailText,
+            fontSize = 11.sp,
+            color = colors.onSurfaceVariant,
+            modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
+        )
     }
 }

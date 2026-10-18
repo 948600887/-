@@ -357,6 +357,19 @@ object AssetSyncManager {
         var lastError: Throwable? = null
 
         try {
+            // 退市标的（400xxx/420xxx 老三板）没有任何行情源可取：UI 已显示「退市」，
+            // 同步侧再为它轮询三源只是白烧请求额度，还会把数据源失败计数推高
+            // （累计到阈值会「跳过数据源（失败次数过多）」禁用 30 分钟，连累正常标的）。
+            // isDelisted 走 extractDigits，sh/sz/bj/fund_ 等前缀都能吃；
+            // 而 400/420 在 classifyCode 里归 STOCK，基金代码段（ETF 510/159、
+            // LOF 16/18、场外 01/02、场内 5/1）取不到这两个前缀，带上 FUND 也不会误杀。
+            if ((asset.type == AssetType.STOCK || asset.type == AssetType.FUND) &&
+                StockCodeManager.isDelisted(symbol)
+            ) {
+                AppLogger.i("跳过退市标的: ${asset.name}（$symbol，无行情源）", TAG)
+                return
+            }
+
             when (asset.type) {
                 AssetType.FUND -> {
                     val fundCode = symbol?.removePrefix("fund_")

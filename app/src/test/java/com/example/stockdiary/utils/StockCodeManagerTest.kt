@@ -333,6 +333,29 @@ class StockCodeManagerTest {
         assertFalse(StockCodeManager.isDelisted(""))
     }
 
+    @Test
+    fun `isDelisted returns true for 老三板 under sh prefix`() {
+        // 老三板退市代码也可能以 sh/sz 前缀形态入库，判定不能只认 bj
+        assertTrue(StockCodeManager.isDelisted("sh400123"))
+    }
+
+    @Test
+    fun `isDelisted returns false for 场内基金 ETF 与 LOF`() {
+        // 同步侧对 STOCK+FUND 做退市短路，前提是基金代码段不可能落在 400/420：
+        // ETF 510/159、LOF 16/18、场内 5/1 开头，均无 400/420。这里钉住不误杀。
+        assertFalse(StockCodeManager.isDelisted("sz164701"))
+        assertFalse(StockCodeManager.isDelisted("sh510050"))
+        assertFalse(StockCodeManager.isDelisted("sz161725"))
+        assertFalse(StockCodeManager.isDelisted("sz159919"))
+    }
+
+    @Test
+    fun `isDelisted returns false for 场外基金 fund_ prefix`() {
+        // fund_ 前缀是场外份额标记，extractDigits 后仍是 6 位，必须确保不误判
+        assertFalse(StockCodeManager.isDelisted("fund_012350"))
+        assertFalse(StockCodeManager.isDelisted("fund_000001"))
+    }
+
     // ========== Edge Cases ==========
 
     @Test

@@ -218,7 +218,7 @@ fun DashboardScreen(
                     AssetGrowthCard(growth = growth)
                 }
 
-                // 收息进度：今年已收 / 全年预计（收入这一半的主角）
+                // 收息进度：今年已收 / 今年预计（收入这一半的主角，同为自然年口径）
                 item {
                     DividendProgressCard(progress = dividendProgress)
                 }

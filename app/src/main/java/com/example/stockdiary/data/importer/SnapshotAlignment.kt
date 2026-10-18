@@ -142,7 +142,11 @@ object SnapshotAlignment {
         val quantity: Double,
         val status: ItemStatus,
         val existing: Asset?,
-        /** 净值（基金E账户特有）。币安侧恒为 null */
+        /**
+         * 净值/参考价。基金E账户是权威净值；币安侧是拉取阶段批量取到的公开价
+         * （导入即预填，见 [BinanceImportService.commit] 的 prices 参数）——查不到价时
+         * 仍为 null，落库后 currentPrice 留空、等行情同步补，绝不编造。
+         */
         val nav: Double?,
         /** 结算币种；null 表示多来源不一致，落库时回落 [CommitPolicy.defaultCurrency] */
         val currency: String?

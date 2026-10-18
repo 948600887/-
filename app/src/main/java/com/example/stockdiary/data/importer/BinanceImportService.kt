@@ -143,10 +143,19 @@ class BinanceImportService(
      *
      * @param account 用户输入的账户名，只用于**新建**的资产；
      *                已存在的资产保持它原来的账户，不跟着改（与持仓快照一致）。
+     * @param prices  拉取阶段批量取到的公开价（键为 [priceKeyFor] 的交易对，
+     *                见 BinanceImportViewModel.fetch）。网络可达时，用户确认导入的
+     *                那一刻就把价格预填进 currentPrice——行情同步还没跑、甚至暂时
+     *                连不上（币安熔断 / 离线）时，总资产也已经是对的。查不到价的
+     *                标的静默留空等行情同步补，绝不编造价格、也绝不让导入失败。
      */
-    suspend fun commit(preview: Preview, account: String): CommitResult {
+    suspend fun commit(
+        preview: Preview,
+        account: String,
+        prices: Map<String, Double> = emptyMap()
+    ): CommitResult {
         val result = SnapshotAlignment.commit(
-            rows = preview.items.map { it.toCommitRow() },
+            rows = preview.items.map { it.toCommitRow(prices) },
             writer = writer,
             account = account,
             policy = commitPolicy
@@ -164,16 +173,23 @@ class BinanceImportService(
         )
     }
 
-    /** 预览项 → 内核行视图。status 映射回内核枚举，其余字段原样带 */
-    private fun PreviewItem.toCommitRow(): SnapshotAlignment.CommitRow =
+    /**
+     * 预览项 → 内核行视图。status 映射回内核枚举，其余字段原样带。
+     *
+     * @param prices 拉取阶段的公开价，经 nav 落进 currentPrice（导入即预填参考价，
+     *               见 [referencePriceForImport]）。键用 [priceKeyFor] 现算——与拉取
+     *               阶段生成 getPrices 请求列表是同一个函数，两边永不错位。
+     */
+    private fun PreviewItem.toCommitRow(prices: Map<String, Double>): SnapshotAlignment.CommitRow =
         SnapshotAlignment.CommitRow(
             symbol = symbol,
             name = name,
             quantity = quantity,
             status = status.toKernelStatus(),
             existing = existing,
-            // 币安接口此刻没给价格：nav 恒为 null，currentPrice 留空让行情同步按交易对填真实价
-            nav = null,
+            // 导入即预填：查得到价就写 currentPrice，总资产当场就是对的；
+            // 查不到（含 LD 剥不出底层）留空，等行情同步按交易对补真实价
+            nav = referencePriceForImport(name, prices),
             // 币安现货价以 USDT 计价（≈美元）：币种恒走策略里的 USD，不按行取
             currency = null
         )
@@ -254,11 +270,42 @@ internal fun baseAssetToSymbol(asset: String): String {
  * 与 [estimatedValueCny] 内部的取价键保持一致：ViewModel 据此生成 getPrices
  * 的请求列表，estimatedValueCny 据此查 priceOf，两边永不错位。
  *
- * 实际映射委托给 [BinanceAPI.cryptoTradingPairFor]——本函数的入参一定是账户接口
- * 给的基础资产名（BTC/USDT/ADA…），而那个函数额外还认「已是交易对」的形态，
+ * 非 LD 输入（账户接口给的基础资产名 BTC/USDT/ADA…）委托给
+ * [BinanceAPI.cryptoTradingPairFor]——那个函数额外还认「已是交易对」的形态，
  * 覆盖面更宽，行为在本函数的输入域上完全一致（现有单测即为此背书）。
+ *
+ * ## 理财/锁仓（LD 前缀）走底层交易对
+ *
+ * `LDBNB` 这类持仓壳没有现货交易对，但它与底层资产 1:1 可赎回，估值用底层币
+ * 市价（见 [BinanceAPI.earnUnderlyingPair]）。不转的话会去向币安请求并不存在的
+ * `LDBNB` 交易对（400），预览的市值估算与导入预填参考价都拿不到价。
  */
-internal fun priceKeyFor(asset: String): String? = BinanceAPI.cryptoTradingPairFor(asset)
+internal fun priceKeyFor(asset: String): String? {
+    if (BinanceAPI.isEarnProduct(asset)) return BinanceAPI.earnUnderlyingPair(asset)
+    return BinanceAPI.cryptoTradingPairFor(asset)
+}
+
+/**
+ * 导入即预填的参考价：查得到价就返回，查不到返回 null（落库后 currentPrice 留空，
+ * 等行情同步补——**绝不编造价格**，也绝不让导入因为查不到价而失败）。
+ *
+ * 键与拉取阶段一致（[priceKeyFor]，LD 走底层交易对）：ViewModel 用同一个函数
+ * 生成 getPrices 的请求列表，这里用同一个函数查表，两边永不错位。
+ *
+ * 稳定币没有交易对可查，按 1.0 美元计——这不是"抓到的价"，是定义价，与
+ * [com.example.stockdiary.network.UnifiedPriceService] 取价时对稳定币的口径一致
+ * （USDT 持仓不预填的话，导入后、行情同步前它的市值是 0）。
+ *
+ * @param asset  账户接口给的基础资产名（BTC / LDBNB / USDT…），即 PreviewItem.name
+ * @param prices 拉取阶段批量取到的公开价（Map<交易对, 最新价>）
+ */
+internal fun referencePriceForImport(asset: String, prices: Map<String, Double>): Double? {
+    val key = priceKeyFor(asset)
+    if (key == null) {
+        return if (isStablecoin(asset)) 1.0 else null
+    }
+    return prices[key]?.takeIf { it.isFinite() && it > 0.0 }
+}
 
 /** 是否是 USD 稳定币（无需查价，按 1 美元计） */
 internal fun isStablecoin(asset: String): Boolean =

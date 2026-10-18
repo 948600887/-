@@ -6,6 +6,7 @@ import com.example.stockdiary.data.importer.estimatedValueCny
 import com.example.stockdiary.data.importer.filterDustByValue
 import com.example.stockdiary.data.importer.isStablecoin
 import com.example.stockdiary.data.importer.priceKeyFor
+import com.example.stockdiary.data.importer.referencePriceForImport
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.network.BinanceBalance
@@ -316,5 +317,111 @@ class BinanceImportServiceTest {
         )
         assertEquals(0, filtered)
         assertEquals(1, kept.size)
+    }
+
+    // ---------- 导入即预填参考价 ----------
+
+    @Test
+    fun 新建时预填拉取阶段取到的价() = runBlocking {
+        val captured = slot<List<Asset>>()
+        coEvery { repo.insertAssets(capture(captured)) } returns Unit
+
+        val preview = service.buildPreview(
+            balances = listOf(balance("BTC", free = 0.5)),
+            existingAssets = emptyList()
+        )
+        service.commit(preview, account = "币安", prices = mapOf("BTCUSDT" to 67000.0))
+
+        val asset = captured.captured.single()
+        // 现价当场就有：行情同步还没跑（或暂时连不上），总资产也已经是对的
+        assertEquals(67000.0, asset.currentPrice!!, 1e-9)
+        // 参考单价仍是 0（它是无行情兜底，不是成本），市值走 currentPrice
+        assertEquals(0.0, asset.purchasePrice, 1e-9)
+        assertEquals(33500.0, asset.totalValue, 1e-6)
+    }
+
+    @Test
+    fun LD持仓按底层交易对预填价() = runBlocking {
+        val captured = slot<List<Asset>>()
+        coEvery { repo.insertAssets(capture(captured)) } returns Unit
+
+        val preview = service.buildPreview(
+            balances = listOf(balance("LDBNB", free = 2.0)),
+            existingAssets = emptyList()
+        )
+        // 键是底层交易对 BNBUSDT（与拉取阶段 priceKeyFor 生成的请求列表一致）
+        service.commit(preview, account = "币安", prices = mapOf("BNBUSDT" to 600.0))
+
+        val asset = captured.captured.single()
+        // 落库 key 仍是原 symbol，价格是底层币 1:1 市价
+        assertEquals("LDBNBUSDT", asset.symbol)
+        assertEquals(600.0, asset.currentPrice!!, 1e-9)
+        assertEquals(1200.0, asset.totalValue, 1e-9)
+    }
+
+    @Test
+    fun 覆盖时同样刷新现价() = runBlocking {
+        val existing = cryptoAsset(7L, "BTCUSDT", balance = 0.5)
+        val priceSlot = slot<Double>()
+        coEvery { repo.updatePriceById(7L, capture(priceSlot)) } returns Unit
+
+        val preview = service.buildPreview(
+            balances = listOf(balance("BTC", free = 0.8)),
+            existingAssets = listOf(existing)
+        )
+        service.commit(preview, account = "币安", prices = mapOf("BTCUSDT" to 67000.0))
+
+        assertEquals(67000.0, priceSlot.captured, 1e-9)
+    }
+
+    @Test
+    fun 查不到价不编造_留空等行情同步() = runBlocking {
+        val captured = slot<List<Asset>>()
+        coEvery { repo.insertAssets(capture(captured)) } returns Unit
+
+        val preview = service.buildPreview(
+            balances = listOf(balance("NEWCOIN", free = 1000.0)),
+            existingAssets = emptyList()
+        )
+        // 取价失败降级为空 map：绝不写 0 以外的假数据，也不让导入失败
+        service.commit(preview, account = "币安", prices = emptyMap())
+
+        val asset = captured.captured.single()
+        assertEquals(null, asset.currentPrice)
+        assertEquals(0.0, asset.purchasePrice, 1e-9)
+    }
+
+    @Test
+    fun 稳定币按1美元预填() = runBlocking {
+        val captured = slot<List<Asset>>()
+        coEvery { repo.insertAssets(capture(captured)) } returns Unit
+
+        val preview = service.buildPreview(
+            balances = listOf(balance("USDT", free = 100.0)),
+            existingAssets = emptyList()
+        )
+        // 稳定币没有交易对可查但锚定 1 美元——不预填的话它的市值在同步前是 0
+        service.commit(preview, account = "币安", prices = emptyMap())
+
+        val asset = captured.captured.single()
+        assertEquals(1.0, asset.currentPrice!!, 1e-9)
+        assertEquals(100.0, asset.totalValue, 1e-9)
+    }
+
+    @Test
+    fun 预填价拒绝非正数_按查不到价处理() {
+        // getPrices 理论上只回正价，这里防御性钉住：0 / 负 / NaN 一律当查不到价
+        assertEquals(null, referencePriceForImport("BTC", mapOf("BTCUSDT" to 0.0)))
+        assertEquals(null, referencePriceForImport("BTC", mapOf("BTCUSDT" to -1.0)))
+        assertEquals(null, referencePriceForImport("BTC", mapOf("BTCUSDT" to Double.NaN)))
+        assertEquals(67000.0, referencePriceForImport("BTC", mapOf("BTCUSDT" to 67000.0))!!, 1e-9)
+        // LD 走底层键；LDO 是真实现货走自己的交易对；LDUSDT 剥不出底层 → null
+        assertEquals(600.0, referencePriceForImport("LDBNB", mapOf("BNBUSDT" to 600.0))!!, 1e-9)
+        assertEquals(2.5, referencePriceForImport("LDO", mapOf("LDOUSDT" to 2.5))!!, 1e-9)
+        assertEquals(null, referencePriceForImport("LDUSDT", mapOf("USDT" to 1.0)))
+        // 稳定币没有键也是 1.0（定义价，与行情同步同口径）
+        assertEquals(1.0, referencePriceForImport("USDT", emptyMap())!!, 1e-9)
+        // 冷门币查不到 → null
+        assertEquals(null, referencePriceForImport("NEWCOIN", emptyMap()))
     }
 }

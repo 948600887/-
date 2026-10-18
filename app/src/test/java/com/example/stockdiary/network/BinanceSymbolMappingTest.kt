@@ -85,9 +85,13 @@ class BinanceSymbolMappingTest {
     }
 
     /**
-     * 委托安全性证明：导入链路的 priceKeyFor 现在委托给 cryptoTradingPairFor。
-     * 两者的输入域不同（priceKeyFor 只吃账户接口给的基础资产名），但在那个域上
-     * 行为必须逐字一致——否则导入时的取价键会变，估值与过滤跟着错。
+     * 委托安全性证明：导入链路的 priceKeyFor 在**非 LD 输入域**上委托给
+     * cryptoTradingPairFor。两者的输入域不同（priceKeyFor 只吃账户接口给的基础
+     * 资产名），但在那个域上行为必须逐字一致——否则导入时的取价键会变，估值与
+     * 过滤跟着错。
+     *
+     * LD 前缀是刻意的例外：priceKeyFor 转走 earnUnderlyingPair 的底层交易对
+     * （LDBNB → BNBUSDT），由下面的用例单独钉住。
      */
     @Test
     fun `与导入链路 priceKeyFor 在基础资产输入域上一致`() {
@@ -107,5 +111,19 @@ class BinanceSymbolMappingTest {
                 BinanceAPI.cryptoTradingPairFor(coin)
             )
         }
+    }
+
+    /**
+     * LD 前缀（理财/锁仓）的取价键必须走**底层交易对**：LDBNB 与 1 个 BNB 1:1
+     * 可赎回，估值用 BNB 市价。不转的话会去请求并不存在的 LDBNB 交易对（400）。
+     */
+    @Test
+    fun `priceKeyFor 对 LD 持仓走底层交易对`() {
+        assertEquals("BNBUSDT", priceKeyFor("LDBNB"))
+        assertEquals("POLUSDT", priceKeyFor("LDPOL"))
+        // LDO 是真实现货，不走底层映射
+        assertEquals("LDOUSDT", priceKeyFor("LDO"))
+        // 剥完是稳定币 → 没有交易对可查
+        assertEquals(null, priceKeyFor("LDUSDT"))
     }
 }

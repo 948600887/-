@@ -200,7 +200,13 @@ class BinanceImportViewModel(
         }
     }
 
-    /** 确认导入：按交易对覆盖数量、其余新建。未变的不写库。 */
+    /**
+     * 确认导入：按交易对覆盖数量、其余新建。未变的不写库。
+     *
+     * 把拉取阶段取到的公开价一起交给落库：用户确认的那一刻就把价格预填进
+     * currentPrice，行情同步还没跑（或暂时连不上）时总资产也已经是对的。
+     * 价格是拉取那一刻的，用户核对预览期间可能略有偏差，下一轮行情同步即刷新。
+     */
     fun commit() {
         val preview = _uiState.value.preview ?: return
         if (_uiState.value.step == Step.COMMITTING) return
@@ -215,7 +221,7 @@ class BinanceImportViewModel(
             }
         ) {
             updateState { state -> state.copy(step = Step.COMMITTING, error = null) }
-            val result = service.commit(preview, _uiState.value.account)
+            val result = service.commit(preview, _uiState.value.account, _uiState.value.prices)
             updateState { state -> state.copy(step = Step.RESULT, result = result) }
         }
     }

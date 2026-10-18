@@ -92,17 +92,47 @@ object NetworkRetryHelper {
     }
 
     /**
+     * 限流 / 无效标的等业务文案。
+     *
+     * 这些本身就是「词组」，按子串匹配不会有歧义，因此可以保留子串语义。
+     */
+    private val NON_RETRYABLE_PHRASES: List<String> = listOf(
+        "频率过高", "请求过于频繁", "rate limit",
+        "请检查股票代码", "未获取到股票数据", "代码不存在", "无效的代码"
+    )
+
+    /**
+     * 重试只会火上浇油的 HTTP 状态码：403（限流/被封 IP）、429（Too Many Requests）。
+     */
+    private val NON_RETRYABLE_HTTP_STATUS_CODES: List<Int> = listOf(403, 429)
+
+    /**
+     * 状态码必须是**独立的数字 token** 才成立：`(?<!\d)403(?!\d)`。
+     *
+     * 裸子串匹配（旧实现）会踩这个坑：任何正好包含这几位数字的文案都会被判成
+     * 「不必重试」——成交额 14035、错误码 4291、金额 40300、股票代码 sz000403、
+     * 时间戳带 403 段……这些其实都是可恢复的失败，被误判后一次请求就放弃，
+     * 表现为「行情莫名取不到」且日志里看不出原因。前后各加一个"非数字"断言即可规避。
+     */
+    private val NON_RETRYABLE_HTTP_STATUS: List<Regex> = NON_RETRYABLE_HTTP_STATUS_CODES.map { code ->
+        Regex("""(?<!\d)$code(?!\d)""")
+    }
+
+    /**
      * 判断是否是"重试也不会改变结果"的确定性失败。
      *
      * 各类数据源目前把业务失败统一包成 [IOException] 往外抛（HTTP 403、代码不存在、
      * 返回空串都是同一类型），重试层只能靠文案识别。这是现状下的最小侵入方案。
+     *
+     * 匹配策略分两类：
+     * - [NON_RETRYABLE_PHRASES]：中文/英文词组，子串匹配（ignoreCase）；
+     * - [NON_RETRYABLE_HTTP_STATUS]：HTTP 状态码，按完整数字 token 匹配，
+     *   只认 "403" / "429" 本体（"HTTP 403"、"status=403"、"code 403" 也能命中），
+     *   不会被 14035、4291、40300 这类更长的数字误伤。
      */
     private fun isNonRetryableBusinessFailure(message: String): Boolean {
-        val patterns = listOf(
-            "频率过高", "请求过于频繁", "rate limit", "403", "429",
-            "请检查股票代码", "未获取到股票数据", "代码不存在", "无效的代码"
-        )
-        return patterns.any { message.contains(it, ignoreCase = true) }
+        return NON_RETRYABLE_PHRASES.any { message.contains(it, ignoreCase = true) } ||
+            NON_RETRYABLE_HTTP_STATUS.any { it.containsMatchIn(message) }
     }
     
     suspend fun <T> executeWithFallback(

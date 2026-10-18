@@ -18,17 +18,37 @@ import java.time.LocalTime
 import java.time.ZoneId
 import java.time.temporal.ChronoUnit
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CancellationException
 
 /**
- * 基金数据 API：从东方财富 pingzhongdata 接口获取基金净值数据。
- * 原 fundgz.1234567.com.cn 实时估值接口已于 2023 年因监管要求下线，
- * 现改用 fund.eastmoney.com/pingzhongdata/{code}.js 获取最新净值。
+ * 基金数据 API：获取场外基金最新净值。
+ *
+ * ## 数据源
+ *
+ * - **轻量源（首选）**：`fundmobapi.eastmoney.com/FundMNewApi/FundMNBasicInformation`，
+ *   只回最新一期净值，约 2.5KB，且带基金名称。解析见 [FundNavParser]。
+ * - **legacy 源（回退）**：`fund.eastmoney.com/pingzhongdata/{code}.js`，
+ *   内容是基金的**完整历史净值**（0.5~2MB），只为拿最后一个数却要把整份历史
+ *   读进内存 —— 它是刷新时峰值内存的主要来源（原 fundgz.1234567.com.cn
+ *   实时估值接口已于 2023 年因监管要求下线后改用的方案）。
+ *
+ * 历史净值数组在本项目里**没有任何消费方**（走势图、快照补洞、持仓盈亏、
+ * 导出、分红都走 [com.example.stockdiary.database.AssetSnapshot] 或分红专用接口），
+ * 所以首选轻量源不会损失任何功能。
  */
 object FundAPI {
     private const val TAG = "FundAPI"
-    private const val BASE_URL = "https://fund.eastmoney.com/pingzhongdata"
+    private const val LEGACY_BASE_URL = "https://fund.eastmoney.com/pingzhongdata"
+    private const val LIGHTWEIGHT_NAV_URL =
+        "https://fundmobapi.eastmoney.com/FundMNewApi/FundMNBasicInformation"
+    /** 轻量源必须带 UA，否则东财回 ErrCode 61136「网络繁忙」。 */
+    private const val USER_AGENT = "Mozilla/5.0"
+    private const val LEGACY_REFERER = "https://fund.eastmoney.com/"
     private const val CACHE_DURATION_MS = 5 * 60 * 1000L
+
+    /** 轻量源连续失败多少次后**整源熔断**（本进程内不再尝试）。 */
+    private const val LIGHTWEIGHT_FAILURE_THRESHOLD = 3
 
     private val client = NetworkClient.fundClient
     private val cache = ConcurrentHashMap<String, CacheEntry>()
@@ -63,6 +83,50 @@ object FundAPI {
 
     /** 持久化缓存是否可用（未注入时 false）。单测用它钉住「未注入也不炸」。 */
     internal fun hasPersistentNavCache(): Boolean = navCacheDao != null
+
+    // ==================== 轻量源 / legacy 源 ====================
+    //
+    // 两个数据源做成可替换的挂起函数，是为了让「回退链」与「整源熔断」
+    // 能在 JVM 单测里用假源钉死（单测没有网络，打真实接口既慢又不可靠）。
+    // 生产代码永远用下面这两个默认实现。
+
+    /** 轻量源注入点，默认走真实网络（[fetchFundInfoLightweight]）。 */
+    @Volatile
+    internal var lightweightNavSource: suspend (String) -> FundInfo? = { code ->
+        fetchFundInfoLightweight(code)
+    }
+
+    /** legacy 源注入点，默认走真实网络（[fetchFundInfoLegacy]）。 */
+    @Volatile
+    internal var legacyNavSource: suspend (String) -> FundInfo? = { code ->
+        fetchFundInfoLegacy(code)
+    }
+
+    /** 轻量源连续失败计数（跨基金码累计，成功一次即清零）。 */
+    private val lightweightFailures = AtomicInteger(0)
+
+    /** 轻量源是否已熔断。进程级：下次启动自动重置。 */
+    @Volatile
+    private var lightweightSourceDisabled = false
+
+    /** 轻量源是否已被熔断（单测用）。 */
+    internal fun isLightweightSourceDisabled(): Boolean = lightweightSourceDisabled
+
+    /** 轻量源当前连续失败次数（单测用）。 */
+    internal fun lightweightFailureCount(): Int = lightweightFailures.get()
+
+    /**
+     * 把数据源与熔断状态恢复成出厂值。
+     *
+     * 只给单测用：熔断状态是进程级全局的，一个用例改了不还原会污染同批
+     * 其它用例（JVM 单测共用同一个 [FundAPI] 单例）。
+     */
+    internal fun resetNavSourcesForTest() {
+        lightweightNavSource = { code -> fetchFundInfoLightweight(code) }
+        legacyNavSource = { code -> fetchFundInfoLegacy(code) }
+        lightweightFailures.set(0)
+        lightweightSourceDisabled = false
+    }
 
     /**
      * 读一条持久化净值。
@@ -351,16 +415,116 @@ object FundAPI {
         }
     }
 
-    private suspend fun fetchFundInfo(fundCode: String): FundInfo? {
+    /**
+     * 取一只基金的最新净值：先轻量源，失败才回退 legacy。
+     *
+     * 轻量源只回最新一期（~2.5KB），legacy 会拉回整份历史净值（0.5~2MB），
+     * 所以任何一步不对都要**明确地**落回 legacy，绝不静默吞掉失败
+     * （每条回退都打 [AppLogger.w]，带上基金码与原因，便于线上定位）。
+     */
+    internal suspend fun fetchFundInfo(fundCode: String): FundInfo? {
+        if (!lightweightSourceDisabled) {
+            val lightweight = try {
+                lightweightNavSource(fundCode)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                AppLogger.w("轻量净值源异常，回退旧数据源: $fundCode ${e.message}", TAG)
+                null
+            }
+            if (lightweight != null) {
+                lightweightFailures.set(0)
+                return lightweight
+            }
+            noteLightweightFailure(fundCode)
+        }
+        return legacyNavSource(fundCode)
+    }
+
+    /**
+     * 累计一次轻量源失败，达到阈值就整源熔断。
+     *
+     * 熔断的必要性：一旦轻量源整体不可用（接口下线 / 拦截），不熔断的话
+     * 每只基金都要「先白跑一次轻量请求再回退 legacy」，刷新请求数直接翻倍，
+     * 弱网下把本来能用的 legacy 链路一起拖垮。
+     *
+     * 计数**跨基金码**累计：轻量源故障必然是全局的，不会因为换一只基金就好。
+     * 熔断只在进程内生效（进程重启即失效），不做持久化 —— 存到磁盘会让一次
+     * 短暂故障在用户反复重启后仍然生效，反而更难自愈。
+     */
+    private fun noteLightweightFailure(fundCode: String) {
+        val failures = lightweightFailures.incrementAndGet()
+        if (failures >= LIGHTWEIGHT_FAILURE_THRESHOLD && !lightweightSourceDisabled) {
+            lightweightSourceDisabled = true
+            AppLogger.w(
+                "轻量净值源连续失败 $failures 次（最后一只 $fundCode），本进程后续基金直接走旧数据源",
+                TAG
+            )
+        }
+    }
+
+    /**
+     * 轻量源：只取最新一期净值（~2.5KB），不下载完整历史。
+     *
+     * 必须带 `User-Agent: Mozilla/5.0`，否则东财返回 ErrCode 61136「网络繁忙」。
+     * 解析失败 / 非 200 / 解析出 null 一律返回 null，由 [fetchFundInfo] 回退。
+     */
+    private suspend fun fetchFundInfoLightweight(fundCode: String): FundInfo? {
         return withContext(Dispatchers.IO) {
             try {
-                val url = "$BASE_URL/${fundCode}.js?v=${System.currentTimeMillis()}"
+                val url = "$LIGHTWEIGHT_NAV_URL?FCODE=$fundCode" +
+                    "&deviceid=Wap&plat=Wap&product=EFund&version=2.0.0"
                 AppLogger.apiUrl("GET", url, TAG)
 
                 val request = Request.Builder()
                     .url(url)
-                    .addHeader("User-Agent", "Mozilla/5.0")
-                    .addHeader("Referer", "https://fund.eastmoney.com/")
+                    .addHeader("User-Agent", USER_AGENT)
+                    .build()
+
+                val response = client.newCall(request).execute()
+                response.use {
+                    if (!it.isSuccessful) {
+                        AppLogger.w(
+                            "轻量净值源 HTTP ${it.code}，回退旧数据源: $fundCode",
+                            TAG
+                        )
+                        return@withContext null
+                    }
+
+                    val body = it.body?.string().orEmpty()
+                    val info = FundNavParser.parseBasicInfo(body, fundCode)
+                    if (info == null) {
+                        AppLogger.w(
+                            "轻量净值源返回无法解析的内容，回退旧数据源: $fundCode",
+                            TAG
+                        )
+                    }
+                    return@withContext info
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                AppLogger.w("轻量净值源请求失败，回退旧数据源: $fundCode ${e.message}", TAG)
+                null
+            }
+        }
+    }
+
+    /**
+     * legacy 源：下载完整历史净值文件（0.5~2MB）后取最后一条。
+     *
+     * 只在轻量源拿不到数据时使用（含轻量源整源熔断后）。
+     */
+    private suspend fun fetchFundInfoLegacy(fundCode: String): FundInfo? {
+        return withContext(Dispatchers.IO) {
+            try {
+                val url = "$LEGACY_BASE_URL/${fundCode}.js?v=${System.currentTimeMillis()}"
+                AppLogger.apiUrl("GET", url, TAG)
+
+                val request = Request.Builder()
+                    .url(url)
+                    .addHeader("User-Agent", USER_AGENT)
+                    .addHeader("Referer", LEGACY_REFERER)
                     .build()
 
                 val response = client.newCall(request).execute()

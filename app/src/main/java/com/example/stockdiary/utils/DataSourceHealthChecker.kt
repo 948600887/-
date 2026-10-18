@@ -3,6 +3,7 @@ package com.example.stockdiary.utils
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.Request
+import com.example.stockdiary.network.FundNavParser
 import com.example.stockdiary.network.NetworkClient
 import kotlinx.coroutines.CancellationException
 
@@ -16,7 +17,10 @@ data class DataSourceHealth(
 )
 
 object DataSourceHealthChecker {
-    
+
+    /** 健康检查用的样本基金码：一只长期在市的普通股票型基金。 */
+    private const val HEALTH_CHECK_FUND_CODE = "110022"
+
     private val client = NetworkClient.defaultClient
     
     suspend fun checkAllHealth(): List<DataSourceHealth> = withContext(Dispatchers.IO) {
@@ -64,25 +68,51 @@ object DataSourceHealthChecker {
         }
     }
     
+    /**
+     * 天天基金健康检查。
+     *
+     * 探测地址就是 FundAPI 实际用的**轻量净值源**（~2.5KB）。原来用的是
+     * `pingzhongdata/110022.js`：那是基金的**完整历史净值**，单次响应约 570KB，
+     * 而健康检查只想知道「这个源通不通」—— 拿大文件探测既慢又白白吃掉流量，
+     * 还可能在打开设置页的一次体检里再添一份内存压力。
+     *
+     * 判定也比原来严一点：HTTP 200 之外还要求报文能解析出净值（接口业务报错时
+     * 同样返回 200，光看状态码会把「源坏了但连得上」报成健康）。
+     */
     suspend fun checkFundAPI(): DataSourceHealth = withContext(Dispatchers.IO) {
         val startTime = System.currentTimeMillis()
         try {
             val request = Request.Builder()
-                .url("https://fund.eastmoney.com/pingzhongdata/110022.js?v=${System.currentTimeMillis()}")
+                .url(
+                    "https://fundmobapi.eastmoney.com/FundMNewApi/FundMNBasicInformation" +
+                        "?FCODE=$HEALTH_CHECK_FUND_CODE&deviceid=Wap&plat=Wap" +
+                        "&product=EFund&version=2.0.0"
+                )
+                // 与 FundAPI 一致：不带 UA 时该接口回 ErrCode 61136
                 .addHeader("User-Agent", "Mozilla/5.0")
-                .addHeader("Referer", "https://fund.eastmoney.com/")
                 .build()
-            
+
             client.newCall(request).execute().use { response ->
                 val latency = System.currentTimeMillis() - startTime
+                val body = if (response.isSuccessful) response.body?.string().orEmpty() else ""
+                val parsed = if (response.isSuccessful) {
+                    FundNavParser.parseBasicInfo(body, HEALTH_CHECK_FUND_CODE)
+                } else {
+                    null
+                }
+                val available = response.isSuccessful && parsed != null
 
                 DataSourceHealth(
                     name = "天天基金",
-                    url = "fund.eastmoney.com",
-                    isAvailable = response.isSuccessful,
+                    url = "fundmobapi.eastmoney.com",
+                    isAvailable = available,
                     latency = latency,
                     lastCheck = System.currentTimeMillis(),
-                    errorMessage = if (!response.isSuccessful) "HTTP ${response.code}" else null
+                    errorMessage = when {
+                        !response.isSuccessful -> "HTTP ${response.code}"
+                        parsed == null -> "轻量净值接口返回异常（业务码非 0 或数据缺失）"
+                        else -> null
+                    }
                 )
             }
         } catch (e: CancellationException) {
@@ -90,7 +120,7 @@ object DataSourceHealthChecker {
         } catch (e: Exception) {
             DataSourceHealth(
                 name = "天天基金",
-                url = "fund.eastmoney.com",
+                url = "fundmobapi.eastmoney.com",
                 isAvailable = false,
                 latency = System.currentTimeMillis() - startTime,
                 lastCheck = System.currentTimeMillis(),
@@ -98,7 +128,7 @@ object DataSourceHealthChecker {
             )
         }
     }
-    
+
     suspend fun checkBinanceAPI(): DataSourceHealth = withContext(Dispatchers.IO) {
         val startTime = System.currentTimeMillis()
         try {

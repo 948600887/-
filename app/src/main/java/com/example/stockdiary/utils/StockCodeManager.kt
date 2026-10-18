@@ -50,6 +50,24 @@ object StockCodeManager {
     }
 
     /**
+     * 同步链路专用的退市判定：[isDelisted] 之外再排除场外基金份额。
+     *
+     * 为什么不能直接用 [isDelisted]：它只做「6 位数字 + 400/420 前缀」，
+     * 而天天基金的场外代码段里**真有** 400xxx / 420xxx（400030 东方添益债券、
+     * 420102 就是用户持仓里的实例）。直接判它们会被误杀：价格冻结、还不计失败，
+     * 用户端毫无信号，比没有豁免更糟。
+     *
+     * `fund_` 前缀是「场外份额」的显式标记（AssetSyncManager 的 FUND 分支靠它
+     * 决定走天天基金净值），老三板股票不会带这个前缀，所以排除它既堵住误杀，
+     * 又不放过真退市股（bj400264 / sh400123 这类）。
+     */
+    fun isDelistedForSync(symbol: String?): Boolean {
+        if (symbol.isNullOrBlank()) return false
+        if (symbol.startsWith("fund_", ignoreCase = true)) return false
+        return isDelisted(symbol)
+    }
+
+    /**
      * 从字符串中提取纯数字
      */
     fun extractDigits(input: String): String = input.filter { it.isDigit() }

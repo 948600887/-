@@ -226,7 +226,7 @@ fun StockAssetItem(
                     when {
                         isLiability -> "待偿还"
                         currentPrice != null -> "¥${currentPrice.format(pricePrecision)}"
-                        StockCodeManager.isDelisted(asset.symbol) -> "退市"
+                        StockCodeManager.isDelistedForSync(asset.symbol) -> "退市"
                         else -> "价格待更新"
                     },
                     style = MaterialTheme.typography.bodySmall, color = AppTheme.colors.onSurfaceVariant, fontWeight = FontWeight.Medium

@@ -356,6 +356,51 @@ class StockCodeManagerTest {
         assertFalse(StockCodeManager.isDelisted("fund_000001"))
     }
 
+    // ========== isDelistedForSync ==========
+
+    @Test
+    fun `isDelisted 对 fund_ 场外基金返回 true（同步链路因此必须用 isDelistedForSync）`() {
+        // 这里钉住的是「错的前提」本身：isDelisted 只看 6 位数字 + 400/420 前缀，
+        // 而天天基金场外代码段里真有 400xxx/420xxx。语义没变、也不能改——
+        // UI 的「退市」文案和其他调用方还依赖它，改小口径会漏掉真退市股。
+        assertTrue(StockCodeManager.isDelisted("fund_400030"))
+        assertTrue(StockCodeManager.isDelisted("fund_420102"))
+    }
+
+    @Test
+    fun `isDelistedForSync 仍能认出老三板退市股`() {
+        assertTrue(StockCodeManager.isDelistedForSync("bj400264"))
+        assertTrue(StockCodeManager.isDelistedForSync("sh400123"))
+    }
+
+    @Test
+    fun `isDelistedForSync 放行 fund_ 前缀的场外基金`() {
+        // 本次 bug 的回归：400030（东方添益债券）、420102 都是用户持仓里的真基金。
+        // 用 isDelisted 判它们会命中 → 同步侧不发行情请求、不计失败，
+        // 价格永久冻结且用户端零信号，比没有豁免更糟。
+        assertFalse(StockCodeManager.isDelistedForSync("fund_400030"))
+        assertFalse(StockCodeManager.isDelistedForSync("fund_420102"))
+    }
+
+    @Test
+    fun `isDelistedForSync 对 fund_ 前缀大小写不敏感`() {
+        assertFalse(StockCodeManager.isDelistedForSync("FUND_400030"))
+        assertFalse(StockCodeManager.isDelistedForSync("Fund_420102"))
+    }
+
+    @Test
+    fun `isDelistedForSync 放行其他正常标的`() {
+        assertFalse(StockCodeManager.isDelistedForSync("fund_012350"))
+        assertFalse(StockCodeManager.isDelistedForSync("sh600519"))
+        assertFalse(StockCodeManager.isDelistedForSync("sz164701"))
+    }
+
+    @Test
+    fun `isDelistedForSync 空值返回 false`() {
+        assertFalse(StockCodeManager.isDelistedForSync(null))
+        assertFalse(StockCodeManager.isDelistedForSync(""))
+    }
+
     // ========== Edge Cases ==========
 
     @Test

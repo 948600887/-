@@ -360,11 +360,13 @@ object AssetSyncManager {
             // 退市标的（400xxx/420xxx 老三板）没有任何行情源可取：UI 已显示「退市」，
             // 同步侧再为它轮询三源只是白烧请求额度，还会把数据源失败计数推高
             // （累计到阈值会「跳过数据源（失败次数过多）」禁用 30 分钟，连累正常标的）。
-            // isDelisted 走 extractDigits，sh/sz/bj/fund_ 等前缀都能吃；
-            // 而 400/420 在 classifyCode 里归 STOCK，基金代码段（ETF 510/159、
-            // LOF 16/18、场外 01/02、场内 5/1）取不到这两个前缀，带上 FUND 也不会误杀。
+            // 必须走 isDelistedForSync 而不是 isDelisted：后者的「6 位数字 + 400/420 前缀」
+            // 和天天基金场外代码段是重叠的——400030（东方添益债券）、420102 都是用户
+            // 持仓里的真基金。误杀后不发行情请求、不计失败，价格永久冻结且用户端零信号，
+            // 比没有豁免更糟。isDelistedForSync 会放行 fund_ 前缀的场外份额，
+            // 同时仍能认出老三板真退市股（bj400264 / sh400123）。
             if ((asset.type == AssetType.STOCK || asset.type == AssetType.FUND) &&
-                StockCodeManager.isDelisted(symbol)
+                StockCodeManager.isDelistedForSync(symbol)
             ) {
                 AppLogger.i("跳过退市标的: ${asset.name}（$symbol，无行情源）", TAG)
                 return

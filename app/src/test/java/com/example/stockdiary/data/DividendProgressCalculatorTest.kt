@@ -85,14 +85,15 @@ class DividendProgressCalculatorTest {
     }
 
     @Test
-    fun `全年预计按TTM每十股分红乘持仓`() {
+    fun `今年预计按今年已宣告分红的金额合计`() {
         val assets = listOf(asset("长江电力", "600900", 2000.0))
         val records = mapOf(
             "600900" to listOf(record(dateIn(3, 10), 4.0))
         )
         val progress = DividendProgressCalculator.calculate(assets, records, today)
 
-        // TTM = 4 元/十股 → 4 / 10 × 2000 = 800
+        // 今年有宣告 → 按宣告金额合计，不再走 TTM：
+        // 每十股 4 元 × 2000 股 ÷ 10 = 800
         assertEquals(800.0, progress.yearProjected, 0.001)
     }
 
@@ -193,7 +194,10 @@ class DividendProgressCalculatorTest {
     @Test
     fun `正好12个月仍在TTM窗口内，闸门不杀它`() {
         // TTM 窗口是闭区间 [今天-12个月, 今天]，边界那天必须算进去；
-        // 新鲜度闸门用同一把尺子，所以边界那天也还能推算下一笔
+        // 新鲜度闸门用同一把尺子，所以边界那天也还能推算下一笔。
+        // 注意 edgeDate 在**去年** → 今年无已宣告分红，预计走的是 TTM 退回分支
+        // （自然年口径下今年没有宣告时才退回 TTM，否则年初分母会是 0），
+        // 边界那天仍算进 TTM → 预计 500。
         val edgeDate = today.minusMonths(12)
         val assets = listOf(asset("长江电力", "600900", 1000.0))
         val records = mapOf("600900" to listOf(record(edgeDate.toString(), 5.0)))
@@ -212,6 +216,8 @@ class DividendProgressCalculatorTest {
 
         val progress = DividendProgressCalculator.calculate(assets, records, today)
 
+        // justStale 在去年 → 今年无已宣告分红，预计走 TTM 退回分支；
+        // 它又比 12 个月窗口早一天，TTM 也统计不到 → 预计 0
         assertEquals(0.0, progress.yearProjected, 0.001)
         assertNull(progress.nextPayout)
     }
@@ -463,5 +469,105 @@ class DividendProgressCalculatorTest {
         assertEquals(665.0, progress.yearProjected, 0.001)
         assertEquals(360.0, progress.yearReceived, 0.001)   // 300 + 60
         assertEquals(1, progress.receivedCount)             // 只有股票那 1 笔
+    }
+
+    // ===== 今年预计 = 自然年口径（分子分母同一把日历尺）=====
+    //
+    // 改之前分母是纯 TTM（滚动 12 个月），与按日历年统计的今年已收不同口径：
+    // 进度条可能永远填不满，TTM 窗口横跨两年时还会算出「已收 > 预计」。
+    // 现在：今年已宣告（除息日在今年）→ 按宣告金额合计；今年未宣告 → 退回 TTM。
+    // 下面几个用例固定用 midYear（10/14）作「今天」，断言不随运行日期漂移。
+
+    @Test
+    fun `今年预计只含今年已宣告的分红不含去年那笔TTM记录`() {
+        // 去年 11/20 那笔落在 TTM 窗口 [去年-10-14, 今年-10-14] 内：
+        // 改之前按纯 TTM 它会被算进预计（5+3=8 元/十股 → 800）；
+        // 现在分母是自然年，只有今年 4/10 宣告的那笔算数 → 300
+        val assets = listOf(asset("长江电力", "600900", 1000.0))
+        val records = mapOf(
+            "600900" to listOf(
+                record("${year - 1}-11-20", 5.0),
+                record(dateIn(4, 10), 3.0)
+            )
+        )
+
+        val progress = DividendProgressCalculator.calculate(assets, records, midYear)
+
+        // 每十股 3 元 × 1000 股 ÷ 10 = 300，去年那笔的 500 不计入
+        assertEquals(300.0, progress.yearProjected, 0.001)
+    }
+
+    @Test
+    fun `今年无宣告时预计退回TTM而不是变成0`() {
+        // 唯一一笔在去年 11/20（TTM 窗口内）：今年还没宣告 → 退回 TTM 预估，
+        // 否则年初分母是 0，进度条显得空
+        val assets = listOf(asset("长江电力", "600900", 1000.0))
+        val records = mapOf(
+            "600900" to listOf(record("${year - 1}-11-20", 5.0))
+        )
+
+        val progress = DividendProgressCalculator.calculate(assets, records, midYear)
+
+        // TTM = 5 元/十股 → 5 / 10 × 1000 = 500
+        assertEquals(500.0, progress.yearProjected, 0.001)
+    }
+
+    @Test
+    fun `混合多标的时预计各走各的分支再累加`() {
+        // 600900 今年有宣告 → 走自然年分支；000001 今年没有 → 走 TTM 退回分支
+        val assets = listOf(
+            asset("长江电力", "600900", 1000.0),
+            asset("某红利ETF", "000001", 2000.0)
+        )
+        val records = mapOf(
+            "600900" to listOf(record(dateIn(4, 10), 3.0)),       // 今年宣告 → 3/10×1000 = 300
+            "000001" to listOf(record("${year - 1}-11-20", 5.0))  // 今年无宣告 → TTM 5/10×2000 = 1000
+        )
+
+        val progress = DividendProgressCalculator.calculate(assets, records, midYear)
+
+        assertEquals(1300.0, progress.yearProjected, 0.001)
+    }
+
+    @Test
+    fun `12月除息次年到账的分红计入今年预计但不计入今年已收`() {
+        // 12/20 除息、次年 1/10 到账：宣告发生在今年 → 计入今年预计；
+        // 钱还没到账 → 不计入今年已收（进度不到 100%，符合预期）
+        val assets = listOf(asset("红利LOF", "sh510880", 1000.0))
+        val records = mapOf(
+            "sh510880" to listOf(
+                record("$year-12-20", 2.0).copy(paymentDate = "${year + 1}-01-10")
+            )
+        )
+
+        val progress = DividendProgressCalculator.calculate(assets, records, midYear)
+
+        // 每十股 2 元 × 1000 份 ÷ 10 = 200
+        assertEquals(200.0, progress.yearProjected, 0.001)
+        assertEquals(0.0, progress.yearReceived, 0.001)
+        assertEquals(0, progress.receivedCount)
+        assertEquals(0.0, progress.ratio, 0.001)
+    }
+
+    @Test
+    fun `今年已宣告且全部到账时进度不会超额`() {
+        // 今年宣告的两笔都已到账：已收 = 预计 = 500，分子不会超过分母
+        // （改之前 TTM 横跨两年时这里会出现「已收 > 预计」）
+        val assets = listOf(asset("长江电力", "600900", 1000.0))
+        val records = mapOf(
+            "600900" to listOf(
+                record(dateIn(2, 10), 3.0).copy(paymentDate = dateIn(2, 20)),
+                record(dateIn(5, 10), 2.0).copy(paymentDate = dateIn(5, 20))
+            )
+        )
+
+        val progress = DividendProgressCalculator.calculate(assets, records, midYear)
+
+        assertEquals(500.0, progress.yearProjected, 0.001)
+        assertEquals(500.0, progress.yearReceived, 0.001)
+        assertEquals(2, progress.receivedCount)
+        assertEquals(1.0, progress.ratio, 0.001)
+        assertEquals(0.0, progress.remaining, 0.001)
+        assertTrue(progress.yearReceived <= progress.yearProjected + 0.001)
     }
 }

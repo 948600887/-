@@ -11,13 +11,17 @@ import java.time.temporal.ChronoUnit
 
 /**
  * 「收息进度」计算器——借鉴同类股息 App 的头号卖点：
- * **今年已经收到多少股息 / 全年预计能收多少**，外加月度现金流节奏与下一笔到账倒计时。
+ * **今年已经收到多少股息 / 今年预计能收多少**，外加月度现金流节奏与下一笔到账倒计时。
  *
  * 设计原则（与全项目一致）：**只统计真实存在的分红记录，不编造数字**。
  * 某个月没有派息记录就是 0，绝不按平均值把柱子抹平。
  *
- * 口径说明：
- * - 全年预计 = TTM（最近 12 个月）每十股分红 × 持仓数量 ÷ 10
+ * 口径说明（分子分母同一把日历尺，都是自然年）：
+ * - 今年预计 = 今年已宣告（除息日在今年，含已排定未到账的）→ 按这些记录的金额合计；
+ *   今年还没宣告的标的 → 退回 TTM（最近 12 个月）每十股分红 × 持仓数量 ÷ 10 预估，
+ *   否则年初分母会是 0，进度条显得空。
+ *   从前这里是纯 TTM，与按日历年统计的今年已收不同口径：
+ *   进度条可能永远填不满，TTM 窗口横跨两年时还会算出「已收 > 预计」。
  * - 今年已收 = **到账日**落在「今年 1 月 1 日 ~ 今天」之间的记录 × 持仓数量 ÷ 10
  * - 月度柱图只认**今年**的记录：已过的是实收，未来的已排定派息是预计。
  *   归月一律按**到账日**而非除息日——除息日只是「有资格拿」的日子，
@@ -33,8 +37,9 @@ object DividendProgressCalculator {
      *
      * 业界（Dividend Wealth 的 quality gate）会把陈旧的外推行直接丢掉——
      * 一只三年没分红的标的，拿 2023 年那次派息去预告今年的到账日是自欺欺人。
-     * 定 12 个月是为了和「全年预计」的 TTM 口径一致：**连 TTM 都统计不到的标的，
-     * 就不该出现在预计里**。数据源自己排定的未来派息不受此限制（那是真数据，不是推算）。
+     * 定 12 个月是为了和预计口径的 TTM 退回保持一致：今年没有已宣告分红、
+     * 只能拿近 12 个月预估时，**连 TTM 都统计不到的标的，就不该出现在预计里**。
+     * 数据源自己排定的未来派息不受此限制（那是真数据，不是推算）。
      *
      * 判定用 `lastDate.isBefore(today - 12个月)`，与 `getTTMDividend` 的闭区间窗口对齐。
      */
@@ -124,7 +129,7 @@ object DividendProgressCalculator {
             val records = recordsBySymbol[symbol].orEmpty()
 
             // 货币基金不发现金分红，收益是每日「每万份收益」，必须在这里单独进收息进度：
-            // 否则它会撞上下面「无分红记录 → 跳过」，全年预计里永远是 0。
+            // 否则它会撞上下面「无分红记录 → 跳过」，今年预计里永远是 0。
             // 与现金分红分支并存累加：极少数货基可能同时带分红记录，两条路都该算进来。
             val moneyFund = moneyFundIncome(asset, today, monthlyReceived, monthlyScheduled)
             yearProjected += moneyFund.projected
@@ -133,8 +138,24 @@ object DividendProgressCalculator {
             if (records.isEmpty()) return@assetLoop
 
             val balance = asset.balance
-            val ttmPerTenShares = DividendYieldCalculator.getTTMDividend(records, today)
-            yearProjected += perTenSharesToAmount(ttmPerTenShares, balance)
+
+            // 预计口径 = 自然年（与分子 yearReceived、月度柱图同一个日历口径）：
+            // - 今年已宣告（除息日在今年，含已排定未到账的）→ 按这些记录的金额合计
+            // - 今年还没宣告的标的 → 退回 TTM 预估，否则年初分母会是 0，进度条显得空
+            // 从前这里是纯 TTM，与按日历年统计的 yearReceived 不同口径：
+            // 进度条可能永远填不满，TTM 窗口横跨两年时还会算出「已收 > 预计」。
+            // 判定用除息日、不用到账日：12 月除息、次年 1 月到账的分红，
+            // 宣告发生在今年，就该计入今年的预计（否则年末分母会突然少一块）。
+            val thisYearRecords = records.filter {
+                val exDate = it.exDividendDate.take(10)
+                // 脏数据保护与该函数里归月处同一风格：日期串不满 10 位的一律不采信
+                exDate.length == 10 && exDate >= yearStart
+            }
+            yearProjected += if (thisYearRecords.isNotEmpty()) {
+                thisYearRecords.sumOf { it.amountFor(balance) }
+            } else {
+                perTenSharesToAmount(DividendYieldCalculator.getTTMDividend(records, today), balance)
+            }
 
             // 已排定的未来派息：用于倒计时（数据源给的日期比推算更可信）
             // 三元组 = 除息日 / 到账日 / 金额
@@ -222,12 +243,12 @@ object DividendProgressCalculator {
      * 所以持有 balance 份的日收益 = balance × 万份收益 ÷ 10000。
      *
      * 与现金分红口径的差异（务必记住）：
-     * - **全年预计** = 日收益 × 当年天数。前向预估，与现金分红的 TTM 同为 estimate 性质。
+     * - **今年预计** = 日收益 × 当年天数。前向预估，与现金分红的今年预计同为 estimate 性质。
      * - **今年已收** = 日收益 × 今年已过天数。**这是估算，不是真实到账记录**：
      *   我们只存了**最新**的万份收益，没有历史每日序列，只能拿最新值单点外推。
      *   用户已确认接受（否则货基已收恒为 0、进度条永远空着，反而更误导）。
      * - **月度柱图**：已过天数进 received、当年剩余天数进 scheduled，
-     *   两段相加正好等于全年预计，柱图与「全年预计」不会打架。
+     *   两段相加正好等于今年预计，柱图与「今年预计」不会打架。
      * - **不进 receivedCount**：那是「派息笔数」；货基按日计息，逐日计数会把笔数冲到几百。
      * - **不设 nextPayout**：货基按日结息，没有「下一笔」概念。
      *

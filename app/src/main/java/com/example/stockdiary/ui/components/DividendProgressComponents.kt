@@ -30,10 +30,12 @@ import com.example.stockdiary.utils.format
 import kotlin.math.ceil
 
 /**
- * 今年收息进度：已收 / 全年预计。
+ * 今年收息进度：已收 / 今年预计。
  *
  * 这是同类股息 App 的头号卖点 —— 用户打开 App 第一个想知道的就是
- * 「今年已经到手多少、全年大概能有多少」。进度条给出「还差多少」的直观感受。
+ * 「今年已经到手多少、今年大概能有多少」。进度条给出「还差多少」的直观感受。
+ * 分子（今年已收，按到账日）与分母（今年预计，按除息日宣告）同为自然年口径，
+ * 不会出现「永远填不满」或「已收大于预计」的错位。
  */
 @Composable
 fun DividendProgressCard(
@@ -85,7 +87,7 @@ fun DividendProgressCard(
                     )
                 }
                 Column(horizontalAlignment = Alignment.End) {
-                    Text("全年预计", style = MaterialTheme.typography.labelSmall, color = AppTheme.colors.onSurfaceVariant)
+                    Text("今年预计", style = MaterialTheme.typography.labelSmall, color = AppTheme.colors.onSurfaceVariant)
                     Text(
                         "¥${progress.yearProjected.format(2)}",
                         style = MaterialTheme.typography.titleMedium,
@@ -108,14 +110,16 @@ fun DividendProgressCard(
                     if (progress.remaining > 0.005) {
                         "已完成 ${(progress.ratio * 100).format(1)}%，还剩 ¥${progress.remaining.format(2)}"
                     } else {
-                        "全年预计已全部到账，超额 ¥${(progress.yearReceived - progress.yearProjected).format(2)}"
+                        // 真出现超额说明分红数据有出入（如到账日跨年、金额录错），仍该提示，
+                        // 但这不是常态——自然年口径下已收本不该超过今年预计
+                        "今年预计已全部到账，超额 ¥${(progress.yearReceived - progress.yearProjected).format(2)}（请检查分红数据）"
                     },
                     style = MaterialTheme.typography.bodySmall,
                     color = AppTheme.colors.onSurfaceVariant
                 )
             } else {
                 Text(
-                    "预计数据暂缺，已收金额按实际到账记录统计",
+                    "预计数据暂缺，已收金额按实际到账记录统计；今年已宣告的分红按宣告金额计入预计，尚未宣告的按近 12 个月预估",
                     style = MaterialTheme.typography.bodySmall,
                     color = AppTheme.colors.onSurfaceVariant
                 )

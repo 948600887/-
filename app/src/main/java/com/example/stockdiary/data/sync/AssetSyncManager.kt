@@ -278,20 +278,26 @@ object AssetSyncManager {
                     if (doing.isNotEmpty()) "（$doing）" else ""
             }
         ) {
-            val jobs = assets.map { asset ->
+            // 顺序很重要：场外基金是日更净值，且每只都要下 0.5~2MB 历史文件，最重、最不紧急；
+            // 把它排到最后，让股票 / 虚拟货币这些轻量、用户最关心的实时行情优先在预算内刷完，
+            // 基金被截断也只影响日更数据、下次（或后台 Worker）补上即可。
+            val orderedAssets = assets.sortedBy { if (it.type == AssetType.FUND) 1 else 0 }
+            val jobs = orderedAssets.map { asset ->
                 async {
-                    // 达到时间预算就跳过还没开始的标的：已启动的跑完，
-                    // 没启动的不再启动，结果带 truncatedByTimeLimit 让调用方提示用户
-                    if (SyncBudget.isExceeded(startTime, timeLimitMs, System.currentTimeMillis())) {
-                        if (truncated.compareAndSet(false, true)) {
-                            AppLogger.w(
-                                "已达时间预算（${timeLimitMs}ms），后续未开始的标的本次跳过",
-                                TAG
-                            )
-                        }
-                        return@async
-                    }
                     semaphore.withPermit {
+                        // 时间预算检查必须放在「拿到信号量之后」：上面的 112 个 async 是一次性
+                        // 全部 launch 的，若在 withPermit 之前检查，全都在 t≈0 落空、之后在信号量
+                        // 上排队恢复时早已错过检查点，预算形同虚设——这正是手动刷新曾跑满数分钟、
+                        // 被系统 LMK 静默击毙、且币安行情永远排不到的根因。
+                        if (SyncBudget.isExceeded(startTime, timeLimitMs, System.currentTimeMillis())) {
+                            if (truncated.compareAndSet(false, true)) {
+                                AppLogger.w(
+                                    "已达时间预算（${timeLimitMs}ms），后续未开始的标的本次跳过",
+                                    TAG
+                                )
+                            }
+                            return@withPermit
+                        }
                         val label = "${asset.name}（${asset.symbol ?: "无代码"}）".take(24)
                         AppLogger.d("开始同步 $label", TAG)
                         inFlightAssets.add(label)

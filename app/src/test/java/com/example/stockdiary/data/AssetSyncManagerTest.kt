@@ -43,7 +43,7 @@ import java.util.Collections
  * 这次「点刷新黑屏闪退」修复给 `syncAllAssets` 加了两个机制：**手动刷新互斥锁**
  * 与**时间预算**。判据是 `startTime <= 0` 视为手动刷新：
  *
- * - 手动路径套互斥锁 + 90 秒默认预算（[SyncBudget.MANUAL_SYNC_TIME_LIMIT_MS]）；
+ * - 手动路径套互斥锁 + 70 秒默认预算（[SyncBudget.MANUAL_SYNC_TIME_LIMIT_MS]，压在实测 ~83 秒 LMK 阈值之下）；
  * - 后台 [PriceSyncWorker] 传自己的 startTime 与 9 分钟上限，**两项都不套**——
  *   让用户点下的刷新排在 Worker 后面（最多 9 分钟）比叠加更糟。
  *

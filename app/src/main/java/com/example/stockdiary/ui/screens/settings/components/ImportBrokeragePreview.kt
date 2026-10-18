@@ -110,7 +110,7 @@ internal fun PreviewHeaderBlock(
             "有 $incompleteCount 行只认出了名称和金额、没认到日期与数量，已保留为异常行（不会导入）。" +
                 "通常是这一行在截图里被截断或表格列错位，重新截一张完整对账单即可。",
             style = MaterialTheme.typography.bodySmall,
-            color = AppTheme.colors.error
+            color = AppTheme.colors.errorText
         )
     }
     if (state.autoFilledCount > 0) {
@@ -119,7 +119,7 @@ internal fun PreviewHeaderBlock(
             "已自动匹配 ${state.autoFilledCount} 行证券代码（来自记忆/持仓/历史流水/证券库），" +
                 "核对无误直接确认即可；你手动填过的会被记住，下次不用再填。",
             style = MaterialTheme.typography.bodySmall,
-            color = AppTheme.colors.success
+            color = AppTheme.colors.successText
         )
     }
     if (state.ocrLines.isNotEmpty() || !state.ocrRawText.isNullOrBlank()) {
@@ -144,7 +144,7 @@ internal fun PreviewTransactionRow(
 ) {
     val focusManager = LocalFocusManager.current
     val bg = when {
-        tx.errors.isNotEmpty() -> AppTheme.colors.errorContainer // 红
+        tx.errors.isNotEmpty() -> AppTheme.colors.errorRowBackground // 红
         tx.isDuplicate -> AppTheme.colors.warningContainer        // 黄
         tx.skip -> MaterialTheme.colorScheme.surfaceVariant
         else -> Color.Transparent
@@ -205,7 +205,7 @@ internal fun PreviewTransactionRow(
                     Text(
                         "✓ 已自动匹配（${tx.symbolSource}），核对无误直接确认即可",
                         style = MaterialTheme.typography.bodySmall,
-                        color = AppTheme.colors.success
+                        color = AppTheme.colors.successText
                     )
                 }
             }
@@ -221,7 +221,7 @@ internal fun PreviewTransactionRow(
                 Text(
                     "与库内已有记录重复",
                     style = MaterialTheme.typography.bodySmall,
-                    color = AppTheme.colors.warning
+                    color = AppTheme.colors.warningText
                 )
             }
         }

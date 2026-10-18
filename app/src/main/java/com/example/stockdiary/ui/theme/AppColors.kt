@@ -21,6 +21,9 @@ data class AppColors(
     val surfaceContainer: Color, val surfaceContainerHigh: Color, val surfaceContainerHighest: Color,
     val background: Color, val primaryContainer: Color, val secondaryContainer: Color,
     val tertiaryContainer: Color, val errorContainer: Color, val warningContainer: Color,
+    // 导入预览专用文字/底色令牌：浅色值 = 该页面原硬编码字面量（保证浅色零变化），
+    // 不复用 error/success/warning 通用令牌——那些的浅色值与此处原值有差，深色亦需提亮
+    val errorText: Color, val successText: Color, val warningText: Color, val errorRowBackground: Color,
     // 描边
     val outline: Color, val outlineVariant: Color,
     // 品牌/强调
@@ -64,6 +67,11 @@ internal val LightAppColors = AppColors(
     tertiaryContainer = TertiaryContainer,
     errorContainer = ErrorContainer,
     warningContainer = Color(0xFFFFF59D),
+    // 导入预览专用令牌：浅色值逐字等于该页面原硬编码（零变化），见 AppColorsTest 钉死
+    errorText = Color(0xFFC62828),
+    successText = Color(0xFF2E7D32),
+    warningText = Color(0xFFF57F17),
+    errorRowBackground = Color(0xFFFFCDD2),
     outline = Outline,
     outlineVariant = OutlineVariant,
     primary = Primary,
@@ -100,6 +108,11 @@ internal val DarkAppColors = AppColors(
     tertiaryContainer = TertiaryContainerDark,
     errorContainer = ErrorContainerDark,
     warningContainer = Color(0xFF3A2E00),
+    // 导入预览专用令牌：深色用 Color.kt 已有亮色变体，保证深底下对比度
+    errorText = LossRedBright,
+    successText = ProfitGreenBright,
+    warningText = WarningBright,
+    errorRowBackground = ErrorContainerDark,
     outline = OutlineDark,
     outlineVariant = OutlineVariantDark,
     primary = PrimaryGreenLight,        // #4CAF50 微调提亮

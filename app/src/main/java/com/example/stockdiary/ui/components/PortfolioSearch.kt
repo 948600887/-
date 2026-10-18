@@ -47,7 +47,7 @@ fun PortfolioSearchDialog(
         onDismissRequest = onDismiss,
         title = {
             Column {
-                Text("搜索持仓", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = OnSurface)
+                Text("搜索持仓", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = AppTheme.colors.onSurface)
                 Spacer(modifier = Modifier.height(8.dp))
                 OutlinedTextField(
                     value = searchQuery,
@@ -60,12 +60,12 @@ fun PortfolioSearchDialog(
                     trailingIcon = {
                         if (searchQuery.isNotEmpty()) {
                             IconButton(onClick = { searchQuery = "" }) {
-                                Icon(Icons.Filled.Close, contentDescription = "清除", tint = OnSurfaceVariant)
+                                Icon(Icons.Filled.Close, contentDescription = "清除", tint = AppTheme.colors.onSurfaceVariant)
                             }
                         }
                     },
                     singleLine = true,
-                    colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = Primary, unfocusedBorderColor = Outline)
+                    colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = AppTheme.colors.primary, unfocusedBorderColor = AppTheme.colors.outline)
                 )
             }
         },
@@ -78,7 +78,7 @@ fun PortfolioSearchDialog(
                 if (filteredAssets.isEmpty() && searchQuery.isNotBlank()) {
                     item {
                         Box(modifier = Modifier.fillMaxWidth().padding(32.dp), contentAlignment = Alignment.Center) {
-                            Text("没有找到匹配的持仓", style = MaterialTheme.typography.bodyMedium, color = OnSurfaceVariant)
+                            Text("没有找到匹配的持仓", style = MaterialTheme.typography.bodyMedium, color = AppTheme.colors.onSurfaceVariant)
                         }
                     }
                 }
@@ -97,7 +97,7 @@ fun SearchAssetItem(asset: Asset, onClick: () -> Unit, onDividendClick: () -> Un
     Card(
         modifier = Modifier.fillMaxWidth().clickable(onClick = onClick),
         shape = RoundedCornerShape(8.dp),
-        colors = CardDefaults.cardColors(containerColor = SurfaceContainerLow)
+        colors = CardDefaults.cardColors(containerColor = AppTheme.colors.surfaceContainerLow)
     ) {
         Row(
             modifier = Modifier.fillMaxWidth().padding(12.dp),
@@ -105,26 +105,26 @@ fun SearchAssetItem(asset: Asset, onClick: () -> Unit, onDividendClick: () -> Un
             verticalAlignment = Alignment.CenterVertically
         ) {
             Column(modifier = Modifier.weight(1f)) {
-                Text(asset.name, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold, color = OnSurface, maxLines = 1)
+                Text(asset.name, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold, color = AppTheme.colors.onSurface, maxLines = 1)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text(asset.symbol ?: "", style = MaterialTheme.typography.bodySmall, color = OnSurfaceVariant)
-                    Text("•", style = MaterialTheme.typography.bodySmall, color = OnSurfaceVariant)
-                    Text("${asset.balance.format(0)}${if (asset.type == AssetType.STOCK) "股" else "份"}", style = MaterialTheme.typography.bodySmall, color = OnSurfaceVariant)
+                    Text(asset.symbol ?: "", style = MaterialTheme.typography.bodySmall, color = AppTheme.colors.onSurfaceVariant)
+                    Text("•", style = MaterialTheme.typography.bodySmall, color = AppTheme.colors.onSurfaceVariant)
+                    Text("${asset.balance.format(0)}${if (asset.type == AssetType.STOCK) "股" else "份"}", style = MaterialTheme.typography.bodySmall, color = AppTheme.colors.onSurfaceVariant)
                 }
             }
             Column(modifier = Modifier.weight(1f), horizontalAlignment = Alignment.End) {
-                Text("¥${asset.totalValueCny.format(2)}", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold, color = OnSurface)
+                Text("¥${asset.totalValueCny.format(2)}", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold, color = AppTheme.colors.onSurface)
                 Text(
                     asset.currentPrice?.let { "¥${it.format(pricePrecision)}" } ?: if (StockCodeManager.isDelisted(asset.symbol)) "退市" else "价格待更新",
-                    style = MaterialTheme.typography.bodySmall, color = OnSurfaceVariant, fontWeight = FontWeight.Medium
+                    style = MaterialTheme.typography.bodySmall, color = AppTheme.colors.onSurfaceVariant, fontWeight = FontWeight.Medium
                 )
                 if (asset.millionCopiesIncome != null) {
                     Text("万份收益 ${asset.millionCopiesIncome.format(4)}",
-                        style = MaterialTheme.typography.bodySmall, color = OnSurfaceVariant)
+                        style = MaterialTheme.typography.bodySmall, color = AppTheme.colors.onSurfaceVariant)
                 }
             }
             IconButton(onClick = onDividendClick, modifier = Modifier.size(32.dp)) {
-                Icon(Icons.Filled.Savings, contentDescription = "分红", tint = Primary, modifier = Modifier.size(18.dp))
+                Icon(Icons.Filled.Savings, contentDescription = "分红", tint = AppTheme.colors.primary, modifier = Modifier.size(18.dp))
             }
         }
     }

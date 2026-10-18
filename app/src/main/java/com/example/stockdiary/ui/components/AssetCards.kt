@@ -33,7 +33,7 @@ fun PortfolioOverviewCard(
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(12.dp),
-        colors = CardDefaults.cardColors(containerColor = PrimaryContainer)
+        colors = CardDefaults.cardColors(containerColor = AppTheme.colors.primaryContainer)
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
             Row(
@@ -41,11 +41,11 @@ fun PortfolioOverviewCard(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text("总资产", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, color = OnSurface)
-                Text("$assetCount 项", style = MaterialTheme.typography.bodySmall, color = OnSurfaceVariant)
+                Text("总资产", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, color = AppTheme.colors.onSurface)
+                Text("$assetCount 项", style = MaterialTheme.typography.bodySmall, color = AppTheme.colors.onSurfaceVariant)
             }
             Spacer(modifier = Modifier.height(8.dp))
-            Text("¥${totalAssets.format(2)}", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold, color = OnSurface)
+            Text("¥${totalAssets.format(2)}", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold, color = AppTheme.colors.onSurface)
             // 有负债时净资产比总资产更值得看，别让用户自己心算
             if (totalLiabilities > 0) {
                 Spacer(modifier = Modifier.height(6.dp))
@@ -53,12 +53,12 @@ fun PortfolioOverviewCard(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    Text("净资产 ¥${netAssets.format(2)}", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium, color = OnSurface)
-                    Text("负债 ¥${totalLiabilities.format(2)}", style = MaterialTheme.typography.bodyMedium, color = ProfitGreen)
+                    Text("净资产 ¥${netAssets.format(2)}", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium, color = AppTheme.colors.onSurface)
+                    Text("负债 ¥${totalLiabilities.format(2)}", style = MaterialTheme.typography.bodyMedium, color = AppTheme.colors.profitGreen)
                 }
             }
             Spacer(modifier = Modifier.height(12.dp))
-            HorizontalDivider(color = Outline.copy(alpha = 0.3f))
+            HorizontalDivider(color = AppTheme.colors.outline.copy(alpha = 0.3f))
             Spacer(modifier = Modifier.height(12.dp))
             // 抓取期间照常显示旧值，不用「计算中」把屏幕占住——
             // 缓存命中时根本不抓，冷启动那一下也会有旧值可看
@@ -97,7 +97,7 @@ fun MarketHeaderCard(
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(12.dp),
-        colors = CardDefaults.cardColors(containerColor = PrimaryContainer)
+        colors = CardDefaults.cardColors(containerColor = AppTheme.colors.primaryContainer)
     ) {
         Row(
             modifier = Modifier.fillMaxWidth().clickable(onClick = { onToggleExpand(expandKey) }).padding(16.dp),
@@ -109,22 +109,22 @@ fun MarketHeaderCard(
                     label,
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold,
-                    color = OnSurface
+                    color = AppTheme.colors.onSurface
                 )
-                Text("$assetCount 项", style = MaterialTheme.typography.bodySmall, color = OnSurfaceVariant)
+                Text("$assetCount 项", style = MaterialTheme.typography.bodySmall, color = AppTheme.colors.onSurfaceVariant)
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     "¥${totalValue.format(2)}",
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.SemiBold,
-                    color = OnSurface
+                    color = AppTheme.colors.onSurface
                 )
                 Spacer(modifier = Modifier.width(8.dp))
                 Icon(
                     imageVector = if (isExpanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
                     contentDescription = if (isExpanded) "收起" else "展开",
-                    tint = OnSurfaceVariant
+                    tint = AppTheme.colors.onSurfaceVariant
                 )
             }
         }
@@ -150,7 +150,7 @@ fun AccountHeaderCard(
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(12.dp),
-        colors = CardDefaults.cardColors(containerColor = SurfaceContainer)
+        colors = CardDefaults.cardColors(containerColor = AppTheme.colors.surfaceContainer)
     ) {
         Row(
             modifier = Modifier.fillMaxWidth().clickable(onClick = { onToggleExpand(expandKey) }).padding(16.dp),
@@ -158,16 +158,16 @@ fun AccountHeaderCard(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Column {
-                Text(account, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, color = OnSurface)
-                Text("$assetCount 项", style = MaterialTheme.typography.bodySmall, color = OnSurfaceVariant)
+                Text(account, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, color = AppTheme.colors.onSurface)
+                Text("$assetCount 项", style = MaterialTheme.typography.bodySmall, color = AppTheme.colors.onSurfaceVariant)
             }
             Column(horizontalAlignment = Alignment.End) {
-                Text("¥${totalValue.format(2)}", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, color = OnSurface)
+                Text("¥${totalValue.format(2)}", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, color = AppTheme.colors.onSurface)
             }
             Icon(
                 imageVector = if (isExpanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
                 contentDescription = if (isExpanded) "收起" else "展开",
-                tint = OnSurfaceVariant
+                tint = AppTheme.colors.onSurfaceVariant
             )
         }
     }
@@ -191,7 +191,7 @@ fun StockAssetItem(
         modifier = Modifier.fillMaxWidth().clickable(onClick = { onClick(asset.id) }),
         shape = RoundedCornerShape(8.dp),
         colors = CardDefaults.cardColors(
-            containerColor = if (isSelected) PrimaryContainer.copy(alpha = 0.4f) else SurfaceContainerLow
+            containerColor = if (isSelected) AppTheme.colors.primaryContainer.copy(alpha = 0.4f) else AppTheme.colors.surfaceContainerLow
         )
     ) {
         Row(
@@ -207,21 +207,21 @@ fun StockAssetItem(
                 )
             }
             Column(modifier = Modifier.weight(1f)) {
-                Text(asset.name, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold, color = OnSurface, maxLines = 1)
+                Text(asset.name, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold, color = AppTheme.colors.onSurface, maxLines = 1)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                     asset.symbol?.let {
-                        Text(it, style = MaterialTheme.typography.bodySmall, color = OnSurfaceVariant)
-                        Text("•", style = MaterialTheme.typography.bodySmall, color = OnSurfaceVariant)
+                        Text(it, style = MaterialTheme.typography.bodySmall, color = AppTheme.colors.onSurfaceVariant)
+                        Text("•", style = MaterialTheme.typography.bodySmall, color = AppTheme.colors.onSurfaceVariant)
                     }
                     // 负债没有「持仓数量」的概念，balance 就是欠多少钱
                     Text(
                         if (isLiability) "负债" else "${asset.balance.format(0)}$unitLabel",
-                        style = MaterialTheme.typography.bodySmall, color = OnSurfaceVariant
+                        style = MaterialTheme.typography.bodySmall, color = AppTheme.colors.onSurfaceVariant
                     )
                 }
             }
             Column(modifier = Modifier.weight(1f), horizontalAlignment = Alignment.End) {
-                Text("¥${asset.totalValueCny.format(2)}", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold, color = OnSurface)
+                Text("¥${asset.totalValueCny.format(2)}", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold, color = AppTheme.colors.onSurface)
                 Text(
                     when {
                         isLiability -> "待偿还"
@@ -229,17 +229,17 @@ fun StockAssetItem(
                         StockCodeManager.isDelisted(asset.symbol) -> "退市"
                         else -> "价格待更新"
                     },
-                    style = MaterialTheme.typography.bodySmall, color = OnSurfaceVariant, fontWeight = FontWeight.Medium
+                    style = MaterialTheme.typography.bodySmall, color = AppTheme.colors.onSurfaceVariant, fontWeight = FontWeight.Medium
                 )
                 if (asset.millionCopiesIncome != null) {
                     Text("万份收益 ${asset.millionCopiesIncome.format(4)}",
-                        style = MaterialTheme.typography.bodySmall, color = OnSurfaceVariant)
+                        style = MaterialTheme.typography.bodySmall, color = AppTheme.colors.onSurfaceVariant)
                 }
             }
             // 分红入口只对能分红的类型有意义，负债点了也是空列表
             if (!selectionMode && !isLiability) {
                 IconButton(onClick = { onDividendClick(asset.id) }, modifier = Modifier.size(32.dp)) {
-                    Icon(Icons.Filled.Savings, contentDescription = "分红", tint = Primary, modifier = Modifier.size(18.dp))
+                    Icon(Icons.Filled.Savings, contentDescription = "分红", tint = AppTheme.colors.primary, modifier = Modifier.size(18.dp))
                 }
             }
         }
@@ -250,10 +250,10 @@ fun StockAssetItem(
 private fun PortfolioMetricColumn(label: String, value: String, isLoading: Boolean) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         if (isLoading) {
-            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = Primary)
+            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = AppTheme.colors.primary)
         } else {
-            Text(value, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, color = OnSurface)
+            Text(value, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, color = AppTheme.colors.onSurface)
         }
-        Text(label, style = MaterialTheme.typography.labelSmall, color = OnSurfaceVariant)
+        Text(label, style = MaterialTheme.typography.labelSmall, color = AppTheme.colors.onSurfaceVariant)
     }
 }

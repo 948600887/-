@@ -15,23 +15,22 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.example.stockdiary.ui.theme.OnSurface
-import com.example.stockdiary.ui.theme.OnSurfaceVariant
+import com.example.stockdiary.ui.theme.AppTheme
 import com.example.stockdiary.utils.format
 
 @Composable
-internal fun OverviewMetric(label: String, value: String, valueColor: Color = OnSurface) {
+internal fun OverviewMetric(label: String, value: String, valueColor: Color = AppTheme.colors.onSurface) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Text(text = value, fontSize = 15.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold, color = valueColor)
-        Text(text = label, fontSize = 11.sp, color = OnSurfaceVariant)
+        Text(text = label, fontSize = 11.sp, color = AppTheme.colors.onSurfaceVariant)
     }
 }
 
 @Composable
-internal fun RiskMetric(label: String, value: String, valueColor: Color = OnSurface) {
+internal fun RiskMetric(label: String, value: String, valueColor: Color = AppTheme.colors.onSurface) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Text(text = value, fontSize = 14.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold, color = valueColor)
-        Text(text = label, fontSize = 11.sp, color = OnSurfaceVariant)
+        Text(text = label, fontSize = 11.sp, color = AppTheme.colors.onSurfaceVariant)
     }
 }
 
@@ -52,11 +51,11 @@ internal fun DistributionLegend(
                 drawCircle(color = color)
             }
             Spacer(modifier = Modifier.width(8.dp))
-            Text(name, fontSize = 13.sp, color = OnSurface)
+            Text(name, fontSize = 13.sp, color = AppTheme.colors.onSurface)
         }
         Column(horizontalAlignment = Alignment.End) {
-            Text("¥${value.format(0)}", fontSize = 13.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Medium, color = OnSurface)
-            Text("${percent.format(1)}%", fontSize = 11.sp, color = OnSurfaceVariant)
+            Text("¥${value.format(0)}", fontSize = 13.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Medium, color = AppTheme.colors.onSurface)
+            Text("${percent.format(1)}%", fontSize = 11.sp, color = AppTheme.colors.onSurfaceVariant)
         }
     }
 }

@@ -19,7 +19,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.ui.dialogs.sanitizeDecimalInput
-import com.example.stockdiary.ui.theme.LossRed
+import com.example.stockdiary.ui.theme.AppTheme
 import com.example.stockdiary.utils.format
 import com.example.stockdiary.utils.totalValueCny
 
@@ -95,7 +95,7 @@ fun FireCalculationDialog(
                             "${realYield.format(2)}%",
                             fontSize = 16.sp,
                             fontWeight = FontWeight.Bold,
-                            color = if (realYield > 0) LossRed else MaterialTheme.colorScheme.onSurfaceVariant
+                            color = if (realYield > 0) AppTheme.colors.lossRed else MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                 }

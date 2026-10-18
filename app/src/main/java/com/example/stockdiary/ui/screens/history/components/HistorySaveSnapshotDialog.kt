@@ -14,7 +14,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.stockdiary.database.Asset
-import com.example.stockdiary.ui.theme.ProfitGreen
+import com.example.stockdiary.ui.theme.AppTheme
 import com.example.stockdiary.utils.format
 import com.example.stockdiary.utils.totalValueCny
 
@@ -43,7 +43,7 @@ fun HistorySaveSnapshotDialog(
 
                 Text("净资产: ¥${netAssets.format(2)}", fontWeight = FontWeight.Bold)
                 if (totalLiabilities > 0) {
-                    Text("负债: ¥${totalLiabilities.format(2)}", color = ProfitGreen)
+                    Text("负债: ¥${totalLiabilities.format(2)}", color = AppTheme.colors.profitGreen)
                 }
                 Text("总资产: ¥${totalValue.format(2)}")
             }

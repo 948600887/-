@@ -49,7 +49,7 @@ fun TotalAssetCard(
             .fillMaxWidth()
             .shadow(elevation = 4.dp, shape = RoundedCornerShape(12.dp)),
         shape = RoundedCornerShape(12.dp),
-        colors = CardDefaults.cardColors(containerColor = SurfaceContainer)
+        colors = CardDefaults.cardColors(containerColor = AppTheme.colors.surfaceContainer)
     ) {
         Column(
             modifier = Modifier
@@ -64,12 +64,12 @@ fun TotalAssetCard(
                     MetricLabel("总资产", "¥${totalAssets.format(2)}", MaterialTheme.typography.headlineSmall)
                 }
                 Spacer(modifier = Modifier.height(16.dp))
-                HorizontalDivider(color = Outline.copy(alpha = 0.5f))
+                HorizontalDivider(color = AppTheme.colors.outline.copy(alpha = 0.5f))
                 Spacer(modifier = Modifier.height(16.dp))
             } else if (showTotalAssets) {
                 MetricLabel("总资产", "¥${totalAssets.format(2)}", MaterialTheme.typography.headlineMedium)
                 Spacer(modifier = Modifier.height(16.dp))
-                HorizontalDivider(color = Outline.copy(alpha = 0.5f))
+                HorizontalDivider(color = AppTheme.colors.outline.copy(alpha = 0.5f))
                 Spacer(modifier = Modifier.height(16.dp))
             }
 
@@ -141,7 +141,7 @@ fun AssetGrowthCard(
                 Text(
                     text = "在「历史」页保存快照后，这里就能对比出本月 / 今年的增值",
                     style = MaterialTheme.typography.bodySmall,
-                    color = OnSurfaceVariant
+                    color = AppTheme.colors.onSurfaceVariant
                 )
             }
         }
@@ -155,9 +155,9 @@ private fun GrowthMetric(label: String, delta: Double?) {
             text = delta?.toProfitDisplay("¥") ?: "—",
             style = MaterialTheme.typography.titleMedium,
             fontWeight = FontWeight.Bold,
-            color = delta?.profitColor() ?: OnSurface
+            color = delta?.profitColor() ?: AppTheme.colors.onSurface
         )
-        Text(text = label, style = MaterialTheme.typography.labelSmall, color = OnSurfaceVariant)
+        Text(text = label, style = MaterialTheme.typography.labelSmall, color = AppTheme.colors.onSurfaceVariant)
     }
 }
 
@@ -179,7 +179,7 @@ fun AssetDistributionCard(
                 Text(
                     text = "暂无资产分布数据",
                     style = MaterialTheme.typography.bodyMedium,
-                    color = OnSurfaceVariant
+                    color = AppTheme.colors.onSurfaceVariant
                 )
             } else {
                 Row(
@@ -218,16 +218,16 @@ fun DistributionItem(label: String, value: Double, percent: Double) {
 fun EmptyAssetCard(onAddAsset: () -> Unit) {
     Card(
         modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = SurfaceContainer)
+        colors = CardDefaults.cardColors(containerColor = AppTheme.colors.surfaceContainer)
     ) {
         Column(
             modifier = Modifier.fillMaxWidth().padding(32.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Icon(imageVector = Icons.Default.AccountBalance, contentDescription = null, modifier = Modifier.size(64.dp), tint = OnSurfaceVariant)
+            Icon(imageVector = Icons.Default.AccountBalance, contentDescription = null, modifier = Modifier.size(64.dp), tint = AppTheme.colors.onSurfaceVariant)
             Spacer(modifier = Modifier.height(16.dp))
-            Text(text = "还没有添加任何资产", style = MaterialTheme.typography.titleMedium, color = OnSurface)
-            Text(text = "点击下方按钮添加你的第一笔资产", style = MaterialTheme.typography.bodyMedium, color = OnSurfaceVariant)
+            Text(text = "还没有添加任何资产", style = MaterialTheme.typography.titleMedium, color = AppTheme.colors.onSurface)
+            Text(text = "点击下方按钮添加你的第一笔资产", style = MaterialTheme.typography.bodyMedium, color = AppTheme.colors.onSurfaceVariant)
             Spacer(modifier = Modifier.height(16.dp))
             Button(onClick = onAddAsset) {
                 Icon(Icons.Default.Add, contentDescription = null)
@@ -286,20 +286,20 @@ fun SortChip(currentSort: SortOrder, onSortChange: (SortOrder) -> Unit) {
 
 @Composable
 private fun MetricLabel(label: String, value: String, valueStyle: androidx.compose.ui.text.TextStyle) {
-    Text(text = label, style = MaterialTheme.typography.labelMedium, color = OnSurfaceVariant)
+    Text(text = label, style = MaterialTheme.typography.labelMedium, color = AppTheme.colors.onSurfaceVariant)
     Spacer(modifier = Modifier.height(8.dp))
-    Text(text = value, style = valueStyle, fontWeight = FontWeight.Bold, color = OnSurface)
+    Text(text = value, style = valueStyle, fontWeight = FontWeight.Bold, color = AppTheme.colors.onSurface)
 }
 
 @Composable
 private fun MetricColumn(label: String, value: String? = null, loading: Boolean = false) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(text = label, style = MaterialTheme.typography.labelSmall, color = OnSurfaceVariant)
+        Text(text = label, style = MaterialTheme.typography.labelSmall, color = AppTheme.colors.onSurfaceVariant)
         if (loading) {
             Spacer(modifier = Modifier.height(4.dp))
-            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = Primary)
+            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = AppTheme.colors.primary)
         } else if (value != null) {
-            Text(text = value, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, color = OnSurface)
+            Text(text = value, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, color = AppTheme.colors.onSurface)
         }
     }
 }
@@ -310,13 +310,13 @@ private fun StatusHint(text: String) {
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 4.dp, vertical = 8.dp)
-            .background(Warning.copy(alpha = 0.1f), RoundedCornerShape(8.dp))
+            .background(AppTheme.colors.warning.copy(alpha = 0.1f), RoundedCornerShape(8.dp))
             .padding(horizontal = 12.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Icon(imageVector = Icons.Default.Info, contentDescription = null, tint = Warning, modifier = Modifier.size(14.dp))
+        Icon(imageVector = Icons.Default.Info, contentDescription = null, tint = AppTheme.colors.warning, modifier = Modifier.size(14.dp))
         Spacer(modifier = Modifier.width(6.dp))
-        Text(text = text, fontSize = 11.sp, color = OnSurfaceVariant)
+        Text(text = text, fontSize = 11.sp, color = AppTheme.colors.onSurfaceVariant)
     }
 }
 
@@ -326,7 +326,7 @@ private fun IncomeDisplay(annualIncome: Double, dividendLoading: Boolean) {
         Icon(
             imageVector = Icons.AutoMirrored.Filled.TrendingUp,
             contentDescription = null,
-            tint = Primary,
+            tint = AppTheme.colors.primary,
             modifier = Modifier.size(16.dp)
         )
         Spacer(modifier = Modifier.width(4.dp))
@@ -337,7 +337,7 @@ private fun IncomeDisplay(annualIncome: Double, dividendLoading: Boolean) {
                 "预计年度收入 ¥${annualIncome.format(2)} · 月均 ¥${(annualIncome / 12).format(2)}"
             },
             style = MaterialTheme.typography.bodyMedium,
-            color = Primary,
+            color = AppTheme.colors.primary,
             fontWeight = FontWeight.Medium
         )
     }

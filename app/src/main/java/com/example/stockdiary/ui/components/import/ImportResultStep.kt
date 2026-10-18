@@ -22,8 +22,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import com.example.stockdiary.ui.theme.LossRed
-import com.example.stockdiary.ui.theme.ProfitGreen
+import com.example.stockdiary.ui.theme.AppTheme
 
 /**
  * 导入结果统计。把持仓截图与币安两条链路的 CommitResult 口径统一到这里：
@@ -70,7 +69,7 @@ fun ImportResultStep(
             Icons.Default.Info,
             contentDescription = null,
             modifier = Modifier.size(48.dp),
-            tint = ProfitGreen
+            tint = AppTheme.colors.profitGreen
         )
         Spacer(Modifier.height(16.dp))
         Text("导入完成", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
@@ -87,7 +86,7 @@ fun ImportResultStep(
                 Icon(
                     Icons.Default.Info,
                     contentDescription = null,
-                    tint = LossRed,
+                    tint = AppTheme.colors.lossRed,
                     modifier = Modifier.size(16.dp)
                 )
                 Spacer(Modifier.width(6.dp))

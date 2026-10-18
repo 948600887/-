@@ -29,15 +29,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.stockdiary.data.calculator.AssetGrowthCalculator
 import com.example.stockdiary.database.AssetSnapshot
-import com.example.stockdiary.ui.theme.AccentBlue
-import com.example.stockdiary.ui.theme.AccentOrange
-import com.example.stockdiary.ui.theme.LossRed
-import com.example.stockdiary.ui.theme.OnSurface
-import com.example.stockdiary.ui.theme.OnSurfaceVariant
-import com.example.stockdiary.ui.theme.Primary
-import com.example.stockdiary.ui.theme.PrimaryGreen
-import com.example.stockdiary.ui.theme.ProfitGreen
-import com.example.stockdiary.ui.theme.SurfaceContainerLow
+import com.example.stockdiary.ui.theme.AppTheme
 import com.example.stockdiary.ui.viewmodels.MonthlyReturn
 import com.example.stockdiary.ui.viewmodels.SnapshotStatistics
 import com.example.stockdiary.utils.format
@@ -73,8 +65,8 @@ fun HistoryPeriodSelector(
             Surface(
                 modifier = Modifier.clickable { onPeriodSelected(key) },
                 shape = RoundedCornerShape(8.dp),
-                color = if (isSelected) Primary else SurfaceContainerLow,
-                contentColor = if (isSelected) Color.White else OnSurfaceVariant
+                color = if (isSelected) AppTheme.colors.primary else AppTheme.colors.surfaceContainerLow,
+                contentColor = if (isSelected) AppTheme.colors.onPrimary else AppTheme.colors.onSurfaceVariant
             ) {
                 Text(
                     text = label, fontSize = 13.sp,
@@ -109,11 +101,11 @@ private fun SectionCard(
     }
     Card(
         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
-        colors = CardDefaults.cardColors(containerColor = SurfaceContainerLow),
+        colors = CardDefaults.cardColors(containerColor = AppTheme.colors.surfaceContainerLow),
         shape = RoundedCornerShape(12.dp)
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
-            Text(title, fontSize = 12.sp, color = OnSurfaceVariant)
+            Text(title, fontSize = 12.sp, color = AppTheme.colors.onSurfaceVariant)
             Spacer(modifier = Modifier.height(titleGap))
             content()
         }
@@ -138,7 +130,7 @@ fun LazyListScope.historyOverviewCard(
         SectionCard(title = "资产总览", titleGap = 4.dp, spacerBefore = false) {
             Text(
                 text = "¥${latest.netAssets.format(2)}",
-                fontSize = 28.sp, fontWeight = FontWeight.Bold, color = OnSurface
+                fontSize = 28.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.onSurface
             )
             Spacer(modifier = Modifier.height(12.dp))
             Row(
@@ -148,12 +140,12 @@ fun LazyListScope.historyOverviewCard(
                 OverviewMetric(
                     "本月新增",
                     monthDelta?.toProfitDisplay("¥") ?: "—",
-                    monthDelta?.profitColor() ?: OnSurface
+                    monthDelta?.profitColor() ?: AppTheme.colors.onSurface
                 )
                 OverviewMetric(
                     "今年新增",
                     yearDelta?.toProfitDisplay("¥") ?: "—",
-                    yearDelta?.profitColor() ?: OnSurface
+                    yearDelta?.profitColor() ?: AppTheme.colors.onSurface
                 )
             }
         }
@@ -207,7 +199,7 @@ fun LazyListScope.historyPeriodReturnCard(
                         fontSize = 24.sp, fontWeight = FontWeight.Bold,
                         color = periodChange.profitColor()
                     )
-                    Text("净资产增加", fontSize = 11.sp, color = OnSurfaceVariant)
+                    Text("净资产增加", fontSize = 11.sp, color = AppTheme.colors.onSurfaceVariant)
                 }
                 Column(horizontalAlignment = Alignment.End) {
                     Text(
@@ -215,11 +207,11 @@ fun LazyListScope.historyPeriodReturnCard(
                         fontSize = 24.sp, fontWeight = FontWeight.Bold,
                         color = periodYield.profitColor()
                     )
-                    Text("增幅", fontSize = 11.sp, color = OnSurfaceVariant)
+                    Text("增幅", fontSize = 11.sp, color = AppTheme.colors.onSurfaceVariant)
                 }
             }
             Spacer(modifier = Modifier.height(4.dp))
-            Text(periodLabel, fontSize = 11.sp, color = OnSurfaceVariant)
+            Text(periodLabel, fontSize = 11.sp, color = AppTheme.colors.onSurfaceVariant)
         }
     }
 }
@@ -231,8 +223,8 @@ fun LazyListScope.historyRiskCard(stats: SnapshotStatistics) {
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceEvenly
             ) {
-                RiskMetric("最大回撤", "${stats.maxDrawdown.format(2)}%", ProfitGreen)
-                RiskMetric("波动率", "${stats.volatility.format(2)}%", OnSurface)
+                RiskMetric("最大回撤", "${stats.maxDrawdown.format(2)}%", AppTheme.colors.profitGreen)
+                RiskMetric("波动率", "${stats.volatility.format(2)}%", AppTheme.colors.onSurface)
                 RiskMetric("日均增幅", "${stats.avgDailyReturnPercent.format(2)}%", stats.avgDailyReturnPercent.profitColor())
             }
             Spacer(modifier = Modifier.height(8.dp))
@@ -241,8 +233,8 @@ fun LazyListScope.historyRiskCard(stats: SnapshotStatistics) {
                 horizontalArrangement = Arrangement.SpaceEvenly
             ) {
                 RiskMetric("日均增值额", stats.avgDailyReturnAmount.toProfitDisplay("¥"), stats.avgDailyReturnAmount.profitColor())
-                RiskMetric("最高净资产", "¥${stats.maxValue.format(0)}", OnSurface)
-                RiskMetric("最低净资产", "¥${stats.minValue.format(0)}", OnSurface)
+                RiskMetric("最高净资产", "¥${stats.maxValue.format(0)}", AppTheme.colors.onSurface)
+                RiskMetric("最低净资产", "¥${stats.minValue.format(0)}", AppTheme.colors.onSurface)
             }
         }
     }
@@ -276,16 +268,16 @@ fun LazyListScope.historyAssetDistribution(latest: AssetSnapshot) {
                 Spacer(modifier = Modifier.width(20.dp))
                 Column(modifier = Modifier.weight(1f)) {
                     if (latest.stockValue > 0) {
-                        DistributionLegend("股票", latest.stockValue, latest.stockValue / totalForShare * 100, LossRed)
+                        DistributionLegend("股票", latest.stockValue, latest.stockValue / totalForShare * 100, AppTheme.colors.lossRed)
                     }
                     if (latest.fundValue > 0) {
-                        DistributionLegend("基金", latest.fundValue, latest.fundValue / totalForShare * 100, AccentOrange)
+                        DistributionLegend("基金", latest.fundValue, latest.fundValue / totalForShare * 100, AppTheme.colors.accentOrange)
                     }
                     if (latest.cryptoValue > 0) {
-                        DistributionLegend("加密货币", latest.cryptoValue, latest.cryptoValue / totalForShare * 100, AccentBlue)
+                        DistributionLegend("加密货币", latest.cryptoValue, latest.cryptoValue / totalForShare * 100, AppTheme.colors.accentBlue)
                     }
                     if (latest.bankDepositValue > 0) {
-                        DistributionLegend("银行存款", latest.bankDepositValue, latest.bankDepositValue / totalForShare * 100, PrimaryGreen)
+                        DistributionLegend("银行存款", latest.bankDepositValue, latest.bankDepositValue / totalForShare * 100, AppTheme.colors.primaryGreen)
                     }
                 }
             }

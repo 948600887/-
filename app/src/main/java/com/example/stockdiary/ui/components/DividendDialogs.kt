@@ -96,7 +96,7 @@ fun DividendDetailDialog(
             ) {
                 Column {
                     Text(asset.name, fontWeight = FontWeight.Bold)
-                    Text(symbol, style = MaterialTheme.typography.labelSmall, color = OnSurfaceVariant)
+                    Text(symbol, style = MaterialTheme.typography.labelSmall, color = AppTheme.colors.onSurfaceVariant)
                 }
                 TextButton(onClick = { isEditMode = !isEditMode }) {
                     Text(if (isEditMode) "完成" else "管理")
@@ -117,7 +117,7 @@ fun DividendDetailDialog(
                         modifier = Modifier.fillMaxWidth().height(80.dp),
                         contentAlignment = Alignment.Center
                     ) {
-                        Text(loadError ?: "", color = OnSurfaceVariant)
+                        Text(loadError ?: "", color = AppTheme.colors.onSurfaceVariant)
                     }
                 } else if (records.isEmpty()) {
                     Box(
@@ -125,9 +125,9 @@ fun DividendDetailDialog(
                         contentAlignment = Alignment.Center
                     ) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Icon(Icons.Filled.Savings, contentDescription = null, tint = OnSurfaceVariant, modifier = Modifier.size(32.dp))
+                            Icon(Icons.Filled.Savings, contentDescription = null, tint = AppTheme.colors.onSurfaceVariant, modifier = Modifier.size(32.dp))
                             Spacer(modifier = Modifier.height(8.dp))
-                            Text("暂无分红记录", color = OnSurfaceVariant)
+                            Text("暂无分红记录", color = AppTheme.colors.onSurfaceVariant)
                         }
                     }
                 } else {
@@ -152,7 +152,7 @@ fun DividendDetailDialog(
                     val historicalPerTen = records.sumOf { it.amount }
 
                     Card(
-                        colors = CardDefaults.cardColors(containerColor = PrimaryContainer.copy(alpha = 0.5f)),
+                        colors = CardDefaults.cardColors(containerColor = AppTheme.colors.primaryContainer.copy(alpha = 0.5f)),
                         shape = RoundedCornerShape(8.dp)
                     ) {
                         Column(modifier = Modifier.fillMaxWidth().padding(12.dp)) {
@@ -161,12 +161,12 @@ fun DividendDetailDialog(
                                 horizontalArrangement = Arrangement.SpaceEvenly
                             ) {
                                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                    Text("${records.size}次", fontWeight = FontWeight.Bold, color = OnSurface)
-                                    Text("分红次数", fontSize = 11.sp, color = OnSurfaceVariant)
+                                    Text("${records.size}次", fontWeight = FontWeight.Bold, color = AppTheme.colors.onSurface)
+                                    Text("分红次数", fontSize = 11.sp, color = AppTheme.colors.onSurfaceVariant)
                                 }
                                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                    Text("¥${recentAmount.format(2)}", fontWeight = FontWeight.Bold, color = LossRed)
-                                    Text("近12个月分红", fontSize = 11.sp, color = OnSurfaceVariant)
+                                    Text("¥${recentAmount.format(2)}", fontWeight = FontWeight.Bold, color = AppTheme.colors.lossRed)
+                                    Text("近12个月分红", fontSize = 11.sp, color = AppTheme.colors.onSurfaceVariant)
                                 }
                             }
                             Spacer(modifier = Modifier.height(8.dp))
@@ -175,7 +175,7 @@ fun DividendDetailDialog(
                             Text(
                                 text = "按当前 ${asset.balance.format(0)} $unitWord 估算，非实际到账",
                                 fontSize = 10.sp,
-                                color = OnSurfaceVariant,
+                                color = AppTheme.colors.onSurfaceVariant,
                                 textAlign = TextAlign.Center,
                                 modifier = Modifier.fillMaxWidth()
                             )
@@ -185,7 +185,7 @@ fun DividendDetailDialog(
                                     // Kotlin 会把整个「unitWord派」当成一个标识符去解析
                                     text = "该基金历史累计每10${unitWord}派 ¥${historicalPerTen.format(2)}",
                                     fontSize = 10.sp,
-                                    color = OnSurfaceVariant,
+                                    color = AppTheme.colors.onSurfaceVariant,
                                     textAlign = TextAlign.Center,
                                     modifier = Modifier.fillMaxWidth()
                                 )
@@ -194,7 +194,7 @@ fun DividendDetailDialog(
                                 Text(
                                     text = "近12个月无分红，历史累计仅供参考",
                                     fontSize = 10.sp,
-                                    color = OnSurfaceVariant,
+                                    color = AppTheme.colors.onSurfaceVariant,
                                     textAlign = TextAlign.Center,
                                     modifier = Modifier.fillMaxWidth()
                                 )
@@ -211,7 +211,7 @@ fun DividendDetailDialog(
                             val amount = record.amountFor(asset.balance)
                             Card(
                                 modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
-                                colors = CardDefaults.cardColors(containerColor = SurfaceContainerLow),
+                                colors = CardDefaults.cardColors(containerColor = AppTheme.colors.surfaceContainerLow),
                                 shape = RoundedCornerShape(8.dp)
                             ) {
                                 Row(
@@ -224,11 +224,11 @@ fun DividendDetailDialog(
                                             // 除息日只说明「有没有资格拿」，钱到账通常还要等 1~4 周，
                                             // 有发放日就一并标出来，免得被当成到账日
                                             record.date + (record.payDate?.let { " · 到账 ${it.take(5)}" } ?: ""),
-                                            fontSize = 13.sp, fontWeight = FontWeight.Medium, color = OnSurface
+                                            fontSize = 13.sp, fontWeight = FontWeight.Medium, color = AppTheme.colors.onSurface
                                         )
                                         Text(
                                             "每10$unitWord ¥${record.amount.format(2)}",
-                                            fontSize = 11.sp, color = OnSurfaceVariant
+                                            fontSize = 11.sp, color = AppTheme.colors.onSurfaceVariant
                                         )
                                     }
                                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -236,7 +236,7 @@ fun DividendDetailDialog(
                                             "¥${amount.format(2)}",
                                             fontSize = 13.sp,
                                             fontWeight = FontWeight.Bold,
-                                            color = LossRed
+                                            color = AppTheme.colors.lossRed
                                         )
                                 if (isEditMode) {
                                     Spacer(modifier = Modifier.width(8.dp))
@@ -254,13 +254,13 @@ fun DividendDetailDialog(
                                         onClick = editClick,
                                         modifier = Modifier.size(24.dp)
                                     ) {
-                                        Icon(Icons.Filled.Edit, contentDescription = "编辑", tint = Primary, modifier = Modifier.size(16.dp))
+                                        Icon(Icons.Filled.Edit, contentDescription = "编辑", tint = AppTheme.colors.primary, modifier = Modifier.size(16.dp))
                                     }
                                     IconButton(
                                         onClick = deleteClick,
                                         modifier = Modifier.size(24.dp)
                                     ) {
-                                        Icon(Icons.Filled.Delete, contentDescription = "删除", tint = LossRed, modifier = Modifier.size(16.dp))
+                                        Icon(Icons.Filled.Delete, contentDescription = "删除", tint = AppTheme.colors.lossRed, modifier = Modifier.size(16.dp))
                                     }
                                 }
                                     }
@@ -348,7 +348,7 @@ fun DividendDetailDialog(
                             }
                         }
                     }
-                ) { Text("删除", color = LossRed) }
+                ) { Text("删除", color = AppTheme.colors.lossRed) }
             },
             dismissButton = {
                 TextButton(onClick = { pendingDeleteRecord = null; deleteError = null }) { Text("取消") }
@@ -390,7 +390,7 @@ private fun DividendEditDialog(
         title = { Text(if (existing == null) "新增分红" else "编辑分红", fontWeight = FontWeight.Bold) },
         text = {
             Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text(assetName, style = MaterialTheme.typography.bodySmall, color = OnSurfaceVariant)
+                Text(assetName, style = MaterialTheme.typography.bodySmall, color = AppTheme.colors.onSurfaceVariant)
                 OutlinedTextField(
                     value = date,
                     onValueChange = { date = it; dateTouched = true },
@@ -434,7 +434,7 @@ private fun DividendEditDialog(
                         if (amountError != null) {
                             Text(amountError)
                         } else if (amountHint != null) {
-                            Text(amountHint, color = OnSurfaceVariant)
+                            Text(amountHint, color = AppTheme.colors.onSurfaceVariant)
                         }
                     }
                 )

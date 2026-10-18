@@ -123,6 +123,70 @@ class AssetRepository private constructor(
     suspend fun getAssetsByTypes(types: List<AssetType>): List<Asset> {
         return assetDao.getAssetsByTypes(types)
     }
+
+    /**
+     * 一次性修复已存的 LD 锁仓脏符号（见 [computeLdRepairs]）。
+     *
+     * ## 为什么需要它
+     *
+     * 旧版币安导入把 `LDBCH` 落库成 `LDBCHUSDT`（盲加 USDT），币安无此交易对，
+     * 导致之后每次行情同步都 400。导入路径已修（BinanceImportService），但库里
+     * **已经**按错符号落库的资产仍会继续 400，必须一次性把它们的 symbol 改成底层
+     * 交易对（如 `LDBCHUSDT` → `BCHUSDT`）。
+     *
+     * ## 幂等 & 零数据丢失
+     *
+     * - 用 SharedPreferences 守卫，保证每个安装只跑一次；即使守卫失效重复调用，
+     *   [computeLdRepairs] 本身是幂等纯函数，已修过的库 updates 为空，不会重复改动。
+     * - 只改 symbol 字段；碰撞的条目整体跳过（记 AppLogger.w），绝不覆盖、不丢数据。
+     *
+     * @return [LdRepairSummary]：实际改了几条、跳了几条、是否因守卫而跳过
+     */
+    suspend fun repairLdDirtySymbols(): LdRepairSummary {
+        val prefs = context.getSharedPreferences(REPAIR_PREFS, Context.MODE_PRIVATE)
+        if (prefs.getBoolean(KEY_LD_REPAIR_DONE, false)) {
+            AppLogger.d("LD 脏符号修复已执行过，跳过", "AssetRepository")
+            return LdRepairSummary(updated = 0, skipped = 0, alreadyDone = true)
+        }
+
+        // 只检查加密货币资产：LD 脏符号只可能出现在加密持仓里
+        val cryptoAssets = assetDao.getAssetsByTypes(listOf(AssetType.CRYPTO))
+        val plan = computeLdRepairs(cryptoAssets)
+
+        if (plan.updates.isEmpty()) {
+            AppLogger.i("LD 脏符号修复：无需修复（库中无 LD 脏符号）", "AssetRepository")
+            prefs.edit().putBoolean(KEY_LD_REPAIR_DONE, true).apply()
+            return LdRepairSummary(updated = 0, skipped = plan.skipped.size, alreadyDone = false)
+        }
+
+        val byId = cryptoAssets.associateBy { it.id }
+        try {
+            StockDatabase.getInstance(context).withTransaction {
+                for ((id, newSymbol) in plan.updates) {
+                    val asset = byId[id] ?: continue
+                    assetDao.updateAsset(asset.copy(symbol = newSymbol))
+                }
+            }
+            // 碰撞跳过的条目记警告：不覆盖、不丢数据，留给用户手工处理
+            plan.skipped.forEach { id ->
+                val sym = byId[id]?.symbol
+                AppLogger.w("LD 脏符号修复跳过（目标底层交易对已存在，不覆盖）：$id $sym", "AssetRepository")
+            }
+            AppLogger.i(
+                "LD 脏符号修复完成：改 ${plan.updates.size} 条，跳过 ${plan.skipped.size} 条",
+                "AssetRepository"
+            )
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            AppLogger.e("LD 脏符号修复失败: ${e.message}", e, "AssetRepository")
+            // 失败也要标记已尝试？不标：下次启动可重试，避免脏数据永久卡在守卫外
+            return LdRepairSummary(updated = 0, skipped = plan.skipped.size, alreadyDone = false)
+        }
+
+        prefs.edit().putBoolean(KEY_LD_REPAIR_DONE, true).apply()
+        return LdRepairSummary(updated = plan.updates.size, skipped = plan.skipped.size, alreadyDone = false)
+    }
     
     /**
      * 创建快照。如果指定日期已存在快照，则先删除旧快照再插入新快照，
@@ -323,7 +387,13 @@ class AssetRepository private constructor(
         @SuppressLint("StaticFieldLeak")
         @Volatile
         private var instance: AssetRepository? = null
-        
+
+        /** SharedPreferences 文件名（一次性修复的守卫用） */
+        private const val REPAIR_PREFS = "stock_diary_repair"
+
+        /** 标记「LD 脏符号修复」已执行过的 key，保证每个安装只跑一次 */
+        private const val KEY_LD_REPAIR_DONE = "ld_dirty_symbol_repair_done"
+
         fun getInstance(context: Context): AssetRepository {
             return instance ?: synchronized(this) {
                 instance ?: AssetRepository(

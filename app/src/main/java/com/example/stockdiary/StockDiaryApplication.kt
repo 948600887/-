@@ -64,6 +64,9 @@ class StockDiaryApplication : Application() {
             scheduleDailySnapshot()
             fillMissingSnapshots()
             scheduleAutoPriceSync()
+            // 一次性修复已存的 LD 锁仓脏符号（旧版导入落库的 LDBCHUSDT 等），
+            // 否则这些资产之后每次行情同步都向币安问不存在的交易对 → 永远 400。
+            repairLdDirtySymbols()
             // 崩溃日志的磁盘裁剪挪到启动阶段：崩溃现场多一次目录遍历与排序，
             // 在 OOM/StackOverflow 时只会火上浇油。
             GlobalExceptionHandler.pruneCrashFiles()
@@ -97,8 +100,24 @@ class StockDiaryApplication : Application() {
         }
     }
 
-    private suspend fun fillMissingSnapshots() {
+    /**
+     * 一次性修复已存的 LD 锁仓脏符号（旧版币安导入落库的 LDBCHUSDT 等）。
+     *
+     * 见 [com.example.stockdiary.data.repository.AssetRepository.repairLdDirtySymbols]：
+     * 用 SharedPreferences 守卫保证每个安装只跑一次，失败静默降级（下次启动可重试），
+     * 绝不因为修复失败而拖垮启动。
+     */
+    private suspend fun repairLdDirtySymbols() {
         try {
+            container.assetRepository.repairLdDirtySymbols()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            AppLogger.e("修复 LD 脏符号失败: ${e.message}", e, "StockDiaryApplication")
+        }
+    }
+
+    private suspend fun fillMissingSnapshots() {        try {
             val repository = container.assetRepository
             val snapshots = repository.getAllSnapshots().first()
 

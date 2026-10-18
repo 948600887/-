@@ -38,7 +38,11 @@ fun ApiSelectionDialog(
     
     val priceApiOptions = listOf(
         PriceApiOption("新浪财经", "国内A股数据稳定，支持实时行情", "A股、基金"),
-        PriceApiOption("腾讯财经", "数据全面，延迟较低", "A股、港股")
+        PriceApiOption("腾讯财经", "数据全面，延迟较低", "A股、港股"),
+        // 第三个选项与 ApiManager.API_SKILL 对应：磁盘上存的值可能就是它，
+        // 少这一项会导致打开对话框时两个选项都不呈选中态，用户以为设置丢了。
+        // 数据链路（StockDataManager.getDataSource）本就支持该值，这里只补入口。
+        PriceApiOption(ApiManager.API_SKILL, "需安装东方财富妙想 Skill 后生效", "AI增强")
     )
 
     AlertDialog(

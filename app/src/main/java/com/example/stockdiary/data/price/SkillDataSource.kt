@@ -32,8 +32,10 @@ class SkillDataSource : StockDataSource {
                     }
                 }
                 is Result.Error -> {
-                    AppLogger.e("妙想Skill获取股票数据失败: ${result.message}", Exception(result.message), TAG)
-                    Result.failure(Exception(result.message))
+                    // describeError 兜底：message 为 null 时日志不能出现裸 "null"
+                    val reason = describeError(result)
+                    AppLogger.e("妙想Skill获取股票数据失败: $reason", Exception(reason), TAG)
+                    Result.failure(Exception(reason))
                 }
                 else -> Result.failure("未知状态")
             }
@@ -56,7 +58,7 @@ class SkillDataSource : StockDataSource {
                         parseStockData(result.data, symbol)?.let { results.add(it) }
                     }
                     is Result.Error -> {
-                        errors.add("$symbol: ${result.message}")
+                        errors.add("$symbol: ${describeError(result)}")
                     }
                     else -> {
                         errors.add("$symbol: 未知状态")
@@ -78,6 +80,20 @@ class SkillDataSource : StockDataSource {
     }
     
     override fun getSourceName(): String = "妙想Skill"
+
+    /**
+     * 把 [Result.Error] 翻成可读的失败原因。
+     *
+     * Result.Error.message 是可空的：EastmoneySkillApi 抛了异常但没带文案时，
+     * 直接插值会得到裸 "null"——诊断日志里一片「妙想Skill获取股票数据失败: null」，
+     * 完全看不出失败原因。兜底顺序：显式 message → 异常 message →
+     * 异常类名 + 安装提示。只改文案展示，不改失败判定。
+     */
+    private fun describeError(error: Result.Error): String {
+        error.message?.takeIf { it.isNotBlank() }?.let { return it }
+        error.exception.message?.takeIf { it.isNotBlank() }?.let { return it }
+        return "未知错误（${error.exception.javaClass.name}），请检查妙想 Skill 是否已安装并运行"
+    }
     
     override suspend fun isAvailable(): Boolean = withContext(Dispatchers.IO) {
         try {

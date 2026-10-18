@@ -174,6 +174,14 @@ object UnifiedPriceService {
      * 现在统一走 [BinanceAPI.cryptoTradingPairFor]：它先判「自身就是报价币」再判
      * 「以报价币结尾」，两种形态都认，稳定币还能省掉一次注定为空的请求。
      *
+     * ## 理财/锁仓（LD 前缀）按底层 1:1 计价
+     *
+     * `LD` 是 Simple Earn / Locked Staking 的持仓壳层标记，币安没有 `LDXXXUSDT`
+     * 市场，直接拿它查价只会 400 或超时。但 LD 与底层资产 1:1 可赎回
+     * （LDBNB 就是 1 个 BNB），所以剥掉 LD 用底层交易对查价（见
+     * [BinanceAPI.earnUnderlyingPair]）——这些持仓导入时 purchasePrice = 0，
+     * 不查价 totalValue 就恒为 0，总资产会少算整整一块。
+     *
      * ## 错误提示
      *
      * 复用 [BinanceAccountAPI.binanceError]：币安按条款挡部分地区/IP（常返 451），
@@ -182,13 +190,23 @@ object UnifiedPriceService {
      */
     private suspend fun getCryptoPrice(code: String): Result<CryptoData> = withContext(Dispatchers.IO) {
         // 理财/锁仓产品（LD 前缀）不是现货交易对，币安没有 LDXXXUSDT 这种市场。
-        // 必须在解析交易对之前短路：一旦发请求，主机不可达时会挂到超时，
-        // 实测 LDLTCUSDT 一次堵住 3478 秒，把同步信号量拖死。
+        // 但 LD 代币与底层资产 1:1 可赎回，估值应剥掉 LD 用底层交易对查价——
+        // 否则这些持仓的 currentPrice 永远为空，而导入时 purchasePrice = 0，
+        // totalValue 恒为 0，总资产会少算整整一块（见 BinanceAPI.earnUnderlyingPair）。
+        // 剥不掉底层的（稳定币壳 LDUSDT 等）才按「无行情」跳过，不计同步失败。
+        var pair: String? = null
         if (BinanceAPI.isEarnProduct(code)) {
-            AppLogger.d("理财/锁仓产品 $code 无现货交易对，跳过查价", TAG)
-            return@withContext Result.failure(NonTradableAssetException("$code 是币安理财/锁仓产品，没有现货行情"))
+            pair = BinanceAPI.earnUnderlyingPair(code)
+            if (pair == null) {
+                AppLogger.d("理财/锁仓产品 $code 无底层交易对，跳过查价", TAG)
+                return@withContext Result.failure(
+                    NonTradableAssetException("$code 是币安理财/锁仓产品，没有现货行情")
+                )
+            }
+            AppLogger.d("理财/锁仓产品 $code 按底层 $pair 1:1 计价", TAG)
+        } else {
+            pair = BinanceAPI.cryptoTradingPairFor(code)
         }
-        val pair = BinanceAPI.cryptoTradingPairFor(code)
         // 稳定币锚定 1 美元，币安上没有 XXXUSDT 自我交易对，查价必然空——直接按 1.0 计
         if (pair == null) {
             AppLogger.d("稳定币 $code 按 1.0 美元计，跳过查价", TAG)
@@ -238,6 +256,8 @@ object UnifiedPriceService {
                     return@withContext Result.failure(Exception("响应格式错误"))
                 }
 
+                // 注意传的是原 code（如 LDBNBUSDT）而不是底层交易对：落库 key 必须是
+                // 原 symbol，价格才是底层币 1:1 的市价——不能把资产名/代码改成 BNBUSDT
                 val cryptoData = parseBinanceCrypto(code, body)
 
                 return@withContext if (cryptoData != null) {

@@ -8,7 +8,6 @@ import android.content.Context
 import android.content.res.Configuration
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
-import com.example.stockdiary.network.BinanceAPI
 import com.example.stockdiary.network.UnifiedPriceService
 import com.example.stockdiary.network.model.AssetPrice
 import com.example.stockdiary.utils.AppLogger
@@ -469,11 +468,12 @@ object AssetSyncManager {
                         errorTypes.offer(SyncErrorType.DATA)
                         return
                     }
-                    // 理财/锁仓产品（LD 前缀）没有现货行情，直接跳过——不计成功也不计失败
-                    if (BinanceAPI.isEarnProduct(cryptoSymbol)) {
-                        AppLogger.i("跳过不可交易标的: ${asset.name}（$cryptoSymbol 是理财/锁仓产品，无现货行情）", TAG)
-                        return
-                    }
+                    // 理财/锁仓产品（LD 前缀）不再在这里预跳过：LD 与底层资产 1:1 可赎回，
+                    // 行情门面会剥掉 LD 按底层交易对取价（见 BinanceAPI.earnUnderlyingPair）——
+                    // 从前在这里跳过 + 导入时 purchasePrice = 0，这些持仓的市值恒为 0，
+                    // 总资产少算整整一块。剥不掉底层的（如稳定币壳 LDUSDT）由门面返回
+                    // NonTradableAssetException，落到下面的记账分支同样不计失败——
+                    // 「能不能取价」的判定只此一处（门面），同步侧别再复制第二份。
                     val cryptoResult = UnifiedPriceService.getPrice(
                         cryptoSymbol,
                         AssetType.CRYPTO,
@@ -503,9 +503,11 @@ object AssetSyncManager {
                 // 价格保持上次的值不动（AssetRepository 也不会写入 0 价）。
                 AppLogger.i("跳过停牌标的: ${asset.name}（${lastError?.message}）", TAG)
             } else if (com.example.stockdiary.network.NonTradableAssetException.isNonTradable(lastError)) {
-                // 币安理财/锁仓产品没有现货行情：不是网络故障、也不是暂时停牌，
-                // 而是本就不可取价。手动刷新等没走上面 CRYPTO 分支短路的路径
-                // 也会走到这里，同样不计失败，价格保持上次的值。
+                // 币安理财/锁仓产品剥不掉底层交易对（如稳定币壳 LDUSDT）：不是网络故障、
+                // 也不是暂时停牌，而是本就不可取价。有底层的 LD 已改按底层 1:1 计价
+                // （见 BinanceAPI.earnUnderlyingPair），走到这里只剩真正无行情的。
+                // 手动刷新等没走上面 CRYPTO 分支短路的路径也会走到这里，同样不计失败，
+                // 价格保持上次的值。
                 AppLogger.i("跳过不可交易标的: ${asset.name}（${lastError?.message}）", TAG)
             } else if (com.example.stockdiary.network.BinanceHostUnavailableException.isUnavailable(lastError)) {
                 // 币安主机级熔断（BinanceHostGate）：临时暂停访问、不是故障，也不是

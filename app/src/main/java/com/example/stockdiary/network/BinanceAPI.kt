@@ -157,8 +157,12 @@ object BinanceAPI {
      * 实测一轮同步里 37 条「获取加密货币价格失败」有 32 条是这类 `LD*` 持仓，
      * 其中 `LDLTCUSDT` 一次挂了 3478 秒，把 AssetSyncManager 的并发信号量整个堵死。
      *
-     * 这些持仓是真实资产、要继续显示，只是**本来就不该为它发取价请求**——
-     * 所以调用方收到的是 [NonTradableAssetException]，且**不计同步失败**。
+     * 这些持仓是真实资产、要继续显示。`LDXXXUSDT` 这种交易对币安确实没有，
+     * **不能直接拿它发请求**；但 LD 与底层资产 1:1 可赎回，估值应走
+     * [earnUnderlyingPair] 剥掉 LD 后用底层交易对查价——一律当成「没有行情」
+     * 会让这些持仓的市值恒为 0，总资产少算整整一块。只有剥不掉底层的
+     * （如稳定币壳 `LDUSDT`）才真正无行情可查，调用方按
+     * [NonTradableAssetException] 处理，且**不计同步失败**。
      *
      * ## 为什么要排除 LDO
      *
@@ -170,11 +174,30 @@ object BinanceAPI {
      * 与 [BINANCE_STABLECOINS] 同一个理由：币安的领域知识应当只有一处定义。
      * 两边各写一份正是历史上出过 bug 的原因。
      *
-     * @return true 表示这是理财/锁仓口径的持仓代码，没有现货行情可查
+     * @return true 表示这是理财/锁仓口径的持仓代码，没有 `LDXXXUSDT` 现货行情可查
+     *   （估值请转 [earnUnderlyingPair] 走底层交易对）
      */
     internal fun isEarnProduct(symbol: String): Boolean {
         val s = symbol.uppercase().trim()
         return s.startsWith("LD") && s.length > 2 && s !in BINANCE_LD_EXCEPTIONS
+    }
+
+    /**
+     * 理财/锁仓产品（LD 前缀）的**底层交易对**。
+     *
+     * LD 代币与底层资产 1:1 可赎回（LDBNB 就是 1 个 BNB、LDPOL 就是 1 个 POL），
+     * 所以估值该用底层币的市价，而不是当成"没有行情"。
+     * 这也是总资产不失真的前提：导入时 purchasePrice = 0，若 LD 一律跳过取价，
+     * 这些持仓的 totalValue 恒为 0，总资产/净资产/快照的加密分块全部少算。
+     *
+     * @return 底层交易对（如 LDBNBUSDT → BNBUSDT）；剥掉 LD 后仍构不成交易对
+     *   （稳定币、空串、非 LD 符号）返回 null，调用方按「无行情」处理
+     */
+    internal fun earnUnderlyingPair(symbol: String): String? {
+        if (!isEarnProduct(symbol)) return null
+        val underlying = symbol.trim().uppercase().removePrefix("LD")
+        if (underlying.isEmpty()) return null
+        return cryptoTradingPairFor(underlying)
     }
     
     fun getSupportedSymbols(): List<String> {

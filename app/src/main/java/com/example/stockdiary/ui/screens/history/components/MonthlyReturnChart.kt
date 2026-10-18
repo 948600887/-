@@ -26,8 +26,8 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.stockdiary.data.calculator.MonthlyReturn
 import com.example.stockdiary.ui.theme.AppTheme
-import com.example.stockdiary.ui.viewmodels.MonthlyReturn
 import com.example.stockdiary.utils.format
 import com.example.stockdiary.utils.profitColor
 import com.example.stockdiary.utils.toProfitDisplay

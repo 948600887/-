@@ -16,6 +16,7 @@ import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -28,10 +29,10 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.stockdiary.data.calculator.AssetGrowthCalculator
+import com.example.stockdiary.data.calculator.MonthlyReturn
+import com.example.stockdiary.data.calculator.SnapshotStats
 import com.example.stockdiary.database.AssetSnapshot
 import com.example.stockdiary.ui.theme.AppTheme
-import com.example.stockdiary.ui.viewmodels.MonthlyReturn
-import com.example.stockdiary.ui.viewmodels.SnapshotStatistics
 import com.example.stockdiary.utils.format
 import com.example.stockdiary.utils.formatDateLabel
 import com.example.stockdiary.utils.profitColor
@@ -216,7 +217,7 @@ fun LazyListScope.historyPeriodReturnCard(
     }
 }
 
-fun LazyListScope.historyRiskCard(stats: SnapshotStatistics) {
+fun LazyListScope.historyRiskCard(stats: SnapshotStats) {
     item {
         SectionCard(title = "风险指标") {
             Row(
@@ -224,8 +225,8 @@ fun LazyListScope.historyRiskCard(stats: SnapshotStatistics) {
                 horizontalArrangement = Arrangement.SpaceEvenly
             ) {
                 RiskMetric("最大回撤", "${stats.maxDrawdown.format(2)}%", AppTheme.colors.profitGreen)
-                RiskMetric("波动率", "${stats.volatility.format(2)}%", AppTheme.colors.onSurface)
-                RiskMetric("日均增幅", "${stats.avgDailyReturnPercent.format(2)}%", stats.avgDailyReturnPercent.profitColor())
+                RiskMetric("年化波动率", "${stats.volatility.format(2)}%", AppTheme.colors.onSurface)
+                RiskMetric("日均复合增长", "${stats.avgDailyReturnPercent.format(2)}%", stats.avgDailyReturnPercent.profitColor())
             }
             Spacer(modifier = Modifier.height(8.dp))
             Row(
@@ -236,6 +237,14 @@ fun LazyListScope.historyRiskCard(stats: SnapshotStatistics) {
                 RiskMetric("最高净资产", "¥${stats.maxValue.format(0)}", AppTheme.colors.onSurface)
                 RiskMetric("最低净资产", "¥${stats.minValue.format(0)}", AppTheme.colors.onSurface)
             }
+            Spacer(modifier = Modifier.height(8.dp))
+            // 快照有缺口时，日均/年化指标的分母是覆盖天数而非快照份数；
+            // 这行小字让缺口自己说话，用户能判断数字可不可信
+            Text(
+                text = "覆盖 ${stats.coveredDays} 天 · ${stats.totalSnapshots} 份快照",
+                style = MaterialTheme.typography.labelSmall,
+                color = AppTheme.colors.onSurfaceVariant
+            )
         }
     }
 }

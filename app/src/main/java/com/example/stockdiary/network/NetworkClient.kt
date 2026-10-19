@@ -69,7 +69,9 @@ object NetworkClient {
 
         if (isDebug) {
             val loggingInterceptor = HttpLoggingInterceptor { message ->
-                AppLogger.d(message, "OkHttp")
+                // 必须脱敏：BASIC 级别的 message 是整行请求（含 query），
+                // 币安账户接口的 signature 就在 query 里，不剥就是明文落盘
+                AppLogger.d(AppLogger.sanitizeForLog(message), "OkHttp")
             }.apply {
                 level = HttpLoggingInterceptor.Level.BASIC
             }

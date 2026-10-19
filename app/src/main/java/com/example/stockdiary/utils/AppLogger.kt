@@ -84,6 +84,20 @@ object AppLogger {
         return url.substringBefore('?').take(MAX_LOG_URL_LENGTH)
     }
 
+    /**
+     * 通用脱敏：把日志行里的 URL query 段整段去掉再截断。
+     *
+     * [sanitizeUrl] 只 cover「整条消息就是个 URL」的场景；OkHttp 的日志是一整行
+     * （`--> GET https://api.binance.com/api/v3/account?timestamp=…&signature=…`），
+     * 必须按「`?` 到下一个空白」切。否则币安的 signature 会原样落进 app.log ——
+     * debug 包分享日志出去时，等于把一次在时间窗内可重放的签名交出去。
+     */
+    internal fun sanitizeForLog(message: String): String =
+        QUERY_IN_LOG_REGEX.replace(message, "").take(MAX_LOG_URL_LENGTH)
+
+    /** 匹配 URL 的 `?` 到下一个空白字符（日志行里 query 后面是空格/换行/协议尾巴） */
+    private val QUERY_IN_LOG_REGEX = Regex("\\?[^\\s]*")
+
     private const val MAX_LOG_URL_LENGTH = 120
     
     fun db(operation: String, table: String, duration: Long, tag: String = "Database") {

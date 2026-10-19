@@ -148,8 +148,14 @@ class PriceSyncWorker(
 
         if (!SyncStrategy.isRetryable(effectiveErrorType)) {
             AppLogger.w("数据类错误不再重试", "PriceSyncWorker")
-            notifySafely {
-                NotificationHelper.showPriceSyncFailureNotification(applicationContext, newCount)
+            // 第 1 次失败就通知，文案会写成「价格同步**多次**失败 / 已连续 **1** 次」，
+            // 次数与文案双误导；而且下面把 count 清零、周期续期，非交易时段每 4 小时
+            // 就会重推一次 —— 单个资产代码写错/行情源改版就变成连环骚扰。
+            // 攒到第二次再提示：一次是意外，两次才说明这个源真的取不到
+            if (newCount >= MIN_FAILURES_TO_NOTIFY) {
+                notifySafely {
+                    NotificationHelper.showPriceSyncFailureNotification(applicationContext, newCount)
+                }
             }
             prefs.setConsecutiveFailureCount(0)
             // 终态失败也要续期下一轮，否则周期任务就此停摆
@@ -229,6 +235,9 @@ class PriceSyncWorker(
     companion object {
         const val WORK_NAME = "com.example.stockdiary.PriceSyncWorker"
         private const val MAX_CONSECUTIVE_FAILURES = 3
+
+        /** 推「同步失败」通知的最低连续失败次数：1 次不发（见 [handleFailure] 的说明） */
+        private const val MIN_FAILURES_TO_NOTIFY = 2
         // WorkManager 后台任务限制约 10 分钟，预留 1 分钟安全余量
         private const val WORKER_TIME_LIMIT_MS = 9 * 60 * 1000L
     }

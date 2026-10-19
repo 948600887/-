@@ -63,12 +63,21 @@ class PriceSyncWorker(
 
             // 通知只是附加反馈：失败不能把"成功的同步"判成失败，更不能让它穿透到 doWork
             // 的 catch 里导致走到 handleFailure 后无法自我续期。所以这里一律兜住。
-            notifySafely {
-                NotificationHelper.showPriceSyncNotification(
-                    applicationContext,
-                    result.successCount,
-                    result.failedCount
-                )
+            // 成功通知降频：交易时段每 15 分钟一轮，每轮都发一条「同步完成 N 个资产」
+            // 只会持续刷新通知栏时间戳，把真正需要看的失败告警挤下去。
+            // 有失败就一定发（用户需要知道）；纯成功则最多几小时一条
+            val shouldNotifySuccess =
+                result.failedCount > 0 ||
+                    System.currentTimeMillis() - prefs.getLastSuccessNotifyTimeMillis() >= SUCCESS_NOTIFY_INTERVAL
+            if (shouldNotifySuccess) {
+                notifySafely {
+                    NotificationHelper.showPriceSyncNotification(
+                        applicationContext,
+                        result.successCount,
+                        result.failedCount
+                    )
+                }
+                prefs.setLastSuccessNotifyTimeMillis(System.currentTimeMillis())
             }
 
             AppLogger.i(
@@ -238,6 +247,9 @@ class PriceSyncWorker(
 
         /** 推「同步失败」通知的最低连续失败次数：1 次不发（见 [handleFailure] 的说明） */
         private const val MIN_FAILURES_TO_NOTIFY = 2
+
+        /** 纯成功的「同步完成」通知最小间隔：交易时段每 15 分钟一轮，不必每轮都报平安 */
+        private const val SUCCESS_NOTIFY_INTERVAL = 6L * 60 * 60 * 1000
         // WorkManager 后台任务限制约 10 分钟，预留 1 分钟安全余量
         private const val WORKER_TIME_LIMIT_MS = 9 * 60 * 1000L
     }

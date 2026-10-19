@@ -34,6 +34,13 @@ class PriceSyncPreferencesManager(context: Context) {
         prefs.edit().putString(KEY_LAST_ERROR_TYPE, errorType).apply()
     }
 
+    /** 上次弹「同步完成」通知的时间（用于给成功通知降频，见 PriceSyncWorker） */
+    fun getLastSuccessNotifyTimeMillis(): Long = prefs.getLong(KEY_LAST_SUCCESS_NOTIFY_TIME, 0L)
+
+    fun setLastSuccessNotifyTimeMillis(timeMillis: Long) {
+        prefs.edit().putLong(KEY_LAST_SUCCESS_NOTIFY_TIME, timeMillis).apply()
+    }
+
     fun getLastErrorTimeMillis(): Long = prefs.getLong(KEY_LAST_ERROR_TIME, 0L)
 
     fun setLastErrorTimeMillis(timeMillis: Long) {
@@ -47,6 +54,7 @@ class PriceSyncPreferencesManager(context: Context) {
         private const val KEY_CONSECUTIVE_FAILURES = "consecutive_sync_failures"
         private const val KEY_LAST_ERROR_TYPE = "last_sync_error_type"
         private const val KEY_LAST_ERROR_TIME = "last_sync_error_time"
+        private const val KEY_LAST_SUCCESS_NOTIFY_TIME = "last_success_notify_time"
 
         @Volatile
         private var instance: PriceSyncPreferencesManager? = null

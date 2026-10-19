@@ -1,7 +1,7 @@
 package com.example.stockdiary.ui.screens.history.components
 
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AssetTrendChartTest {
@@ -70,12 +70,42 @@ class AssetTrendChartTest {
     }
 
     @Test
-    fun `midTimestampIndex取时间中点对应的帧`() {
-        // 0/10/20/30/40 天，中点 20 → 下标 2
-        assertEquals(2, midTimestampIndex((0..4).map { it * 10L }))
-        // 缺口：0/1/2/3/40 天，中点 20，最近的是 3（差 17）
-        assertEquals(3, midTimestampIndex(listOf(0L, 1L, 2L, 3L, 40L)))
-        // 快照数不足 3 个时补标签只会和首尾重复
-        assertNull(midTimestampIndex(listOf(0L, 10L)))
+    fun `trendXLabelIndices稀疏时每份快照的日期都画`() {
+        // 4 个点间距 100px、标签宽 50px：互不重叠，全部保留
+        val positions = listOf(0f, 100f, 200f, 300f)
+        val widths = List(4) { 50f }
+        assertEquals(listOf(0, 1, 2, 3), trendXLabelIndices(positions, widths, minGap = 8f))
+    }
+
+    @Test
+    fun `trendXLabelIndices密集时间隔不足的跳过但首末保留`() {
+        // 4 个点间距只有 10px、标签宽 50px：中间的必然重叠，只留首末
+        val positions = listOf(0f, 10f, 20f, 30f)
+        val widths = List(4) { 50f }
+        val kept = trendXLabelIndices(positions, widths, minGap = 8f)
+        assertTrue(kept.contains(0))
+        assertTrue(kept.contains(3))
+        assertTrue("中间的应被稀疏化", kept.size < 4)
+    }
+
+    @Test
+    fun `trendXLabelIndices恰好贴边时保留`() {
+        // 首标签末端 25，中标签起端 33，间隔恰好 8 = minGap：>= 判定，保留（不重叠）
+        val positions = listOf(0f, 58f, 200f)
+        val widths = List(3) { 50f }
+        assertEquals(listOf(0, 1, 2), trendXLabelIndices(positions, widths, minGap = 8f))
+    }
+
+    @Test
+    fun `trendXLabelIndices差一点贴边就跳过`() {
+        // 首标签末端 25，中标签起端 32，间隔 7 < minGap：跳过中间的
+        val positions = listOf(0f, 57f, 200f)
+        val widths = List(3) { 50f }
+        assertEquals(listOf(0, 2), trendXLabelIndices(positions, widths, minGap = 8f))
+    }
+
+    @Test
+    fun `trendXLabelIndices空输入返回空`() {
+        assertEquals(emptyList<Int>(), trendXLabelIndices(emptyList(), emptyList(), minGap = 8f))
     }
 }

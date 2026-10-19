@@ -92,24 +92,31 @@ internal fun nearestPointIndex(x: Float, positions: List<Float>): Int {
 }
 
 /**
- * 时间跨度中点对应的快照下标，用于在首尾日期标签之间补一个中间参照。
- * 快照数 < 3 时补了也和首尾重复，返回 null。中点用 min + (max-min)/2 防溢出。
+ * 为 X 轴日期标签挑选该画哪些快照的下标。
+ *
+ * 每份快照的日期都尽量标在**它自己的点上**：快照稀疏时全部可见——用户能直接看出
+ * 哪些天有数据、缺口在哪（与跨缺口虚线段互相印证）；标签会互相重叠时跳过中间的、
+ * 保留上一个，首末下标永远保留（最起码知道起止）。[labelWidths] 与 [positions] 同序同长。
  */
-internal fun midTimestampIndex(timestamps: List<Long>): Int? {
-    if (timestamps.size < 3) return null
-    val minTs = timestamps.min()
-    val maxTs = timestamps.max()
-    val midTs = minTs + (maxTs - minTs) / 2
-    var bestIndex = 0
-    var bestDistance = Long.MAX_VALUE
-    timestamps.forEachIndexed { index, ts ->
-        val distance = abs(ts - midTs)
-        if (distance < bestDistance) {
-            bestDistance = distance
-            bestIndex = index
+internal fun trendXLabelIndices(
+    positions: List<Float>,
+    labelWidths: List<Float>,
+    minGap: Float
+): List<Int> {
+    if (positions.isEmpty()) return emptyList()
+    val kept = mutableListOf<Int>()
+    var lastEnd = Float.NEGATIVE_INFINITY
+    for (index in positions.indices) {
+        val isEdge = index == 0 || index == positions.lastIndex
+        val start = positions[index] - labelWidths[index] / 2f
+        val end = positions[index] + labelWidths[index] / 2f
+        // 首末必须画；中间的与上一个已画标签间隔不足 minGap 就跳过
+        if (isEdge || start - lastEnd >= minGap) {
+            kept.add(index)
+            if (end > lastEnd) lastEnd = end
         }
     }
-    return bestIndex
+    return kept
 }
 
 @Composable
@@ -214,29 +221,30 @@ fun AssetTrendChart(
                 )
             }
 
-            // X轴日期标签：首尾保留，中间按时间中点补一个做参照；三者放不下就只画首尾
+            // X轴日期标签：**每份快照的日期都标在它自己的点上**，与上一个标签放不下
+            // （间隔不足 TREND_LABEL_GAP）才跳过，首末永远保留。快照稀疏时全部可见——
+            // 用户能直接看出哪些天有数据、缺口在哪（与虚线段互相印证）；密集时自动稀疏化。
+            // 曾经只标首/中/末三个，中间的点在哪天全靠猜，缺口被读成「间距画错了」
             if (snapshots.isNotEmpty()) {
-                val firstDate = snapshots.first().date.formatDateLabel()
-                val lastDate = snapshots.last().date.formatDateLabel()
                 val paint = android.graphics.Paint().apply {
                     color = axisText; textSize = 22f; isAntiAlias = true
                 }
                 val labelY = paddingTop + cHeight + 24f
-                drawContext.canvas.nativeCanvas.drawText(firstDate, paddingLeft, labelY, paint)
-                val lastX = width - paddingRight - paint.measureText(lastDate)
-                drawContext.canvas.nativeCanvas.drawText(lastDate, lastX, labelY, paint)
-
-                val timestamps = snapshots.map { it.timestamp }
-                val midIndex = midTimestampIndex(timestamps)
-                if (midIndex != null && midIndex != 0 && midIndex != snapshots.lastIndex) {
-                    val midDate = snapshots[midIndex].date.formatDateLabel()
-                    val midWidth = paint.measureText(midDate)
-                    val midX = points[midIndex].x - midWidth / 2f
-                    val minMidX = paddingLeft + paint.measureText(firstDate) + TREND_LABEL_GAP
-                    val maxMidX = lastX - TREND_LABEL_GAP - midWidth
-                    if (midX in minMidX..maxMidX) {
-                        drawContext.canvas.nativeCanvas.drawText(midDate, midX, labelY, paint)
+                val labelWidths = snapshots.map { paint.measureText(it.date.formatDateLabel()) }
+                val labelIndices = trendXLabelIndices(
+                    positions = positions,
+                    labelWidths = labelWidths,
+                    minGap = TREND_LABEL_GAP
+                )
+                labelIndices.forEach { index ->
+                    val label = snapshots[index].date.formatDateLabel()
+                    // 首个左对齐到绘图区左沿、末个右对齐到右沿，其余居中于各自的点
+                    val labelX = when (index) {
+                        0 -> paddingLeft
+                        snapshots.lastIndex -> width - paddingRight - labelWidths[index]
+                        else -> points[index].x - labelWidths[index] / 2f
                     }
+                    drawContext.canvas.nativeCanvas.drawText(label, labelX, labelY, paint)
                 }
             }
 

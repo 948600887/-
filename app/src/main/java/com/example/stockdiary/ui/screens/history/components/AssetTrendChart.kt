@@ -182,7 +182,7 @@ fun AssetTrendChart(
                             val snaps = currentSnapshots
                             if (snaps.size < 2) return@detectHorizontalDragGestures
                             val positions = trendXPositions(
-                                timestamps = snaps.map { it.timestamp },
+                                timestamps = snaps.dayTimestamps(),
                                 left = TREND_PADDING_LEFT,
                                 width = size.width - TREND_PADDING_LEFT - TREND_PADDING_RIGHT
                             )

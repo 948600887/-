@@ -25,6 +25,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
@@ -255,12 +256,29 @@ fun AssetTrendChart(
                     )
                 )
 
-                // 折线
-                val linePath = Path().apply {
-                    moveTo(points.first().x, points.first().y)
-                    for (i in 1 until points.size) lineTo(points[i].x, points[i].y)
+                // 折线按段画：相邻快照日期连续（相差 1 天）画实线；跨缺口
+                // （相差 >1 天，中间没有快照）画虚线。X 轴按真实日期排布，缺数据的
+                // 日子横向占位，所以不同日期的间隔不一样——虚线就是把这件事画出来：
+                // 这一段是跨无数据期的连线，不是逐日实测
+                for (i in 1 until points.size) {
+                    val prevDate = snapshots[i - 1].date.toLocalDate()
+                    val currDate = snapshots[i].date.toLocalDate()
+                    val gapDays = if (prevDate != null && currDate != null) {
+                        ChronoUnit.DAYS.between(prevDate, currDate)
+                    } else 1L
+                    val segPath = Path().apply {
+                        moveTo(points[i - 1].x, points[i - 1].y)
+                        lineTo(points[i].x, points[i].y)
+                    }
+                    drawPath(
+                        path = segPath,
+                        color = lineColor,
+                        style = Stroke(
+                            width = 2.5f,
+                            pathEffect = if (gapDays > 1L) PathEffect.dashPathEffect(floatArrayOf(14f, 8f), 0f) else null
+                        )
+                    )
                 }
-                drawPath(path = linePath, color = lineColor, style = Stroke(width = 2.5f))
             }
 
             // 十字线
@@ -311,10 +329,9 @@ fun AssetTrendChart(
                                 color = colors.onSurfaceVariant
                             )
                         }
-                        Text(
-                            "总资产: ¥${snapshot.totalAssets.format(2)}",
-                            fontSize = 11.sp, color = colors.onSurfaceVariant
-                        )
+                        // 不要再在这里显示 totalAssets（总资产，含负债）：本页所有卡片
+                        // （资产总览/期间增值/风险指标）与本图画的都是净资产 netAssets，
+                        // 混进一个含负债的总资产，数值可能差数倍，用户会以为图本身画错了
                     }
                     Column(horizontalAlignment = Alignment.End) {
                         Text("¥${snapshot.netAssets.format(2)}", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = colors.onSurface)

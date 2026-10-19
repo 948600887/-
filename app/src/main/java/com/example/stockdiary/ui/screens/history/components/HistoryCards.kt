@@ -182,7 +182,10 @@ fun LazyListScope.historyPeriodReturnCard(
     latest: AssetSnapshot
 ) {
     val periodChange = latest.netAssets - earliest.netAssets
-    val periodYield = if (earliest.netAssets > 0) (periodChange / earliest.netAssets) * 100 else 0.0
+    // 基期净资产 ≤ 0（期间从「一无所有」或脏数据开始）时增幅数学上无定义：
+    // 显示 "+0.00%" 会误导——看着像零增长，实际可能是一整段新增。与本月/今年
+    // 新增的「—」口径保持一致
+    val periodYield = if (earliest.netAssets > 0) (periodChange / earliest.netAssets) * 100 else null
     val firstLabel = earliest.date.formatDateLabel()
     val lastLabel = latest.date.formatDateLabel()
     val periodLabel = if (firstLabel == lastLabel) firstLabel else "$firstLabel ~ $lastLabel"
@@ -204,9 +207,9 @@ fun LazyListScope.historyPeriodReturnCard(
                 }
                 Column(horizontalAlignment = Alignment.End) {
                     Text(
-                        text = "${if (periodYield >= 0) "+" else ""}${periodYield.format(2)}%",
+                        text = periodYield?.let { "${if (it >= 0) "+" else ""}${it.format(2)}%" } ?: "—",
                         fontSize = 24.sp, fontWeight = FontWeight.Bold,
-                        color = periodYield.profitColor()
+                        color = periodYield?.profitColor() ?: AppTheme.colors.onSurfaceVariant
                     )
                     Text("增幅", fontSize = 11.sp, color = AppTheme.colors.onSurfaceVariant)
                 }

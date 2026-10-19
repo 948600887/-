@@ -1,6 +1,7 @@
 package com.example.stockdiary.ui.components
 
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -16,17 +17,24 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.stockdiary.data.dividend.DividendProgressCalculator
 import com.example.stockdiary.ui.theme.AppTheme
 import com.example.stockdiary.utils.format
+import java.time.LocalDate
 import kotlin.math.ceil
 
 /**
@@ -201,6 +209,9 @@ fun MonthlyCashFlowCard(
     progress: DividendProgressCalculator.Progress,
     modifier: Modifier = Modifier
 ) {
+    // 选中的月份：默认当前月，点柱子可切换，用于下方明细行与柱图高亮
+    var selectedMonth by remember { mutableStateOf(LocalDate.now().monthValue) }
+
     Card(
         modifier = modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = AppTheme.colors.surfaceContainer)
@@ -213,10 +224,43 @@ fun MonthlyCashFlowCard(
                 style = MaterialTheme.typography.labelSmall,
                 color = AppTheme.colors.onSurfaceVariant
             )
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // 选中月份的明细：醒目地展示「本月收了多少」
+            val monthData = progress.monthly.firstOrNull { it.month == selectedMonth }
+            val hasMonthData = monthData != null && (monthData.received > 0 || monthData.scheduled > 0)
+            if (!hasMonthData) {
+                Text(
+                    "${selectedMonth}月 暂无派息",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = AppTheme.colors.onSurfaceVariant
+                )
+            } else {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "${selectedMonth}月",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = AppTheme.colors.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        buildString {
+                            append("已收 ¥${monthData!!.received.format(2)}")
+                            if (monthData.scheduled > 0) append(" · 待收 ¥${monthData.scheduled.format(2)}")
+                        },
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = AppTheme.colors.onSurface
+                    )
+                }
+            }
+
             Spacer(modifier = Modifier.height(12.dp))
 
             MonthlyCashFlowChart(
                 monthly = progress.monthly,
+                selectedMonth = selectedMonth,
+                onMonthSelected = { selectedMonth = it },
                 modifier = Modifier.fillMaxWidth().height(130.dp)
             )
 
@@ -257,15 +301,17 @@ private fun LegendItem(color: Color, label: String) {
 @Composable
 private fun MonthlyCashFlowChart(
     monthly: List<DividendProgressCalculator.MonthCash>,
+    selectedMonth: Int,
+    onMonthSelected: (Int) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val maxValue = monthly.maxOf { it.received + it.scheduled }
-    val currentMonth = java.time.LocalDate.now().monthValue
 
     // 设计规范 4.4：进入 Canvas/DrawScope 的颜色必须在 @Composable 组体内读出并捕获为局部 val
     val colors = AppTheme.colors
     val barScheduled = colors.primary.copy(alpha = 0.35f)
     val barReceived = colors.primary
+    val selectionStroke = colors.onSurface
 
     Box(modifier = modifier) {
         if (maxValue <= 0) {
@@ -275,7 +321,22 @@ private fun MonthlyCashFlowChart(
             return@Box
         }
 
-        Canvas(modifier = Modifier.fillMaxWidth().height(96.dp)) {
+        Canvas(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(96.dp)
+                .pointerInput(monthly) {
+                    detectTapGestures { tapOffset ->
+                        val count = monthly.size
+                        if (count > 0) {
+                            // 与柱子分格算法一致：每格宽度 = 总宽 ÷ 数量
+                            val cellWidth = size.width / count
+                            val index = (tapOffset.x / cellWidth).toInt().coerceIn(0, count - 1)
+                            onMonthSelected(monthly[index].month)
+                        }
+                    }
+                }
+        ) {
             val count = monthly.size
             // 与下方月份标签共用同一个间隙值、同一套分格算法，否则两者会错位
             val gap = CHART_BAR_GAP.toPx()
@@ -306,6 +367,15 @@ private fun MonthlyCashFlowChart(
                         size = Size(barWidth, receivedHeight)
                     )
                 }
+                // 选中月份：在整根柱外画一圈描边，与「当月加粗」区分，且暗色模式也清晰
+                if (month.month == selectedMonth) {
+                    drawRect(
+                        color = selectionStroke,
+                        topLeft = Offset(left, size.height - totalHeight),
+                        size = Size(barWidth, totalHeight),
+                        style = Stroke(width = 2.dp.toPx())
+                    )
+                }
             }
         }
 
@@ -323,8 +393,8 @@ private fun MonthlyCashFlowChart(
                     Text(
                         text = "${month.month}",
                         fontSize = 10.sp,
-                        color = if (month.month == currentMonth) AppTheme.colors.primary else AppTheme.colors.onSurfaceVariant,
-                        fontWeight = if (month.month == currentMonth) FontWeight.Bold else FontWeight.Normal
+                        color = if (month.month == selectedMonth) AppTheme.colors.primary else AppTheme.colors.onSurfaceVariant,
+                        fontWeight = if (month.month == selectedMonth) FontWeight.Bold else FontWeight.Normal
                     )
                 }
             }

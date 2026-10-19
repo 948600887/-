@@ -15,6 +15,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.stockdiary.data.dividend.DividendRecord
+import com.example.stockdiary.data.dividend.cashDateOrNull
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.ui.theme.AppTheme
 import com.example.stockdiary.database.amountFor
@@ -28,11 +29,10 @@ fun DividendDayDetail(
     dividends: List<Pair<String, List<DividendRecord>>>,
     assetMap: Map<String?, Asset>
 ) {
-    val dateStr = date.toString()
-
-    // 一次遍历，同时计算总额和构建明细
+    // 按**到账日**匹配选中日，与 CalendarViewModel 打「分」标记同一口径：
+    // 除息日只决定资格，钱 1~4 周后才到账；拿除息日比对会点开一个并没进钱的日子
     val dayDividendDetails = dividends.flatMap { (sym, records) ->
-        records.filter { it.exDividendDate == dateStr }.map { sym to it }
+        records.filter { it.cashDateOrNull() == date }.map { sym to it }
     }
 
     if (dayDividendDetails.isEmpty()) {

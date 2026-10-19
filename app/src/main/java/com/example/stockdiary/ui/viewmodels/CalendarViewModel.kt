@@ -7,6 +7,7 @@ import com.example.stockdiary.data.repository.AssetRepository
 import com.example.stockdiary.data.prefs.DashboardPreferencesManager
 import com.example.stockdiary.data.dividend.DividendIncomeUseCase
 import com.example.stockdiary.data.dividend.DividendRecord
+import com.example.stockdiary.data.dividend.cashDateOrNull
 import com.example.stockdiary.data.repository.DividendRepository
 import com.example.stockdiary.data.sync.SyncBudget
 import com.example.stockdiary.database.Asset
@@ -207,6 +208,8 @@ class CalendarViewModel(
                 return@withContext CalendarResult(data, emptySet(), emptyList())
             }
 
+            val today = LocalDate.now()
+
             // 只 parse 一次：筛当月和取日期用的是同一个 LocalDate。
             // 原先 filter 里 parse 一遍、下面的循环再 parse 一遍同一批字符串。
             val monthSnapshots = snapshotDao.getAllSnapshotsSync().mapNotNull { snapshot ->
@@ -246,21 +249,18 @@ class CalendarViewModel(
                 val symbol = asset.symbol ?: continue
                 try {
                 val records = dividendRepository.getDividendsBySymbol(symbol)
-                // 照样只 parse 一次：筛当月和记分红日用的是同一个 LocalDate。
-                // 原先 filter 里 parse 一遍、下面记日期时又 parse 一遍同样的记录。
+                // 照样只算一次日期：筛当月、记分红日、判是否已到账用的是同一个 LocalDate。
+                // 按**到账日**（派息日，拿不到才除息日）而不是除息日：除息日只决定资格，
+                // 钱 1~4 周后才到账——按除息日打标记会让钱还没到就显示「分」。
+                // 并且只记已到账的（到账日不晚于今天）：日历上的「分」表示钱确实到了；
+                // 还没到账的待收金额在 Dashboard 收息进度卡的「待收」行和下一笔倒计时里看
                 val monthEntries = records.mapNotNull { record ->
-                    val date = try {
-                        LocalDate.parse(record.exDividendDate)
-                    } catch (e: CancellationException) {
-                        throw e
-                    } catch (e: Exception) {
-                        null
-                    }
+                    val date = record.cashDateOrNull()
                     if (date == null) {
                         AppLogger.w("解析分红日期失败: ${record.exDividendDate}", "CalendarViewModel")
                         return@mapNotNull null
                     }
-                    if (date.year == month.year && date.monthValue == month.monthValue) {
+                    if (date.year == month.year && date.monthValue == month.monthValue && !date.isAfter(today)) {
                         date to record
                     } else {
                         null
@@ -301,6 +301,7 @@ class CalendarViewModel(
                 data[month.atDay(day)] = 0.0
             }
 
+            val today = LocalDate.now()
             val symbols = assets.mapNotNull { it.symbol }
             // 同 generateAssetCalendarData：不带预算就是不设限，弱网下能把日历页
             // 拖到几分钟且无法中止。超时跳过的标的不写缓存，按需抓取会补上
@@ -317,35 +318,28 @@ class CalendarViewModel(
                 val symbol = asset.symbol ?: continue
                 try {
                     val records = dividendRepository.getDividendsBySymbol(symbol)
-                    val monthRecords = records.filter { record ->
-                        try {
-                            val date = LocalDate.parse(record.exDividendDate)
-                            date.year == month.year && date.monthValue == month.monthValue
-                        } catch (e: CancellationException) {
-                            throw e
-                        } catch (e: Exception) {
-                            false
+                    // 同资产日历：按到账日归日、只算已到账的（到账日不晚于今天）。
+                    // 原先按除息日归日，钱还没到就把金额计到了除息日那天
+                    val monthEntries = records.mapNotNull { record ->
+                        val date = record.cashDateOrNull() ?: return@mapNotNull null
+                        if (date.year == month.year && date.monthValue == month.monthValue && !date.isAfter(today)) {
+                            date to record
+                        } else {
+                            null
                         }
                     }
 
-                    if (monthRecords.isNotEmpty()) {
-                        dividends.add(symbol to monthRecords)
+                    if (monthEntries.isNotEmpty()) {
+                        dividends.add(symbol to monthEntries.map { it.second })
 
-                        monthRecords.groupBy { it.exDividendDate }.forEach { (dateStr, dayRecords) ->
-                            try {
-                                val date = LocalDate.parse(dateStr)
-                                dividendDates.add(date)
-                                val totalAmount = perTenSharesToAmount(
-                                    dayRecords.sumOf { it.dividendPerShare.toDoubleOrNull() ?: 0.0 },
-                                    asset.balance
-                                )
-                                if (totalAmount > 0) {
-                                    data[date] = (data[date] ?: 0.0) + totalAmount
-                                }
-                            } catch (e: CancellationException) {
-                                throw e
-                            } catch (e: Exception) {
-                                // ignore
+                        monthEntries.groupBy { it.first }.forEach { (date, dayRecords) ->
+                            dividendDates.add(date)
+                            val totalAmount = perTenSharesToAmount(
+                                dayRecords.sumOf { it.second.dividendPerShare.toDoubleOrNull() ?: 0.0 },
+                                asset.balance
+                            )
+                            if (totalAmount > 0) {
+                                data[date] = (data[date] ?: 0.0) + totalAmount
                             }
                         }
                     }

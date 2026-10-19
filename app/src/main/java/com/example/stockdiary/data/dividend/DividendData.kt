@@ -1,5 +1,7 @@
 package com.example.stockdiary.data.dividend
 
+import java.time.LocalDate
+
 /**
  * 分红数据模型
  * 用于存储从Tsanghi API获取的分红数据
@@ -30,6 +32,28 @@ data class DividendRecord(
      */
     val paymentDate: String? = null
 )
+
+/**
+ * 这笔分红「钱真正到账的日子」。
+ *
+ * 派息日（paymentDate）优先；数据源没给派息日（如新浪）才退回除息日。
+ * **除息日只决定「有没有资格拿」，钱通常晚 1~4 周才到账**——凡是按天展示分红的地方
+ * （日历「分」标记、当日分红明细）都必须用这个日期；用除息日会让钱还没到就显示分红。
+ * 与 DividendProgressCalculator 的归月/已到账判定同一口径。
+ *
+ * 脏数据保护：日期串不满 10 位（null/空/被截断）一律不采信返回 null，
+ * 与 DividendProgressCalculator 对 paymentDate 的处理同一风格。
+ */
+fun DividendRecord.cashDateOrNull(): LocalDate? {
+    val pay = paymentDate?.take(10)?.takeIf { it.length == 10 }
+    val raw = pay ?: exDividendDate.take(10)
+    if (raw.length != 10) return null
+    return try {
+        LocalDate.parse(raw)
+    } catch (e: Exception) {
+        null
+    }
+}
 
 /**
  * 分红指标模型

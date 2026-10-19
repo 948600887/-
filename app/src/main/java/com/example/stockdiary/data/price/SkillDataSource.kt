@@ -22,6 +22,12 @@ class SkillDataSource : StockDataSource {
     
     override suspend fun getStockData(symbol: String): Result<StockData> = withContext(Dispatchers.IO) {
         try {
+            // 进程级退避窗口内直接短路：不再向妙想Skill主机发请求；即便外层被 StockDataManager 的
+            // executeWithRetry 包着，重试也会再次命中本短路——零网络、零重试堆叠（P7）
+            if (EastmoneySkillApi.isSkillHostBlocked()) {
+                AppLogger.w("妙想Skill主机退避中，跳过 $symbol", TAG)
+                return@withContext Result.failure(Exception("妙想Skill主机退避中，稍后自动重试"))
+            }
             when (val result = EastmoneySkillApi.queryStock("$symbol 最新行情")) {
                 is Result.Success -> {
                     val stockData = parseStockData(result.data, symbol)
@@ -49,6 +55,11 @@ class SkillDataSource : StockDataSource {
     
     override suspend fun getStockDataBatch(symbols: List<String>): Result<List<StockData>> = withContext(Dispatchers.IO) {
         try {
+            // 与 getStockData 同一道退避短路：批量路径在退避窗口内同样零网络（P7）
+            if (EastmoneySkillApi.isSkillHostBlocked()) {
+                AppLogger.w("妙想Skill主机退避中，跳过批量获取(${symbols.size} 只)", TAG)
+                return@withContext Result.failure(Exception("妙想Skill主机退避中，稍后自动重试"))
+            }
             val results = mutableListOf<StockData>()
             val errors = mutableListOf<String>()
             

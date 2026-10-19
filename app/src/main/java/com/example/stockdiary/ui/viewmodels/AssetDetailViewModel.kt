@@ -107,7 +107,10 @@ class AssetDetailViewModel(private val container: AppContainer, private val asse
             _isRefreshing.value = true
             try {
                 val currentAsset = _asset.value
-                if (currentAsset != null && (currentAsset.type == AssetType.STOCK || currentAsset.type == AssetType.FUND)) {
+                // 加密货币详情页同样走单独刷新（同步引擎 CRYPTO 分支见
+                // AssetSyncManager.syncSingleAsset:536，币安取价 + 主机熔断 + LD 1:1 计价）。
+                // 银行存款无实时行情，不同步
+                if (currentAsset != null && (currentAsset.type == AssetType.STOCK || currentAsset.type == AssetType.FUND || currentAsset.type == AssetType.CRYPTO)) {
                     try {
                         AssetSyncManager.syncAllAssets(
                             context = container.context,

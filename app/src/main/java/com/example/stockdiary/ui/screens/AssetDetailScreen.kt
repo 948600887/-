@@ -98,7 +98,11 @@ fun AssetDetailScreen(
                             Icon(Icons.Filled.Delete, contentDescription = "删除", tint = AppTheme.colors.error)
                         }
                     }
-                    if (currentAsset != null && (currentAsset.type == AssetType.STOCK || currentAsset.type == AssetType.FUND)) {
+                    // STOCK/FUND/CRYPTO 都有实时行情，都该能单独刷新。
+                    // 加密货币不是被刻意排除：AssetSyncManager.syncSingleAsset 有完整的
+                    // CRYPTO 分支（币安取价 + 主机熔断 + LD 按底层 1:1 计价）。
+                    // 银行存款没有实时行情，不加刷新按钮（正确）
+                    if (currentAsset != null && (currentAsset.type == AssetType.STOCK || currentAsset.type == AssetType.FUND || currentAsset.type == AssetType.CRYPTO)) {
                         IconButton(
                             onClick = { viewModel.refreshData() },
                             enabled = !isRefreshing

@@ -44,8 +44,12 @@ import com.example.stockdiary.utils.toProfitDisplay
 import java.time.temporal.ChronoUnit
 import kotlin.math.abs
 
-/** 折线图绘图区内边距（px）。手势映射与绘制必须共用，否则点按位置和画出来的点对不上 */
-private const val TREND_PADDING_LEFT = 40f
+/**
+ * 折线图绘图区内边距（px）。手势映射与绘制必须共用，否则点按位置和画出来的点对不上。
+ * 左侧 88px：Y 轴标签在数据范围极窄时会退到原值显示（最长 7 位数字约 84px），
+ * 按最宽情况留，避免标签压到绘图区
+ */
+private const val TREND_PADDING_LEFT = 88f
 private const val TREND_PADDING_RIGHT = 20f
 private const val TREND_PADDING_TOP = 20f
 private const val TREND_PADDING_BOTTOM = 64f
@@ -209,12 +213,14 @@ fun AssetTrendChart(
             // Y轴网格线
             val gridCount = 4
             val stepY = cHeight / gridCount
+            // 相邻网格线的差值：Y 轴标签精度随它自适应，范围极窄时不会五条全标"18万"
+            val yStep = valueRange / gridCount
             for (i in 0..gridCount) {
                 val yPos = paddingTop + i * stepY
                 drawLine(gridColor, Offset(paddingLeft, yPos), Offset(width - paddingRight, yPos), 1f)
                 val yValue = maxValue - (i * valueRange / gridCount)
                 drawContext.canvas.nativeCanvas.drawText(
-                    yValue.formatYAxisLabel(), 2f, yPos + 4f,
+                    yValue.formatYAxisLabel(step = yStep), 2f, yPos + 4f,
                     android.graphics.Paint().apply {
                         color = axisText; textSize = 22f; isAntiAlias = true
                     }

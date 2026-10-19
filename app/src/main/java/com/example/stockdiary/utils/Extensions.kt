@@ -177,10 +177,19 @@ fun String.formatDateLabel(): String {
     } catch (e: Exception) { this }
 }
 
-/** 将数值格式化为 Y 轴标签（万/K/原值） */
-fun Double.formatYAxisLabel(): String {
+/**
+ * 将数值格式化为 Y 轴标签（万/K/原值）。
+ *
+ * @param step 相邻网格线的差值，精度随它自适应：步长太小还按整万取整，五条线会全塌成
+ *   同一个数（净值在 18.9 万附近波动时五条全标"18万"，参照系失效——用户实测）。
+ *   万元小数位到两位仍不够（步长 < 100 元）时直接显示原值，保证相邻标签可区分。
+ */
+fun Double.formatYAxisLabel(step: Double = Double.MAX_VALUE): String {
     return when {
-        this >= 10000 -> "${(this / 10000).toInt()}万"
+        this >= 10000 && step >= 10000 -> "${(this / 10000).toInt()}万"
+        this >= 10000 && step >= 1000 -> "${(this / 10000).format(1)}万"
+        this >= 10000 && step >= 100 -> "${(this / 10000).format(2)}万"
+        this >= 10000 -> this.toInt().toString()
         this >= 1000 -> "${(this / 1000).toInt()}K"
         else -> this.toInt().toString()
     }

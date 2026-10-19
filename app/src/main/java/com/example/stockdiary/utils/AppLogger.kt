@@ -182,8 +182,19 @@ object AppLogger {
         }
     }
     
+    /**
+     * 截断预判的字节下限。
+     *
+     * 5000 行常规日志（每行几十到一百多字节）不可能小于 250KB——没超过它就连读都不读。
+     * 从前每次 flush 都全量重读两遍（先数行数、超限再读一遍重写），5000 行的文件
+     * 每 2 秒白读约 500KB，纯浪费。file.length() 是一次 stat，微秒级。
+     */
+    private const val TRIM_CHECK_FLOOR_BYTES = 250_000L
+
     private fun trimLogFile(file: File, maxLines: Int = 5000) {
         try {
+            // 廉价预判：没超字节下限直接返回，一次内容读都不做
+            if (file.length() < TRIM_CHECK_FLOOR_BYTES) return
             // 按行数截断，避免一次性读取大文件导致 OOM
             var lineCount = 0
             file.bufferedReader().use { reader ->

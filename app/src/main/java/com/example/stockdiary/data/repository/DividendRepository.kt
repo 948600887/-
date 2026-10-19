@@ -19,11 +19,13 @@ import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import com.example.stockdiary.common.Result
 import com.example.stockdiary.utils.AppLogger
 import com.example.stockdiary.utils.StockCodeManager
 import kotlinx.coroutines.CancellationException
+import java.io.IOException
 
 class DividendRepository private constructor(
     private val context: Context
@@ -68,6 +70,29 @@ class DividendRepository private constructor(
 
     private fun lastFetchedAt(symbol: String): Long? {
         val value = runCatching { fetchState.getLong(symbol, 0L) }.getOrDefault(0L)
+        return value.takeIf { it > 0L }
+    }
+
+    /**
+     * 记一次抓取失败（所有数据源都没应答）。
+     *
+     * 与 [markFetched] 是**两个独立状态**：[markFetched] 记「源应答了，结论是没有
+     * 分红」（7 天有效），这里记「源没答上」（6 小时后重试）。混在一起就会把错误
+     * 固化成结论 —— 正是本次要修的东西。
+     */
+    private fun markFailed(symbol: String) {
+        runCatching {
+            fetchState.edit().putLong(FAILURE_KEY_PREFIX + symbol, System.currentTimeMillis()).apply()
+        }
+    }
+
+    /** 抓取成功即清除失败标记，让它立刻回到正常的 TTL 节奏 */
+    private fun clearFailure(symbol: String) {
+        runCatching { fetchState.edit().remove(FAILURE_KEY_PREFIX + symbol).apply() }
+    }
+
+    private fun lastFailedAt(symbol: String): Long? {
+        val value = runCatching { fetchState.getLong(FAILURE_KEY_PREFIX + symbol, 0L) }.getOrDefault(0L)
         return value.takeIf { it > 0L }
     }
 
@@ -288,6 +313,20 @@ class DividendRepository private constructor(
          */
         private const val NEGATIVE_RESULT_TTL = 7L * 24 * 60 * 60 * 1000
 
+        /**
+         * 抓取**失败**后不再重打同一标的的退避窗。
+         *
+         * 失败既不能写进 [fetchState]（那等于把网络抖动固化成「这只没有分红」最长
+         * 7 天，界面还一声不吭），也不能什么都不记 —— 场外基金没有批量入口
+         * （天天基金是每基金一个页面，见 [prefetchDividends] 的说明），上百只标的
+         * 每轮各重打一次失败的接口就是请求风暴。所以给失败单独一个短窗：
+         * 窗内不重打，过期自动重试；用户点刷新（forceRefresh）随时可以绕过。
+         */
+        private const val FAILURE_BACKOFF_TTL = 6L * 60 * 60 * 1000
+
+        /** 失败时间戳与「抓过」时间戳共用一份 SP，靠前缀区分，避免多一个文件 */
+        private const val FAILURE_KEY_PREFIX = "failed_"
+
     /**
      * 冷启动允许使用的过期数据上限。
      *
@@ -356,6 +395,19 @@ class DividendRepository private constructor(
 
         if (!forceRefresh) {
             tryGetFromCache(normalizedSymbol)?.let { return it }
+
+            // 上一轮所有数据源都没应答，且还在退避窗内 → 这一轮一个请求都不发，
+            // 只用已经有的（内存旧值 / 库里记录）。场外基金没有批量入口，
+            // 上百只失败标的每轮各重打一次就是请求风暴
+            if (shouldSkipAfterFailure(
+                    lastFailedAt = lastFailedAt(normalizedSymbol),
+                    now = System.currentTimeMillis(),
+                    ttl = FAILURE_BACKOFF_TTL
+                )
+            ) {
+                return cache[normalizedSymbol]?.data
+                    ?: recordsFromDb(dividendDao.getBySymbol(normalizedSymbol))
+            }
         }
 
         cacheMisses.incrementAndGet()
@@ -377,23 +429,20 @@ class DividendRepository private constructor(
                 // 全量刷新后从数据库读取完整记录（含保留的手动记录），保证缓存与DB一致
                 val dbRecords = dividendDao.getBySymbol(normalizedSymbol)
                 if (dbRecords.isNotEmpty()) {
-                    dbRecords.map { dbDiv ->
-                        DividendRecord(
-                            exDividendDate = dbDiv.date,
-                            dividendPerShare = dbDiv.amount.toString(),
-                            announceDate = "",
-                            fiscalYear = dbDiv.date.take(4),
-                            paymentDate = dbDiv.payDate
-                        )
-                    }
+                    recordsFromDb(dbRecords)
                 } else {
                     data
                 }
             }
 
             // 抓成功了就记一笔，**不管抓没抓到**。空结果也是结论，不记下来
-            // 下次冷启动会再抓一遍（见 [fetchState] 的说明）
+            // 下次冷启动会再抓一遍（见 [fetchState] 的说明）。
+            // 「抓成功」≠「抓到了」：所有数据源都没应答时 [fetchDividendData] 抛
+            // [DividendSourceUnavailableException]，直接落到下面的 catch —— 那时
+            // 一个字都不写，否则一次网络抖动会被固化成「这只没有分红」最长 7 天
             markFetched(normalizedSymbol)
+            // 抓通过了就清掉失败退避标记，让它立刻回到正常的 TTL 节奏
+            clearFailure(normalizedSymbol)
 
             cache[normalizedSymbol] = CacheEntry(
                 data = mergedData,
@@ -404,9 +453,22 @@ class DividendRepository private constructor(
             mergedData
         } catch (e: CancellationException) {
             throw e
+        } catch (e: DividendSourceUnavailableException) {
+            // 所有数据源都没应答：只记失败退避，**不写** markFetched —— 那会把一次
+            // 网络抖动固化成「这只没有分红」最长 7 天，界面还一声不吭
+            AppLogger.w(
+                "分红数据源未应答[$normalizedSymbol]，${FAILURE_BACKOFF_TTL / 3_600_000} 小时内不再重打: ${e.message}",
+                "DividendRepository"
+            )
+            markFailed(normalizedSymbol)
+            cache[normalizedSymbol]?.data
+                ?: recordsFromDb(dividendDao.getBySymbol(normalizedSymbol))
         } catch (e: Exception) {
             AppLogger.e("获取分红数据失败: ${e.message}", e, "DividendRepository")
-            cache[normalizedSymbol]?.data ?: emptyList()
+            // 抓不回来也不该让已入库的分红凭空消失：内存有旧值用旧值，没有就退回
+            // 数据库记录（离线/限流时 24h TTL 刚过期的常见场景，见 [tryGetFromCache]）
+            cache[normalizedSymbol]?.data
+                ?: recordsFromDb(dividendDao.getBySymbol(normalizedSymbol))
         }
     }
 
@@ -419,15 +481,17 @@ class DividendRepository private constructor(
 
         val dbRecords = dividendDao.getBySymbol(normalizedSymbol)
         if (dbRecords.isNotEmpty()) {
-            val records =                 dbRecords.map { dbDiv ->
-                DividendRecord(
-                    exDividendDate = dbDiv.date,
-                    dividendPerShare = dbDiv.amount.toString(),
-                    announceDate = "",
-                    fiscalYear = dbDiv.date.take(4),
-                    paymentDate = dbDiv.payDate
-                )
+            // 有分红记录的标的必须受 24h 短 TTL 约束（到账日/金额会随新公告变）。
+            // 从前这里不看抓取时间直接返回 DB 记录 → prefetch 的 pending 判空
+            // （tryGetFromCache(symbol) == null）永远不为真 → 抓过一次后永远不再抓，
+            // 新公告进不了「今年预计」/下一笔倒计时/月度柱图（用户实测：4/17 除息、
+            // 4/24 到账的记录在日历里一直不显示）。stamp 为 null（从未抓过，如纯手动
+            // 录入）也放行重抓——抓取过程会合并保留手动记录，不会丢
+            val stamp = lastFetchedAt(normalizedSymbol)
+            if (stamp == null || System.currentTimeMillis() - stamp >= cacheTTL) {
+                return null
             }
+            val records = recordsFromDb(dbRecords)
             cache[normalizedSymbol] = CacheEntry(records, System.currentTimeMillis(), lastFullFetch = 0L)  // 数据库恢复的缓存不标记为全量拉取
             return records
         }
@@ -458,6 +522,51 @@ class DividendRepository private constructor(
         }
 
         return null
+    }
+
+    /**
+     * 「数据源没应答」的信号 —— 与「问过了，确实没有分红」是两回事，不能混。
+     *
+     * 分红抓取的失败与空结果在 List 上完全同形（都是 emptyList），而调用方
+     * [getDividendsBySymbol] 抓完就 [markFetched]，一旦把「没问到」记成「没有」，
+     * 冷启动的只读缓存路径会把它当有效结论复用 7 天：预计分红 / 收息进度 / 日历
+     * 全显示 0，**且界面没有任何错误提示**。所以每个数据源失败时抛本异常而不是
+     * 返回 emptyList，由 [fetchDividendData] 汇总后决定这是不是真的「没有分红」。
+     */
+    private class DividendSourceUnavailableException(message: String) : IOException(message)
+
+    /**
+     * 数据库行 → [DividendRecord]。三处读取点（缓存恢复、抓取后合并、抓取失败兜底）
+     * 必须是同一套口径，否则同一条记录在日历与进度条上会长出两个版本。
+     */
+    private fun recordsFromDb(dbRecords: List<Dividend>): List<DividendRecord> =
+        dbRecords.map { dbDiv ->
+            DividendRecord(
+                exDividendDate = dbDiv.date,
+                dividendPerShare = dbDiv.amount.toString(),
+                announceDate = "",
+                fiscalYear = dbDiv.date.take(4),
+                paymentDate = dbDiv.payDate
+            )
+        }
+
+    /**
+     * 调一个数据源：应答过就置位 [answered] 并返回数据（**可以是空列表**），
+     * 没应答就记一条警告返回空。用累加器而不是返回值，是因为成员函数改不到调用方的
+     * 局部变量，而「本轮有没有人应答过」是所有数据源的共同结论。
+     */
+    private suspend fun fetchSource(
+        sourceName: String,
+        code: String,
+        answered: AtomicBoolean,
+        block: suspend () -> List<DividendRecord>
+    ): List<DividendRecord> = try {
+        block().also { answered.set(true) }
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: DividendSourceUnavailableException) {
+        AppLogger.w("${sourceName}分红源未应答[$code]: ${e.message}", "DividendRepository")
+        emptyList()
     }
 
     private suspend fun fetchDividendData(
@@ -494,22 +603,36 @@ class DividendRepository private constructor(
         val isEtf = !StockCodeManager.hasFundPrefix(normalizedSymbol) &&
             StockCodeManager.isETF(pureSymbol)
 
+        // 「本轮有没有任何一个数据源应答过」。只要有一个应答，空结果就是有效结论
+        // （该写负缓存）；一个都没应答说明是网络/限流问题，上抛让调用方什么都不写
+        val answered = AtomicBoolean(eastmoneyAnswered)
+
         var data: List<DividendRecord> = when {
-            isOTCFund -> fetchFromFundApi(stockCode)
+            isOTCFund -> fetchSource("天天基金", stockCode, answered) { fetchFromFundApi(stockCode) }
             eastmoneyAnswered -> emptyList()  // 批量已经问过东财了，答案是空，别再逐条重问
-            else -> fetchFromEastmoney(stockCode)
+            else -> fetchSource("东方财富", stockCode, answered) { fetchFromEastmoney(stockCode) }
         }
 
         if (data.isEmpty() && isEtf) {
             // 批量已经覆盖了东财的三种代码格式，别再问一遍；
             // 直接走天天基金这个独立数据源，只砍重复问东财
             // （fetchETFDividends 内部最后本来就会调 fetchFromFundApiForETF，不损失数据源）
-            data = if (eastmoneyAnswered) fetchFromFundApiForETF(stockCode) else fetchETFDividends(stockCode)
+            data = if (eastmoneyAnswered) {
+                fetchSource("天天基金(ETF)", stockCode, answered) { fetchFromFundApiForETF(stockCode) }
+            } else {
+                fetchSource("ETF", stockCode, answered) { fetchETFDividends(stockCode) }
+            }
         }
 
         if (data.isEmpty() && !isOTCFund && !isEtf) {
             val market = StockCodeManager.getMarketPrefix(pureSymbol)
-            data = fetchFromSina(stockCode, market)
+            data = fetchSource("新浪", stockCode, answered) { fetchFromSina(stockCode, market) }
+        }
+
+        if (!answered.get()) {
+            throw DividendSourceUnavailableException(
+                "分红数据源全部未应答[$normalizedSymbol]（场外=$isOTCFund ETF=$isEtf 批量=$eastmoneyAnswered）"
+            )
         }
 
         return data
@@ -522,13 +645,14 @@ class DividendRepository private constructor(
             "${marketPre}${stockCode}",
             "${stockCode}.${marketPre}"
         )
+        var answered = false
         for (fmt in formats) {
             val data = try {
-                fetchFromEastmoneyWithFormat(fmt)
+                fetchFromEastmoneyWithFormat(fmt).also { answered = true }
             } catch (e: CancellationException) {
                 throw e
-            } catch (e: Exception) {
-                AppLogger.w("ETF东方财富格式[$fmt]重试失败: ${e.message}", "DividendRepository")
+            } catch (e: DividendSourceUnavailableException) {
+                AppLogger.w("ETF东方财富格式[$fmt]未应答: ${e.message}", "DividendRepository")
                 emptyList()
             }
             if (data.isNotEmpty()) {
@@ -541,8 +665,10 @@ class DividendRepository private constructor(
             fetchFromFundApiForETF(stockCode)
         } catch (e: CancellationException) {
             throw e
-        } catch (e: Exception) {
-            AppLogger.w("ETF天天基金接口重试失败: ${e.message}", "DividendRepository")
+        } catch (e: DividendSourceUnavailableException) {
+            // 三个格式里只要有一个应答过，空结果就是「确实没有」；全没应答才算抓取失败
+            if (!answered) throw e
+            AppLogger.w("ETF天天基金接口未应答: ${e.message}", "DividendRepository")
             emptyList()
         }
     }
@@ -597,13 +723,15 @@ class DividendRepository private constructor(
                     )
                 }
             } else {
-                emptyList()
+                throw DividendSourceUnavailableException("东方财富分红接口未应答[$stockCode]")
             }
         } catch (e: CancellationException) {
             throw e
+        } catch (e: DividendSourceUnavailableException) {
+            throw e
         } catch (e: Exception) {
             AppLogger.w("东方财富分红数据获取失败: ${e.message}", "DividendRepository")
-            emptyList()
+            throw DividendSourceUnavailableException("东方财富分红数据获取失败[$stockCode]")
         }
     }
     
@@ -622,13 +750,15 @@ class DividendRepository private constructor(
                     )
                 }
             } else {
-                emptyList()
+                throw DividendSourceUnavailableException("东方财富带格式分红接口未应答[$securityCode]")
             }
         } catch (e: CancellationException) {
             throw e
+        } catch (e: DividendSourceUnavailableException) {
+            throw e
         } catch (e: Exception) {
             AppLogger.w("ETF东方财富带格式[$securityCode]获取失败: ${e.message}", "DividendRepository")
-            emptyList()
+            throw DividendSourceUnavailableException("东方财富带格式分红获取失败[$securityCode]")
         }
     }
     
@@ -638,13 +768,15 @@ class DividendRepository private constructor(
             if (result.isSuccess) {
                 result.getOrNull() ?: emptyList()
             } else {
-                emptyList()
+                throw DividendSourceUnavailableException("天天基金分红接口未应答(ETF)[$fundCode]")
             }
         } catch (e: CancellationException) {
             throw e
+        } catch (e: DividendSourceUnavailableException) {
+            throw e
         } catch (e: Exception) {
             AppLogger.w("ETF天天基金接口获取失败[${fundCode}]: ${e.message}", "DividendRepository")
-            emptyList()
+            throw DividendSourceUnavailableException("天天基金分红获取失败(ETF)[$fundCode]")
         }
     }
     
@@ -654,13 +786,15 @@ class DividendRepository private constructor(
             if (result.isSuccess) {
                 result.getOrNull() ?: emptyList()
             } else {
-                emptyList()
+                throw DividendSourceUnavailableException("新浪分红接口未应答[$stockCode]")
             }
         } catch (e: CancellationException) {
             throw e
+        } catch (e: DividendSourceUnavailableException) {
+            throw e
         } catch (e: Exception) {
             AppLogger.w("新浪分红数据获取失败: ${e.message}", "DividendRepository")
-            emptyList()
+            throw DividendSourceUnavailableException("新浪分红数据获取失败[$stockCode]")
         }
     }
     
@@ -671,13 +805,15 @@ class DividendRepository private constructor(
             if (result.isSuccess) {
                 result.getOrNull() ?: emptyList()
             } else {
-                emptyList()
+                throw DividendSourceUnavailableException("天天基金分红接口未应答[$fundCode]")
             }
         } catch (e: CancellationException) {
             throw e
+        } catch (e: DividendSourceUnavailableException) {
+            throw e
         } catch (e: Exception) {
             AppLogger.w("天天基金分红数据获取失败: ${e.message}", "DividendRepository")
-            emptyList()
+            throw DividendSourceUnavailableException("天天基金分红数据获取失败[$fundCode]")
         }
     }
     
@@ -891,6 +1027,29 @@ internal fun shouldReuseEmptyResult(
     // 时间戳来自未来（改过系统时间）→ 不认，宁可重抓也别无限期压住
     if (fetched > now) return false
     return true
+}
+
+/**
+ * 上一轮抓取**没问到**（网络失败 / 限流）之后，这一轮该不该先歇一会儿。
+ *
+ * **纯函数**，不碰 Context / Room / 网络，便于单测。
+ *
+ * 「失败」与「确实没有分红」必须分开记。写成 [shouldReuseEmptyResult] 那种结论，
+ * 一次网络抖动就被固化成「这只没有分红」最长 7 天且界面静默；但干脆不记也不行 ——
+ * 场外基金没有批量入口（天天基金每基金一个页面），上百只标的每轮各重打一次失败
+ * 的接口就是请求风暴。所以失败只压一个短退避窗（[FAILURE_BACKOFF_TTL]）
+ * ，过期自动重试，用户手动刷新（forceRefresh）随时可以绕过。
+ *
+ * @param lastFailedAt 上次失败的时间戳；null 表示没失败过
+ * @param now 当前时间戳
+ * @param ttl 退避窗长度
+ */
+internal fun shouldSkipAfterFailure(lastFailedAt: Long?, now: Long, ttl: Long): Boolean {
+    val failed = lastFailedAt ?: return false
+    if (failed <= 0L) return false
+    // 时间戳来自未来（改过系统时间 / 时钟回拨）也算在窗内：
+    // 宁可多等一窗不重打，也不要把请求量放大回去
+    return now - failed < ttl
 }
 
 /**

@@ -1,6 +1,7 @@
 package com.example.stockdiary.data
 
 import com.example.stockdiary.data.repository.shouldReuseEmptyResult
+import com.example.stockdiary.data.repository.shouldSkipAfterFailure
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -141,5 +142,58 @@ class DividendRepositoryCachePolicyTest {
         val negativeTtl = 7 * 24 * 60 * 60 * 1000L
         assertTrue(shouldReuseEmptyResult(0, now - 6 * negativeTtl / 7, now, negativeTtl))
         assertFalse(shouldReuseEmptyResult(0, now - negativeTtl, now, negativeTtl))
+    }
+}
+
+/**
+ * [shouldSkipAfterFailure] 的回归 —— 「失败」与「确实没有分红」的分界。
+ *
+ * 这条判断守护两件事，两边都是真实事故：
+ *
+ * - 失败**不能**写成空结果结论：那会把一次网络抖动固化成「这只没有分红」
+ *   最长 7 天（冷启动只读缓存，全程静默，界面显示 0）
+ * - 失败也**不能**什么都不记：场外基金没有批量入口，上百只失败标的每轮
+ *   各重打一次就是请求风暴（历史事故形态：250 请求 → 514 → LMK 杀进程）
+ *
+ * 所以失败只压一个短退避窗，过期自动重试，用户手动刷新随时可绕过。
+ */
+class DividendFailureBackoffTest {
+
+    private val ttl = 6 * 60 * 60 * 1000L
+    private val now = 1_700_000_000_000L
+
+    @Test
+    fun 刚失败过_窗内不重打() {
+        assertTrue(shouldSkipAfterFailure(lastFailedAt = now - 1_000L, now = now, ttl = ttl))
+    }
+
+    @Test
+    fun 没失败过_该抓就抓() {
+        assertFalse(shouldSkipAfterFailure(lastFailedAt = null, now = now, ttl = ttl))
+        // SharedPreferences 的 getLong 默认值是 0，必须当成「没失败过」
+        assertFalse(shouldSkipAfterFailure(lastFailedAt = 0L, now = now, ttl = ttl))
+    }
+
+    @Test
+    fun 退避窗过期后自动重试() {
+        assertFalse(shouldSkipAfterFailure(lastFailedAt = now - ttl, now = now, ttl = ttl))
+    }
+
+    @Test
+    fun 时钟回拨也压住_宁可多等一窗不放大请求() {
+        // 时间戳来自未来（改过系统时间）时 now - failed 是负数，
+        // 认作「在窗内」而不是「早就该重试」
+        assertTrue(shouldSkipAfterFailure(lastFailedAt = now + 10 * 24 * 60 * 60 * 1000L, now = now, ttl = ttl))
+    }
+
+    @Test
+    fun 失败退避比空结果TTL短得多_不会把错误固化成结论() {
+        // 失败 6 小时后就重试，而「确实没有分红」压 7 天 ——
+        // 前者是临时故障，后者是结论，两者绝不能共用一套 TTL
+        val day = 24 * 60 * 60 * 1000L
+        val failureTtl = 6 * 60 * 60 * 1000L
+        val negativeTtl = 7 * day
+        assertFalse(shouldSkipAfterFailure(now - 3 * day, now, failureTtl))
+        assertTrue(shouldReuseEmptyResult(0, now - 3 * day, now, negativeTtl))
     }
 }

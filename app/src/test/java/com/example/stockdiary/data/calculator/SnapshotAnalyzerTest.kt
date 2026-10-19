@@ -55,10 +55,10 @@ class SnapshotAnalyzerTest {
 
         // 手算：(11000/10000)^(1/10) - 1
         val expectedCagr = ((11_000.0 / 10_000.0).pow(1.0 / 10.0) - 1.0) * 100
-        assertEquals(expectedCagr, stats.avgDailyReturnPercent, 1e-9)
+        assertEquals(expectedCagr, stats.avgDailyReturnPercent!!, 1e-9)
         // 对照：算术平均会把这些天算成约 +0.96%，CAGR 与它接近但绝不等同；
         // 100→110→100 这种往返场景差距最大（见下面的往返用例）
-        assertTrue(stats.avgDailyReturnPercent > 0.9 && stats.avgDailyReturnPercent < 1.0)
+        assertTrue(stats.avgDailyReturnPercent!! > 0.9 && stats.avgDailyReturnPercent!! < 1.0)
     }
 
     @Test
@@ -70,7 +70,7 @@ class SnapshotAnalyzerTest {
             snapshot("2024-03-03", 100.0)
         )
         val stats = SnapshotAnalyzer.analyze(snapshots)!!
-        assertEquals(0.0, stats.avgDailyReturnPercent, 1e-9)
+        assertEquals(0.0, stats.avgDailyReturnPercent!!, 1e-9)
     }
 
     @Test
@@ -87,7 +87,7 @@ class SnapshotAnalyzerTest {
         assertEquals(10.0, stats.avgIntervalDays, 1e-6)
         // 日均复合增长同样按 10 天折算
         val expectedCagr = ((11_000.0 / 10_000.0).pow(1.0 / 10.0) - 1.0) * 100
-        assertEquals(expectedCagr, stats.avgDailyReturnPercent, 1e-9)
+        assertEquals(expectedCagr, stats.avgDailyReturnPercent!!, 1e-9)
     }
 
     @Test
@@ -103,27 +103,29 @@ class SnapshotAnalyzerTest {
         // coveredDays = 0 → 分母退化为快照数 - 1 = 2
         assertEquals(10.5, stats.avgDailyReturnAmount, 1e-6)
         // (121/100)^(1/2) - 1 = 10%
-        assertEquals(10.0, stats.avgDailyReturnPercent, 1e-6)
+        assertEquals(10.0, stats.avgDailyReturnPercent!!, 1e-6)
         // 全同期 → 平均间隔 0 → 年化无定义，给 0 而不是 NaN/Infinity
         assertEquals(0.0, stats.avgIntervalDays, 1e-9)
         assertEquals(0.0, stats.volatility, 1e-9)
         assertFalse(stats.avgDailyReturnAmount.isNaN())
-        assertFalse(stats.avgDailyReturnPercent.isNaN())
+        assertFalse(stats.avgDailyReturnPercent?.isNaN() ?: false)
         assertFalse(stats.volatility.isNaN())
     }
 
     @Test
-    fun `首值非正时日均复合增长为0但增值额仍按天归一`() {
+    fun `首值非正时日均复合增长为null但增值额仍按天归一`() {
         val zeroStart = SnapshotAnalyzer.analyze(
             listOf(snapshot("2024-03-01", 0.0), snapshot("2024-03-11", 100.0))
         )!!
-        assertEquals(0.0, zeroStart.avgDailyReturnPercent, 1e-9)
+        // 首期 ≤0：增长率无数学意义，给 null（界面显示「—」）。
+        // 曾经给 0.0——「0.00% 增长」与「每天 +10」并排显示，自相矛盾
+        assertNull(zeroStart.avgDailyReturnPercent)
         assertEquals(10.0, zeroStart.avgDailyReturnAmount, 1e-6)
 
         val negativeStart = SnapshotAnalyzer.analyze(
             listOf(snapshot("2024-03-01", -500.0), snapshot("2024-03-11", 100.0))
         )!!
-        assertEquals(0.0, negativeStart.avgDailyReturnPercent, 1e-9)
+        assertNull(negativeStart.avgDailyReturnPercent)
         assertEquals(60.0, negativeStart.avgDailyReturnAmount, 1e-6)
     }
 
@@ -197,6 +199,81 @@ class SnapshotAnalyzerTest {
                 listOf(snapshot("bad", 1.0), snapshot("worse", 2.0))
             )
         )
+    }
+
+    // ===== 首日空快照剔除 =====
+
+    @Test
+    fun `首日正资产为0的快照被忽略分析从第二日算起`() {
+        val snapshots = listOf(
+            snapshot("2024-03-01", 0.0),      // 空快照：无任何资产时 App 自动补的
+            snapshot("2024-03-02", 10_000.0),
+            snapshot("2024-03-03", 11_000.0)
+        )
+        val cleaned = SnapshotAnalyzer.dropLeadingEmptySnapshots(snapshots)
+        assertEquals(2, cleaned.size)
+        assertEquals("2024-03-02", cleaned.first().date)
+
+        // 剔除后统计从 10000 起算：日均增值额 = 1000/1，不再是 11000/2 被空窗稀释
+        val stats = SnapshotAnalyzer.analyze(cleaned)!!
+        assertEquals(1_000.0, stats.avgDailyReturnAmount, 1e-6)
+        assertEquals(1, stats.coveredDays)
+    }
+
+    @Test
+    fun `开头连续多个空快照全部剔除`() {
+        val snapshots = listOf(
+            snapshot("2024-03-01", 0.0),
+            snapshot("2024-03-02", 0.0),
+            snapshot("2024-03-03", 5_000.0),
+            snapshot("2024-03-04", 6_000.0)
+        )
+        val cleaned = SnapshotAnalyzer.dropLeadingEmptySnapshots(snapshots)
+        assertEquals(2, cleaned.size)
+        assertEquals("2024-03-03", cleaned.first().date)
+    }
+
+    @Test
+    fun `中途归零是真实数据不剔除`() {
+        val snapshots = listOf(
+            snapshot("2024-03-01", 10_000.0),
+            snapshot("2024-03-02", 0.0),   // 真卖光了：必须保留
+            snapshot("2024-03-03", 8_000.0)
+        )
+        val cleaned = SnapshotAnalyzer.dropLeadingEmptySnapshots(snapshots)
+        assertEquals(3, cleaned.size)
+        assertEquals(snapshots, cleaned)
+    }
+
+    @Test
+    fun `首日非零时原样返回`() {
+        val snapshots = listOf(
+            snapshot("2024-03-01", 100.0),
+            snapshot("2024-03-02", 110.0)
+        )
+        assertEquals(snapshots, SnapshotAnalyzer.dropLeadingEmptySnapshots(snapshots))
+    }
+
+    @Test
+    fun `剔除后不足2份时原样返回不丢数据`() {
+        // 只有「空快照 + 一条」：剔了就剩 1 份，统计整卡消失，不如留着显示「—」
+        val snapshots = listOf(
+            snapshot("2024-03-01", 0.0),
+            snapshot("2024-03-02", 100.0)
+        )
+        assertEquals(snapshots, SnapshotAnalyzer.dropLeadingEmptySnapshots(snapshots))
+    }
+
+    @Test
+    fun `全空快照与不足两份的输入原样返回`() {
+        val allEmpty = listOf(
+            snapshot("2024-03-01", 0.0),
+            snapshot("2024-03-02", 0.0)
+        )
+        assertEquals(allEmpty, SnapshotAnalyzer.dropLeadingEmptySnapshots(allEmpty))
+        assertEquals(emptyList<AssetSnapshot>(), SnapshotAnalyzer.dropLeadingEmptySnapshots(emptyList()))
+        val single = listOf(snapshot("2024-03-01", 0.0))
+        assertEquals(single, SnapshotAnalyzer.dropLeadingEmptySnapshots(single))
     }
 
     // ===== 月度收益 =====

@@ -200,4 +200,7 @@ private fun filterSnapshots(snapshots: List<AssetSnapshot>, period: String): Lis
         .sortedByDescending { it.timestamp }
         .distinctBy { it.date }
         .sortedBy { it.timestamp }
+        // 最后踢掉开头「正资产为 0」的空快照（无资产时 App 自动补的），
+        // 图表/统计/期间增值/月度收益全部从这里取数，一处剔除全页生效
+        .let { SnapshotAnalyzer.dropLeadingEmptySnapshots(it) }
 }

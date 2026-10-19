@@ -19,8 +19,12 @@ data class SnapshotStats(
     val totalSnapshots: Int,
     /** 最大回撤（百分比）：峰谷口径，与快照间隔无关，缺口不影响 */
     val maxDrawdown: Double,
-    /** 日均复合增长（百分比）：(末/首)^(1/覆盖天数) - 1，不是算术平均 */
-    val avgDailyReturnPercent: Double,
+    /**
+     * 日均复合增长（百分比）：(末/首)^(1/覆盖天数) - 1，不是算术平均。
+     * 首期净资产 ≤ 0 时增长率无数学意义，为 null（界面显示「—」）——
+     * 显示 0.00% 会被读成「零增长」，与正值日均增值额自相矛盾
+     */
+    val avgDailyReturnPercent: Double?,
     /** 日均增值额：(末净值 - 首净值) / 覆盖天数 */
     val avgDailyReturnAmount: Double,
     /** 年化波动率（百分比）：每期收益率样本标准差 × sqrt(365 / 平均间隔天数) */
@@ -89,8 +93,9 @@ object SnapshotAnalyzer {
         val lastValue = values.last()
         val avgDailyReturnAmount = (lastValue - firstValue) / dayDenominator
         val avgDailyReturnPercent = when {
-            // 起点非正：增长率无数学意义，给 0 而不是 NaN
-            firstValue <= 0.0 -> 0.0
+            // 起点非正：增长率无数学意义，给 null（界面显示「—」）而不是 0——
+            // 0.00% 会被读成「零增长」，与正值日均增值额自相矛盾
+            firstValue <= 0.0 -> null
             // 中途亏到 0 或以下：负基数开不了分数次幂，按全损处理
             lastValue <= 0.0 -> -100.0
             else -> ((lastValue / firstValue).pow(1.0 / dayDenominator) - 1.0) * 100
@@ -126,6 +131,26 @@ object SnapshotAnalyzer {
             coveredDays = coveredDays,
             avgIntervalDays = avgIntervalDays
         )
+    }
+
+    /**
+     * 丢掉开头「正资产为 0」的快照。
+     *
+     * 首日正资产（totalAssets）为 0 的快照不是真实数据点：它是用户在没有任何资产时
+     * 打开 App、fillMissingSnapshots 自动补的空快照。留着它：日均增值额被空窗稀释、
+     * 增幅/复合增长无定义、图表从 0 起跳造出一根假陡坡。整段分析从「有资产的第二天」起算。
+     *
+     * 只丢**开头连续**的：中途归零是真实数据（真卖光了），不能丢。
+     * 丢完之后不足 2 份时原样返回——宁可显示带「—」的统计，也不要让整页卡片消失。
+     */
+    fun dropLeadingEmptySnapshots(snapshots: List<AssetSnapshot>): List<AssetSnapshot> {
+        if (snapshots.size < 2) return snapshots
+        var start = 0
+        while (start < snapshots.size && snapshots[start].totalAssets == 0.0) {
+            start++
+        }
+        val remaining = snapshots.drop(start)
+        return if (remaining.size >= 2) remaining else snapshots
     }
 
     /**

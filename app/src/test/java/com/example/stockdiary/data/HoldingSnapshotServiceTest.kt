@@ -27,6 +27,13 @@ class HoldingSnapshotServiceTest {
     private val repo = mockk<AssetRepository>(relaxed = true)
     private val service = HoldingSnapshotService(repo)
 
+    init {
+        // 落库整批走事务：假仓库没有真 DB，直接执行块内容
+        coEvery { repo.inTransaction(any<suspend () -> Any?>()) } coAnswers {
+            firstArg<suspend () -> Any?>()()
+        }
+    }
+
     private fun holding(
         symbol: String,
         name: String,

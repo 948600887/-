@@ -179,6 +179,19 @@ object SnapshotAlignment {
         suspend fun insertAssets(assets: List<Asset>)
         suspend fun updateBalance(id: Long, balance: Double)
         suspend fun updatePriceById(id: Long, price: Double)
+
+        /**
+         * 把一段写库操作包进事务。
+         *
+         * [commit] 的写动作是「先逐条 updateBalance / updatePriceById，最后一次性
+         * insertAssets」—— 这些必须**要么全成、要么全不成**。中途炸了（SQLITE_FULL、
+         * 约束冲突、进程被回收）留下的是半套数据：数量改了、新标的没进来，
+         * 用户看到的总资产是错的（重导能收敛，但当下这一屏是错的）。
+         *
+         * 放接口里而不是让壳层自己包，是因为只有写入口才知道怎么开事务
+         * （真仓库有 Room，测试假实现直接执行）。
+         */
+        suspend fun <T> runInTransaction(block: suspend () -> T): T
     }
 
     /**
@@ -281,57 +294,62 @@ object SnapshotAlignment {
         account: String,
         policy: CommitPolicy
     ): CommitResult {
-        val toInsert = mutableListOf<Asset>()
-        var updated = 0
-        var skipped = 0
-        var conflicts = 0
+        // 整批写进一个事务：见 [SnapshotAssetWriter.runInTransaction] 的说明。
+        // 注意这里不能用 `= writer.runInTransaction { ... return CommitResult(...) }` ——
+        // 它不是 inline 函数，lambda 里写不了非局部 return，只能把结果当最后一行表达式
+        return writer.runInTransaction {
+            val toInsert = mutableListOf<Asset>()
+            var updated = 0
+            var skipped = 0
+            var conflicts = 0
 
-        for (row in rows) {
-            when (row.status) {
-                ItemStatus.NEW -> toInsert.add(
-                    Asset(
-                        name = row.name,
-                        type = policy.assetTypeOf(row.symbol),
-                        symbol = row.symbol,
-                        account = account.ifBlank { policy.defaultAccount },
-                        balance = row.quantity,
-                        // 参考单价留 0：它是「无行情时的市值兜底价」，
-                        // 给个假数字会让市值凭空多出来。有净值就走 currentPrice，没净值等行情同步
-                        purchasePrice = 0.0,
-                        currentPrice = row.nav?.takeIf { it > 0.0 },
-                        // 结算币种必须按导入数据写：默认 CNY 会让一只美元结算的 QDII
-                        // 被按人民币数值直接汇总。null（多来源币种不一致）时不猜，留默认
-                        currency = row.currency ?: policy.defaultCurrency
+            for (row in rows) {
+                when (row.status) {
+                    ItemStatus.NEW -> toInsert.add(
+                        Asset(
+                            name = row.name,
+                            type = policy.assetTypeOf(row.symbol),
+                            symbol = row.symbol,
+                            account = account.ifBlank { policy.defaultAccount },
+                            balance = row.quantity,
+                            // 参考单价留 0：它是「无行情时的市值兜底价」，
+                            // 给个假数字会让市值凭空多出来。有净值就走 currentPrice，没净值等行情同步
+                            purchasePrice = 0.0,
+                            currentPrice = row.nav?.takeIf { it > 0.0 },
+                            // 结算币种必须按导入数据写：默认 CNY 会让一只美元结算的 QDII
+                            // 被按人民币数值直接汇总。null（多来源币种不一致）时不猜，留默认
+                            currency = row.currency ?: policy.defaultCurrency
+                        )
                     )
-                )
 
-                ItemStatus.UPDATE -> {
-                    val existing = row.existing ?: continue
-                    writer.updateBalance(existing.id, row.quantity)
-                    // 净值也是权威数据：份额变了，价格同样该跟着刷新，
-                    // 否则用户会看到「数量更新了、市值还是上周的」
-                    row.nav?.takeIf { it > 0.0 }?.let { nav ->
-                        writer.updatePriceById(existing.id, nav)
+                    ItemStatus.UPDATE -> {
+                        val existing = row.existing ?: continue
+                        writer.updateBalance(existing.id, row.quantity)
+                        // 净值也是权威数据：份额变了，价格同样该跟着刷新，
+                        // 否则用户会看到「数量更新了、市值还是上周的」
+                        row.nav?.takeIf { it > 0.0 }?.let { nav ->
+                            writer.updatePriceById(existing.id, nav)
+                        }
+                        updated++
                     }
-                    updated++
+
+                    ItemStatus.UNCHANGED -> skipped++
+
+                    // 库里同代码有多条，分不清该改哪一条 → 一条都不动，
+                    // 在结果页告诉用户这几条要他自己处理
+                    ItemStatus.CONFLICT -> conflicts++
                 }
-
-                ItemStatus.UNCHANGED -> skipped++
-
-                // 库里同代码有多条，分不清该改哪一条 → 一条都不动，
-                // 在结果页告诉用户这几条要他自己处理
-                ItemStatus.CONFLICT -> conflicts++
             }
+
+            if (toInsert.isNotEmpty()) writer.insertAssets(toInsert)
+
+            CommitResult(
+                inserted = toInsert.size,
+                updated = updated,
+                skipped = skipped,
+                conflicts = conflicts
+            )
         }
-
-        if (toInsert.isNotEmpty()) writer.insertAssets(toInsert)
-
-        return CommitResult(
-            inserted = toInsert.size,
-            updated = updated,
-            skipped = skipped,
-            conflicts = conflicts
-        )
     }
 
     /** 库里命中数量合计与快照数量是否一致（1e-6 容差） */
@@ -356,5 +374,9 @@ internal fun AssetRepository.asSnapshotAssetWriter(): SnapshotAlignment.Snapshot
 
         override suspend fun updatePriceById(id: Long, price: Double) {
             this@asSnapshotAssetWriter.updatePriceById(id, price)
+        }
+
+        override suspend fun <T> runInTransaction(block: suspend () -> T): T {
+            return this@asSnapshotAssetWriter.inTransaction(block)
         }
     }

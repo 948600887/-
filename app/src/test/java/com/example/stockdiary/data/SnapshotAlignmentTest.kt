@@ -44,6 +44,9 @@ class SnapshotAlignmentTest {
         override suspend fun updatePriceById(id: Long, price: Double) {
             priceUpdates.add(id to price)
         }
+
+        /** 假实现没有真数据库：直接执行即可（真仓库会开 Room 事务） */
+        override suspend fun <T> runInTransaction(block: suspend () -> T): T = block()
     }
 
     private fun raw(

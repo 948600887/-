@@ -28,6 +28,13 @@ import org.junit.Test
 class BinanceImportServiceTest {
 
     private val repo = mockk<AssetRepository>(relaxed = true)
+
+    init {
+        // 落库整批走事务：假仓库没有真 DB，直接执行块内容
+        coEvery { repo.inTransaction(any<suspend () -> Any?>()) } coAnswers {
+            firstArg<suspend () -> Any?>()()
+        }
+    }
     private val service = BinanceImportService(repo)
 
     private fun balance(asset: String, free: Double, locked: Double = 0.0) =

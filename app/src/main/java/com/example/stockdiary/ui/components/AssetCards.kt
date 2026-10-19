@@ -30,7 +30,9 @@ fun PortfolioOverviewCard(
     estimatedAnnualDividend: Double,
     isDividendLoading: Boolean,
     dividendStatus: String?,
-    assetCount: Int
+    assetCount: Int,
+    /** 被显示开关藏起来的资产条数；>0 时在标题行如实标出（列表项数 ≠ 总资产口径） */
+    hiddenAssetCount: Int = 0
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -44,7 +46,13 @@ fun PortfolioOverviewCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text("总资产", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, color = AppTheme.colors.onSurface)
-                Text("$assetCount 项", style = MaterialTheme.typography.bodySmall, color = AppTheme.colors.onSurfaceVariant)
+                Text(
+                    // 总资产是全量口径（与资产页、每日快照一致），列表只显示其中一部分时
+                    // 必须说清楚，否则用户拿列表逐项加总会对不上顶部这个数字
+                    if (hiddenAssetCount > 0) "$assetCount 项 · 另有 $hiddenAssetCount 项已隐藏" else "$assetCount 项",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = AppTheme.colors.onSurfaceVariant
+                )
             }
             Spacer(modifier = Modifier.height(8.dp))
             Text("¥${totalAssets.format(2)}", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold, color = AppTheme.colors.onSurface)

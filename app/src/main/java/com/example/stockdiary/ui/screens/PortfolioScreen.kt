@@ -174,8 +174,17 @@ fun PortfolioScreen(
     val assetsOnly = remember(visibleAssets) { visibleAssets.filter { !it.type.isLiability } }
     val liabilities = remember(visibleAssets) { visibleAssets.filter { it.type.isLiability } }
 
-    val totalAssets = remember(assetsOnly) { assetsOnly.sumTotalValueCny() }
-    val totalLiabilities = remember(liabilities) { liabilities.sumTotalValueCny() }
+    // 总资产 / 负债 / 净资产一律按**全部资产**算，与资产页、每日快照同源。
+    // 从前这里用按显示开关过滤后的可见资产，于是用户在设置里关掉某一类（比如虚拟货币）
+    // 后，持仓页「总资产」少一块、资产页不变 —— 同一个名字两个数字，用户不知道信哪个。
+    // 显示开关的语义是「列表里看不看」，不是「算不算进我的家底」
+    val allAssetsOnly = remember(assets) { assets.filter { !it.type.isLiability } }
+    val allLiabilities = remember(assets) { assets.filter { it.type.isLiability } }
+    // 卡片上如实标注列表少显示了多少项，免得用户拿列表逐项加总对不上顶部数字
+    val hiddenAssetCount = remember(visibleAssets, assets) { assets.size - visibleAssets.size }
+
+    val totalAssets = remember(allAssetsOnly) { allAssetsOnly.sumTotalValueCny() }
+    val totalLiabilities = remember(allLiabilities) { allLiabilities.sumTotalValueCny() }
     val netAssets = totalAssets - totalLiabilities
 
     val sortedAssets = remember(assetsOnly, preferences.sortOrder) {
@@ -504,7 +513,8 @@ fun PortfolioScreen(
                         estimatedAnnualDividend = estimatedAnnualDividend,
                         isDividendLoading = dividendLoading,
                         dividendStatus = incomeCalculationStatus,
-                        assetCount = assetsOnly.size
+                        assetCount = assetsOnly.size,
+                        hiddenAssetCount = hiddenAssetCount
                     )
                 }
 

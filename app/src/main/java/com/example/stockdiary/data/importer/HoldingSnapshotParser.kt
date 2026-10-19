@@ -235,8 +235,11 @@ object HoldingSnapshotParser {
         val digits = head.filter { it.isDigit() }
         if (digits.length != 6 || !SIX_DIGIT.matches(digits)) return null
         // 别把表头数字或日期当代码：日期含 "-"，已被上面过滤；
-        // 这里再要求 6 位且首位是合法市场前缀
-        if (digits.first() !in "01345689") return null
+        // 这里再要求 6 位且首位是合法市场前缀。
+        // 首位合法集合：0/3 深市（含创业板）、1 国债/基金、4/8 北交所与老三板、
+        // 5/6/9 沪市（9 含沪市B股 900xxx）、**2 深市B股 200xxx** ——
+        // 少了 2 的话，一码通持仓里的 B 股会被整条跳过（有 incomplete 兜底不会错数，但导不进）
+        if (digits.first() !in "012345689") return null
         return digits
     }
 
@@ -324,7 +327,10 @@ object HoldingSnapshotParser {
      * 这是这个解析器里最危险的一处，所以单独抽出来并有专门单测。
      */
     internal fun parseChineseQuantity(token: String): Double? {
-        val t = token.trim()
+        // 千分位：基金E账户导出是带的（FundEStatementParser.parseNumber 有处理），
+        // 一码通持仓页的大额数量也可能带 —— "1,440" 解析不出来会让整行走 incomplete，
+        // 不会静默错数，但大额持仓就是导不进来
+        val t = token.trim().replace(",", "").replace("，", "")
         if (t.isEmpty()) return null
         val unit = CHINESE_UNITS.entries.firstOrNull { t.endsWith(it.key) }
         if (unit != null) {

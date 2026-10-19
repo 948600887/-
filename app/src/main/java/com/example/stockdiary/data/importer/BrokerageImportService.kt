@@ -358,6 +358,21 @@ class BrokerageImportService internal constructor(private val context: Context) 
     /**
      * 第二步：基于列名关键字自动猜测列映射（中英文兼容）。
      */
+    /**
+     * 解析金额 / 数量：先去掉千分位分隔符与空格。
+     *
+     * 券商导出的 CSV 常带千分位（数量 "1,000"、手续费 "1,234.56"）。
+     * 从前数量解析不出来会整行跳过（至少还有报错），但手续费走 `?: 0.0`
+     * —— **静默按 0 算**，成本悄悄少一块，用户完全看不出来。
+     * 与 GalaxyStatementParser 的 toNumber 同口径（那边的 CSV 本来就带千分位）。
+     */
+    internal fun parseNumber(raw: String): Double? =
+        raw.trim()
+            .replace(",", "")
+            .replace("，", "")
+            .replace(" ", "")
+            .toDoubleOrNull()
+
     fun guessColumnMapping(headers: List<String>): ColumnMapping {
         fun findIndex(pattern: String): Int {
             val regex = Regex(pattern, RegexOption.IGNORE_CASE)
@@ -368,7 +383,10 @@ class BrokerageImportService internal constructor(private val context: Context) 
 
         return ColumnMapping(
             dateCol = findIndex("^(成交日期|委托日期|日期|成交时间|时间|date|trade.?date)$|日期|date"),
-            symbolCol = findIndex("^(证券代码|股票代码|代码|symbol|code|stock.?code)$|证券代码|股票代码|代码|symbol"),
+            // 包含匹配刻意排除「股东代码」：部分券商导出的表头只有「股东代码」
+            // （那是股东账号，不是证券代码），裸 `代码` 会命中它 —— 于是每一行的
+            // 代码都变成同一个股东号，建出一堆不存在的标的，查重也跟着失效
+            symbolCol = findIndex("^(证券代码|股票代码|代码|symbol|code|stock.?code)$|证券代码|股票代码|(?<!股东)代码|symbol"),
             nameCol = findIndex("^(证券名称|股票名称|名称|product.?name|name)$|证券名称|股票名称|名称"),
             typeCol = findIndex("^(买卖|买卖方向|方向|操作|交易类别|类型|side|direction|operation)$|买卖|方向|操作|交易类别"),
             quantityCol = findIndex("^(成交数量|委托数量|股数|持仓数量|数量|volume|qty|shares)$|成交数量|委托数量|股数|数量|volume|qty"),
@@ -431,16 +449,16 @@ class BrokerageImportService internal constructor(private val context: Context) 
             if (type == null) errors.add("买卖方向未识别: '$rawType'")
 
             val rawQty = get(mapping.quantityCol)
-            val quantity = rawQty.toDoubleOrNull()
+            val quantity = parseNumber(rawQty)
             if (quantity == null) errors.add("数量无法解析: '$rawQty'")
             else if (quantity <= 0) errors.add("数量非正: $quantity")
 
             val rawPrice = get(mapping.priceCol)
-            val price = rawPrice.toDoubleOrNull()
+            val price = parseNumber(rawPrice)
             if (price == null) errors.add("价格无法解析: '$rawPrice'")
             else if (price <= 0) errors.add("价格非正: $price")
 
-            val fee = get(mapping.feeCol).toDoubleOrNull() ?: 0.0
+            val fee = parseNumber(get(mapping.feeCol)) ?: 0.0
             val account = get(mapping.accountCol).ifEmpty { "默认账户" }
 
             val isDup = if (date != null && type != null && quantity != null && price != null) {

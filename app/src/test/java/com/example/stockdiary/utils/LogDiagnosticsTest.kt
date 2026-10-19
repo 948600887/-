@@ -107,6 +107,27 @@ class LogDiagnosticsTest {
         assertTrue("磁盘上有 3 份要如实说出来: $text", text.contains("3 份"))
     }
 
+    // ---------- 环境信息：版本/机型/系统 ----------
+
+    @Test
+    fun 传了环境信息时进头部_排障才知道跑在什么版本上() {
+        // 从前报告只有生成时间和行数：用户导出一份日志，这边还要反问"你装的哪个版本、
+        // 什么手机"——排障第一步就卡在沟通上。现在报告自己说
+        val env = "金库 1.2.3(45) · Xiaomi 14 · Android 15(API 35)"
+        val text = LogDiagnostics.composeReport(report(appLog = "一行"), envInfo = env)
+        assertTrue("环境信息要出现在报告里: $text", text.contains(env))
+        // 且要排在日志前面——头部就是给人第一眼看的
+        assertTrue(text.indexOf(env) < text.indexOf("一行"))
+    }
+
+    @Test
+    fun 没传环境信息时头部不留空行或占位() {
+        // 旧调用方不传也不能坏，且不能出现一个孤零零的「环境:」标签
+        val text = LogDiagnostics.composeReport(report(appLog = "一行"))
+        assertTrue("不该出现环境占位: $text", !text.contains("环境"))
+        assertTrue(text.contains("一行"))
+    }
+
     // ---------- tail：纯函数的边界 ----------
 
     @Test

@@ -85,9 +85,12 @@ fun LogViewerDialog(onDismiss: () -> Unit) {
     fun reload() {
         scope.launch {
             loading = true
-            // 读文件 + 拼装都在 IO：app.log 被截到 5000 行，字符串处理在主线程会掉帧
+            // 读文件 + 拼装都在 IO：app.log 被截到 5000 行，字符串处理在主线程会掉帧。
+            // 环境信息（版本/机型/系统）也在这里取——界面上看到的和分享出去的都带它
             val collected = withContext(Dispatchers.IO) { LogDiagnostics.collect(context) }
-            val composed = withContext(Dispatchers.IO) { LogDiagnostics.composeReport(collected) }
+            val composed = withContext(Dispatchers.IO) {
+                LogDiagnostics.composeReport(collected, envInfo = LogDiagnostics.environmentInfo(context))
+            }
             report = collected
             text = composed
             loading = false

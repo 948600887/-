@@ -10,6 +10,7 @@ import com.example.stockdiary.utils.AppLogger
 import com.example.stockdiary.utils.CrashRecoveryManager
 import com.example.stockdiary.utils.ExchangeRateManager
 import com.example.stockdiary.utils.GlobalExceptionHandler
+import com.example.stockdiary.utils.LogDiagnostics
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -33,6 +34,9 @@ class StockDiaryApplication : Application() {
         // 日志尽早初始化：下面 GlobalExceptionHandler.initialize 内部、以及应用启动日志都要用它。
         // 原先 AppLogger.init 放在 MainActivity，导致 Application 阶段的日志早于初始化而被丢弃。
         AppLogger.init(this, debug = BuildConfig.DEBUG)
+        // 会话标记：每次启动写一条带环境信息的日志——诊断报告里能看出第几次启动、
+        // 装的什么版本、什么机型系统（从前报告头部只有生成时间和行数，看不出环境）
+        AppLogger.i("会话开始 · ${LogDiagnostics.environmentInfo(this)}", "AppInit")
         container = AppContainer(this)
         // 行情门面初始化：STOCK/场内基金分支委托 data/price/StockDataManager
         // （多源容错策略），必须在第一次取价之前注入，否则该分支返回失败

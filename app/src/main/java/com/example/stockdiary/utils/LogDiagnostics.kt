@@ -3,8 +3,10 @@ package com.example.stockdiary.utils
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import androidx.core.content.FileProvider
 import java.io.File
+import kotlinx.coroutines.CancellationException
 
 /**
  * 把「崩溃报告 + 运行日志」从手机里取出来的能力。
@@ -62,6 +64,43 @@ object LogDiagnostics {
     )
 
     /**
+     * 一行环境信息：App 版本 + 机型 + 系统。
+     *
+     * 诊断报告头部没有它，排障时连用户装的是哪个版本、什么机型系统都不知道，
+     * 第一步就卡住（从前报告里只有生成时间和行数）。版本读取方式与
+     * [GlobalExceptionHandler] 的 getAppVersion 一致（PackageManager，
+     * 不用 BuildConfig——AGP 8 起不保证生成 VERSION_NAME）。
+     *
+     * 碰 Context / Build，**不能进 [composeReport]**（那个要保纯给单测用），
+     * 由调用方取好转交。
+     */
+    fun environmentInfo(context: Context): String {
+        val version = try {
+            val packageInfo = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                context.packageManager.getPackageInfo(
+                    context.packageName,
+                    android.content.pm.PackageManager.PackageInfoFlags.of(0)
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                context.packageManager.getPackageInfo(context.packageName, 0)
+            }
+            val versionCode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                packageInfo.longVersionCode.toInt()
+            } else {
+                @Suppress("DEPRECATION")
+                packageInfo.versionCode
+            }
+            "${packageInfo.versionName}($versionCode)"
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            "Unknown"
+        }
+        return "金库 $version · ${Build.BRAND} ${Build.MODEL} · Android ${Build.VERSION.RELEASE}(API ${Build.VERSION.SDK_INT})"
+    }
+
+    /**
      * 把日志从磁盘读出来。**会做文件 IO，必须在 Dispatchers.IO 上调用。**
      */
     fun collect(context: Context): Report {
@@ -99,21 +138,30 @@ object LogDiagnostics {
      * 3. **什么都没有时不能给一个空页面**，要说清楚为什么没有——
      *    否则用户只会觉得这个功能也是坏的。
      *
+     * @param envInfo 环境信息（版本/机型/系统），由调用方经 [environmentInfo] 取好转交；
+     *   空串则头部不显示该行（纯函数不碰 BuildConfig/Build，这是保可测性的代价）
      * @param tailLines app.log 保留的行数；传 [Int.MAX_VALUE] 就是不截断（分享用）
      */
-    internal fun composeReport(report: Report, tailLines: Int = DISPLAY_TAIL_LINES): String {
+    internal fun composeReport(
+        report: Report,
+        envInfo: String = "",
+        tailLines: Int = DISPLAY_TAIL_LINES
+    ): String {
         // 组件化拼装而不是一大段字符串模板：三段的存在与否相互独立，
         // 写成模板要处理 8 种组合，实际只有 3 段
         return buildList {
-            add(headerOf(report))
+            add(headerOf(report, envInfo))
             crashesSectionOf(report)?.let { add(it) }
             add(appLogSectionOf(report, tailLines))
         }.joinToString("\n\n")
     }
 
-    private fun headerOf(report: Report): String = buildString {
+    private fun headerOf(report: Report, envInfo: String): String = buildString {
         appendLine("=== 金库诊断报告 ===")
         appendLine("生成时间: ${java.time.LocalDateTime.now()}")
+        // 环境信息：排障时第一件要确认的事就是「这是什么版本、什么机型」——
+        // 从前报告里没有，每次都要来回问，现在报告自己说
+        if (envInfo.isNotBlank()) appendLine("环境: $envInfo")
         appendLine("崩溃报告: ${report.crashFileCount} 份" + if (report.crashFileCount > 0) "（下面列出最近 ${report.crashes.size} 份）" else "")
         appendLine("运行日志: ${report.appLog?.let { "${it.lineCount} 行" } ?: "无"}")
         report.appLogPath?.let { appendLine("日志路径: $it") }
@@ -203,8 +251,8 @@ object LogDiagnostics {
         return try {
             val dir = File(context.cacheDir, "exports").apply { mkdirs() }
             val file = File(dir, "goldvault_diagnostics_${System.currentTimeMillis().toFileTimestamp()}.txt")
-            // 分享用**全文**，不截断：界面上截是为了不卡，给别人看时少一行都可能少一条线索
-            file.writeText(composeReport(report, tailLines = Int.MAX_VALUE))
+        // 分享用**全文**，不截断：界面上截是为了不卡，给别人看时少一行都可能少一条线索
+        file.writeText(composeReport(report, envInfo = environmentInfo(context), tailLines = Int.MAX_VALUE))
             FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
         } catch (e: Exception) {
             AppLogger.e("导出诊断报告失败: ${e.message}", e, "LogDiagnostics")

@@ -75,6 +75,9 @@ class StockDiaryApplication : Application() {
             // 一次性修复已存的 LD 锁仓脏符号（旧版导入落库的 LDBCHUSDT 等），
             // 否则这些资产之后每次行情同步都向币安问不存在的交易对 → 永远 400。
             repairLdDirtySymbols()
+            // 一次性把纯数字形态的场外基金（004502）归一成 fund_ 形态（fund_004502）：
+            // 导入链路一律拼 fund_ 前缀，两种形态并存会让同一只基金被判成两只资产
+            repairOtcSymbolForms()
             // 崩溃日志的磁盘裁剪挪到启动阶段：崩溃现场多一次目录遍历与排序，
             // 在 OOM/StackOverflow 时只会火上浇油。
             GlobalExceptionHandler.pruneCrashFiles()
@@ -122,6 +125,23 @@ class StockDiaryApplication : Application() {
             throw e
         } catch (e: Exception) {
             AppLogger.e("修复 LD 脏符号失败: ${e.message}", e, "StockDiaryApplication")
+        }
+    }
+
+    /**
+     * 一次性把纯数字形态的场外基金 symbol 归一成 `fund_` 形态。
+     *
+     * 见 [com.example.stockdiary.data.repository.AssetRepository.repairOtcSymbolForms]：
+     * 同样的 SharedPreferences 守卫 + 碰撞跳过 + 失败可重试的降级策略，
+     * 绝不因为修复失败而拖垮启动。
+     */
+    private suspend fun repairOtcSymbolForms() {
+        try {
+            container.assetRepository.repairOtcSymbolForms()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            AppLogger.e("修复场外基金 symbol 形态失败: ${e.message}", e, "StockDiaryApplication")
         }
     }
 

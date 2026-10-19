@@ -46,6 +46,13 @@ interface TransactionDao {
     @Query("DELETE FROM transactions WHERE symbol = :symbol")
     suspend fun deleteBySymbol(symbol: String)
 
+    /**
+     * 整表改 symbol。只给「场外基金两种存库形态归一」这类一次性修复用 ——
+     * 交易流水是按 symbol 查的，资产改了 symbol 而流水没改，成本与持仓会整段失联。
+     */
+    @Query("UPDATE transactions SET symbol = :newSymbol WHERE symbol = :oldSymbol")
+    suspend fun renameSymbol(oldSymbol: String, newSymbol: String)
+
     @Query("SELECT COUNT(*) FROM transactions")
     suspend fun getCount(): Int
 

@@ -181,9 +181,27 @@ class StockCodeManagerTest {
     }
 
     @Test
-    fun `normalizeSymbol keeps OTC fund codes as pure numbers`() {
-        assertEquals("007467", StockCodeManager.normalizeSymbol("007467"))
-        assertEquals("010000", StockCodeManager.normalizeSymbol("010000"))
+    fun `normalizeSymbol 场外基金统一落成 fund_ 形态`() {
+        // 从前这里返回纯数字，于是同一只基金在库里有两种形态：
+        // 手动添加 / 一码通截图得到 `004502`，基金E导入与基金截图得到 `fund_004502`。
+        // 两者 isOTCFund 都认，但快照对齐按 symbol 精确分组 → 同一只基金落两条资产
+        assertEquals("fund_007467", StockCodeManager.normalizeSymbol("007467"))
+        assertEquals("fund_010000", StockCodeManager.normalizeSymbol("010000"))
+        // 「手动添加」与「基金E导入」必须落到同一个 symbol，否则持仓翻倍
+        assertEquals(
+            StockCodeManager.normalizeSymbol("004502"),
+            StockCodeManager.normalizeSymbol("fund_004502")
+        )
+    }
+
+    @Test
+    fun `normalizeSymbol 不把 LOF 与老三板并进场外形态`() {
+        // LOF 场内外份额（sz163415 场内 / fund_163415 场外）与老三板
+        // （400030 既是场外基金号段也是退市股票号段）刻意保持两态 ——
+        // 合并它们正是当年场内外互相覆盖的老坑
+        assertEquals("sz163415", StockCodeManager.normalizeSymbol("163415"))
+        assertEquals("fund_163415", StockCodeManager.normalizeSymbol("fund_163415"))
+        assertEquals("bj400264", StockCodeManager.normalizeSymbol("400264"))
     }
 
     @Test
@@ -199,7 +217,7 @@ class StockCodeManagerTest {
         listOf(
             "600519", "SH600519", "sh600519",   // 沪市：补前缀 / 已带前缀转小写
             "000001", "sz000001",               // 深市
-            "007467", "010000",                 // 场外基金：保持纯数字
+            "007467", "010000",                 // 场外基金：落成 fund_ 形态
             "fund_000001",                      // 场外前缀原样保留
             "163415", "SH510050"                // LOF / ETF
         ).forEach { raw ->

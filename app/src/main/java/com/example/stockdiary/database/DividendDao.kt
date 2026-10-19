@@ -48,6 +48,13 @@ interface DividendDao {
     
     @Query("SELECT * FROM dividend WHERE symbol IN (:symbols) ORDER BY date DESC")
     suspend fun getBySymbols(symbols: List<String>): List<Dividend>
+
+    /**
+     * 整表改 symbol。只给「场外基金两种存库形态归一」这类一次性修复用 ——
+     * 分红是按 symbol 查的，资产改了 symbol 而分红没改，历史分红会整段失联。
+     */
+    @Query("UPDATE dividend SET symbol = :newSymbol WHERE symbol = :oldSymbol")
+    suspend fun renameSymbol(oldSymbol: String, newSymbol: String)
     
     @Query("SELECT * FROM dividend ORDER BY date DESC")
     suspend fun getAllSync(): List<Dividend>

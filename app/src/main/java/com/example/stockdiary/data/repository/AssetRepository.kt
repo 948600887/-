@@ -57,6 +57,17 @@ class AssetRepository private constructor(
     }
     
     suspend fun insertAssets(assets: List<Asset>) = assetDao.insertAssets(assets)
+
+    /**
+     * 把一段写库操作包进 Room 事务：要么全成，要么全不成。
+     *
+     * 导入落库必须整批原子：[com.example.stockdiary.data.importer.SnapshotAlignment.commit]
+     * 先逐条 updateBalance / updatePriceById，最后一次性 insertAssets。中途炸掉
+     * （SQLITE_FULL、约束冲突、进程被回收）留下的是**半套数据** —— 已有标的数量改了、
+     * 新标的没进来，用户当下看到的总资产是错的。重导一次能收敛，但那一屏不该是错的。
+     */
+    suspend fun <T> inTransaction(block: suspend () -> T): T =
+        StockDatabase.getInstance(context).withTransaction(block)
     
     suspend fun updateAsset(asset: Asset) = assetDao.updateAsset(asset)
     
@@ -189,6 +200,82 @@ class AssetRepository private constructor(
 
         prefs.edit().putBoolean(KEY_LD_REPAIR_DONE, true).apply()
         return LdRepairSummary(updated = plan.updates.size, skipped = plan.skipped.size, alreadyDone = false)
+    }
+
+    /**
+     * 一次性修复「同一只场外基金在库里两种形态」的历史数据：
+     * 把纯数字形态（`004502`）统一成 `fund_` 形态（`fund_004502`）。
+     *
+     * ## 背景
+     *
+     * [StockCodeManager.normalizeSymbol] 从前对场外号段的纯数字代码**原样返回**，
+     * 而基金E账户导入与基金持仓截图一律拼 `fund_` 前缀。两种形态
+     * [StockCodeManager.isOTCFund] 都认，但字符串不相等 —— 快照对齐按 symbol 精确
+     * 分组，于是同一只基金被判成两只：落两条资产、持仓翻倍，还分别显示在「场内/
+     * 场外」两个分组里。normalizeSymbol 现在统一输出 `fund_` 形态（新数据不再分裂），
+     * 这里修的是已经按纯数字落库的历史数据。
+     *
+     * ## 幂等 & 零数据丢失
+     *
+     * - SharedPreferences 守卫保证每个安装只跑一次；即使守卫失效重复调用，
+     *   [computeOtcSymbolRepairs] 本身是幂等纯函数，已修过的库 updates 为空。
+     * - 只改 symbol 字段；改的同时把 dividend / transactions 里的同名记录一起改过去，
+     *   否则分红与交易流水会因为 symbol 对不上而整段失联。
+     * - 碰撞的条目整体跳过（记 AppLogger.w），绝不覆盖、不丢数据。
+     *
+     * @return [OtcRepairSummary]：实际改了几条、跳了几条、是否因守卫而跳过
+     */
+    suspend fun repairOtcSymbolForms(): OtcRepairSummary {
+        val prefs = context.getSharedPreferences(REPAIR_PREFS, Context.MODE_PRIVATE)
+        if (prefs.getBoolean(KEY_OTC_SYMBOL_REPAIR_DONE, false)) {
+            AppLogger.d("场外基金 symbol 形态修复已执行过，跳过", "AssetRepository")
+            return OtcRepairSummary(updated = 0, skipped = 0, alreadyDone = true)
+        }
+
+        // 只查基金与股票：场外基金只可能落在这两类里（加密/存款的 symbol 不会命中场外号段）
+        val assets = assetDao.getAssetsByTypes(listOf(AssetType.FUND, AssetType.STOCK))
+        val plan = computeOtcSymbolRepairs(assets)
+
+        if (plan.updates.isEmpty()) {
+            AppLogger.i("场外基金 symbol 形态修复：无需修复（库中无纯数字场外 symbol）", "AssetRepository")
+            prefs.edit().putBoolean(KEY_OTC_SYMBOL_REPAIR_DONE, true).apply()
+            return OtcRepairSummary(updated = 0, skipped = plan.skipped.size, alreadyDone = false)
+        }
+
+        val byId = assets.associateBy { it.id }
+        val db = StockDatabase.getInstance(context)
+        try {
+            db.withTransaction {
+                for ((id, newSymbol) in plan.updates) {
+                    val asset = byId[id] ?: continue
+                    val oldSymbol = asset.symbol ?: continue
+                    assetDao.updateAsset(asset.copy(symbol = newSymbol))
+                    // 分红与交易流水按 symbol 关联，必须跟着改名，否则整段失联
+                    db.dividendDao().renameSymbol(oldSymbol, newSymbol)
+                    db.transactionDao().renameSymbol(oldSymbol, newSymbol)
+                }
+            }
+            // 碰撞跳过的记警告：不覆盖、不丢数据，留给用户手工处理
+            plan.skipped.forEach { id ->
+                AppLogger.w(
+                    "场外基金 symbol 形态修复跳过（规范形态已存在，不覆盖）：${byId[id]?.symbol}",
+                    "AssetRepository"
+                )
+            }
+            AppLogger.i(
+                "场外基金 symbol 形态修复完成：改 ${plan.updates.size} 条，跳过 ${plan.skipped.size} 条",
+                "AssetRepository"
+            )
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            AppLogger.e("场外基金 symbol 形态修复失败: ${e.message}", e, "AssetRepository")
+            // 失败不标记已完成：下次启动可重试，避免脏数据永久卡在守卫外
+            return OtcRepairSummary(updated = 0, skipped = plan.skipped.size, alreadyDone = false)
+        }
+
+        prefs.edit().putBoolean(KEY_OTC_SYMBOL_REPAIR_DONE, true).apply()
+        return OtcRepairSummary(updated = plan.updates.size, skipped = plan.skipped.size, alreadyDone = false)
     }
     
     /**
@@ -396,6 +483,9 @@ class AssetRepository private constructor(
 
         /** 标记「LD 脏符号修复」已执行过的 key，保证每个安装只跑一次 */
         private const val KEY_LD_REPAIR_DONE = "ld_dirty_symbol_repair_done"
+
+        /** 标记「场外基金 symbol 形态归一」已执行过的 key，保证每个安装只跑一次 */
+        private const val KEY_OTC_SYMBOL_REPAIR_DONE = "otc_symbol_form_repair_done"
 
         fun getInstance(context: Context): AssetRepository {
             return instance ?: synchronized(this) {

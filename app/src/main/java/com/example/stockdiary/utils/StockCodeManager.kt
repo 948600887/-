@@ -288,10 +288,20 @@ object StockCodeManager {
         // 纯数字代码，判断是否为场外基金
         val pureCode = extractDigits(trimmed)
         if (pureCode.length == 6) {
-            // 场外基金代码：00xxxx/01xxxx/02xxxx 部分，以及 16xxxx/18xxxx/519xxx 等
-            // 不添加市场前缀，保持纯数字格式
+            // 场外基金统一落成 `fund_` 形态，不再保留纯数字。
+            //
+            // 从前这里返回纯数字，于是同一只基金在库里有两种形态：手动添加 /
+            // 一码通持仓截图走本函数得到 `004502`，基金E账户导入与基金持仓截图一律拼
+            // [FUND_PREFIX] 得到 `fund_004502`。两种形态 [isOTCFund] 都认，但字符串
+            // 不相等，而快照对齐是按 symbol 精确分组的 —— 同一只基金被判成两只，
+            // 落两条资产、持仓翻倍，还分别显示在「场内/场外」两个分组里（持仓页
+            // 按 [hasFundPrefix] 分市场）。
+            //
+            // 只在**号段明确属于场外**（[isOTCFundCode]）时才加前缀：LOF 的场内外
+            // 份额（sz163415 场内 / fund_163415 场外）与老三板（400030 既是场外
+            // 基金号段也是退市股票号段）刻意保持两态 —— 那正是当年场内外互相覆盖的老坑
             if (isOTCFundCode(pureCode)) {
-                return pureCode
+                return FUND_PREFIX + pureCode
             }
         }
         

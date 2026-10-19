@@ -1,5 +1,6 @@
 package com.example.stockdiary.network.model
 
+import com.example.stockdiary.data.sync.SyncStrategy
 import com.example.stockdiary.network.base.MarketData
 import com.example.stockdiary.network.base.PriceData
 
@@ -144,14 +145,12 @@ data class MarketStatus(
 ) {
     companion object {
         fun current(): MarketStatus {
-            val now = java.time.LocalTime.now()
-            val weekday = java.time.LocalDate.now().dayOfWeek
-            
-            val isWeekday = weekday != java.time.DayOfWeek.SATURDAY && weekday != java.time.DayOfWeek.SUNDAY
-            val isDuringHours = now >= java.time.LocalTime.of(9, 30) && now <= java.time.LocalTime.of(15, 0)
+            // 交易时段判断统一收敛到 SyncStrategy.isInTradingHours()（含工作日 + 9:30-11:30/13:00-15:00，
+            // 且正确排除午间休市 11:30-13:00）。删除此处重复的本地副本，避免两处口径漂移。
+            val isDuringHours = SyncStrategy.isInTradingHours()
             
             return MarketStatus(
-                isOpen = isWeekday && isDuringHours,
+                isOpen = isDuringHours,
                 nextOpen = if (!isDuringHours) "09:30:00" else null,
                 nextClose = if (isDuringHours) "15:00:00" else null
             )

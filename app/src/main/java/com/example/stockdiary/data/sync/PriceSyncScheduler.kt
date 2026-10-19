@@ -33,7 +33,8 @@ object PriceSyncScheduler {
     fun scheduleSmartSync(context: Context, runImmediately: Boolean = true) {
         val inTrading = SyncStrategy.isInTradingHours()
         val intervalMillis = SyncStrategy.getCurrentSyncIntervalMillis(inTrading)
-        val intervalMinutes = (intervalMillis / 60_000).coerceAtLeast(15)
+        // 下限复用 SyncStrategy 的单一真相源，避免在此处再硬编码「15」分钟
+        val intervalMinutes = (intervalMillis / 60_000).coerceAtLeast(SyncStrategy.MIN_SYNC_INTERVAL_MINUTES.toLong())
 
         val constraints = Constraints.Builder()
             .setRequiredNetworkType(NetworkType.CONNECTED)

@@ -131,6 +131,18 @@ object SyncStrategy {
     private const val TRADING_INTERVAL_MILLIS = 15 * 60 * 1000L       // 15 分钟
     private const val NON_TRADING_INTERVAL_MILLIS = 4 * 60 * 60 * 1000L // 4 小时
 
+    /** 交易时段同步间隔（分钟），供 UI 文案与调度器引用，避免各处硬编码「15」 */
+    const val TRADING_INTERVAL_MINUTES = TRADING_INTERVAL_MILLIS / 60_000L
+
+    /** 非交易时段同步间隔（小时），供 UI 文案引用，避免各处硬编码「4」 */
+    const val NON_TRADING_INTERVAL_HOURS = NON_TRADING_INTERVAL_MILLIS / 3_600_000L
+
+    /**
+     * 调度器使用的最小同步间隔下限（分钟）。WorkManager 退避下限是 10 分钟，
+     * 这里取与交易时段一致的 15，作为「间隔不低于多少」的唯一真相源。
+     */
+    const val MIN_SYNC_INTERVAL_MINUTES = 15
+
     private const val NETWORK_BASE_DELAY_MILLIS = 10_000L
     private const val NETWORK_MAX_DELAY_MILLIS = 5 * 60 * 1000L
 

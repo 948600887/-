@@ -36,6 +36,9 @@ class DividendRepository private constructor(
     private val cache = ConcurrentHashMap<String, CacheEntry>()
     private val cacheTTL = 24 * 60 * 60 * 1000L
 
+    /** 分红缓存上限：与行情侧各缓存同量级（~200），避免长会话里无限增长 */
+    private val MAX_CACHE_ENTRIES = 200
+
     /**
      * 每个代码「上次抓过的时间」，跨进程存活。
      *
@@ -313,6 +316,17 @@ class DividendRepository private constructor(
     fun clearCache() {
         cache.clear()
     }
+
+    /**
+     * 分红缓存超过上限时淘汰最旧条目（按写入时间戳）。避免长会话里缓存无限增长。
+     * 最近写入的（本次同步/刷新窗口内）时间戳最新，不会被误删。
+     */
+    private fun trimCacheIfNeeded() {
+        if (cache.size <= MAX_CACHE_ENTRIES) return
+        val entries = cache.entries.sortedBy { it.value.timestamp }
+        val removeCount = cache.size - MAX_CACHE_ENTRIES
+        entries.take(removeCount).forEach { cache.remove(it.key) }
+    }
     
     fun getCacheStats(): Map<String, Any> = mapOf(
         "size" to cache.size,
@@ -386,6 +400,7 @@ class DividendRepository private constructor(
                 timestamp = System.currentTimeMillis(),
                 lastFullFetch = if (isIncremental) existingEntry?.lastFullFetch ?: System.currentTimeMillis() else System.currentTimeMillis()
             )
+            trimCacheIfNeeded()
             mergedData
         } catch (e: CancellationException) {
             throw e
@@ -769,6 +784,7 @@ class DividendRepository private constructor(
             }
         }
         cache[symbol] = CacheEntry(validRecords, System.currentTimeMillis())
+        trimCacheIfNeeded()
     }
     
     /**

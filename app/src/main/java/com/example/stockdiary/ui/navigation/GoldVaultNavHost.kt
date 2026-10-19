@@ -2,7 +2,6 @@ package com.example.stockdiary.ui.navigation
 
 import android.app.Activity
 import android.content.Context
-import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
@@ -14,6 +13,7 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
+import kotlinx.coroutines.launch
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
@@ -77,6 +77,11 @@ fun GoldVaultNavHost() {
 
     val isDetailScreen = currentDetailId != null
 
+    // 全局唯一的 Snackbar 宿主：把「再按一次退出」这种反馈统一收口到这里，
+    // 而不是用 Toast（应用里其它 16 处反馈都走 SnackbarHostState，Toast 是唯一例外）。
+    val snackbarHostState = remember { SnackbarHostState() }
+    val navScope = rememberCoroutineScope()
+
     BackHandler(enabled = isDetailScreen) {
         currentDetailId = null
     }
@@ -97,12 +102,17 @@ fun GoldVaultNavHost() {
                 context.findActivity()?.finish()
             } else {
                 lastBackPressAt = now
-                Toast.makeText(context, "再按一次退出", Toast.LENGTH_SHORT).show()
+                // 用 Snackbar 代替 Toast，与全应用的反馈方式保持一致；
+                // 已在显示时不再重复触发，避免「Snackbar host 正在显示」异常。
+                if (snackbarHostState.currentSnackbarData == null) {
+                    navScope.launch { snackbarHostState.showSnackbar("再按一次退出") }
+                }
             }
         }
     }
 
     Scaffold(
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         bottomBar = {
             if (!isDetailScreen) {
                 NavigationBar {

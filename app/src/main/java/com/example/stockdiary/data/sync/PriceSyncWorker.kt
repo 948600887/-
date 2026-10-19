@@ -4,6 +4,7 @@ import com.example.stockdiary.data.repository.AssetRepository
 import android.content.Context
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
+import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.database.StockDatabase
 import com.example.stockdiary.database.amountFor
@@ -46,7 +47,10 @@ class PriceSyncWorker(
                 repository = repository,
                 assets = assets,
                 onProgress = { },
-                forceRefresh = true,
+                // 后台定时同步：分红走「24h TTL + 空结果 7 天」分层（DividendRepository），
+                // 不该每次都强制重抓全部分红——那会把请求量放大数倍且毫无收益。
+                // 股票价格仍按自身 5min/60s TTL 自然刷新（见 UnifiedPriceService / PriceCacheManager）。
+                forceRefresh = false,
                 startTime = startTime,
                 timeLimitMs = WORKER_TIME_LIMIT_MS
             )
@@ -77,7 +81,7 @@ class PriceSyncWorker(
                 prefs.setConsecutiveFailureCount(0)
                 prefs.setLastErrorType(null)
                 createOrReplaceTodaySnapshot(repository)
-                notifyTodayDividends(repository, applicationContext)
+                notifyTodayDividends(applicationContext, assets)
                 // 跑完一轮后按「此时是否交易时段」重排下一次间隔（15分钟 ↔ 4小时自适应），
                 // 否则间隔永远是上次 App 启动那一刻算出的值，智能间隔形同虚设
                 PriceSyncScheduler.scheduleSmartSync(applicationContext, runImmediately = false)
@@ -167,14 +171,18 @@ class PriceSyncWorker(
     /**
      * 检查今日持仓是否有分红到账，发送一次通知并记录已通知的分红，避免重复提醒。
      */
-    private suspend fun notifyTodayDividends(repository: AssetRepository, context: Context) {
+    private suspend fun notifyTodayDividends(
+        context: Context,
+        assets: List<Asset>
+    ) {
         try {
             val today = LocalDate.now().format(dateFormatter)
-            val assets = repository.getAllAssets().first()
-                .filter { it.type == AssetType.STOCK || it.type == AssetType.FUND }
-            if (assets.isEmpty()) return
+            // 复用 doWork 已经加载过的资产列表，避免对全表再查一次
+            // （后台同步每 15 分钟 / 4 小时跑一轮，重复全表查询纯属浪费）。
+            val stockFundAssets = assets.filter { it.type == AssetType.STOCK || it.type == AssetType.FUND }
+            if (stockFundAssets.isEmpty()) return
 
-            val symbols = assets.mapNotNull { it.symbol }.distinct()
+            val symbols = stockFundAssets.mapNotNull { it.symbol }.distinct()
             if (symbols.isEmpty()) return
 
             val db = StockDatabase.getInstance(context)
@@ -184,7 +192,7 @@ class PriceSyncWorker(
                 .filter { (it.payDate ?: it.date) == today }
             if (todayDividends.isEmpty()) return
 
-            val assetMap = assets.associateBy { it.symbol }
+            val assetMap = stockFundAssets.associateBy { it.symbol }
             val prefs = context.getSharedPreferences("dividend_notifications", Context.MODE_PRIVATE)
             val editor = prefs.edit()
 

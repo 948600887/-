@@ -1,6 +1,7 @@
 package com.example.stockdiary.ui.screens
 
 import com.example.stockdiary.data.price.ApiManager
+import com.example.stockdiary.data.sync.SyncStrategy
 import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Build
@@ -241,8 +242,8 @@ fun SettingsScreen(
                     // 文案不能写"每日 17:15"，那会让人以为一天只更新一次。
                     subtitle = when {
                         !autoPriceSyncEnabled -> "已关闭"
-                        lastPriceSyncTime > 0 -> "交易时段每 15 分钟、其余时段每 4 小时 · 上次: ${formatPriceSyncTime(lastPriceSyncTime)}"
-                        else -> "交易时段每 15 分钟、其余时段每 4 小时 · 尚未同步"
+                        lastPriceSyncTime > 0 -> "交易时段每 ${SyncStrategy.TRADING_INTERVAL_MINUTES} 分钟、其余时段每 ${SyncStrategy.NON_TRADING_INTERVAL_HOURS} 小时 · 上次: ${formatPriceSyncTime(lastPriceSyncTime)}"
+                        else -> "交易时段每 ${SyncStrategy.TRADING_INTERVAL_MINUTES} 分钟、其余时段每 ${SyncStrategy.NON_TRADING_INTERVAL_HOURS} 小时 · 尚未同步"
                     },
                     isSwitch = true,
                     switchChecked = autoPriceSyncEnabled,

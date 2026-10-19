@@ -2,6 +2,7 @@ package com.example.stockdiary.network
 
 import com.example.stockdiary.data.dividend.DividendHtmlParser
 import com.example.stockdiary.data.dividend.DividendRecord
+import com.example.stockdiary.common.Timeouts
 import com.example.stockdiary.network.NetworkClient
 import com.example.stockdiary.utils.AppLogger
 import kotlinx.coroutines.Dispatchers
@@ -39,9 +40,11 @@ class FundDividendApiService {
     // 复用统一客户端：通过 defaultClient.newBuilder() 派生，共享底层 ConnectionPool/Dispatcher
     // （连接池复用，避免每 API 类各建一个连接池的浪费）；defaultClient 不带 BaseUrlInterceptor，
     // 不会干扰天天基金 fhsp 页面的完整 https URL 请求。仅保留基金页面所需的长超时。
+    // 超时统一走全局标准（common/APIConfig.kt 的 Timeouts），与 NetworkClient / EastmoneySkillApi 保持一致，
+    // 避免各客户端各自硬编码、出现与全局策略不一致的魔数。
     internal var client: OkHttpClient = NetworkClient.defaultClient.newBuilder()
-        .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
-        .readTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
+        .connectTimeout(Timeouts.CONNECT_MS.toLong(), java.util.concurrent.TimeUnit.MILLISECONDS)
+        .readTimeout(Timeouts.READ_MS.toLong(), java.util.concurrent.TimeUnit.MILLISECONDS)
         .build()
 
     /**
@@ -115,7 +118,7 @@ class FundDividendApiService {
             val doc = Jsoup.connect(url)
                 .userAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
                 .referrer("https://fundf10.eastmoney.com/")
-                .timeout(15000)
+                .timeout(Timeouts.READ_MS)
                 .get()
             val html = doc.html()
             AppLogger.d("Jsoup HTML长度: ${html.length}, 是否包含分红表格: ${html.contains("每10份分红") || html.contains("每份分红")}", TAG)

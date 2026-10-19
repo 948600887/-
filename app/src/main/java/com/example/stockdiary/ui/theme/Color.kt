@@ -70,10 +70,6 @@ val TertiaryDark = Color(0xFF1565C0)
 val TertiaryContainer = Color(0x1A1976D2)
 val TertiaryContainerDark = Color(0xFF1A1E20)
 
-val Accent = ProfitGreen
-val AccentLight = ProfitGreen
-val AccentDark = LossRed
-
 val Error = LossRed
 val ErrorLight = LossRed
 val ErrorDark = Color(0xFFC62828)
@@ -124,19 +120,10 @@ val InversePrimaryDark = PrimaryGreen
 val Scrim = Color(0xFF000000)
 val ScrimDark = Color(0xE6000000)
 
-val Gray = DarkGray
-val GrayLight = MidGray
-val GrayDark = DarkGray
-
 val Success = ProfitGreen
-val SuccessDark = ProfitGreen
 val Warning = AccentOrange
-val WarningDark = Color(0xFFF57C00)
 val Info = AccentBlue
-val InfoDark = Color(0xFF1565C0)
 val Disabled = Color(0xFFBDBDBD)
 val DisabledDark = Color(0xFF424242)
 
-val GlassSurface = Color(0x40FFFFFF)
 val GlassBorder = Color(0x202E7D32)
-val GlowEffect = Color(0x204CAF50)

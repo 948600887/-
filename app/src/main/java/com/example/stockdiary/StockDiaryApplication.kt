@@ -15,7 +15,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.flow.first
 import java.time.LocalDate
 import java.time.temporal.ChronoUnit
 import kotlinx.coroutines.CancellationException
@@ -122,19 +121,21 @@ class StockDiaryApplication : Application() {
         }
     }
 
-    private suspend fun fillMissingSnapshots() {        try {
+    private suspend fun fillMissingSnapshots() {
+        try {
             val repository = container.assetRepository
-            val snapshots = repository.getAllSnapshots().first()
+            // 只读最新一条快照（按 timestamp DESC LIMIT 1），而不是把整张快照表都 load 进内存
+            // —— 冷启动时这张表可能已有数百行，只为拿「最后一条日期」而全表读取纯属浪费。
+            val latestSnapshot = repository.getLatestSnapshot()
 
-            if (snapshots.isEmpty()) {
+            if (latestSnapshot == null) {
                 AppLogger.i("无历史快照，创建今日快照", "StockDiaryApplication")
                 // LocalDate.toString() 本身就是 yyyy-MM-dd，不必再走 DateTimeFormatter
                 repository.createSnapshot(LocalDate.now().toString())
                 return
             }
 
-            val latestDateStr = snapshots.lastOrNull()?.date ?: return
-            val latestDate = LocalDate.parse(latestDateStr)
+            val latestDate = LocalDate.parse(latestSnapshot.date)
             val today = LocalDate.now()
 
             if (latestDate.isBefore(today)) {
@@ -148,7 +149,7 @@ class StockDiaryApplication : Application() {
                 // 比缺口本身更有害：用户会误以为那几天真的没波动。
                 val gapDays = ChronoUnit.DAYS.between(latestDate, today)
                 AppLogger.i(
-                    "跳过历史快照回填：最新为 $latestDateStr，距今 $gapDays 天（无历史价格，不伪造净值）；已创建今日快照",
+                    "跳过历史快照回填：最新为 $latestDate，距今 $gapDays 天（无历史价格，不伪造净值）；已创建今日快照",
                     "StockDiaryApplication"
                 )
                 try {

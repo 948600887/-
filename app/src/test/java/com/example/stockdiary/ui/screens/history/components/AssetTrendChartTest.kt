@@ -1,8 +1,10 @@
 package com.example.stockdiary.ui.screens.history.components
 
+import com.example.stockdiary.database.AssetSnapshot
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.time.LocalDate
 
 class AssetTrendChartTest {
 
@@ -107,5 +109,65 @@ class AssetTrendChartTest {
     @Test
     fun `trendXLabelIndices空输入返回空`() {
         assertEquals(emptyList<Int>(), trendXLabelIndices(emptyList(), emptyList(), minGap = 8f))
+    }
+
+    // ===== 按日期排布（不等宽缺口） =====
+
+    /** 显式指定创建时刻的快照，用于验证时刻抖动不影响 X 间距 */
+    private fun snapshotAt(date: String, timestamp: Long, netAssets: Double) = AssetSnapshot(
+        date = date,
+        timestamp = timestamp,
+        totalAssets = netAssets,
+        totalLiabilities = 0.0,
+        netAssets = netAssets
+    )
+
+    @Test
+    fun `dayTimestamps按日期排布忽略创建时刻抖动`() {
+        // 15 号 23:50 建、17 号 00:10 建、19 号 20:00 建：创建时刻差是 1.8/3.4 天的歪斜比例，
+        // 日期差是整齐的 2 天/2 天——间距必须按后者，等日期差必须等宽
+        val day = 86_400_000L
+        val d15 = LocalDate.parse("2026-10-15").toEpochDay() * day
+        val snaps = listOf(
+            snapshotAt("2026-10-15", d15 + 23 * 3600_000L + 50 * 60_000L, 100.0),
+            snapshotAt("2026-10-17", d15 + 2 * day + 10 * 60_000L, 110.0),
+            snapshotAt("2026-10-19", d15 + 4 * day + 20 * 3600_000L, 120.0)
+        )
+        val positions = trendXPositions(snaps.dayTimestamps(), left = 0f, width = 100f)
+        assertEquals(0f, positions[0], 1e-4f)
+        assertEquals(50f, positions[1], 1e-4f)
+        assertEquals(100f, positions[2], 1e-4f)
+    }
+
+    @Test
+    fun `dayTimestamps不同日期差产出成正比间距`() {
+        // 用户实测场景：10/15、10/17、10/18、10/19——15→17 跨 2 天应是 17→18（1 天）的两倍宽
+        val day = 86_400_000L
+        val d15 = LocalDate.parse("2026-10-15").toEpochDay() * day
+        val snaps = listOf(
+            snapshotAt("2026-10-15", d15 + 20 * 3600_000L, 100.0),
+            snapshotAt("2026-10-17", d15 + 2 * day + 3600_000L, 100.0),
+            snapshotAt("2026-10-18", d15 + 3 * day + 22 * 3600_000L, 130.0),
+            snapshotAt("2026-10-19", d15 + 4 * day + 8 * 3600_000L, 130.0)
+        )
+        val positions = trendXPositions(snaps.dayTimestamps(), left = 0f, width = 100f)
+        // 总跨度 4 天：0% / 50% / 75% / 100%
+        assertEquals(0f, positions[0], 1e-4f)
+        assertEquals(50f, positions[1], 1e-4f)
+        assertEquals(75f, positions[2], 1e-4f)
+        assertEquals(100f, positions[3], 1e-4f)
+        // 15→17 的宽度（50%）正好是 17→18（25%）的两倍
+        assertEquals(2f, (positions[1] - positions[0]) / (positions[2] - positions[1]), 1e-4f)
+    }
+
+    @Test
+    fun `dayTimestamps脏日期退回创建时刻`() {
+        val snaps = listOf(
+            snapshotAt("not-a-date", 12345L, 100.0),
+            snapshotAt("2026-10-19", 67890L, 110.0)
+        )
+        val dayTs = snaps.dayTimestamps()
+        assertEquals(12345L, dayTs[0])
+        assertTrue(dayTs[1] > 0L)
     }
 }

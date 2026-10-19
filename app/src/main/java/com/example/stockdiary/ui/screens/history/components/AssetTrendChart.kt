@@ -123,6 +123,20 @@ internal fun trendXLabelIndices(
     return kept
 }
 
+/**
+ * 快照的「日期时刻」：date 字段当天的纪元日 × 86400000ms（无时区、无 DST、无时刻抖动）。
+ *
+ * X 轴必须按它排布，不能按创建时刻（timestamp）：用户看到的刻度是**日期**，间距就得与
+ * **日期差**成正比。用创建时刻的话，「15 号 23:50 打开 App 建的快照」和「19 号 09:00
+ * 建的」之间只隔 3.4 天而不是 4 天——同样差 1 天的两段（如 17→18 与 18→19）会画出
+ * 不同宽度，用户直接读成「比例不对」。同一天多份快照已在 ViewModel 按日期去重，
+ * 不会塌到同一个 x；日期脏数据退回创建时刻。
+ */
+internal fun List<AssetSnapshot>.dayTimestamps(): List<Long> =
+    map { snapshot ->
+        snapshot.date.toLocalDate()?.toEpochDay()?.times(86_400_000L) ?: snapshot.timestamp
+    }
+
 @Composable
 fun AssetTrendChart(
     snapshots: List<AssetSnapshot>,
@@ -150,7 +164,7 @@ fun AssetTrendChart(
                         val snaps = currentSnapshots
                         if (snaps.size < 2) return@detectTapGestures
                         val positions = trendXPositions(
-                            timestamps = snaps.map { it.timestamp },
+                            timestamps = snaps.dayTimestamps(),
                             left = TREND_PADDING_LEFT,
                             width = size.width - TREND_PADDING_LEFT - TREND_PADDING_RIGHT
                         )
@@ -198,9 +212,10 @@ fun AssetTrendChart(
             val maxValue = snapshots.maxOf { it.netAssets }
             val valueRange = if (maxValue - minValue > 0) maxValue - minValue else 1.0
 
-            // x 按时间戳排布：缺口在横向上被拉开，不再伪装成连续数据
+            // x 按日期（当天零点）排布：缺口在横向上被拉开，且宽度与日期差严格成正比，
+            // 不再伪装成连续数据，也不会因「几点几分创建的」让等日期差画出不等宽
             val positions = trendXPositions(
-                timestamps = snapshots.map { it.timestamp },
+                timestamps = snapshots.dayTimestamps(),
                 left = paddingLeft,
                 width = cWidth
             )

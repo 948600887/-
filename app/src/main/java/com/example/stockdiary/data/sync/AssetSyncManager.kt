@@ -8,6 +8,8 @@ import android.content.Context
 import android.content.res.Configuration
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
+import com.example.stockdiary.data.price.ApiManager
+import com.example.stockdiary.data.price.StockDataManager
 import com.example.stockdiary.network.UnifiedPriceService
 import com.example.stockdiary.network.model.AssetPrice
 import com.example.stockdiary.utils.AppLogger
@@ -199,6 +201,32 @@ object AssetSyncManager {
     }
 
     /**
+     * 该资产是否走 STOCK/场内基金行情批量取价路径，返回用于批量取价的代码；
+     * 不在此列（场外基金走 FundAPI、加密走币安、退市无源）返回 null。
+     *
+     * 口径必须与 [syncSingleAsset] 完全一致：场内基金 = 非 `fund_` 前缀 +
+     * ETF/LOF/场内基金类别（与其中「`isExchangeTraded`」判断同源），
+     * 这样批量回填的代码与逐标的取价用的代码一一对应，命中 `batchResult` 短路时不会张冠李戴。
+     */
+    private fun batchStockCode(asset: Asset): String? {
+        val symbol = asset.symbol ?: return null
+        return when (asset.type) {
+            AssetType.STOCK -> if (StockCodeManager.isDelistedForSync(symbol)) null else symbol
+            AssetType.FUND -> {
+                // fund_ 前缀 = 场外份额，走 FundAPI，不参与股票批量
+                if (symbol.startsWith("fund_", ignoreCase = true)) return null
+                val pureCode = StockCodeManager.extractDigits(symbol)
+                val category = StockCodeManager.classifyCode(pureCode)
+                val isExchangeTraded = category == StockCodeManager.CodeCategory.ETF ||
+                    category == StockCodeManager.CodeCategory.LOF ||
+                    category == StockCodeManager.CodeCategory.EXCHANGE_FUND
+                if (isExchangeTraded && !StockCodeManager.isDelistedForSync(symbol)) symbol else null
+            }
+            else -> null
+        }
+    }
+
+    /**
      * 真正干活的同步。整段强制跑在 [Dispatchers.IO] 上——
      * 这是这次卡死修复的核心。
      *
@@ -282,6 +310,25 @@ object AssetSyncManager {
             // 把它排到最后，让股票 / 虚拟货币这些轻量、用户最关心的实时行情优先在预算内刷完，
             // 基金被截断也只影响日更数据、下次（或后台 Worker）补上即可。
             val orderedAssets = assets.sortedBy { if (it.type == AssetType.FUND) 1 else 0 }
+
+            // P3：STOCK/场内基金批量预取——把原本「逐标的各打一次」的 N 次请求，
+            // 合并成走新浪批量接口的 ~⌈N/20⌉ 次请求（请求量不增反降，安全说明见下）。
+            // 在逐标的扇出之前只做一次：网络可用性 / 用户偏好数据源也只在此读一次（P4），
+            // 随后每个标的的 getPrice 要么命中 batchResult 短路、要么命中门面 60s 缓存，
+            // 完全不再逐标的打网络或读系统状态。批量失败 / 停牌 / 退市整理期的标的
+            // batchResult 为 null，会落回逐标的的多源兜底，正确性不丢、也不会因此多烧请求。
+            val batchStockCodes = orderedAssets.mapNotNull { batchStockCode(it) }.distinct()
+            val stockManager = StockDataManager.getInstance(context)
+            val networkAvailable = stockManager.isNetworkAvailableNow()
+            val preferredApi = ApiManager.getPriceApi(context)
+            val batchPriceMap: Map<String, AssetPrice> = if (batchStockCodes.isNotEmpty()) {
+                UnifiedPriceService.prewarmStockPrices(batchStockCodes, forceRefresh, networkAvailable)
+                    .getOrDefault(emptyMap())
+            } else {
+                emptyMap()
+            }
+            AppLogger.i("批量预取 STOCK/场内基金 ${batchStockCodes.size} 个代码，命中 ${batchPriceMap.size} 个", TAG)
+
             val jobs = orderedAssets.map { asset ->
                 async {
                     semaphore.withPermit {
@@ -302,15 +349,18 @@ object AssetSyncManager {
                         AppLogger.d("开始同步 $label", TAG)
                         inFlightAssets.add(label)
                         try {
-                            syncSingleAsset(
-                                asset,
-                                repository,
-                                successCount,
-                                failedCount,
-                                errorTypes,
-                                forceRefresh,
-                                correctNames
-                            )
+                        syncSingleAsset(
+                            asset,
+                            repository,
+                            successCount,
+                            failedCount,
+                            errorTypes,
+                            forceRefresh,
+                            correctNames,
+                            batchResult = batchPriceMap[asset.symbol],
+                            networkAvailable = networkAvailable,
+                            preferredApi = preferredApi
+                        )
                         } finally {
                             inFlightAssets.remove(label)
                         }
@@ -354,7 +404,13 @@ object AssetSyncManager {
         failedCount: AtomicInteger,
         errorTypes: ConcurrentLinkedQueue<SyncErrorType>,
         forceRefresh: Boolean,
-        correctNames: Boolean
+        correctNames: Boolean,
+        /** 批量预取回填的现成价；非 null 时 STOCK/场内基金分支直接采信，跳过逐标的网络请求（P3） */
+        batchResult: AssetPrice? = null,
+        /** 同步起点一次性算好的网络可用性（P4）：非 null 时不再逐标的读 ConnectivityManager */
+        networkAvailable: Boolean? = null,
+        /** 同步起点一次性读好的偏好数据源（P4）：非 null 时不再逐标的读 SharedPreferences */
+        preferredApi: String? = null
     ) {
         val symbol = asset.symbol
 
@@ -401,11 +457,16 @@ object AssetSyncManager {
                         )
 
                     if (isExchangeTraded) {
-                        // 场内交易基金：与股票同源走行情门面（多源容错 + 60s TTL + 单飞）
+                        // 场内交易基金：与股票同源走行情门面（多源容错 + 60s TTL + 单飞）。
+                        // 批量预取的现成价优先（batchResult 非 null 时门面内直接短路），
+                        // 网络可用性与偏好数据源也复用同步起点一次性算好的值，不再逐标的重复读。
                         val result = UnifiedPriceService.getPrice(
                             fundCode,
                             AssetType.STOCK,
-                            forceRefresh = forceRefresh
+                            forceRefresh = forceRefresh,
+                            batchResult = batchResult,
+                            networkAvailable = networkAvailable,
+                            preferredApi = preferredApi
                         )
                         result.onSuccess { price ->
                             when (price) {
@@ -449,11 +510,16 @@ object AssetSyncManager {
                         errorTypes.offer(SyncErrorType.DATA)
                         return
                     }
-                    // 股票与场内基金同源：统一走行情门面，多源容错在门面下游
+                    // 股票与场内基金同源：统一走行情门面，多源容错在门面下游。
+                    // 批量预取的现成价优先（batchResult 非 null 时门面内直接短路），
+                    // 网络可用性与偏好数据源也复用同步起点一次性算好的值，不再逐标的重复读。
                     val result = UnifiedPriceService.getPrice(
                         stockSymbol,
                         AssetType.STOCK,
-                        forceRefresh = forceRefresh
+                        forceRefresh = forceRefresh,
+                        batchResult = batchResult,
+                        networkAvailable = networkAvailable,
+                        preferredApi = preferredApi
                     )
 
                     result.onSuccess { price ->

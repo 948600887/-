@@ -47,6 +47,9 @@ class StockDataManager(
     
     // 数据缓存（内存缓存）
     private val cache = ConcurrentHashMap<String, CacheItem>()
+
+    /** 内存缓存上限：与 PriceCacheManager.MAX_MEMORY_CACHE_SIZE / SinaStockAPI.MAX_CACHE_SIZE 同量级（~200），避免长会话无限增长 */
+    private val MAX_MEMORY_CACHE_ENTRIES = 200
     
     // 数据源实例缓存
     private val dataSourceCache = ConcurrentHashMap<String, StockDataSource>()
@@ -100,8 +103,8 @@ class StockDataManager(
      * 获取当前数据源列表（根据用户选择排序）
      * 妙想Skill优先级最高
      */
-    private fun getCurrentDataSources(): List<Pair<String, StockDataSource>> {
-        val selectedApi = ApiManager.getPriceApi(context)
+    private fun getCurrentDataSources(preferredApi: String? = null): List<Pair<String, StockDataSource>> {
+        val selectedApi = preferredApi ?: ApiManager.getPriceApi(context)
         
         // 优先级：妙想Skill > 新浪 > 腾讯
         val priorityList = listOf(
@@ -120,8 +123,21 @@ class StockDataManager(
     
     /**
      * 获取股票数据（带容错机制）
+     *
+     * @param forceRefresh 跳过内存/持久化缓存强制重抓
+     * @param networkAvailable 本次同步开始时一次性算好的网络可用性；非 null 时直接采信，
+     *        不再每个标的都去问 ConnectivityManager（避免 O(n) 冗余 binder 调用，见 P4）。
+     *        为 null 时回落到 [isNetworkAvailable] 实时判断。
+     * @param preferredApi 本次同步开始时一次性读好的用户偏好数据源；非 null 时直接采信，
+     *        不再每个标的都读 SharedPreferences（避免 O(n) 冗余磁盘读）。为 null 时回落到
+     *        [ApiManager.getPriceApi]。
      */
-    suspend fun getStockData(symbol: String, forceRefresh: Boolean = false): Result<StockData> {
+    suspend fun getStockData(
+        symbol: String,
+        forceRefresh: Boolean = false,
+        networkAvailable: Boolean? = null,
+        preferredApi: String? = null
+    ): Result<StockData> {
         // 1. 检查是否需要强制刷新
         if (!forceRefresh) {
             // 2. 检查内存缓存
@@ -155,8 +171,9 @@ class StockDataManager(
             }
         }
         
-        // 4. 检查网络连接
-        if (!isNetworkAvailable()) {
+        // 4. 检查网络连接（优先用同步开始时一次性算好的结果，避免每个标的重复 binder 调用）
+        val netAvailable = networkAvailable ?: isNetworkAvailable()
+        if (!netAvailable) {
             AppLogger.w("网络连接不可用", TAG)
             // 返回旧缓存或失败
             val oldCache = cache[symbol]
@@ -168,7 +185,7 @@ class StockDataManager(
         
         // 5. 按优先级尝试各个数据源
         var lastError: Exception? = null
-        val currentDataSources = getCurrentDataSources()
+        val currentDataSources = getCurrentDataSources(preferredApi)
         
         for ((apiName, dataSource) in currentDataSources) {
             // 检查失败计数
@@ -192,6 +209,7 @@ class StockDataManager(
                 if (stockData != null && isValidPrice(stockData.price)) {
                     // 成功：更新所有缓存
                     cache[symbol] = CacheItem(stockData, System.currentTimeMillis())
+                    trimCacheIfNeeded()
                     
                     // 同时更新PriceCacheManager持久化缓存
                     val prevClose = stockData.yesterdayClose ?: 0.0
@@ -277,6 +295,38 @@ class StockDataManager(
     }
     
     /**
+     * 通过新浪批量接口一次性取回一批 STOCK/场内基金的行情。
+     *
+     * 这是 P3（批量取价）的核心：新浪的 [SinaStockAPI.getRealtimeData] 原生支持批量，
+     * 会把代码拼成 `/list=CODE1,CODE2,…` 并按 [com.example.stockdiary.common.RequestLimits.BATCH_SIZE]=20
+     * 自动分块，配合 `batchPendingRequests` 去重。所以 N 个代码 ≈ ⌈N/20⌉ 次请求，
+     * 取代原先「逐标的各打一次」的 N 次请求——请求量不增反降，不会引发请求风暴。
+     *
+     * 成功时把结果**双写**内存缓存与 PriceCacheManager 持久化缓存，
+     * 保证后续按代码取价（含批量回填之外的兜底路径）直接命中、不再发请求。
+     * 失败（网络/解析）时返回空 map，调用方（AssetSyncManager）会逐个标的走原有
+     * 多源兜底，绝不因批量失败而放大请求量。
+     */
+    suspend fun getBatchStockDataThroughSina(
+        symbols: List<String>,
+        forceRefresh: Boolean = false
+    ): Result<Map<String, StockData>> {
+        if (symbols.isEmpty()) return Result.success(emptyMap())
+        val sinaResult = SinaStockAPI.getRealtimeData(symbols, context = context, forceRefresh = forceRefresh)
+        return sinaResult.map { sinaMap ->
+            sinaMap.mapValues { (code, sina) ->
+                val unified = sina.toUnifiedStockData()
+                cache[code] = CacheItem(unified, System.currentTimeMillis())
+                PriceCacheManager.cachePrice(code, sina, ApiManager.API_SINA)
+                unified
+            }
+        }
+    }
+
+    /** 供同步编排器在每轮开始时一次性读取网络可用性（P4：避免逐标的重复 binder 调用） */
+    fun isNetworkAvailableNow(): Boolean = isNetworkAvailable()
+
+    /**
      * 检查网络连接
      */
     private fun isNetworkAvailable(): Boolean {
@@ -352,6 +402,17 @@ class StockDataManager(
      */
     fun getCacheSize(): Int {
         return cache.size
+    }
+
+    /**
+     * 内存缓存超过上限时淘汰最旧条目。先清 TTL 已过（日期陈旧）的，还不够再按写入时间淘汰最旧的——
+     * 刚写入的（本次同步窗口内）时间戳最新，不会被误删。
+     */
+    private fun trimCacheIfNeeded() {
+        if (cache.size <= MAX_MEMORY_CACHE_ENTRIES) return
+        val entries = cache.entries.sortedBy { it.value.timestamp }
+        val removeCount = cache.size - MAX_MEMORY_CACHE_ENTRIES
+        entries.take(removeCount).forEach { cache.remove(it.key) }
     }
 }
 

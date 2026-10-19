@@ -52,6 +52,9 @@ object UnifiedPriceService {
      */
     private const val PRICE_CACHE_TTL_MS = 60_000L
 
+    /** 进程内价格缓存上限：与 [com.example.stockdiary.data.price.PriceCacheManager] / [SinaStockAPI] 同量级（~200），避免长会话里无限增长 */
+    private const val PRICE_CACHE_MAX_ENTRIES = 200
+
     /** 缓存条目：价格 + 写入时间，用于判断过期 */
     private data class CacheEntry(val price: AssetPrice, val timestamp: Long)
 
@@ -61,8 +64,45 @@ object UnifiedPriceService {
     private fun isFresh(entry: CacheEntry): Boolean =
         System.currentTimeMillis() - entry.timestamp < PRICE_CACHE_TTL_MS
 
-    suspend fun getPrice(code: String, type: AssetType, forceRefresh: Boolean = false): Result<AssetPrice> = withContext(Dispatchers.IO) {
+    /**
+     * 价格缓存超过上限时淘汰最旧条目，防止进程内无限增长。
+     * 先清一遍已过 TTL 的条目（新鲜度优先），还不够再按写入时间淘汰最旧的——
+     * 刷新窗口内刚写入的条目时间戳最新，不会被误删（不会在同步进行中丢热点键）。
+     */
+    private fun trimPriceCacheIfNeeded() {
+        if (priceCache.size <= PRICE_CACHE_MAX_ENTRIES) return
+        val expireThreshold = System.currentTimeMillis() - PRICE_CACHE_TTL_MS
+        val expired = priceCache.filter { it.value.timestamp < expireThreshold }.keys
+        expired.forEach { priceCache.remove(it) }
+        if (priceCache.size > PRICE_CACHE_MAX_ENTRIES) {
+            val sorted = priceCache.entries.sortedBy { it.value.timestamp }
+            val removeCount = priceCache.size - PRICE_CACHE_MAX_ENTRIES
+            sorted.take(removeCount).forEach { priceCache.remove(it.key) }
+        }
+    }
+
+    suspend fun getPrice(
+        code: String,
+        type: AssetType,
+        forceRefresh: Boolean = false,
+        /**
+         * 批量预取回填的现成价格。非 null 时直接返回它，**完全跳过**门面 60s 缓存与下游取价，
+         * 用于刷新编排器把一批 STOCK/场内基金价格一次性批量取回后，逐标的不再重复发请求
+         * （见 [AssetSyncManager]）。这是 P3 批量取价的关键短路点。
+         */
+        batchResult: AssetPrice? = null,
+        /**
+         * 本次同步开始时一次性算好的网络可用性 / 用户偏好数据源。传入后 [StockDataManager]
+         * 不再每个标的都去读 ConnectivityManager 与 SharedPreferences（O(n) 冗余系统调用，P4）。
+         * 为 null 时回落到原行为（各自实时读取）。
+         */
+        networkAvailable: Boolean? = null,
+        preferredApi: String? = null
+    ): Result<AssetPrice> = withContext(Dispatchers.IO) {
         val cacheKey = "${type.name}_$code"
+
+        // 批量回填优先：刷新编排器已经把这只标的的价取回来了，直接返回，绝不重复打网络
+        if (batchResult != null) return@withContext Result.success(batchResult)
 
         if (!forceRefresh) {
             val cached = priceCache[cacheKey]
@@ -82,7 +122,7 @@ object UnifiedPriceService {
 
         try {
             val result: Result<AssetPrice> = when (type) {
-                AssetType.STOCK -> getStockData(code, forceRefresh)
+                AssetType.STOCK -> getStockData(code, forceRefresh, networkAvailable, preferredApi)
                 AssetType.FUND -> getFundPrice(code, forceRefresh).map { AssetPrice.Fund(it) }
                 AssetType.CRYPTO -> getCryptoPrice(code).map { AssetPrice.Crypto(it) }
                 else -> Result.failure(Exception("不支持的资产类型: $type"))
@@ -90,6 +130,7 @@ object UnifiedPriceService {
 
             result.onSuccess { price ->
                 priceCache[cacheKey] = CacheEntry(price, System.currentTimeMillis())
+                trimPriceCacheIfNeeded()
             }
 
             deferred.complete(result)
@@ -121,17 +162,58 @@ object UnifiedPriceService {
      * 确实需要新鲜数据；[StockDataManager] 内部的三级缓存与熔断行为不变。
      * forceRefresh 一并透传——调用方显式要求刷新时，策略层的缓存也要让路。
      */
-    private suspend fun getStockData(code: String, forceRefresh: Boolean): Result<AssetPrice> {
+    private suspend fun getStockData(
+        code: String,
+        forceRefresh: Boolean,
+        networkAvailable: Boolean? = null,
+        preferredApi: String? = null
+    ): Result<AssetPrice> {
         val manager = stockDataManager
             ?: return Result.failure(IllegalStateException("行情门面未初始化（UnifiedPriceService.init 未调用）"))
         // StockDataManager 用 common.Result，门面对外是 kotlin.Result，这里做转换
-        return when (val result = manager.getStockData(code, forceRefresh)) {
+        return when (val result = manager.getStockData(code, forceRefresh, networkAvailable, preferredApi)) {
             is com.example.stockdiary.common.Result.Success -> Result.success(AssetPrice.Stock(result.data))
             is com.example.stockdiary.common.Result.Error -> Result.failure(result.exception)
             is com.example.stockdiary.common.Result.Loading -> Result.failure(IllegalStateException("行情结果尚未加载完成"))
         }
     }
-    
+
+    /**
+     * 批量预取 STOCK/场内基金行情（走新浪批量接口，N 个代码 ≈ ⌈N/20⌉ 次请求）。
+     *
+     * 刷新编排器在逐标的扇出**之前**调用一次：结果会双写本门面的 60s 缓存
+     * （[priceCache]）与下层 StockDataManager / PriceCacheManager，使得随后每个标的的
+     * [getPrice] 命中 [batchResult] 短路或 60s 缓存，**完全不再逐标的打网络**。
+     *
+     * @return `kotlin.Result` 包着的 `code -> AssetPrice.Stock` 映射（仅含成功取回的代码）。
+     *   网络不可用或代码为空时返回空 map；底层批量失败时也返回空 map——
+     *   调用方据此让逐标的 [getPrice] 走原有多源兜底，绝不因批量失败而放大请求量。
+     */
+    suspend fun prewarmStockPrices(
+        codes: List<String>,
+        forceRefresh: Boolean,
+        networkAvailable: Boolean
+    ): kotlin.Result<Map<String, AssetPrice>> = withContext(Dispatchers.IO) {
+        if (!networkAvailable || codes.isEmpty()) return@withContext Result.success(emptyMap())
+        val manager = stockDataManager
+            ?: return@withContext Result.failure(
+                IllegalStateException("行情门面未初始化（UnifiedPriceService.init 未调用）")
+            )
+        when (val result = manager.getBatchStockDataThroughSina(codes, forceRefresh)) {
+            is com.example.stockdiary.common.Result.Success -> {
+                val priceMap = result.data.mapValues { (_, stockData) -> AssetPrice.Stock(stockData) }
+                // 写门面 60s 缓存：即便 batchResult 短路没兜住，逐标的 getPrice 也能命中这里
+                priceMap.forEach { (code, price) ->
+                    priceCache["${AssetType.STOCK.name}_$code"] = CacheEntry(price, System.currentTimeMillis())
+                }
+                Result.success(priceMap)
+            }
+            is com.example.stockdiary.common.Result.Error -> Result.failure(result.exception)
+            is com.example.stockdiary.common.Result.Loading ->
+                Result.failure(IllegalStateException("行情结果尚未加载完成"))
+        }
+    }
+
     private suspend fun getFundPrice(code: String, forceRefresh: Boolean): Result<FundData> = withContext(Dispatchers.IO) {
         try {
             // 走带缓存的版本：原来直接调 getFundInfo 会绕过 FundAPI 的 5 分钟缓存，

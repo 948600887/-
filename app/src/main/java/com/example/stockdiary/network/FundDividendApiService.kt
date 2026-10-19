@@ -8,6 +8,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import org.jsoup.HttpStatusException
 import org.jsoup.Jsoup
 import kotlinx.coroutines.CancellationException
 
@@ -22,6 +23,17 @@ class FundDividendApiService {
         private const val FHSP_URL = "https://fundf10.eastmoney.com/fhsp_{code}.html"
         // 天天基金页面可能给出"每份"或"每10份"两种单位，统一转换为"每10份"
         private const val MAX_DIVIDEND_PER_TEN_SHARES = 100.0
+
+        /**
+         * 进程级限流退避窗口（毫秒时间戳）。一旦被天天基金以 514/429 限流，
+         * 在此时间戳之前，所有场外基金分红抓取统一短路跳过，不再对同一个被限流的主机
+         * 用 OkHttp 或 Jsoup 反复猛打——那只会拉长封禁窗口。
+         */
+        @Volatile
+        internal var rateLimitedUntil: Long = 0L
+
+        /** 限流后强制退避时长（60 秒），覆盖绝大多数天天基金限流窗口。 */
+        private const val RATE_LIMIT_BACKOFF_MS = 60_000L
     }
 
     // 复用统一客户端：通过 defaultClient.newBuilder() 派生，共享底层 ConnectionPool/Dispatcher
@@ -37,6 +49,13 @@ class FundDividendApiService {
      * @param fundCode 纯数字基金代码，如 "110011"
      */
     suspend fun getFundDividendHistory(fundCode: String): Result<List<DividendRecord>> = withContext(Dispatchers.IO) {
+        // 进程级限流退避：一旦被天天基金 514/429 限流，整段时间内所有基金统一跳过，
+        // 不再对同一个被限流的主机用 OkHttp 或 Jsoup 反复猛打（只会拉长封禁窗口）。
+        if (System.currentTimeMillis() < rateLimitedUntil) {
+            AppLogger.w("天天基金限流退避中，跳过 $fundCode 本次抓取", TAG)
+            return@withContext Result.failure(Exception("天天基金限流退避中，跳过"))
+        }
+
         val url = FHSP_URL.replace("{code}", fundCode)
 
         // 第一次尝试：使用 OkHttp
@@ -75,6 +94,13 @@ class FundDividendApiService {
                     AppLogger.w("天天基金返回的页面不像分红页（可能是反爬页），换 Jsoup 重试", TAG)
                 } else {
                     AppLogger.w("OkHttp HTTP 请求失败: ${response.code}", TAG)
+                    // 限流（514/429）：设置退避窗口并直接失败，绝不再用 Jsoup 对同一个被限流
+                    // 主机补刀——那只会让限流窗口更久。其它非 2xx 仍保留降级到 Jsoup 的机会。
+                    if (response.code == 514 || response.code == 429) {
+                        rateLimitedUntil = System.currentTimeMillis() + RATE_LIMIT_BACKOFF_MS
+                        AppLogger.w("天天基金限流（${response.code}），本周期退避，不再用 Jsoup 兜底猛打", TAG)
+                        return@withContext Result.failure(Exception("天天基金限流（${response.code}），本周期退避"))
+                    }
                 }
             }
         } catch (e: CancellationException) {
@@ -100,6 +126,15 @@ class FundDividendApiService {
             }
         } catch (e: CancellationException) {
             throw e
+        } catch (e: HttpStatusException) {
+            // 限流（514/429）：同样设置退避窗口并直接失败，不再继续走最终的兜底失败逻辑
+            // 或重复对限流主机发请求。其它 HttpStatusException（如 404/503）仍按普通异常处理。
+            if (e.statusCode == 514 || e.statusCode == 429) {
+                rateLimitedUntil = System.currentTimeMillis() + RATE_LIMIT_BACKOFF_MS
+                AppLogger.w("天天基金限流（${e.statusCode}），本周期退避，不再用 Jsoup 兜底猛打", TAG)
+                return@withContext Result.failure(Exception("天天基金限流（${e.statusCode}），本周期退避"))
+            }
+            AppLogger.e("Jsoup 获取天天基金分红失败: ${e.message}", e, TAG)
         } catch (e: Exception) {
             AppLogger.e("Jsoup 获取天天基金分红失败: ${e.message}", e, TAG)
         }

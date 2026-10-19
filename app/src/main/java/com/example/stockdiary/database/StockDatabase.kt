@@ -20,7 +20,11 @@ import com.example.stockdiary.utils.AppLogger
         FundNavCache::class
     ],
     version = 16,
-    exportSchema = false
+    // 必须开着：项目铁律是「迁移 SQL 取自 Room 自己导出的 JSON，不手敲」。
+    // 关掉它 kapt 不会导任何 schema（room.schemaLocation 形同虚设），
+    // 于是 5~16.json 全缺，下一次 bump version 没有基准可对照，
+    // Room 的 schema 一致性校验（MigrationTestHelper）也没法做
+    exportSchema = true
 )
 @TypeConverters(Converters::class)
 abstract class StockDatabase : RoomDatabase() {

@@ -17,6 +17,7 @@ import androidx.compose.ui.unit.dp
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.network.BinanceHostGate
+import com.example.stockdiary.utils.ExchangeRateManager
 import com.example.stockdiary.utils.StockCodeManager
 import com.example.stockdiary.utils.format
 import com.example.stockdiary.utils.totalValueCny
@@ -226,7 +227,11 @@ fun StockAssetItem(
                 Text(
                     when {
                         isLiability -> "待偿还"
-                        currentPrice != null -> "¥${currentPrice.format(pricePrecision)}"
+                        // 价格是原币口径（与 totalValue 同币种），而同行市值是折算后人民币。
+                        // 不过这道换算直接套 ¥，USD 加密货币会把 $67,000 显示成 ¥67,000
+                        // （真实约 ¥48 万）——与详情页 AssetDetailScreen:180 同一口径
+                        currentPrice != null ->
+                            "¥${ExchangeRateManager.toCny(currentPrice, asset.currency).format(pricePrecision)}"
                         StockCodeManager.isDelistedForSync(asset.symbol) -> "退市"
                         // 币安主机级熔断期间（连不上 api.binance.com，见 BinanceHostGate）要给一个
                         // 区别于「价格待更新」的提示：前者是网络/主机问题，后者可能是数据源缺数据。

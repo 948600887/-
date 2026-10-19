@@ -22,6 +22,7 @@ import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.ui.components.DialogInfoItem
 import com.example.stockdiary.ui.components.DialogSectionHeader
+import com.example.stockdiary.utils.ExchangeRateManager
 import com.example.stockdiary.utils.format
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -247,7 +248,13 @@ fun AdjustPositionDialog(
                                     horizontalArrangement = Arrangement.SpaceBetween
                                 ) {
                                     DialogInfoItem("新持仓", "${newBalance.format(0)}")
-                                    DialogInfoItem("交易金额", "¥${tradeTotal.format(2)}")
+                                    // 成交价是原币口径，交易金额也要折算成人民币——
+                            // 与持仓页价格行同一口径（不过换算会把 USD 加密货币的
+                            // 成交额显示成人民币数字）
+                            DialogInfoItem(
+                                "交易金额",
+                                "¥${ExchangeRateManager.toCny(tradeTotal, asset.currency).format(2)}"
+                            )
                                 }
                             }
                         }

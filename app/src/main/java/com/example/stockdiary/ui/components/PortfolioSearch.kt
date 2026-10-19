@@ -22,6 +22,7 @@ import androidx.compose.ui.unit.dp
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.network.BinanceHostGate
+import com.example.stockdiary.utils.ExchangeRateManager
 import com.example.stockdiary.utils.StockCodeManager
 import com.example.stockdiary.utils.format
 import com.example.stockdiary.utils.totalValueCny
@@ -117,7 +118,10 @@ fun SearchAssetItem(asset: Asset, onClick: () -> Unit, onDividendClick: () -> Un
                 Text("¥${asset.totalValueCny.format(2)}", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold, color = AppTheme.colors.onSurface)
                 Text(
                     when {
-                        asset.currentPrice != null -> "¥${asset.currentPrice.format(pricePrecision)}"
+                        // 同 AssetCards：价格是原币口径，套 ¥ 前必须折算，
+                        // 否则 USD 报价的加密货币显示成人民币数字（差一个汇率）
+                        asset.currentPrice != null ->
+                            "¥${ExchangeRateManager.toCny(asset.currentPrice, asset.currency).format(pricePrecision)}"
                         StockCodeManager.isDelistedForSync(asset.symbol) -> "退市"
                         // 与 AssetCards.StockAssetItem 同一套口径：币安主机级熔断期间
                         // （连不上 api.binance.com，见 BinanceHostGate）显示「币安暂不可达」，

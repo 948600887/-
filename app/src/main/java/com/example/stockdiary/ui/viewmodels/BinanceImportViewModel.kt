@@ -31,7 +31,7 @@ import kotlinx.coroutines.withContext
  *
  * 状态流与 IO 协程模板已上收至 [ImportWizardViewModel]，这里只留来源特有逻辑。
  */
-class BinanceImportViewModel(
+open class BinanceImportViewModel(
     private val context: Context,
     private val repository: AssetRepository,
     private val service: BinanceImportService,
@@ -127,7 +127,10 @@ class BinanceImportViewModel(
                 updateState { state ->
                     state.copy(fetching = false, step = Step.INPUT, error = "拉取失败: ${e.message ?: "未知错误"}")
                 }
-            }
+            },
+            // 拉取进行中若协程被取消（关弹窗/离开/作用域销毁），复位进度态，
+            // 否则 fetching 永不复位、弹窗卡在「正在拉取…」。取消不吞（仍重抛）。
+            onCancel = { updateState { it.copy(fetching = false, step = Step.INPUT, error = null) } }
         ) {
             updateState { state ->
                 state.copy(fetching = true, error = null, preview = null, result = null, step = Step.FETCHING)
@@ -225,7 +228,9 @@ class BinanceImportViewModel(
                 updateState { state ->
                     state.copy(step = Step.PREVIEW, error = "导入失败: ${e.message ?: "未知错误"}")
                 }
-            }
+            },
+            // 写入进行中被取消时回到预览（保留 preview 让用户重试），避免停在 COMMITTING 转圈。
+            onCancel = { updateState { it.copy(step = Step.PREVIEW) } }
         ) {
             updateState { state -> state.copy(step = Step.COMMITTING, error = null) }
             val result = service.commit(preview, _uiState.value.account, _uiState.value.prices)
@@ -244,6 +249,7 @@ class BinanceImportViewModel(
      * 下次打开会残留上次的预览。密钥与已知账户保留，那是用户上下文。
      */
     fun reset() {
+        cancelActiveJob()
         updateState { state ->
             state.copy(
                 step = Step.INPUT,

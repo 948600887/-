@@ -186,6 +186,23 @@ class HoldingSnapshotServiceTest {
     }
 
     @Test
+    fun 场外号段裸码经buildPreview落成fund_前缀且类型为基金() = runBlocking {
+        // 锁死历史坑：场外号段裸码（004502）必须经由 normalizeSymbol 落成 fund_004502
+        // 且资产类型为 FUND，不能误标成股票、也不能同一只基金两种形态翻倍。
+        // 必须走 buildPreview → normalizeSymbol 真路径，不要只断言裸码。
+        coEvery { repo.getAssetsBySymbols(any()) } returns emptyList()
+        val captured = slot<List<Asset>>()
+        coEvery { repo.insertAssets(capture(captured)) } returns Unit
+
+        val preview = service.buildPreview(parsed(holding("004502", "中银如意宝货币A", 100.0)))
+        service.commit(preview, account = "中国结算")
+
+        val asset = captured.captured.single()
+        assertEquals("fund_004502", asset.symbol)
+        assertEquals(AssetType.FUND, asset.type)
+    }
+
+    @Test
     fun 覆盖时只改数量_账户和名称保持库里原样() = runBlocking {
         val existing = assetOf(7L, "515080", "我改过的名字", balance = 10000.0, account = "我的券商")
         coEvery { repo.getAssetsBySymbols(any()) } returns listOf(existing)

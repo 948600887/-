@@ -39,7 +39,7 @@ import kotlinx.coroutines.withContext
  *
  * 状态流与 IO 协程模板已上收至 [ImportWizardViewModel]，这里只留来源特有逻辑。
  */
-class HoldingSnapshotViewModel(
+open class HoldingSnapshotViewModel(
     private val context: Context,
     private val repository: AssetRepository,
     private val service: HoldingSnapshotService,
@@ -110,7 +110,8 @@ class HoldingSnapshotViewModel(
                         error = "识别失败: ${e.message ?: "未知错误"}"
                     )
                 }
-            }
+            },
+            onCancel = { updateState { it.copy(recognizing = false, step = Step.SELECT_IMAGE) } }
         ) {
             updateState { state ->
                 state.copy(
@@ -183,7 +184,8 @@ class HoldingSnapshotViewModel(
                             "请确认选的是基金E账户「公募基金查询」导出的 .xlsx 文件。"
                     )
                 }
-            }
+            },
+            onCancel = { updateState { it.copy(recognizing = false, step = Step.SELECT_IMAGE) } }
         ) {
             updateState { state ->
                 state.copy(
@@ -197,11 +199,21 @@ class HoldingSnapshotViewModel(
 
             val parsed = FundEStatementParser.parse(rows)
             if (parsed.holdings.isEmpty()) {
+                // 空持仓时：若解析器留下了「问题」说明（如「没找到基金代码这一列」），
+                // 把它们拼进错误文案，否则用户只看到一句泛泛的「没读到持仓」，
+                // 无从判断到底是格式不对还是截错了页面
+                val problems = parsed.problems
+                val base = "没从这个文件里读到持仓。请确认导出自基金E账户的「公募基金查询」页（右上角导出）。"
+                val separator = "；"
+                val errorMsg = if (problems.isNotEmpty()) {
+                    "$base\n\n" + problems.joinToString(separator)
+                } else {
+                    base
+                }
                 updateState { state ->
                     state.copy(
                         recognizing = false,
-                        error = "没从这个文件里读到持仓。请确认导出自基金E账户的「公募基金查询」页" +
-                            "（右上角导出）。",
+                        error = errorMsg,
                         recognizedText = null,
                         lines = emptyList()
                     )
@@ -248,7 +260,8 @@ class HoldingSnapshotViewModel(
                         error = "导入失败: ${e.message ?: "未知错误"}"
                     )
                 }
-            }
+            },
+            onCancel = { updateState { it.copy(step = Step.PREVIEW) } }
         ) {
             updateState { state -> state.copy(step = Step.COMMITTING, error = null) }
             val result = service.commit(preview, _uiState.value.account)
@@ -336,6 +349,7 @@ class HoldingSnapshotViewModel(
      * 不复位的话下次打开会残留上次的预览。账户名与已知账户保留，那是用户上下文。
      */
     fun reset() {
+        cancelActiveJob()
         updateState { state -> UiState(
             account = state.account,
             knownAccounts = state.knownAccounts

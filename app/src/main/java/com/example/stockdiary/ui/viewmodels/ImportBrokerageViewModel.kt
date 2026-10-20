@@ -24,7 +24,7 @@ import java.nio.charset.Charset
  * 状态流与 IO 协程模板已上收至 [ImportWizardViewModel]；本类是三者中最复杂的：
  * 列映射、逐行代码防抖校验、同名联动、候选代码都留在这里。
  */
-class ImportBrokerageViewModel(
+open class ImportBrokerageViewModel(
     private val service: BrokerageImportService,
     private val ocrService: OcrStatementService
 ) : ImportWizardViewModel<ImportBrokerageViewModel.UiState>(ImportBrokerageViewModel.UiState()) {
@@ -132,7 +132,8 @@ class ImportBrokerageViewModel(
                         error = msg
                     )
                 }
-            }
+            },
+            onCancel = { updateState { it.copy(recognizing = false, step = Step.SELECT_FILE) } }
         ) {
             // 停留在选择页展示进度条，不要直接跳 PREVIEW：
             // OCR 通常要 1~3 秒，先跳过去会闪一个「共 0 行」的空预览页。
@@ -477,7 +478,8 @@ class ImportBrokerageViewModel(
                         error = "提交失败: ${e.message}"
                     )
                 }
-            }
+            },
+            onCancel = { updateState { it.copy(committing = false, step = Step.PREVIEW) } }
         ) {
             updateState { state -> state.copy(step = Step.COMMITTING, committing = true) }
             val result = service.commit(txs)
@@ -496,6 +498,7 @@ class ImportBrokerageViewModel(
 
     /** 重置整个流程 */
     fun reset() {
+        cancelActiveJob()
         symbolCheckJobs.values.forEach { it.cancel() }
         symbolCheckJobs.clear()
         _uiState.value = UiState()

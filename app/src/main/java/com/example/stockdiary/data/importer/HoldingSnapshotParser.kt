@@ -1,7 +1,5 @@
 package com.example.stockdiary.data.importer
 
-import com.example.stockdiary.utils.StockCodeManager
-
 /**
  * 「中国结算 · 一码通持有查询」持仓截图解析器（纯函数，可直接 JVM 单测）。
  *
@@ -83,10 +81,7 @@ data class ParsedHolding(
      * 会被按人民币数值直接汇总——错得无声无息。
      */
     val currency: String = "CNY"
-) {
-    /** 按代码前缀推断的类别：ETF / LOF / 股票 / 场内基金…… */
-    val category: StockCodeManager.CodeCategory get() = StockCodeManager.classifyCode(symbol)
-}
+)
 
 /** 解析结果：[holdings] 为成功配对的记录，[skipped] 为认得出代码却没配全的行（供诊断）。 */
 data class HoldingSnapshotResult(
@@ -155,10 +150,11 @@ object HoldingSnapshotParser {
                 val rawQuantity = inline?.second ?: pendingRawQuantity
                 val name = pendingName
 
-                // quantity >= 0 是硬要求：Asset 构造器里有 require(balance >= 0)，
-                // 负数会在落库时抛异常，把整次导入打断成一句「数量不能为负数」，
-                // 用户根本看不出是哪一行的问题。这里提前判掉，让它走 incomplete 报出来。
-                if (name != null && quantity != null && quantity.isFinite() && quantity >= 0.0) {
+                // quantity 必须严格为正（> 0）：与 FundEStatementParser 对齐，0 份额视为没读懂。
+                // 负数会在落库时因 Asset 构造器的 require(balance >= 0) 抛异常，
+                // 把整次导入打断成一句「数量不能为负数」，用户根本看不出是哪一行的问题；
+                // 这里提前把 <= 0 的行判掉，让它走 incomplete 报出来。
+                if (name != null && quantity != null && quantity.isFinite() && quantity > 0.0) {
                     holdings.add(
                         ParsedHolding(
                             name = name,
@@ -239,7 +235,7 @@ object HoldingSnapshotParser {
         // 首位合法集合：0/3 深市（含创业板）、1 国债/基金、4/8 北交所与老三板、
         // 5/6/9 沪市（9 含沪市B股 900xxx）、**2 深市B股 200xxx** ——
         // 少了 2 的话，一码通持仓里的 B 股会被整条跳过（有 incomplete 兜底不会错数，但导不进）
-        if (digits.first() !in "012345689") return null
+        if (digits.first() !in "0123456789") return null
         return digits
     }
 

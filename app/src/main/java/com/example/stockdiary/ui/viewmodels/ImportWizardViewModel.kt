@@ -10,6 +10,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -43,6 +44,9 @@ abstract class ImportWizardViewModel<S>(initialState: S) : ViewModel() {
     /** 暴露给 UI 的状态流。UI 收集到的仍是各子类的 UiState 类型，字段与迁移前一致 */
     val uiState: StateFlow<S> = _uiState.asStateFlow()
 
+    /** 当前在途 IO 协程句柄。用于取消（关弹窗/离开时）与取消回归测试。 */
+    protected var activeJob: Job? = null
+
     /** 所有状态写入口。集中一处，便于日后统一加日志或断言 */
     protected fun updateState(transform: (S) -> S) {
         _uiState.update(transform)
@@ -61,25 +65,41 @@ abstract class ImportWizardViewModel<S>(initialState: S) : ViewModel() {
      * @param logTag 日志 tag，按类名字面量（项目惯例）
      * @param logMessage 失败日志文案。日志写给排障的人，可与界面提示不同
      * @param onError 把异常落成用户可见的状态；界面文案在这里说清楚
-     * @param block 业务主体，在 Dispatchers.IO 上执行
+     * @param onCancel 协程被取消时回调（默认空）。用于复位进度态——
+     *   取消不吞（仍原样重抛 CancellationException，守项目铁律），只是多复位一次，
+     *   避免拉取/写入进行中关弹窗导致 `fetching`/`recognizing`/`committing`/step
+     *   永久卡住、弹窗停在转圈页。
+     * @param block 业务主体，在 Dispatchers.IO 上执行。**必须放在最后**：
+     *   调用方用 `) { … }` 尾随 lambda 传它，尾随 lambda 永远绑给最后一个参数，
+     *   若把它放在带默认值的 `onCancel` 之前，`) { … }` 会被误绑到 `onCancel` 导致编译失败。
      */
     protected fun launchIo(
         logTag: String,
         logMessage: (Exception) -> String,
         onError: (Exception) -> Unit,
+        onCancel: () -> Unit = {},
         block: suspend () -> Unit,
     ) {
-        viewModelScope.launch(Dispatchers.IO) {
+        activeJob = viewModelScope.launch(Dispatchers.IO) {
             try {
                 block()
             } catch (e: CancellationException) {
                 // 必须第一个 catch：吞掉取消会出诡异的跨线程 bug（项目铁律）
+                // 取消时先复位进度态再原样重抛——复位避免弹窗卡在转圈，
+                // 重抛则不吞取消（调用方仍感知到取消）。
+                onCancel()
                 throw e
             } catch (e: Exception) {
                 AppLogger.e(logMessage(e), e, logTag)
                 onError(e)
             }
         }
+    }
+
+    /** 取消当前在途 IO 协程。关弹窗/离开时调用，避免陈旧结果回头覆盖 [reset]。 */
+    protected fun cancelActiveJob() {
+        activeJob?.cancel()
+        activeJob = null
     }
 
     /**

@@ -174,12 +174,13 @@ class HoldingSnapshotParserTest {
     @Test
     fun 按代码前缀推断类别() {
         val bySymbol = HoldingSnapshotParser.parse(realScreenshot).holdings.associateBy { it.symbol }
-        assertEquals(StockCodeManager.CodeCategory.ETF, bySymbol.getValue("510210").category)
-        assertEquals(StockCodeManager.CodeCategory.ETF, bySymbol.getValue("588000").category)
-        assertEquals(StockCodeManager.CodeCategory.LOF, bySymbol.getValue("160719").category)
-        assertEquals(StockCodeManager.CodeCategory.STOCK, bySymbol.getValue("601988").category)
+        // 类别判定统一走 StockCodeManager.classifyCode（ParsedHolding 已移除自带 category 字段）
+        assertEquals(StockCodeManager.CodeCategory.ETF, StockCodeManager.classifyCode(bySymbol.getValue("510210").symbol))
+        assertEquals(StockCodeManager.CodeCategory.ETF, StockCodeManager.classifyCode(bySymbol.getValue("588000").symbol))
+        assertEquals(StockCodeManager.CodeCategory.LOF, StockCodeManager.classifyCode(bySymbol.getValue("160719").symbol))
+        assertEquals(StockCodeManager.CodeCategory.STOCK, StockCodeManager.classifyCode(bySymbol.getValue("601988").symbol))
         // REITs（508xxx）走 5 开头 → 场内基金
-        assertEquals(StockCodeManager.CodeCategory.EXCHANGE_FUND, bySymbol.getValue("508016").category)
+        assertEquals(StockCodeManager.CodeCategory.EXCHANGE_FUND, StockCodeManager.classifyCode(bySymbol.getValue("508016").symbol))
     }
 
     // ---------- 表头与噪声 ----------
@@ -334,37 +335,45 @@ class HoldingSnapshotParserTest {
         assertNull(r.dataDate)
     }
 
-    // ---------- 类别标签：fund_ 前缀不能被号段判成股票 ----------
-
-    @Test
-    fun fund_前缀的持仓类别是场外基金() {
-        // 预览页的「股票 / 基金」标签直接读 ParsedHolding.category（→ classifyCode）。
-        // 400030（东方添益债券）落在 400xxx 号段，只按数字推会被判成 STOCK，
-        // 用户看到一只债券基金顶着「股票」标签。前缀是显式标记，必须优先于号段。
-        val holding = ParsedHolding(
-            name = "东方添益债券",
-            symbol = "fund_400030",
-            quantity = 1000.0,
-            lineNumber = 1,
-            rawQuantity = "1000"
-        )
-        assertEquals(StockCodeManager.CodeCategory.OTC_FUND, holding.category)
-    }
+    // ---------- 类别标签：按号段/前缀判定（统一走 StockCodeManager.classifyCode） ----------
 
     @Test
     fun 场内代码仍按号段分类() {
-        // 没有前缀时一切照旧：LOF 160719 是 LOF、ETF 510210 是 ETF、400264 是老三板股票
+        // 没有前缀时一切照旧：LOF 160719 是 LOF、ETF 510210 是 ETF、400264 是老三板股票。
+        // 注意：ParsedHolding 已移除自带的 category 字段，类别判定统一走 StockCodeManager.classifyCode
         assertEquals(
             StockCodeManager.CodeCategory.LOF,
-            ParsedHolding("黄金LOF", "160719", 262.0, 1, "262").category
+            StockCodeManager.classifyCode("160719")
         )
         assertEquals(
             StockCodeManager.CodeCategory.ETF,
-            ParsedHolding("综指ETF", "510210", 14400.0, 1, "1.44万").category
+            StockCodeManager.classifyCode("510210")
         )
         assertEquals(
             StockCodeManager.CodeCategory.STOCK,
-            ParsedHolding("R东方1", "400264", 100.0, 1, "100").category
+            StockCodeManager.classifyCode("400264")
         )
+    }
+
+    // ---------- 边界：首位 '7' 与数量为零 ----------
+
+    @Test
+    fun 首位是7的代码也能识别为有效代码_不进incomplete() {
+        // 一码通持有里 7 开头多为配股/可转债申购/优先股（如 733xxx）。
+        // extractSymbol 的允许首位集合必须含 '7'，否则整条被丢进 incomplete。
+        val r = HoldingSnapshotParser.parse(noise + listOf("某配股 100", "733001"))
+        assertEquals(1, r.holdings.size)
+        assertEquals("733001", r.holdings[0].symbol)
+        assertEquals(100.0, r.holdings[0].quantity, 0.001)
+        assertTrue("7 开头代码不该被当成没读懂", r.incomplete.isEmpty())
+    }
+
+    @Test
+    fun 数量为零时按没读懂处理_与基金链路对齐() {
+        // 与 FundEStatementParser（份额 <= 0 拒绝）口径一致：0 份额不落库，归为 incomplete。
+        val r = HoldingSnapshotParser.parse(noise + listOf("黄金LOF 0", "160719"))
+        assertTrue(r.holdings.isEmpty())
+        assertEquals(1, r.incomplete.size)
+        assertTrue(r.incomplete[0].contains("160719"))
     }
 }

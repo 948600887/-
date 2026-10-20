@@ -504,7 +504,7 @@ private fun SnapshotItemRow(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 } else {
-                    Spacer(Modifier.width(0.dp))
+                    Text("")
                 }
                 Text(statusText, style = MaterialTheme.typography.bodySmall, color = statusColor)
             }

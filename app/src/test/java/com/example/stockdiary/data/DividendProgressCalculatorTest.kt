@@ -4,6 +4,7 @@ import com.example.stockdiary.data.dividend.DividendProgressCalculator
 import com.example.stockdiary.data.dividend.DividendRecord
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
+import com.example.stockdiary.utils.ExchangeRateManager
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -569,5 +570,61 @@ class DividendProgressCalculatorTest {
         assertEquals(1.0, progress.ratio, 0.001)
         assertEquals(0.0, progress.remaining, 0.001)
         assertTrue(progress.yearReceived <= progress.yearProjected + 0.001)
+    }
+
+    // ===== 多币种折算（calc-P1-1 回归）=====
+    //
+    // 外币持仓（如美股/港币基金）的分红金额必须按标的币种换成人民币后再汇总，
+    // 否则会把美元金额当人民币数值直接相加，钱数被严重低估。
+    // 这里用默认汇率表 USD=7.25：每十股派 10 美元 × 100 股 ÷ 10 = 100 美元 → 折 725 人民币。
+
+    @Test
+    fun `外币持仓的分红金额按汇率折算成人民币后再汇总`() {
+        ExchangeRateManager.resetForTesting()
+        try {
+            val usdAsset = Asset(
+                name = "Apple",
+                type = AssetType.STOCK,
+                symbol = "AAPL",
+                account = "美股",
+                balance = 100.0,
+                currency = "USD"
+            )
+            val records = mapOf("AAPL" to listOf(record(dateIn(1, 15), 10.0)))
+            // 用固定的 midYear（10/14）作「今天」：dateIn(1,15) 必在其前，断言不随运行日期漂移
+            val progress = DividendProgressCalculator.calculate(listOf(usdAsset), records, midYear)
+
+            // 今年已宣告 → 预计走自然年分支；1/15 已过 → 已收同数。
+            // 100 美元 × 7.25 = 725 人民币，而不是把 100 当人民币（少算 625）
+            assertEquals(725.0, progress.yearProjected, 0.001)
+            assertEquals(725.0, progress.yearReceived, 0.001)
+            assertEquals(1, progress.receivedCount)
+        } finally {
+            ExchangeRateManager.resetForTesting()
+        }
+    }
+
+    @Test
+    fun `多币种与人民币持仓混合时各自换汇后加总`() {
+        ExchangeRateManager.resetForTesting()
+        try {
+            val cnyAsset = asset("长江电力", "600900", 1000.0) // 每十股 3 元 → 300 人民币
+            val usdAsset = Asset(
+                name = "Apple", type = AssetType.STOCK, symbol = "AAPL",
+                account = "美股", balance = 100.0, currency = "USD"
+            ) // 每十股 10 美元 → 100 美元 × 7.25 = 725 人民币
+            val records = mapOf(
+                "600900" to listOf(record(dateIn(4, 10), 3.0)),
+                "AAPL" to listOf(record(dateIn(5, 10), 10.0))
+            )
+            val progress = DividendProgressCalculator.calculate(listOf(cnyAsset, usdAsset), records, midYear)
+
+            // 300 + 725 = 1025 人民币，而非 300 + 100 = 400（后者把美元当人民币）
+            assertEquals(1025.0, progress.yearProjected, 0.001)
+            assertEquals(1025.0, progress.yearReceived, 0.001)
+            assertEquals(2, progress.receivedCount)
+        } finally {
+            ExchangeRateManager.resetForTesting()
+        }
     }
 }

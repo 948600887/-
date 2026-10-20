@@ -10,6 +10,7 @@ import com.example.stockdiary.database.StockDatabase
 import com.example.stockdiary.database.amountFor
 import com.example.stockdiary.utils.AppLogger
 import com.example.stockdiary.utils.NotificationHelper
+import com.example.stockdiary.utils.ExchangeRateManager
 import kotlinx.coroutines.flow.first
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
@@ -218,7 +219,9 @@ class PriceSyncWorker(
                 val key = "${dividend.symbol}_${dividend.payDate ?: dividend.date}"
                 if (prefs.getBoolean(key, false)) continue
 
-                val amount = dividend.amountFor(asset.balance)
+                // 折算成人民币：外币持仓（USD/HKD）的分红按标的币种换算后再累加，
+                // 否则美元金额会按人民币数值计入今日到账总额，通知里的「¥总额」被低估。
+                val amount = ExchangeRateManager.toCny(dividend.amountFor(asset.balance), asset.currency)
                 totalAmount += amount
                 newCount++
                 editor.putBoolean(key, true)

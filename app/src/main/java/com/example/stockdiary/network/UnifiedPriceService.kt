@@ -280,6 +280,18 @@ object UnifiedPriceService {
         if (BinanceAPI.isEarnProduct(code)) {
             pair = BinanceAPI.earnUnderlyingPair(code)
             if (pair == null) {
+                // 底层仍是稳定币（如 LDUSDT）：没有现货交易对，但锚定 1 美元，
+                // 与现货稳定币同口径按 1.0 计，而不是当成「无行情」跳过——
+                // 否则存量 LDUSDT 的 currentPrice 永远留着导入前的 0，市值恒为 0
+                // （用户看到的「USDT 价格默认为 0」正是这个）。earnUnderlyingPair
+                // 返回 null 当且仅当剥掉 LD 后底层是稳定币，所以这里判一次集合即可。
+                val underlying = code.trim().uppercase().removePrefix("LD")
+                if (underlying in BINANCE_STABLECOINS) {
+                    AppLogger.d("理财/锁仓稳定币 $code 按 1.0 美元计", TAG)
+                    return@withContext Result.success(
+                        CryptoData(code = code.uppercase().trim(), name = code.uppercase().trim(), price = 1.0, change = null, changePercent = null)
+                    )
+                }
                 AppLogger.d("理财/锁仓产品 $code 无底层交易对，跳过查价", TAG)
                 return@withContext Result.failure(
                     NonTradableAssetException("$code 是币安理财/锁仓产品，没有现货行情")

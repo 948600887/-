@@ -308,7 +308,13 @@ internal fun priceKeyFor(asset: String): String? {
 internal fun referencePriceForImport(asset: String, prices: Map<String, Double>): Double? {
     val key = priceKeyFor(asset)
     if (key == null) {
-        return if (isStablecoin(asset)) 1.0 else null
+        // 无交易对可查：现货稳定币（USDT / USDC …）与稳定币理财壳（LDUSDT 等）。
+        // 二者都锚定 1 美元，按定义价 1.0 计——与 [estimatedValueCny] 在预览里的口径
+        // 完全一致（key==null 时同样回落 1.0），杜绝「预览显示 1.0、落库却留空→市值恒 0」
+        // 的口径分裂（即 LDUSDT 已知问题：用户看到的 USDT 价格默认为 0）。
+        // priceKeyFor 返回 null 当且仅当资产是稳定币或稳定币理财壳，绝不会是别的，
+        // 所以这里直接给 1.0，不必再判 isStablecoin。
+        return 1.0
     }
     return prices[key]?.takeIf { it.isFinite() && it > 0.0 }
 }

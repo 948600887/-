@@ -14,6 +14,20 @@ data class DashboardPreferences(
     val showFunds: Boolean = true,
     val showCrypto: Boolean = true,
     val showLiabilities: Boolean = true,
+    /**
+     * 隐藏低价值虚拟货币：开启后，已知价且人民币市值低于 [lowValueThresholdCny] 的
+     * 加密货币不在持仓列表显示（总资产仍按全量算）。用于清掉币安账户里一堆 dust。
+     * 价格未知（待更新）的不藏，避免误藏真实持仓。
+     */
+    val hideLowValueCrypto: Boolean = false,
+    /** 低价值阈值（人民币，文本存储以便自由输入），非法/负数回退默认 10 */
+    val lowValueThresholdCny: String = "10",
+    /**
+     * 同时也隐藏**无价格**（currentPrice == null，界面显示「价格待更新」/ ¥0.00）的加密货币。
+     * 默认关：无行情不等于没持仓，静默丢掉等于弄丢真实资产；开启即表示用户接受这个取舍。
+     * 仅当 [hideLowValueCrypto] 开启时才有意义。
+     */
+    val hideUnknownPriceCrypto: Boolean = false,
     val defaultExpanded: Set<String> = emptySet(),
     val sortOrder: SortOrder = SortOrder.BY_TYPE,
     val defaultPeriod: String = "1M",
@@ -35,6 +49,10 @@ enum class SortOrder {
     BY_VALUE_ASC,
     BY_NAME
 }
+
+/** 低价值阈值（人民币）：把文本偏好解析成数值，非法或负数回退默认 10 */
+fun DashboardPreferences.lowValueThreshold(): Double =
+    lowValueThresholdCny.toDoubleOrNull()?.takeIf { it >= 0 } ?: 10.0
 
 enum class DashboardComponent(val key: String, val title: String) {
     TOTAL_ASSETS("total_assets", "总资产"),
@@ -69,6 +87,9 @@ class DashboardPreferencesManager(context: Context) {
         private const val KEY_SHOW_FUNDS = "show_funds"
         private const val KEY_SHOW_CRYPTO = "show_crypto"
         private const val KEY_SHOW_LIABILITIES = "show_liabilities"
+        private const val KEY_HIDE_LOW_VALUE_CRYPTO = "hide_low_value_crypto"
+        private const val KEY_LOW_VALUE_THRESHOLD = "low_value_threshold"
+        private const val KEY_HIDE_UNKNOWN_PRICE_CRYPTO = "hide_unknown_price_crypto"
         private const val KEY_DEFAULT_EXPANDED = "default_expanded"
         private const val KEY_SORT_ORDER = "sort_order"
         private const val KEY_DEFAULT_PERIOD = "default_period"
@@ -115,6 +136,9 @@ class DashboardPreferencesManager(context: Context) {
             showFunds = prefs.getBoolean(KEY_SHOW_FUNDS, true),
             showCrypto = prefs.getBoolean(KEY_SHOW_CRYPTO, true),
             showLiabilities = prefs.getBoolean(KEY_SHOW_LIABILITIES, true),
+            hideLowValueCrypto = prefs.getBoolean(KEY_HIDE_LOW_VALUE_CRYPTO, false),
+            lowValueThresholdCny = prefs.getString(KEY_LOW_VALUE_THRESHOLD, "10") ?: "10",
+            hideUnknownPriceCrypto = prefs.getBoolean(KEY_HIDE_UNKNOWN_PRICE_CRYPTO, false),
             defaultExpanded = prefs.getStringSet(KEY_DEFAULT_EXPANDED, emptySet()) ?: emptySet(),
             sortOrder = sortOrderOf(prefs.getString(KEY_SORT_ORDER, null)),
             defaultPeriod = prefs.getString(KEY_DEFAULT_PERIOD, "1M") ?: "1M",
@@ -136,6 +160,9 @@ class DashboardPreferencesManager(context: Context) {
             putBoolean(KEY_SHOW_FUNDS, preferences.showFunds)
             putBoolean(KEY_SHOW_CRYPTO, preferences.showCrypto)
             putBoolean(KEY_SHOW_LIABILITIES, preferences.showLiabilities)
+            putBoolean(KEY_HIDE_LOW_VALUE_CRYPTO, preferences.hideLowValueCrypto)
+            putString(KEY_LOW_VALUE_THRESHOLD, preferences.lowValueThresholdCny)
+            putBoolean(KEY_HIDE_UNKNOWN_PRICE_CRYPTO, preferences.hideUnknownPriceCrypto)
             putStringSet(KEY_DEFAULT_EXPANDED, preferences.defaultExpanded)
             putString(KEY_SORT_ORDER, preferences.sortOrder.name)
             putString(KEY_DEFAULT_PERIOD, preferences.defaultPeriod)

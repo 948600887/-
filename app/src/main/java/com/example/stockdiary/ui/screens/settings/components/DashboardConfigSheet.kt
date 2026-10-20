@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -21,6 +22,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -28,6 +30,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.example.stockdiary.data.prefs.DashboardPreferences
 import com.example.stockdiary.data.prefs.SortOrder
@@ -106,6 +109,39 @@ fun DashboardConfigSheet(
                 checked = preferences.showLiabilities,
                 onCheckedChange = { onPreferencesChange(preferences.copy(showLiabilities = it)) }
             )
+
+            HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+
+            SwitchPreference(
+                title = "隐藏低价值虚拟货币",
+                checked = preferences.hideLowValueCrypto,
+                onCheckedChange = { onPreferencesChange(preferences.copy(hideLowValueCrypto = it)) }
+            )
+            if (preferences.hideLowValueCrypto) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 6.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(text = "低于此金额（¥）隐藏")
+                    OutlinedTextField(
+                        value = preferences.lowValueThresholdCny,
+                        onValueChange = { onPreferencesChange(preferences.copy(lowValueThresholdCny = it)) },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        modifier = Modifier.width(120.dp)
+                    )
+                }
+                // 子开关：仅在「隐藏低价值」开启时有意义，所以嵌套在它下面显示。
+                // 默认关：无行情不等于没持仓，开启即表示用户接受「可能藏掉真实持仓」的取舍。
+                SwitchPreference(
+                    title = "同时隐藏无价格虚拟货币",
+                    checked = preferences.hideUnknownPriceCrypto,
+                    onCheckedChange = { onPreferencesChange(preferences.copy(hideUnknownPriceCrypto = it)) }
+                )
+            }
 
             HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
 

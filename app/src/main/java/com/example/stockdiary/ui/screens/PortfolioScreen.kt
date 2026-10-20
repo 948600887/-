@@ -19,7 +19,9 @@ import com.example.stockdiary.utils.AppLogger
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import com.example.stockdiary.data.prefs.DashboardPreferences
 import com.example.stockdiary.data.prefs.SortOrder
+import com.example.stockdiary.data.prefs.lowValueThreshold
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.ui.components.*
@@ -171,8 +173,25 @@ fun PortfolioScreen(
             }
         }
     }
-    val assetsOnly = remember(visibleAssets) { visibleAssets.filter { !it.type.isLiability } }
-    val liabilities = remember(visibleAssets) { visibleAssets.filter { it.type.isLiability } }
+    // 低价值虚拟货币隐藏：在「显示开关」按类别过滤之上再滤一层。
+    // 仅藏「已知价且人民币市值低于阈值」的加密货币；价格未知的不藏（避免误丢真实持仓）。
+    // 总资产仍按全量（allAssetsOnly / allLiabilities）算，这里只影响列表与分组头计数。
+    val displayAssets by remember(
+        visibleAssets,
+        preferences.hideLowValueCrypto,
+        preferences.hideUnknownPriceCrypto
+    ) {
+        derivedStateOf {
+            filterLowValueCrypto(
+                visibleAssets,
+                preferences.hideLowValueCrypto,
+                preferences.lowValueThreshold(),
+                preferences.hideUnknownPriceCrypto
+            )
+        }
+    }
+    val assetsOnly = remember(displayAssets) { displayAssets.filter { !it.type.isLiability } }
+    val liabilities = remember(displayAssets) { displayAssets.filter { it.type.isLiability } }
 
     // 总资产 / 负债 / 净资产一律按**全部资产**算，与资产页、每日快照同源。
     // 从前这里用按显示开关过滤后的可见资产，于是用户在设置里关掉某一类（比如虚拟货币）
@@ -181,7 +200,7 @@ fun PortfolioScreen(
     val allAssetsOnly = remember(assets) { assets.filter { !it.type.isLiability } }
     val allLiabilities = remember(assets) { assets.filter { it.type.isLiability } }
     // 卡片上如实标注列表少显示了多少项，免得用户拿列表逐项加总对不上顶部数字
-    val hiddenAssetCount = remember(visibleAssets, assets) { assets.size - visibleAssets.size }
+    val hiddenAssetCount = remember(displayAssets, assets) { assets.size - displayAssets.size }
 
     val totalAssets = remember(allAssetsOnly) { allAssetsOnly.sumTotalValueCny() }
     val totalLiabilities = remember(allLiabilities) { allLiabilities.sumTotalValueCny() }
@@ -461,8 +480,8 @@ fun PortfolioScreen(
         },
         modifier = modifier
     ) { padding ->
-        if (visibleAssets.isEmpty()) {
-            // 分清两种「空」：有资产但被显示开关全藏了 → 给恢复入口；
+        if (displayAssets.isEmpty()) {
+            // 分清两种「空」：有资产但被显示设置（类别开关 / 低价值隐藏）全藏了 → 给提示；
             // 压根没有资产 → 引导添加。混为一谈会让用户以为数据丢了。
             if (assets.isNotEmpty()) {
                 Box(
@@ -477,10 +496,10 @@ fun PortfolioScreen(
                             modifier = Modifier.fillMaxWidth().padding(16.dp),
                             horizontalAlignment = androidx.compose.ui.Alignment.CenterHorizontally
                         ) {
-                            Text("当前未显示任何资产类别", style = MaterialTheme.typography.titleSmall)
+                            Text("当前未显示任何资产", style = MaterialTheme.typography.titleSmall)
                             Spacer(modifier = Modifier.height(4.dp))
                             Text(
-                                "你共有 ${assets.size} 项记录，但显示开关把它们全部隐藏了",
+                                "你共有 ${assets.size} 项记录，但显示设置把它们全部隐藏了",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )

@@ -278,6 +278,32 @@ class BinanceImportServiceTest {
         assertTrue(!isStablecoin("BTC"))
     }
 
+    // ---------- 稳定币理财壳（LDUSDT 等）口径一致 ----------
+
+    @Test
+    fun 稳定币理财壳_LDUSDT_查价键为null() {
+        // LDUSDT 剥掉 LD 后底层是稳定币 USDT，没有现货交易对 → 查价键 null
+        assertEquals(null, priceKeyFor("LDUSDT"))
+        assertEquals(null, priceKeyFor("ldusdt"))
+    }
+
+    @Test
+    fun 稳定币理财壳_LDUSDT_导入参考价按1美元计() {
+        // 修复前：referencePriceForImport 仅判 isStablecoin，LDUSDT 不在集合里 → 返回 null
+        // → 落库 currentPrice 留空 → 市值恒为 0（用户看到的「USDT 价格默认为 0」）。
+        // 修复后：查价键为 null 即按定义价 1.0 美元计，与预览 estimatedValueCny 同口径。
+        assertEquals(1.0, referencePriceForImport("LDUSDT", emptyMap())!!, 1e-9)
+        assertEquals(1.0, referencePriceForImport("ldusdc", emptyMap())!!, 1e-9)
+    }
+
+    @Test
+    fun 稳定币理财壳_LDUSDT_市值按1美元估算_与导入参考价一致() {
+        // 100 LDUSDT × 1.0 × 7.25(USD 汇率) = 725 元；必须与上面的参考价口径一致，
+        // 否则又回到「预览 1.0、落库 0」的分裂。
+        val value = estimatedValueCny("LDUSDT", 100.0) { null }
+        assertEquals(725.0, value!!, 1e-6)
+    }
+
     // ---------- 按市值过滤 filterDustByValue ----------
 
     @Test
@@ -424,10 +450,11 @@ class BinanceImportServiceTest {
         assertEquals(null, referencePriceForImport("BTC", mapOf("BTCUSDT" to -1.0)))
         assertEquals(null, referencePriceForImport("BTC", mapOf("BTCUSDT" to Double.NaN)))
         assertEquals(67000.0, referencePriceForImport("BTC", mapOf("BTCUSDT" to 67000.0))!!, 1e-9)
-        // LD 走底层键；LDO 是真实现货走自己的交易对；LDUSDT 剥不出底层 → null
+        // LD 走底层键；LDO 是真实现货走自己的交易对；LDUSDT 底层是稳定币 → 按 1.0 美元计
+        // （修复前这里返回 null，导致落库 currentPrice 留空→市值恒 0，即「USDT 价格默认为 0」）
         assertEquals(600.0, referencePriceForImport("LDBNB", mapOf("BNBUSDT" to 600.0))!!, 1e-9)
         assertEquals(2.5, referencePriceForImport("LDO", mapOf("LDOUSDT" to 2.5))!!, 1e-9)
-        assertEquals(null, referencePriceForImport("LDUSDT", mapOf("USDT" to 1.0)))
+        assertEquals(1.0, referencePriceForImport("LDUSDT", emptyMap())!!, 1e-9)
         // 稳定币没有键也是 1.0（定义价，与行情同步同口径）
         assertEquals(1.0, referencePriceForImport("USDT", emptyMap())!!, 1e-9)
         // 冷门币查不到 → null

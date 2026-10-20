@@ -21,6 +21,7 @@ import com.example.stockdiary.ui.theme.AppTheme
 import com.example.stockdiary.database.amountFor
 import com.example.stockdiary.utils.format
 import com.example.stockdiary.utils.shareUnitWord
+import com.example.stockdiary.utils.ExchangeRateManager
 import java.time.LocalDate
 
 @Composable
@@ -47,7 +48,9 @@ fun DividendDayDetail(
     // 界面上显示「—」比显示一个错的数诚实
     val details = dayDividendDetails.map { (sym, record) ->
         val asset = assetMap[sym]
-        val amount = asset?.let { record.amountFor(it.balance) }
+        // 折算成人民币：外币基金（USD/HKD）的每份金额按标的币种换算，
+        // 否则界面会把美元金额当人民币显示，钱数错得无声无息。
+        val amount = asset?.let { ExchangeRateManager.toCny(record.amountFor(it.balance), it.currency) }
         Triple(sym, record, amount)
     }
     val totalDividend = details.sumOf { it.third ?: 0.0 }
@@ -86,7 +89,7 @@ fun DividendDayDetail(
                     color = AppTheme.colors.onSurface
                 )
                 Text(
-                    text = "每十${asset?.shareUnitWord ?: "份"}派息: ¥${(record.dividendPerShare.toDoubleOrNull() ?: 0.0).format(2)}",
+                    text = "每十${asset?.shareUnitWord ?: "份"}派息: ¥${ExchangeRateManager.toCny(record.dividendPerShare.toDoubleOrNull() ?: 0.0, asset?.currency ?: "CNY").format(2)}",
                     fontSize = 12.sp,
                     color = AppTheme.colors.onSurfaceVariant
                 )

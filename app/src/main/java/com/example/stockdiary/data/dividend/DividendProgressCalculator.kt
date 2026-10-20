@@ -4,6 +4,7 @@ import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.database.amountFor
 import com.example.stockdiary.database.perTenSharesToAmount
+import com.example.stockdiary.utils.ExchangeRateManager
 import java.time.LocalDate
 import java.time.Year
 import java.time.YearMonth
@@ -151,10 +152,15 @@ object DividendProgressCalculator {
                 // 脏数据保护与该函数里归月处同一风格：日期串不满 10 位的一律不采信
                 exDate.length == 10 && exDate >= yearStart
             }
+            // 折算成人民币再累加：持仓可能是美元/港币基金，native 金额不能直接和 A 股相加。
+            // 默认币种 CNY 时 toCny 是恒等变换，不影响原有的纯人民币组合。
             yearProjected += if (thisYearRecords.isNotEmpty()) {
-                thisYearRecords.sumOf { it.amountFor(balance) }
+                thisYearRecords.sumOf { ExchangeRateManager.toCny(it.amountFor(balance), asset.currency) }
             } else {
-                perTenSharesToAmount(DividendYieldCalculator.getTTMDividend(records, today), balance)
+                ExchangeRateManager.toCny(
+                    perTenSharesToAmount(DividendYieldCalculator.getTTMDividend(records, today), balance),
+                    asset.currency
+                )
             }
 
             // 已排定的未来派息：用于倒计时（数据源给的日期比推算更可信）
@@ -168,7 +174,8 @@ object DividendProgressCalculator {
             records.forEach recordLoop@{ record ->
                 val exDate = record.exDividendDate.take(10)
                 if (exDate.length != 10) return@recordLoop
-                val amount = record.amountFor(balance)
+                // 折算成人民币：单笔分红按标的币种换算后再归月 / 计入已收
+                val amount = ExchangeRateManager.toCny(record.amountFor(balance), asset.currency)
 
                 // 归月与「已到账 / 待到账」一律按**到账日**算，不能按除息日。
                 // 除息日只决定「你有没有资格拿」，钱真正进来通常晚 1~4 周：
@@ -211,7 +218,7 @@ object DividendProgressCalculator {
                     amount = amount,
                     isEstimated = false
                 )
-            } ?: predictNext(asset.name, symbol, records, balance, today)
+            } ?: predictNext(asset.name, symbol, records, balance, asset.currency, today)
 
             if (candidate != null && candidate.daysUntil >= 0 &&
                 (next == null || candidate.daysUntil < next!!.daysUntil)
@@ -252,8 +259,9 @@ object DividendProgressCalculator {
      * - **不进 receivedCount**：那是「派息笔数」；货基按日计息，逐日计数会把笔数冲到几百。
      * - **不设 nextPayout**：货基按日结息，没有「下一笔」概念。
      *
-     * 币种：与这个文件里现金分红的口径一致，**不做汇率换算**（[perTenSharesToAmount] 同样不换）。
-     * 要人民币口径的走 DividendIncomeCalculator，那边会换算。
+     * 币种：与这个文件里现金分红的口径一致，**统一折算成人民币**（[asset.currency] → CNY），
+     * 这样跨币种持仓（如美元货基）的收息进度才能和 A 股 / 人民币基金加总在同一把尺子上。
+     * [perTenSharesToAmount] 本身不换，换算在调用处用 [ExchangeRateManager.toCny] 做。
      */
     private fun moneyFundIncome(
         asset: Asset,
@@ -265,7 +273,7 @@ object DividendProgressCalculator {
         val balance = asset.balance
         if (mci == null || mci <= 0.0 || balance <= 0.0) return MoneyFundIncome.ZERO
 
-        val daily = balance * mci / COPIES_PER_UNIT
+        val daily = ExchangeRateManager.toCny(balance * mci / COPIES_PER_UNIT, asset.currency)
         val daysInYear = Year.of(today.year).length()
         val elapsed = today.dayOfYear.coerceIn(0, daysInYear)
 
@@ -298,6 +306,7 @@ object DividendProgressCalculator {
         symbol: String,
         records: List<DividendRecord>,
         balance: Double,
+        currency: String,
         today: LocalDate
     ): NextPayout? {
         val lastRecord = records.sortedByDescending { it.exDividendDate.take(10) }.firstOrNull()
@@ -314,7 +323,7 @@ object DividendProgressCalculator {
         val base = parseDate(predicted) ?: return null
         val date = if (!base.isBefore(today)) base else base.plusYears(1)
 
-        val amount = lastRecord.amountFor(balance)
+        val amount = ExchangeRateManager.toCny(lastRecord.amountFor(balance), currency)
         // 到账日 = 推算出的除息日 + 这只标的历史上「除息→到账」的天数
         val payDate = paymentLagDays(lastRecord)?.let { date.plusDays(it) }
 

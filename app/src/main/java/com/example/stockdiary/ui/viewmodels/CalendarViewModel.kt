@@ -16,6 +16,7 @@ import com.example.stockdiary.database.SnapshotDao
 import com.example.stockdiary.database.perTenSharesToAmount
 import com.example.stockdiary.di.AppContainer
 import com.example.stockdiary.utils.AppLogger
+import com.example.stockdiary.utils.ExchangeRateManager
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -334,9 +335,14 @@ class CalendarViewModel(
 
                         monthEntries.groupBy { it.first }.forEach { (date, dayRecords) ->
                             dividendDates.add(date)
-                            val totalAmount = perTenSharesToAmount(
-                                dayRecords.sumOf { it.second.dividendPerShare.toDoubleOrNull() ?: 0.0 },
-                                asset.balance
+                            // 折算成人民币：同一天可能有多只外币基金派息，各自换汇后再累加，
+                            // 否则美元/港币金额会按人民币数值直接相加，钱数被严重低估。
+                            val totalAmount = ExchangeRateManager.toCny(
+                                perTenSharesToAmount(
+                                    dayRecords.sumOf { it.second.dividendPerShare.toDoubleOrNull() ?: 0.0 },
+                                    asset.balance
+                                ),
+                                asset.currency
                             )
                             if (totalAmount > 0) {
                                 data[date] = (data[date] ?: 0.0) + totalAmount

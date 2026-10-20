@@ -11,17 +11,29 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
+import java.time.LocalDate
+import java.time.format.DateTimeFormatter
+import java.util.LinkedHashMap
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CancellationException
 
 class DividendIncomeLoader(
-    private val dividendRepository: DividendRepository
+    private val dividendRepository: DividendRepository,
+    /**
+     * 「预计收入」计算结果的持久层。默认 null：纯 JVM 单测没有 Android Context，
+     * 传 null 时整条缓存逻辑自动跳过（行为退化为改造前，保证既有单测零改动、零网络）。
+     * 生产环境由 [com.example.stockdiary.di.AppContainer] 注入真实实例。
+     */
+    private val incomeCache: DividendIncomeCache? = null
 ) {
     companion object {
         /** 与 AssetSyncManager.MAX_CONCURRENT_SYNC 同数量级：持仓上百支时不要一次打出上百个并发请求 */
         private const val MAX_CONCURRENT_FETCH = 8
+
+        /** 计算当天日期的字符串格式（yyyy-MM-dd），与 [DividendIncomeCache.CachedIncome.date] 同口径 */
+        private val DATE_FORMATTER = DateTimeFormatter.ISO_LOCAL_DATE
     }
 
     data class IncomeResult(
@@ -48,28 +60,48 @@ class DividendIncomeLoader(
     ): IncomeResult = withContext(Dispatchers.IO) {
         val stockAssets = assets.filter { it.type == AssetType.STOCK || it.type == AssetType.FUND }
 
-        // 冷启动快速路径：全部有缓存就直接用，零请求。
-        // 有一个标的没有缓存就整批走正常流程 —— 只抓缺的那些（prefetch 会合并成批量请求），
-        // 而不是把 59 个代码全部重抓一遍
-        if (cacheOnly && !forceRefresh) {
-            val cached = LinkedHashMap<String, List<DividendRecord>>()
-            var allCached = true
+        // ===== 同日短路：零网络复用上次算好的结果，杀掉同日抖动 =====
+        // 抖动根因：同一天内 TTM 滑窗不变，但不同次抓取拿到的 records 集不同 → TTM 求和变。
+        // 这里在发起任何抓取前，先零网络把各标的缓存记录取出来，算出 dataHash；
+        // 若上次落盘的缓存「哈希一致 + 当天 + 非强制刷新」就直接复用，不进 prefetch、不算 TTM。
+        // 仅当底层 records 真变了（dataHash 不同）或跨日（date != 今天）才重算 ——
+        // 即「保留跨日 TTM 漂移 + 仅底层数据变化才重算」。
+        if (!forceRefresh) {
+            val cachedRecords = LinkedHashMap<String, List<DividendRecord>>()
+            var allHit = true
             for (asset in stockAssets) {
                 val symbol = asset.symbol ?: continue
                 val data = dividendRepository.getCachedAllowingStale(symbol)
                 if (data == null) {
-                    allCached = false
+                    allHit = false
                     break
                 }
-                cached[symbol] = data
+                cachedRecords[symbol] = data
             }
-            if (allCached && cached.isNotEmpty()) {
-                AppLogger.d("冷启动命中缓存，未发起任何分红请求", tag)
-                // 汇总口径必须与正常抓取路径一致：传**全部资产**（含存款利息），
-                // 不能传 stockAssets —— 存款走利息分支，被过滤掉就会漏算利息，
-                // 冷启动与同步后两个屏幕的「预计收入」会来回跳
-                return@withContext buildResult(assets, cached)
+
+            if (allHit && cachedRecords.isNotEmpty()) {
+                val currentHash = computeDataHash(cachedRecords)
+                val today = LocalDate.now().format(DATE_FORMATTER)
+                val cached = incomeCache?.loadCached()
+                // 同日 + 底层数据未变 → 直接复用缓存的 IncomeResult，彻底消掉同日抖动
+                if (cached != null && cached.dataHash == currentHash && cached.date == today) {
+                    AppLogger.d("同日且底层分红数据未变，复用缓存的预计收入（不重算）", tag)
+                    return@withContext IncomeResult(
+                        dividendsBySymbol = cached.dividendsBySymbol,
+                        // 用刚读到的缓存 records 回填，保证收息进度/日历拿到的仍是当前记录
+                        recordsBySymbol = cachedRecords,
+                        totalAnnualIncome = cached.totalAnnualIncome,
+                        hasDividendData = cached.hasDividendData
+                    )
+                }
+                // 全命中但未复用（缓存为空 / 跨日 / 底层数据变了）：
+                // cacheOnly 零请求重算并落盘；正常路径继续往下走抓取。
+                if (cacheOnly) {
+                    return@withContext buildAndSave(assets, cachedRecords, currentHash, today, tag)
+                }
             }
+            // allHit=false（有标的连过期数据都没有）时，cacheOnly 原有语义是「整批走抓取」，
+            // 这里自然落到下面的正常路径，不会重复读一遍缓存。
         }
 
         val dividendsBySymbol = ConcurrentHashMap<String, Double>()
@@ -121,12 +153,37 @@ class DividendIncomeLoader(
 
         val totalAnnualIncome = DividendIncomeCalculator.calculateTotalAnnualIncome(assets, dividendsBySymbol)
 
-        IncomeResult(
+        val result = IncomeResult(
             dividendsBySymbol = dividendsBySymbol,
             recordsBySymbol = recordsBySymbol,
             totalAnnualIncome = totalAnnualIncome,
             hasDividendData = hasDividendFlag.get()
         )
+
+        // 落盘：仅当注入了缓存层。date=今天、dataHash=本次 records 哈希，
+        // 下次同日且底层数据不变时即可短路复用，杀掉同日抖动
+        incomeCache?.save(result, computeDataHash(recordsBySymbol), LocalDate.now().format(DATE_FORMATTER))
+
+        result
+    }
+
+    /**
+     * 从「symbol → 分红记录」直接算出结果并落盘，不走抓取。
+     *
+     * 抽出来是为了让冷启动的零请求路径和正常抓取路径**共用同一套汇总口径** ——
+     * 两条路各算一遍 TTM 和年度收入，迟早会给出不一样的「预计收入」。
+     */
+    private fun buildAndSave(
+        assets: List<Asset>,
+        recordsBySymbol: Map<String, List<DividendRecord>>,
+        dataHash: String,
+        date: String,
+        tag: String
+    ): IncomeResult {
+        val result = buildResult(assets, recordsBySymbol)
+        incomeCache?.save(result, dataHash, date)
+        AppLogger.d("冷启动零请求重算预计收入并落盘（date=$date）", tag)
+        return result
     }
 
     /**
@@ -148,5 +205,28 @@ class DividendIncomeLoader(
             totalAnnualIncome = DividendIncomeCalculator.calculateTotalAnnualIncome(assets, dividendsBySymbol),
             hasDividendData = dividendsBySymbol.values.any { it > 0 }
         )
+    }
+
+    /**
+     * 由各标的原始分红记录算出**稳定哈希**，用于判断「底层分红数据有没有变」。
+     *
+     * 只要 records（symbol → 除息日/每股分红列表）不变，哈希就不变；
+     * 哈希变了即底层 records 真变了（如 24h 缓存刷新后抓到新数据），必须重算。
+     * 口径：按 symbol 排序，每只标的再按（除息日, 每股分红）排序后拼成规范串再取哈希，
+     * 与序列化/抓取顺序无关，保证同一份数据每次算出同一个哈希。
+     */
+    private fun computeDataHash(recordsBySymbol: Map<String, List<DividendRecord>>): String {
+        val sb = StringBuilder()
+        recordsBySymbol.keys.sorted().forEach { symbol ->
+            sb.append(symbol).append('|')
+            recordsBySymbol[symbol]
+                ?.sortedWith(compareBy({ it.exDividendDate }, { it.dividendPerShare }))
+                ?.forEach { record ->
+                    sb.append(record.exDividendDate).append('=').append(record.dividendPerShare).append(';')
+                }
+            sb.append('\n')
+        }
+        // Java String.hashCode 是字符的纯函数、跨 JVM 运行稳定，足够做「内容是否相同」判等
+        return sb.toString().hashCode().toString()
     }
 }

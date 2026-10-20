@@ -14,9 +14,15 @@ import com.example.stockdiary.network.UnifiedPriceService
 import com.example.stockdiary.network.model.AssetPrice
 import com.example.stockdiary.utils.AppLogger
 import com.example.stockdiary.utils.StockCodeManager
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
@@ -26,7 +32,6 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
-import kotlinx.coroutines.CancellationException
 
 /**
  * Asset 同步管理器
@@ -69,6 +74,20 @@ object AssetSyncManager {
     private val manualSyncMutex = Mutex()
 
     /**
+     * 当前进行中的**手动**同步 job（startTime<=0 的那条），供退后台取消。
+     *
+     * 手动同步一路在 [manualSyncMutex] 锁内登记自己、finally 里清空；后台 Worker 传
+     * startTime>0，**不**登记，因此退后台取消波及不到它（Worker 有自己的时间预算，
+     * 且本该跑完）。
+     *
+     * 为什么需要它：手动同步若卡在一个挂死的请求上（app 退后台被系统冻结，醒来才恢复），
+     * 会一直占着信号量与锁。用户在后台里并不会盯着转圈，但切回来时面对的是「恢复后立刻
+     * 超时截断、只零星更新几个标的」的僵尸轮。退后台时主动取消在途手动同步，换来的是
+     * 不再有这种僵尸轮——用户下次下拉刷新即可重新同步。
+     */
+    @Volatile private var activeManualSyncJob: Job? = null
+
+    /**
      * 场外基金下载的专属并发上限。
      *
      * 场外基金走天天基金 `pingzhongdata/{code}.js`，每只响应 0.5~2MB（完整历史净值）。
@@ -81,6 +100,15 @@ object AssetSyncManager {
      */
     private const val FUND_MAX_CONCURRENT_SYNC = 2
     private val fundSemaphore = Semaphore(FUND_MAX_CONCURRENT_SYNC)
+
+    /**
+     * 看门狗轮询间隔（毫秒）。
+     *
+     * 取 1 秒：时间预算的判定粒度。太小（如 10ms）会在每轮同步里空转烧 CPU，
+     * 太大（如 10s）会让超预算的同步多跑近 10 秒才被砍——70 秒预算下多跑 10 秒
+     * 就逼近实测 ~83 秒的 LMK 阈值。1 秒是「及时收手」与「不空转」的折中。
+     */
+    private const val WATCHDOG_INTERVAL_MS = 1_000L
 
     /**
      * 进程级内存回收回调（整个进程只注册一次）。
@@ -173,18 +201,27 @@ object AssetSyncManager {
                 AppLogger.i("另一次刷新正在进行，本次刷新排队等待", TAG)
             }
             manualSyncMutex.withLock {
-                // 预算从真正开跑那一刻起算：在锁上排队的时间不能算进本次刷新，
-                // 否则第二次刷新拿到的是被第一次吃掉大半的残预算
-                runSync(
-                    context = context,
-                    repository = repository,
-                    assets = assets,
-                    onProgress = onProgress,
-                    forceRefresh = forceRefresh,
-                    startTime = System.currentTimeMillis(),
-                    timeLimitMs = SyncBudget.MANUAL_SYNC_TIME_LIMIT_MS,
-                    correctNames = correctNames
-                )
+                // 登记当前手动同步的 job，供 MainActivity.onStop 退后台取消（见 [cancelActiveManualSync]）。
+                // withLock 块是 suspend 的，可安全读 currentCoroutineContext().job（= 调用方
+                // viewModelScope 那个 job，取消它会一路取消到 runSync）。finally 清空，避免
+                // 泄漏一个已结束的 job 引用、或让下次取消误伤。
+                activeManualSyncJob = currentCoroutineContext()[Job]
+                try {
+                    // 预算从真正开跑那一刻起算：在锁上排队的时间不能算进本次刷新，
+                    // 否则第二次刷新拿到的是被第一次吃掉大半的残预算
+                    runSync(
+                        context = context,
+                        repository = repository,
+                        assets = assets,
+                        onProgress = onProgress,
+                        forceRefresh = forceRefresh,
+                        startTime = System.currentTimeMillis(),
+                        timeLimitMs = SyncBudget.MANUAL_SYNC_TIME_LIMIT_MS,
+                        correctNames = correctNames
+                    )
+                } finally {
+                    activeManualSyncJob = null
+                }
             }
         } else {
             runSync(
@@ -199,6 +236,32 @@ object AssetSyncManager {
             )
         }
     }
+
+    /**
+     * 取消当前进行中的**手动**同步（若有）。
+     *
+     * 由 MainActivity.onStop 调用：用户切到后台（分屏/权限弹窗只触发 onPause，不触发 onStop，
+     * 不会误伤）。没有在途手动同步时是 no-op；后台 Worker（startTime>0）从不登记，
+     * 因此不受影响。
+     *
+     * 取消会经协程树一路传到 [runSync]，在途请求的 await 立即返回、同步立即收尾，
+     * 残余阻塞在 OkHttp execute() 里的线程由 callTimeout（见 [com.example.stockdiary.network.NetworkClient]）兜底回收。
+     * 各调用方的 catch 已按铁律 `catch (CancellationException) { throw e }` 透传，刷新态在
+     *  finally 里复位，不会弹错误提示也不会永久转圈。
+     */
+    fun cancelActiveManualSync(reason: String) {
+        val job = activeManualSyncJob ?: return
+        AppLogger.i("取消进行中的手动同步：$reason", TAG)
+        job.cancel()
+    }
+
+    /** 测试专用复位：清掉在途手动同步句柄（object 是进程内单例，用例之间必须清状态） */
+    internal fun resetForTesting() {
+        activeManualSyncJob = null
+    }
+
+    /** 测试专用读数：当前登记的在途手动同步句柄（无则 null），供取消用例断言登记/清空 */
+    internal fun activeManualSyncJobForTesting(): Job? = activeManualSyncJob
 
     /**
      * 该资产是否走 STOCK/场内基金行情批量取价路径，返回用于批量取价的代码；
@@ -369,8 +432,53 @@ object AssetSyncManager {
                     }
                 }
             }
-            // 等待所有任务完成
-            jobs.forEach { it.await() }
+
+            // ===== 看门狗：强制时间预算 =====
+            // 上面 withPermit 内的快检查只能拦「还没拿到信号量的标的」。可一旦某个在途请求挂死
+            // （实测有请求挂 54 分钟：app 退后台被系统冻结、醒来才恢复），它会一直占着信号量名额，
+            // 后面的标的连 withPermit 都进不去、快检查永远不执行——预算形同虚设，恢复后已耗时数十分钟
+            // 才靠下一个拿到名额的标的触发截断。看门狗按 [WATCHDOG_INTERVAL_MS] 轮询总预算，超了就
+            // **主动取消所有在途子任务**，不依赖它们是否还能拿到信号量。
+            val watchdog = if (enforceTimeLimit) {
+                launch {
+                    while (isActive) {
+                        delay(WATCHDOG_INTERVAL_MS)
+                        if (SyncBudget.isExceeded(startTime, timeLimitMs, System.currentTimeMillis())) {
+                            if (truncated.compareAndSet(false, true)) {
+                                AppLogger.w(
+                                    "看门狗触发：已达时间预算（${timeLimitMs}ms），取消在途请求并收尾",
+                                    TAG
+                                )
+                            }
+                            // 取消打不断同步阻塞在 OkHttp execute() 里的线程，但 await 会立即返回、
+                            // 同步立即收尾；残余阻塞线程由 callTimeout（NetworkClient）兜底回收。
+                            jobs.forEach { it.cancel() }
+                            return@launch
+                        }
+                    }
+                }
+            } else {
+                null
+            }
+
+            // 逐条 await + try/catch：区分「被看门狗取消的子任务」与「外部取消（退后台 / VM 销毁）」。
+            // 前者（当前协程仍 active）吞掉、继续收尾其余，最终照常构建 SyncResult（truncatedByTimeLimit=true）；
+            // 后者（当前协程已 inactive）原样重抛——项目铁律：取消不吞，否则退后台取消会被误当成「刷新失败」。
+            try {
+                jobs.forEach { job ->
+                    try {
+                        job.await()
+                    } catch (e: CancellationException) {
+                        if (!shouldContinueAfterChildCancel(currentCoroutineContext().isActive)) {
+                            throw e
+                        }
+                        // 只是被看门狗取消的子任务：吞掉，继续收尾
+                    }
+                }
+            } finally {
+                // 无论正常收尾还是外部取消，都要把看门狗停掉，否则 coroutineScope 会一直等它空转
+                watchdog?.cancel()
+            }
         }
 
         val networkErrorCount = errorTypes.count { it == SyncErrorType.NETWORK }
@@ -639,3 +747,14 @@ data class SyncResult(
     val hasRetryableErrors: Boolean
         get() = networkErrorCount > 0 || serverErrorCount > 0 || unknownErrorCount > 0
 }
+
+/**
+ * 看门狗取消在途子任务后，收集方（父协程）该不该「吞掉这次 [CancellationException] 继续收尾」。
+ *
+ * 纯函数（只取决于入参），便于单测钉死判定，不碰协程/时钟：
+ * - `parentActive = true`：只有子任务被看门狗砍了、父协程还活着 → 返回 true，调用方吞掉异常、
+ *   继续收尾其余标的，最终照常返回带 `truncatedByTimeLimit=true` 的 [SyncResult]；
+ * - `parentActive = false`：父协程也死了（退后台取消 / VM 销毁 / 看门狗自己被外部取消）→
+ *   返回 false，调用方必须**原样重抛**（项目铁律：取消不吞），让取消一路传上去。
+ */
+internal fun shouldContinueAfterChildCancel(parentActive: Boolean): Boolean = parentActive

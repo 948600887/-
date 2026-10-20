@@ -1,6 +1,7 @@
 package com.example.stockdiary.data
 
 import com.example.stockdiary.data.sync.SyncBudget
+import com.example.stockdiary.data.sync.shouldContinueAfterChildCancel
 import com.example.stockdiary.data.sync.shouldEmitHeartbeat
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -97,5 +98,21 @@ class SyncBudgetTest {
         // 防御极端配置：intervalMs=0 时不能一条都不发（静默比刷屏更糟）
         assertTrue(shouldEmitHeartbeat(startedAt = 0L, now = 0L, intervalMs = 0L))
         assertTrue(shouldEmitHeartbeat(startedAt = 0L, now = 1L, intervalMs = -1L))
+    }
+
+    // ---------- 看门狗取消子任务后的吞/抛判定 ----------
+
+    @Test
+    fun `看门狗取消子任务_父协程仍活则吞掉继续收尾`() {
+        // 只有子任务被看门狗砍了、收集方（父协程）还活着 → 吞掉这次取消，
+        // 继续收尾其余标的，最终照常返回带 truncatedByTimeLimit=true 的 SyncResult
+        assertTrue(shouldContinueAfterChildCancel(parentActive = true))
+    }
+
+    @Test
+    fun `外部取消_父协程也死了则必须重抛`() {
+        // 父协程也死了（退后台取消 / VM 销毁）→ 不吞，原样重抛（项目铁律：取消不吞），
+        // 否则取消会被误当成「刷新失败」弹提示、刷新态错乱
+        assertFalse(shouldContinueAfterChildCancel(parentActive = false))
     }
 }

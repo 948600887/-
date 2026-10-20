@@ -29,6 +29,8 @@ import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.AfterClass
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.BeforeClass
@@ -272,5 +274,52 @@ class AssetSyncManagerTest {
         assertEquals(0, result.successCount)
         // 预算已尽：一个网络请求都不该再发
         coVerify(exactly = 0) { UnifiedPriceService.getPrice(any(), any(), any()) }
+    }
+
+    // ---------- 退后台取消在途手动同步（B3） ----------
+
+    @Test
+    fun `无在途手动同步时取消是 no-op`() = runBlocking {
+        AssetSyncManager.resetForTesting()
+        assertNull("复位后不该有在途句柄", AssetSyncManager.activeManualSyncJobForTesting())
+        // 没有在途同步：取消直接返回，不抛、不改状态
+        AssetSyncManager.cancelActiveManualSync("无在途时取消")
+        assertNull("no-op 取消不该凭空造出句柄", AssetSyncManager.activeManualSyncJobForTesting())
+    }
+
+    @Test
+    fun `有在途手动同步时取消_真的取消且 finally 清空句柄`() = runBlocking {
+        AssetSyncManager.resetForTesting()
+        val gate = CompletableDeferred<Unit>()
+        stubBlocking("010001", gate)
+
+        val syncJob = async(Dispatchers.Default) {
+            AssetSyncManager.syncAllAssets(
+                context, repository, listOf(fundAsset("fund_010001")), {}, forceRefresh = true
+            )
+        }
+        // 等它真正进入抓取并登记在途句柄（manualSyncMutex 块内置上）
+        assertTrue(
+            "手动同步应登记在途句柄",
+            awaitUntil { AssetSyncManager.activeManualSyncJobForTesting() != null }
+        )
+        assertNotNull(AssetSyncManager.activeManualSyncJobForTesting())
+
+        // 退后台取消：取消 activeManualSyncJob（= 这个 syncJob）
+        AssetSyncManager.cancelActiveManualSync("测试取消在途手动同步")
+
+        // 取消后协程应变为已取消（await 立即返回、同步立即收尾）
+        assertTrue("取消后手动同步协程应已取消", awaitUntil { !syncJob.isActive })
+        assertTrue(syncJob.isCancelled)
+        // syncAllAssets 的 finally 会清空句柄，避免泄漏/误伤下次
+        assertTrue(
+            "finally 应清空在途句柄",
+            awaitUntil { AssetSyncManager.activeManualSyncJobForTesting() == null }
+        )
+
+        // 收尾：放行 gate，让被取消的链路彻底结束（避免悬挂协程）。
+        // 末尾 .let{} 令 runBlocking 块返回 Unit，满足 JUnit「测试方法返回 void」约定。
+        gate.complete(Unit)
+        runCatching { withTimeout(5000) { syncJob.await() } }.let { }
     }
 }

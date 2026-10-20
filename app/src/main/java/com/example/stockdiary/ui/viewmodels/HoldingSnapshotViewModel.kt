@@ -328,6 +328,9 @@ open class HoldingSnapshotViewModel(
                 }
                 updateState { state -> state.copy(syncing = false, syncMessage = message) }
             } catch (e: CancellationException) {
+                // 取消（退后台 onStop / VM 销毁）时 rethrow 会跳出本 try，而本方法没有 finally，
+                // syncing 会卡在 true、导入页同步态永久转圈——补一次复位（铁律：取消照旧重抛，不做吞）
+                updateState { it.copy(syncing = false) }
                 throw e
             } catch (e: Exception) {
                 AppLogger.e("持仓导入后同步行情失败: ${e.message}", e, "HoldingSnapshotVM")

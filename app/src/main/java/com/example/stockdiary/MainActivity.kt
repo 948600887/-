@@ -25,6 +25,7 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import com.example.stockdiary.di.LocalAppContainer
+import com.example.stockdiary.data.sync.AssetSyncManager
 import com.example.stockdiary.ui.navigation.GoldVaultNavHost
 import com.example.stockdiary.ui.theme.GoldVaultTheme
 import com.example.stockdiary.utils.GlobalExceptionHandler
@@ -90,6 +91,16 @@ class MainActivity : ComponentActivity() {
     override fun onPause() {
         super.onPause()
         GlobalExceptionHandler.logSafe("Lifecycle", "MainActivity onPause")
+    }
+
+    override fun onStop() {
+        super.onStop()
+        GlobalExceptionHandler.logSafe("Lifecycle", "MainActivity onStop")
+        // 退后台取消在途**手动**同步：用户切走后不该留一个挂死的刷新占着信号量与互斥锁，
+        // 否则切回来面对的是「恢复后立刻超时截断、只零星更新几个标的」的僵尸轮。
+        // 用 onStop 不用 onPause：分屏 / 权限弹窗只触发 onPause，不能误伤正在进行的刷新。
+        // 后台 Worker（传 startTime）从不登记，不受影响。取消后用户下次下拉刷新即可重新同步。
+        AssetSyncManager.cancelActiveManualSync("MainActivity onStop，应用进入后台")
     }
 }
 

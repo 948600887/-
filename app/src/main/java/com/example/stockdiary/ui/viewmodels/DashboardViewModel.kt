@@ -258,6 +258,10 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
                     "DashboardVM"
                 )
             } catch (e: CancellationException) {
+                // 取消（退后台 onStop / VM 销毁）时 rethrow 会跳过下面第二阶段的 finally，
+                // _isRefreshing 会永远停在 true、后续刷新全被挡死、界面一直转圈——
+                // 这里补一次复位，保证取消路径刷新态也能收起（铁律：取消照旧重抛，不做吞）
+                _isRefreshing.value = false
                 throw e
             } catch (e: Exception) {
                 // 不捕获的话 _isRefreshing 永远停在 true，后续刷新全被挡死、界面一直转圈

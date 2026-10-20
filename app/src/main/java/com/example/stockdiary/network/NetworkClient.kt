@@ -41,6 +41,14 @@ object NetworkClient {
             .connectTimeout(Timeouts.CONNECT_MS.toLong(), TimeUnit.MILLISECONDS)
             .readTimeout(Timeouts.READ_MS.toLong(), TimeUnit.MILLISECONDS)
             .writeTimeout(Timeouts.WRITE_MS.toLong(), TimeUnit.MILLISECONDS)
+            // callTimeout 全局覆盖（所有业务客户端经 newBuilder 派生，一并继承）：
+            // connect/read 只约束「单连接上的单次 IO」，而 OkHttp 默认
+            // retryOnConnectionFailure(true)——主机解析出一串 IPv6/IPv4 地址时会逐个重试、
+            // 每个地址各自重新计时。实测一个基金净值请求挂了 54 分钟（app 退后台被系统冻结，
+            // 醒来才恢复），把 AssetSyncManager 的并发信号量整个堵死；币安主机不可达时单个
+            // call 也曾挂到 3478 秒。callTimeout 覆盖从 enqueue 到响应读完的**整段**时间
+            // （含重试与排队），是唯一能兜住「主机压根不可达 / 进程被冻结」的开关。
+            .callTimeout(Timeouts.CALL_MS.toLong(), TimeUnit.MILLISECONDS)
             .retryOnConnectionFailure(true)
             .connectionPool(
                 okhttp3.ConnectionPool(
@@ -100,18 +108,18 @@ object NetworkClient {
     }
 
     /**
-     * 币安单独加 [callTimeout]：connect/read 超时只约束单连接单次 IO，
-     * 而 OkHttp 默认 `retryOnConnectionFailure(true)`，api.binance.com 解析出一串
-     * IPv6/IPv4 地址时会逐个重试、每个地址各自重新计时——实测主机不可达时单个
-     * call 挂了 3478 秒，把 AssetSyncManager 的并发信号量堵死。
-     * callTimeout 覆盖整段 call（含重试与排队），是唯一能兜住这种情况的开关。
+     * 币安客户端：与其它业务客户端一样经 [baseClient] 派生，仅追加 BaseUrlInterceptor。
      *
-     * 只加给币安：A 股/基金那几个源主机单一、耗时特征不同，改动面要收窄。
+     * [okhttp3.OkHttpClient.Builder.callTimeout] 现已全局覆盖（见 [baseClient]），币安不再特殊。
+     * 保留这段 rationale：connect/read 超时只约束单连接单次 IO，而 OkHttp 默认
+     * `retryOnConnectionFailure(true)`，api.binance.com 解析出一串 IPv6/IPv4 地址时会逐个重试、
+     * 每个地址各自重新计时——实测主机不可达时单个 call 挂了 3478 秒，把 AssetSyncManager 的并发
+     * 信号量堵死。callTimeout 覆盖整段 call（含重试与排队），是唯一能兜住这种情况的开关，
+     * 因此必须对**所有**客户端生效，而非只币安。
      */
     val binanceClient: OkHttpClient by lazy {
         baseClient.newBuilder()
             .addInterceptor(BaseUrlInterceptor(APIEndpoints.Binance.BASE_URL))
-            .callTimeout(Timeouts.CALL_MS.toLong(), TimeUnit.MILLISECONDS)
             .build()
     }
     

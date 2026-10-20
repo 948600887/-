@@ -344,4 +344,131 @@ class DividendIncomeLoaderTest {
         coVerify(exactly = 0) { repository.getCachedAllowingStale(any()) }
         coVerify(exactly = 1) { cache.save(any(), any(), any()) }
     }
+
+    /** 捕获落盘的 (result, dataHash, date) 三段，用于构造「与首次计算匹配」的假缓存 */
+    private fun captureSave():
+        Triple<MutableList<DividendIncomeLoader.IncomeResult>, MutableList<String>, MutableList<String>> {
+        val results = mutableListOf<DividendIncomeLoader.IncomeResult>()
+        val hashes = mutableListOf<String>()
+        val dates = mutableListOf<String>()
+        every { cache.save(any(), any(), any()) } answers {
+            results.add(arg(0) as DividendIncomeLoader.IncomeResult)
+            hashes.add(arg(1) as String)
+            dates.add(arg(2) as String)
+        }
+        return Triple(results, hashes, dates)
+    }
+
+    /**
+     * 修「同日改持仓但预计收入不更新」掩藏（QA advisory）：分红记录不变，但当天加仓
+     * （balance 变）→ dataHash 变 → 必须重算，不能把旧值当新的。
+     */
+    @Test
+    fun `同日分红不变但持仓 balance 变化_必须重算`() = runBlocking {
+        val today = LocalDate.now().format(DateTimeFormatter.ISO_LOCAL_DATE)
+        val assetsA = listOf(stock("sh600519", balance = 100.0))
+        val assetsB = listOf(stock("sh600519", balance = 200.0)) // 当天加仓
+        coEvery { repository.getCachedAllowingStale("sh600519") } returns listOf(record(today, "5.0"))
+        coEvery { repository.prefetchDividends(any(), any()) } returns emptyMap()
+        coEvery { repository.getDividendsBySymbol("sh600519", false, any()) } returns listOf(record(today, "5.0"))
+
+        val (results, hashes, dates) = captureSave()
+        var loadCount = 0
+        every { cache.loadCached() } answers {
+            when (loadCount++) {
+                0 -> null
+                // 第二次返回「用旧持仓(100)算出的哈希」的缓存；当前持仓已变 200 → 哈希不同 → 重算
+                else -> DividendIncomeCache.CachedIncome(
+                    date = dates[0],
+                    dataHash = hashes[0],
+                    dividendsBySymbol = results[0].dividendsBySymbol,
+                    totalAnnualIncome = results[0].totalAnnualIncome,
+                    hasDividendData = results[0].hasDividendData
+                )
+            }
+        }
+
+        val first = cachedLoader.loadIncome(assetsA) // 100 股 × 5/10 = 50
+        val second = cachedLoader.loadIncome(assetsB) // 200 股 × 5/10 = 100，必须重算
+
+        assertEquals(50.0, first.totalAnnualIncome, 1e-6)
+        assertEquals(100.0, second.totalAnnualIncome, 1e-6)
+        // 两次都走了抓取（哈希因持仓而不同）+ 都落盘
+        coVerify(exactly = 2) { repository.prefetchDividends(any(), any()) }
+        coVerify(exactly = 2) { repository.getDividendsBySymbol("sh600519", false, any()) }
+        coVerify(exactly = 2) { cache.save(any(), any(), any()) }
+    }
+
+    /**
+     * currency 也是 calculateAnnualIncome 的真实输入（toCny 折算）→ 变 currency 必须重算。
+     * 只断言「重算发生」（prefetch/save 各两次），不锁具体金额——USD 折算依赖 ExchangeRateManager 状态。
+     */
+    @Test
+    fun `同日分红不变但持仓 currency 变化_必须重算`() = runBlocking {
+        val today = LocalDate.now().format(DateTimeFormatter.ISO_LOCAL_DATE)
+        val assetsA = listOf(stock("sh600519").copy(currency = "CNY"))
+        val assetsB = listOf(stock("sh600519").copy(currency = "USD"))
+        coEvery { repository.getCachedAllowingStale("sh600519") } returns listOf(record(today, "5.0"))
+        coEvery { repository.prefetchDividends(any(), any()) } returns emptyMap()
+        coEvery { repository.getDividendsBySymbol("sh600519", false, any()) } returns listOf(record(today, "5.0"))
+
+        val (results, hashes, dates) = captureSave()
+        var loadCount = 0
+        every { cache.loadCached() } answers {
+            when (loadCount++) {
+                0 -> null
+                else -> DividendIncomeCache.CachedIncome(
+                    date = dates[0],
+                    dataHash = hashes[0],
+                    dividendsBySymbol = results[0].dividendsBySymbol,
+                    totalAnnualIncome = results[0].totalAnnualIncome,
+                    hasDividendData = results[0].hasDividendData
+                )
+            }
+        }
+
+        cachedLoader.loadIncome(assetsA)
+        cachedLoader.loadIncome(assetsB) // currency 变了 → 哈希不同 → 重算
+
+        coVerify(exactly = 2) { repository.prefetchDividends(any(), any()) }
+        coVerify(exactly = 2) { repository.getDividendsBySymbol("sh600519", false, any()) }
+        coVerify(exactly = 2) { cache.save(any(), any(), any()) }
+    }
+
+    /**
+     * 防止「哈希加持仓字段后永远不命中」把方案1的消抖动效果打没：
+     * 分红 + 持仓全不变 → 必须仍走缓存复用（原样返回持久化值，不偷偷重算）。
+     */
+    @Test
+    fun `同日分红与持仓全不变_仍走缓存复用`() = runBlocking {
+        val today = LocalDate.now().format(DateTimeFormatter.ISO_LOCAL_DATE)
+        val assets = listOf(stock("sh600519", balance = 100.0))
+        coEvery { repository.getCachedAllowingStale("sh600519") } returns listOf(record(today, "5.0"))
+        coEvery { repository.prefetchDividends(any(), any()) } returns emptyMap()
+        coEvery { repository.getDividendsBySymbol("sh600519", false, any()) } returns listOf(record(today, "5.0"))
+
+        val (_, hashes, _) = captureSave()
+        var loadCount = 0
+        every { cache.loadCached() } answers {
+            when (loadCount++) {
+                0 -> null
+                // 全不变 → 第二次哈希与首次一致，缓存 date 也是今天 → 复用
+                else -> DividendIncomeCache.CachedIncome(
+                    date = today,
+                    dataHash = hashes[0],
+                    dividendsBySymbol = mapOf("sh600519" to 5.0),
+                    totalAnnualIncome = 777.0, // 与重算值 50 不同：复用就必须原样返回 777
+                    hasDividendData = true
+                )
+            }
+        }
+
+        cachedLoader.loadIncome(assets)
+        val reused = cachedLoader.loadIncome(assets)
+
+        assertEquals(777.0, reused.totalAnnualIncome, 1e-6)
+        // 两次调用总共只抓取过一次
+        coVerify(exactly = 1) { repository.prefetchDividends(any(), any()) }
+        coVerify(exactly = 1) { repository.getDividendsBySymbol("sh600519", false, any()) }
+    }
 }

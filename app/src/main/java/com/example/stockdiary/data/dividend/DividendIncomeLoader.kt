@@ -62,10 +62,11 @@ class DividendIncomeLoader(
 
         // ===== 同日短路：零网络复用上次算好的结果，杀掉同日抖动 =====
         // 抖动根因：同一天内 TTM 滑窗不变，但不同次抓取拿到的 records 集不同 → TTM 求和变。
-        // 这里在发起任何抓取前，先零网络把各标的缓存记录取出来，算出 dataHash；
+        // 这里在发起任何抓取前，先零网络把各标的缓存记录取出来，连同持仓一起算 dataHash；
         // 若上次落盘的缓存「哈希一致 + 当天 + 非强制刷新」就直接复用，不进 prefetch、不算 TTM。
-        // 仅当底层 records 真变了（dataHash 不同）或跨日（date != 今天）才重算 ——
-        // 即「保留跨日 TTM 漂移 + 仅底层数据变化才重算」。
+        // 哈希覆盖两路底层输入：分红记录（records 变了才重算）+ 持仓（当天加仓/调仓才重算）。
+        // 仅当 records 真变、持仓真变或跨日（date != 今天）才重算 ——
+        // 即「保留跨日 TTM 漂移 + 仅底层输入变化才重算」。
         if (!forceRefresh) {
             val cachedRecords = LinkedHashMap<String, List<DividendRecord>>()
             var allHit = true
@@ -80,7 +81,7 @@ class DividendIncomeLoader(
             }
 
             if (allHit && cachedRecords.isNotEmpty()) {
-                val currentHash = computeDataHash(cachedRecords)
+                val currentHash = computeDataHash(cachedRecords, assets)
                 val today = LocalDate.now().format(DATE_FORMATTER)
                 val cached = incomeCache?.loadCached()
                 // 同日 + 底层数据未变 → 直接复用缓存的 IncomeResult，彻底消掉同日抖动
@@ -160,9 +161,9 @@ class DividendIncomeLoader(
             hasDividendData = hasDividendFlag.get()
         )
 
-        // 落盘：仅当注入了缓存层。date=今天、dataHash=本次 records 哈希，
-        // 下次同日且底层数据不变时即可短路复用，杀掉同日抖动
-        incomeCache?.save(result, computeDataHash(recordsBySymbol), LocalDate.now().format(DATE_FORMATTER))
+        // 落盘：仅当注入了缓存层。date=今天、dataHash=本次 records + 持仓的哈希，
+        // 下次同日且底层输入（分红记录/持仓）不变时即可短路复用，杀掉同日抖动
+        incomeCache?.save(result, computeDataHash(recordsBySymbol, assets), LocalDate.now().format(DATE_FORMATTER))
 
         result
     }
@@ -208,15 +209,32 @@ class DividendIncomeLoader(
     }
 
     /**
-     * 由各标的原始分红记录算出**稳定哈希**，用于判断「底层分红数据有没有变」。
+     * 由「分红记录 + 持仓」算出**稳定哈希**，用于判断「预计收入的底层输入有没有变」。
      *
-     * 只要 records（symbol → 除息日/每股分红列表）不变，哈希就不变；
-     * 哈希变了即底层 records 真变了（如 24h 缓存刷新后抓到新数据），必须重算。
-     * 口径：按 symbol 排序，每只标的再按（除息日, 每股分红）排序后拼成规范串再取哈希，
-     * 与序列化/抓取顺序无关，保证同一份数据每次算出同一个哈希。
+     * 预计收入 = Σ(持仓 × 每只标的 TTM 分红)，底层输入有两路，任一路变都要重算：
+     *   1. 分红记录（symbol → 除息日/每股分红列表）——变了说明抓到新数据；
+     *   2. 持仓（[DividendIncomeCalculator.calculateAnnualIncome] 的真实计算输入）——
+     *      变了说明用户当天加仓/调仓，预计收入必须跟着更新。
+     *
+     * 持仓口径**严格对齐 calculateAnnualIncome 实际读到的字段**（已核对源码）：
+     *   - 存款：年化利息 = totalValueCny × interestRate/100，而存款 totalValue = balance
+     *     （存款不走 price），故输入为 balance + currency + interestRate；
+     *   - 股票/基金：年化 = balance × toCny(每十股分红 或 每万份收益, currency) / 10（或 ×365），
+     *     输入为 balance + currency + millionCopiesIncome（每股分红由分红记录那路覆盖）；
+     *   - type 决定走哪条分支；symbol 决定从 dividendsBySymbol 取哪只的分红。
+     *   **不含 price**：price 不参与 calculateAnnualIncome。把它算进哈希会让每次行情同步都
+     *   触发重算，白白重开「重新抓取拿到不同 records」的抖动窗口（本方案正是要关掉它），
+     *   且对预计收入毫无影响。
+     *
+     * 拼接前排序保证确定性，输出仍是稳定字符串。
      */
-    private fun computeDataHash(recordsBySymbol: Map<String, List<DividendRecord>>): String {
+    private fun computeDataHash(
+        recordsBySymbol: Map<String, List<DividendRecord>>,
+        assets: List<Asset>
+    ): String {
         val sb = StringBuilder()
+
+        // 1) 分红记录部分：按 symbol 排序，每只再按（除息日, 每股分红）排序，与抓取/序列化顺序无关
         recordsBySymbol.keys.sorted().forEach { symbol ->
             sb.append(symbol).append('|')
             recordsBySymbol[symbol]
@@ -226,6 +244,20 @@ class DividendIncomeLoader(
                 }
             sb.append('\n')
         }
+
+        // 2) 持仓指纹部分：calculateAnnualIncome 的真实计算输入（见上方口径说明）
+        assets
+            .sortedWith(compareBy({ it.symbol ?: "" }, { it.type.name }, { it.balance }))
+            .forEach { asset ->
+                sb.append("A:").append(asset.symbol ?: "-")
+                    .append("|t=").append(asset.type.name)
+                    .append("|bal=").append(asset.balance)
+                    .append("|cur=").append(asset.currency)
+                    .append("|mci=").append(asset.millionCopiesIncome ?: -1.0)
+                    .append("|ir=").append(asset.interestRate ?: -1.0)
+                    .append('\n')
+            }
+
         // Java String.hashCode 是字符的纯函数、跨 JVM 运行稳定，足够做「内容是否相同」判等
         return sb.toString().hashCode().toString()
     }

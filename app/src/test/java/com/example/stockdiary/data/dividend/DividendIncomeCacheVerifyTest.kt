@@ -8,7 +8,9 @@ import com.example.stockdiary.database.AssetType
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
+import io.mockk.just
 import io.mockk.mockk
+import io.mockk.runs
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -424,5 +426,36 @@ class DividendIncomeCacheVerifyTest {
         coVerify(exactly = 2) { repository.getCachedAllowingStale("sh600519") }
         coVerify(exactly = 0) { repository.prefetchDividends(any(), any()) }
         coVerify(exactly = 0) { repository.getDividendsBySymbol(any(), any(), any()) }
+    }
+
+    /**
+     * 升级兼容（a63b4c2 补持仓指纹前落盘的旧缓存）：旧哈希不含持仓段，与当前哈希
+     * （含持仓指纹）必然不同 → 同日也自然不命中 → 自动重算一次，无迁移、无崩溃。
+     * 旧哈希的精确值无所谓——任何与当前哈希不同的串都代表「旧格式缓存」。
+     */
+    @Test
+    fun `旧格式缓存_哈希不含持仓指纹_同日也自然不命中自动重算不崩`() = runBlocking {
+        val assets = listOf(stock("sh600519", balance = 100.0))
+        coEvery { repository.getCachedAllowingStale("sh600519") } returns listOf(record(today, "5.0"))
+        coEvery { repository.prefetchDividends(any(), any()) } returns emptyMap()
+        coEvery { repository.getDividendsBySymbol("sh600519", false, any()) } returns listOf(record(today, "5.0"))
+
+        every { cache.loadCached() } returns DividendIncomeCache.CachedIncome(
+            date = today, // 同日：只有哈希对不上
+            dataHash = "旧格式哈希_只有分红记录段_没有持仓指纹",
+            dividendsBySymbol = mapOf("sh600519" to 5.0),
+            totalAnnualIncome = 999.0, // 旧缓存里的值（哪怕是脏的也不许复用）
+            hasDividendData = true
+        )
+        every { cache.save(any(), any(), any()) } just runs
+
+        val result = cachedLoader.loadIncome(assets)
+
+        // 自然不命中 → 重算拿到当前持仓的正确值，不崩、不返回旧缓存的 999
+        assertEquals(50.0, result.totalAnnualIncome, 1e-6)
+        coVerify(exactly = 1) { repository.prefetchDividends(any(), any()) }
+        coVerify(exactly = 1) { repository.getDividendsBySymbol("sh600519", false, any()) }
+        // 重算后照常落盘（新格式哈希），下次同日即可命中
+        coVerify(exactly = 1) { cache.save(any(), any(), any()) }
     }
 }

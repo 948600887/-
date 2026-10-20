@@ -5,7 +5,6 @@ import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.network.BinanceAPI
 import com.example.stockdiary.network.BinanceBalance
-import com.example.stockdiary.network.BINANCE_STABLECOINS
 import com.example.stockdiary.utils.AppLogger
 import com.example.stockdiary.utils.ExchangeRateManager
 
@@ -114,13 +113,18 @@ class BinanceImportService(
         ) { balance ->
             SnapshotAlignment.RawHolding(
                 // 基础资产名 → 交易对代码（BTC → BTCUSDT），落库/取价都用这个形态。
-                // 特例：LD 锁仓币（LDBCH）必须落库成**底层交易对** BCHUSDT，不能用
-                // baseAssetToSymbol 盲加 USDT 成 LDBCHUSDT——币安根本没有这个交易对，
-                // 落库后每次行情同步都拿它去问币安 → 永远 400。priceKeyFor 已正确处理
-                // LD→底层（见 priceKeyFor / BinanceAPI.earnUnderlyingPair）；稳定币
-                // priceKeyFor 返回 null，回落 baseAssetToSymbol（USDT→USDT）。name 仍
-                // 存原始 LD 代码（如 LDBNB），展示层不受影响。
-                symbol = priceKeyFor(balance.asset) ?: baseAssetToSymbol(balance.asset),
+                // 特例：LD 理财/锁仓壳（LDBNB）落库 symbol 用**原始 LD 代码 LDBNB**，
+                // 而不是底层交易对 BNBUSDT——否则会和现货 BNB 撞同一个去重键，被
+                // SnapshotAlignment 合并成一行，看不到「多少锁在 earn、多少在现货」，
+                // 行名还会误导（见 P1 修复）。LD 与底层 1:1 可赎回，取价/估值仍走
+                // getCryptoPrice / priceKeyFor 的 LD→底层逻辑（两条路径都已支持 LD 代码），
+                // 改完定价不断。稳定币（priceKeyFor 返回 null）回落 baseAssetToSymbol
+                // （USDT→USDT）。name 始终存原始代码（LDBNB / BNB），展示层不受影响。
+                symbol = if (BinanceAPI.isEarnProduct(balance.asset)) {
+                    balance.asset
+                } else {
+                    priceKeyFor(balance.asset) ?: baseAssetToSymbol(balance.asset)
+                },
                 name = balance.asset,
                 quantity = balance.total
             )
@@ -242,16 +246,15 @@ class BinanceImportService(
  * App 的加密资产按**交易对**存 symbol，行情同步
  * （[com.example.stockdiary.network.UnifiedPriceService] 的 CRYPTO 分支）
  * 直接拿 `symbol.uppercase()` 当币安交易对查价。所以落库的 symbol 必须是
- * 币安认得的交易对形态（BTCUSDT、ETHUSDT…），这也是
- * [com.example.stockdiary.network.BinanceAPI.getSupportedSymbols] 返回的全集格式。
+ * 币安认得的交易对形态（BTCUSDT、ETHUSDT…），即 `<基础资产>USDT` 形式。
  *
  * ## 为什么不复用 [com.example.stockdiary.network.BinanceAPI] 的 formatSymbol
  *
  * formatSymbol 面向「用户输入的交易对/简称」，它把 BTC、ETH 当作**报价币**：
  * `formatSymbol("BTC")` 命中 `endsWith("BTC")` 分支返回 "BTC" 本身，而非 "BTCUSDT"。
  * 账户接口给的是裸基础资产，直接套 formatSymbol 会让 BTC→BTC、ETH→ETH，
- * 全部同步不到价。所以这里用一段专用于「基础资产补 USDT」的映射，产出与
- * getSupportedSymbols 完全一致的格式。
+ * 全部同步不到价。所以这里用一段专用于「基础资产补 USDT」的映射，产出
+ * 与 cryptoTradingPairFor 一致的 `<基础资产>USDT` 格式。
  *
  * **查价键（而非落库 symbol）现在统一走
  * [com.example.stockdiary.network.BinanceAPI.cryptoTradingPairFor]**：那个函数同时认
@@ -306,22 +309,21 @@ internal fun priceKeyFor(asset: String): String? {
  * @param prices 拉取阶段批量取到的公开价（Map<交易对, 最新价>）
  */
 internal fun referencePriceForImport(asset: String, prices: Map<String, Double>): Double? {
+    // 稳定币（白名单 + 命名规律兜底）锚定 1 美元，按定义价 1.0 计（见 [BinanceAPI.isLikelyStablecoin]）。
+    // 与 [estimatedValueCny] 在预览里的口径完全一致，杜绝「预览 1.0、落库 0」的口径分裂。
+    if (BinanceAPI.isLikelyStablecoin(asset)) {
+        return 1.0
+    }
     val key = priceKeyFor(asset)
     if (key == null) {
-        // 无交易对可查：现货稳定币（USDT / USDC …）与稳定币理财壳（LDUSDT 等）。
-        // 二者都锚定 1 美元，按定义价 1.0 计——与 [estimatedValueCny] 在预览里的口径
-        // 完全一致（key==null 时同样回落 1.0），杜绝「预览显示 1.0、落库却留空→市值恒 0」
-        // 的口径分裂（即 LDUSDT 已知问题：用户看到的 USDT 价格默认为 0）。
-        // priceKeyFor 返回 null 当且仅当资产是稳定币或稳定币理财壳，绝不会是别的，
-        // 所以这里直接给 1.0，不必再判 isStablecoin。
+        // 非稳定币但查价键为 null（如稳定币理财壳 LDUSDT——底层是稳定币，无现货交易对）。
+        // 判定口径统一为 priceKeyFor 是否返回 null（不再单独判稳定币集合），
+        // 这里同样按定义价 1.0 计，避免落库 currentPrice 留空 → 市值恒 0
+        // （即「USDT 价格默认为 0」已知问题）。
         return 1.0
     }
     return prices[key]?.takeIf { it.isFinite() && it > 0.0 }
 }
-
-/** 是否是 USD 稳定币（无需查价，按 1 美元计） */
-internal fun isStablecoin(asset: String): Boolean =
-    asset.uppercase().trim() in BINANCE_STABLECOINS
 
 /**
  * 估算某持仓值多少人民币。
@@ -339,6 +341,12 @@ internal fun estimatedValueCny(
     total: Double,
     priceOf: (String) -> Double?
 ): Double? {
+    // 稳定币（白名单 + 命名规律兜底）锚定 1 美元，无需查价，按定义价 1.0 计。
+    // 见 [BinanceAPI.isLikelyStablecoin]：白名单漏收的新稳定币也能拿到 1.0 兜底，
+    // 不再退化成裸码查价 → 查不到 → 市值显 0（Dim3 健壮性）。
+    if (BinanceAPI.isLikelyStablecoin(asset)) {
+        return total * 1.0 * ExchangeRateManager.getRate("USD")
+    }
     val key = priceKeyFor(asset)
     val usdUnitPrice = if (key == null) 1.0 else priceOf(key) ?: return null
     return total * usdUnitPrice * ExchangeRateManager.getRate("USD")

@@ -199,14 +199,52 @@ object BinanceAPI {
         if (underlying.isEmpty()) return null
         return cryptoTradingPairFor(underlying)
     }
-    
-    fun getSupportedSymbols(): List<String> {
-        return listOf(
-            "BTCUSDT", "ETHUSDT", "BNBUSDT",
-            "ADAUSDT", "DOGEUSDT", "XRPUSDT",
-            "DOTUSDT", "UNIUSDT", "LTCUSDT",
-            "SOLUSDT", "MATICUSDT", "LINKUSDT"
-        )
+
+    /**
+     * 把交易对归一化成「以 USDT 计价」，用于按美元估值。
+     *
+     * 已是 USDT 对（BTCUSDT）原样返回；裸基础资产（BTC）补 USDT；**非 USDT 报价的
+     * 交易对（ADABTC / ETHBTC）剥掉报价币取基础资产再补 USDT（ADAUSDT / ETHUSDT）**——
+     * App 始终按美元计价，非 USDT 对的 lastPrice 是「以报价币计」，直接当美元会把市值
+     * 错算（见 P2：手动填 BTC 市场币对的用户，其价值被错当美元）。
+     *
+     * 只做**计价归一**，不负责「是否是可交易现货」（那是 [cryptoTradingPairFor] +
+     * [isEarnProduct] 的职责）。输入已是与币安一致的交易对或裸资产，不会收到 LD 壳层代码。
+     */
+    internal fun toUsdtPair(pair: String): String {
+        val s = pair.uppercase().trim()
+        if (s.isEmpty()) return s
+        if (s.endsWith("USDT")) return s
+        val quote = BINANCE_QUOTE_ASSETS.firstOrNull { q -> s.length > q.length && s.endsWith(q) }
+        return if (quote != null) "${s.removeSuffix(quote)}USDT" else "${s}USDT"
+    }
+
+    /**
+     * 稳定币的**兜底**识别：白名单 [BINANCE_STABLECOINS] 之外，原始资产名以
+     * `USD` / `EUR` 结尾的几乎都是锚定法币的稳定币（如 NEWUSD / USDG …）。
+     *
+     * ## 只做「按 1.0 美元估」的召回增强，不参与交易对判定
+     *
+     * 交易对判定仍以 [cryptoTradingPairFor] 为准——那里若把疑似稳定币也判成 null，
+     * 会误伤行情同步的真实查价。所以这里只把结果喂给导入路径的估值/预填
+     * （[com.example.stockdiary.data.importer.estimatedValueCny] 与
+     *  [com.example.stockdiary.data.importer.referencePriceForImport]），
+     * 让漏进白名单的新稳定币也能拿到 1.0 兜底，不再退化成裸码查价 → 查不到 → 市值 0。
+     *
+     * ## 误判代价很小
+     *
+     * 一个本该查价的币若被当成稳定币，最坏只是导入预填/预览市值按 1.0 美元计，
+     * 而行情同步仍按真实交易对补价，不会永久错算；反过来（稳定币漏网→市值恒 0）
+     * 危害更大，故优先召回。这正是 [BINANCE_STABLECOINS] 注释里写的「根治漂移方向」。
+     *
+     * @return true 表示该资产应按 1.0 美元估值（白名单命中 或 命名疑似稳定币）
+     */
+    internal fun isLikelyStablecoin(asset: String): Boolean {
+        val s = asset.uppercase().trim()
+        if (s in BINANCE_STABLECOINS) return true
+        // 欧元稳定币命名不统一（EURT/EURC/EURS…），这里只做「USD/EUR 收尾」的粗召回，
+        // 更精确的欧元币仍靠白名单补充；多收不致命（见上），少收也只退化到旧的查价路径。
+        return s.endsWith("USD") || s.endsWith("EUR")
     }
 }
 
@@ -230,9 +268,19 @@ data class Binance24hrStats(
  * 两边各写一份正是历史上出过 bug 的原因（见 [BinanceAPI.cryptoTradingPairFor]）。
  * 顶层声明（而非 object 成员）是为了让 data 层能 `import` 到它。
  */
+/**
+ * 常见 USD 稳定币集合（锚定 1 美元，币安上没有 XXXUSDT 自我交易对，查价必然空，
+ * 估值按 1.0 美元计）。
+ *
+ * ⚠️ 这是**手工维护**的名单，天然会随市场上新稳定币而漂移——PYUSD / USDE / USDG 等都曾漏过。
+ * 漏网的稳定币不会拿到 1.0 兜底，而是退化成裸码去查价 → 查不到 → 市值显 0 / 价格待更新。
+ * 名单只补「明确 USD 锚定」的主流币；欧元稳定币（EURT 等）**故意不收**，否则会被当 1 美元错算。
+ * 若以后要根治漂移，应改为「查价失败且代码疑似稳定币时按 1.0 兜底」而非依赖这份名单。
+ */
 internal val BINANCE_STABLECOINS: Set<String> = setOf(
     "USDT", "USDC", "BUSD", "TUSD", "DAI", "FDUSD",
-    "USDP", "USDD", "GUSD", "USDS", "SUSD"
+    "USDP", "USDD", "GUSD", "USDS", "SUSD",
+    "PYUSD", "USDE", "USDB", "USDG", "USD1", "USDL", "FRAX"
 )
 
 /**

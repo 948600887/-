@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.background
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -62,6 +63,7 @@ import com.example.stockdiary.ui.components.import.ImportWizardScaffold
 import com.example.stockdiary.ui.dialogs.sanitizeDecimalInput
 import com.example.stockdiary.ui.theme.AppTheme
 import com.example.stockdiary.ui.viewmodels.BinanceImportViewModel
+import com.example.stockdiary.network.BinanceAPI
 import com.example.stockdiary.utils.format
 
 /**
@@ -313,6 +315,12 @@ private fun BinancePreviewStep(
     // 同一份 priceOf 既用于「是否被过滤」也用于每行市值显示
     val priceOf: (String) -> Double? = { state.prices[it] }
 
+    // 预览顶部总览：预估市值 + 待估值项数（拿不到价的那批保留而非丢弃，单独点出来，
+    // 免得用户以为漏算）。稳定币/LD 稳定币壳按 1 美元计，不计入「待估值」。
+    val pricedRows = preview.items.map { it to estimatedValueCny(it.name, it.quantity, priceOf) }
+    val totalCny = pricedRows.sumOf { (_, v) -> v ?: 0.0 }
+    val unknownCount = pricedRows.count { (_, v) -> v == null }
+
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(16.dp),
@@ -338,6 +346,15 @@ private fun BinancePreviewStep(
                             append("未变 ${preview.unchangedItems.size}")
                         },
                         style = MaterialTheme.typography.bodySmall
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        buildString {
+                            append("预估市值 ≈ ¥${totalCny.format(2)}")
+                            if (unknownCount > 0) append("（含 $unknownCount 项待估值）")
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        fontWeight = FontWeight.Medium
                     )
                     Spacer(Modifier.height(8.dp))
                     Text(
@@ -428,7 +445,25 @@ private fun BinancePreviewItemRow(
             Column(modifier = Modifier.weight(1f)) {
                 // name 是基础资产名（BTC），symbol 是交易对（BTCUSDT）——
                 // 两个都显示：前者好认，后者是真正落库/取价的代码
-                Text(item.name, fontWeight = FontWeight.Medium)
+                // LD 理财/锁仓壳（LDBNB 等）明确打「锁仓」标，与现货区分开
+                // （P1 已让它们分属不同 symbol，这里再补视觉区分）
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(item.name, fontWeight = FontWeight.Medium)
+                    if (BinanceAPI.isEarnProduct(item.name)) {
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            "锁仓",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onTertiaryContainer,
+                            modifier = Modifier
+                                .background(
+                                    MaterialTheme.colorScheme.tertiaryContainer,
+                                    MaterialTheme.shapes.extraSmall
+                                )
+                                .padding(horizontal = 6.dp, vertical = 2.dp)
+                        )
+                    }
+                }
                 Text(
                     item.symbol,
                     style = MaterialTheme.typography.bodySmall,

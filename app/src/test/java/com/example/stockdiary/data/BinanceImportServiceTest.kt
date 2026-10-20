@@ -4,11 +4,11 @@ import com.example.stockdiary.data.repository.AssetRepository
 import com.example.stockdiary.data.importer.BinanceImportService
 import com.example.stockdiary.data.importer.estimatedValueCny
 import com.example.stockdiary.data.importer.filterDustByValue
-import com.example.stockdiary.data.importer.isStablecoin
 import com.example.stockdiary.data.importer.priceKeyFor
 import com.example.stockdiary.data.importer.referencePriceForImport
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
+import com.example.stockdiary.network.BinanceAPI
 import com.example.stockdiary.network.BinanceBalance
 import io.mockk.coEvery
 import io.mockk.coVerify
@@ -17,6 +17,7 @@ import io.mockk.slot
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertFalse
 import org.junit.Test
 
 /**
@@ -274,8 +275,6 @@ class BinanceImportServiceTest {
         assertEquals(null, priceKeyFor("usdc"))
         assertEquals("BTCUSDT", priceKeyFor("BTC"))
         assertEquals("SOLUSDT", priceKeyFor("sol"))
-        assertTrue(isStablecoin("busd"))
-        assertTrue(!isStablecoin("BTC"))
     }
 
     // ---------- 稳定币理财壳（LDUSDT 等）口径一致 ----------
@@ -289,9 +288,9 @@ class BinanceImportServiceTest {
 
     @Test
     fun 稳定币理财壳_LDUSDT_导入参考价按1美元计() {
-        // 修复前：referencePriceForImport 仅判 isStablecoin，LDUSDT 不在集合里 → 返回 null
-        // → 落库 currentPrice 留空 → 市值恒为 0（用户看到的「USDT 价格默认为 0」）。
-        // 修复后：查价键为 null 即按定义价 1.0 美元计，与预览 estimatedValueCny 同口径。
+        // 查价键为 null 即按定义价 1.0 美元计（priceKeyFor 统一判定，不再单独判稳定币集合），
+        // 与预览 estimatedValueCny 同口径——否则落库 currentPrice 留空 → 市值恒 0
+        // （用户看到的「USDT 价格默认为 0」）。
         assertEquals(1.0, referencePriceForImport("LDUSDT", emptyMap())!!, 1e-9)
         assertEquals(1.0, referencePriceForImport("ldusdc", emptyMap())!!, 1e-9)
     }
@@ -374,7 +373,7 @@ class BinanceImportServiceTest {
     }
 
     @Test
-    fun LD持仓落库底层交易对并按底层价预填() = runBlocking {
+    fun LD持仓落库原始LD代码_按底层价预填() = runBlocking {
         val captured = slot<List<Asset>>()
         coEvery { repo.insertAssets(capture(captured)) } returns Unit
 
@@ -382,16 +381,65 @@ class BinanceImportServiceTest {
             balances = listOf(balance("LDBNB", free = 2.0)),
             existingAssets = emptyList()
         )
-        // 键是底层交易对 BNBUSDT（与拉取阶段 priceKeyFor 生成的请求列表一致）
+        // 取价键仍是底层交易对 BNBUSDT（与拉取阶段 priceKeyFor 生成的请求列表一致），
+        // 但落库 symbol 用原始 LD 代码，避免和现货 BNB 撞去重键（见 P1）
         service.commit(preview, account = "币安", prices = mapOf("BNBUSDT" to 600.0))
 
         val asset = captured.captured.single()
-        // 落库 symbol 必须是底层交易对 BNBUSDT（不是盲加 USDT 的 LDBNBUSDT，
-        // 币安无此交易对，否则之后行情同步永远 400）；name 仍保留原始 LD 代码
-        assertEquals("BNBUSDT", asset.symbol)
+        // 落库 symbol 是原始 LD 代码 LDBNB（不是底层交易对 BNBUSDT，否则与现货撞键被合并）；
+        // name 也保留原始 LD 代码
+        assertEquals("LDBNB", asset.symbol)
         assertEquals("LDBNB", asset.name)
         assertEquals(600.0, asset.currentPrice!!, 1e-9)
         assertEquals(1200.0, asset.totalValue, 1e-9)
+    }
+
+    @Test
+    fun LD与现货不撞去重键_各自独立落库() = runBlocking {
+        // P1 修复：LD 理财壳（LDBNB）落库用原始代码 LDBNB，而不是底层交易对 BNBUSDT，
+        // 否则会和现货 BNB（symbol=BNBUSDT）撞同一个去重键、被 SnapshotAlignment 合并成一行
+        val preview = service.buildPreview(
+            balances = listOf(balance("LDBNB", free = 2.0), balance("BNB", free = 1.0)),
+            existingAssets = emptyList()
+        )
+        assertEquals(2, preview.items.size)
+        val symbols = preview.items.map { it.symbol }.toSet()
+        assertTrue("LD 与现货必须分属不同 symbol", symbols.contains("LDBNB") && symbols.contains("BNBUSDT"))
+    }
+
+    @Test
+    fun 白名单外稳定币_PYUSD_按1美元估_不再漏兜底() {
+        // P2 修复：BINANCE_STABLECOINS 增补 PYUSD 等，查价键为 null → 按定义价 1.0 计，
+        // 否则退化成裸码 PYUSD 去查价 → 查不到 → 市值显 0 / 价格待更新
+        assertEquals(1.0, referencePriceForImport("PYUSD", emptyMap())!!, 1e-9)
+        assertEquals(1.0, referencePriceForImport("pyusd", emptyMap())!!, 1e-9)
+        // 100 PYUSD × 1.0 × 7.25(USD 汇率) = 725 元
+        assertEquals(725.0, estimatedValueCny("PYUSD", 100.0) { null }!!, 1e-6)
+    }
+
+    @Test
+    fun 命名规律兜底_白名单外USD稳定币按1美元估() {
+        // Dim3 健壮性：白名单没来得及收的新稳定币（假设 NEWUSD），按「以 USD 收尾」的
+        // 命名规律兜底成 1.0，不再退化成裸码查价 → 查不到 → 市值 0 / 价格待更新
+        assertEquals(1.0, referencePriceForImport("NEWUSD", emptyMap())!!, 1e-9)
+        assertEquals(725.0, estimatedValueCny("NEWUSD", 100.0) { null }!!, 1e-6)
+        // 普通币不命中兜底：仍是查价路径，查不到返回 null（绝不猜成 1.0）
+        assertEquals(null, referencePriceForImport("NEWCOIN", emptyMap()))
+    }
+
+    @Test
+    fun isLikelyStablecoin_白名单与命名规律都识别() {
+        // 白名单命中
+        assertTrue(BinanceAPI.isLikelyStablecoin("USDT"))
+        assertTrue(BinanceAPI.isLikelyStablecoin("PYUSD"))
+        assertTrue(BinanceAPI.isLikelyStablecoin("USDG"))
+        // 命名规律（小写也识别）
+        assertTrue(BinanceAPI.isLikelyStablecoin("newusd"))
+        // 非稳定币不命中：真实现货、理财壳走各自查价路径
+        assertFalse(BinanceAPI.isLikelyStablecoin("BTC"))
+        assertFalse(BinanceAPI.isLikelyStablecoin("NEWCOIN"))
+        assertFalse(BinanceAPI.isLikelyStablecoin("LDBNB"))
+        assertFalse(BinanceAPI.isLikelyStablecoin("LDO"))
     }
 
     @Test

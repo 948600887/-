@@ -126,4 +126,18 @@ class BinanceSymbolMappingTest {
         // 剥完是稳定币 → 没有交易对可查
         assertEquals(null, priceKeyFor("LDUSDT"))
     }
+
+    /**
+     * P2 修复：非 USDT 报价的交易对（ADABTC / ETHBTC）必须归一成基础资产的 USDT 对，
+     * 否则 getCryptoPrice 把「以报价币计」的 lastPrice 当美元，市值被错算。
+     * toUsdtPair 只做计价归一，不动 cryptoTradingPairFor 的「原样用」语义（后者有单独测试钉住）。
+     */
+    @Test
+    fun `toUsdtPair_非USDT报价对归一为USDT对`() {
+        assertEquals("ADAUSDT", BinanceAPI.toUsdtPair("ADABTC"))
+        assertEquals("ETHUSDT", BinanceAPI.toUsdtPair("ETHBTC"))
+        assertEquals("BNBUSDT", BinanceAPI.toUsdtPair("BNBBTC"))
+        assertEquals("BTCUSDT", BinanceAPI.toUsdtPair("BTCUSDT"))   // 已是对，原样返回
+        assertEquals("BTCUSDT", BinanceAPI.toUsdtPair("BTC"))        // 裸资产补 USDT
+    }
 }

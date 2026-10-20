@@ -15,6 +15,8 @@ import com.example.stockdiary.network.BinanceAccountAPI
 import com.example.stockdiary.utils.AppLogger
 import com.example.stockdiary.utils.ExchangeRateManager
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -144,16 +146,21 @@ class BinanceImportViewModel(
             // 拉到了再存密钥：见方法注释
             credentialsManager.save(current.apiKey, current.apiSecret)
 
-            // 下面按人民币市值过滤零碎，走 estimatedValueCny → USD 汇率折算，
-            // 先确保汇率新鲜。TTL 6 小时兜底，通常不会真的发请求；
-            // 刷新失败也无所谓——沿用当前汇率，绝不影响导入本身
-            ExchangeRateManager.refresh()
-
             // 批量取公开价，用于按人民币市值过滤零碎。
             // 交易对列表从余额生成（稳定币无需查价）；取价失败降级为空 map
             // → priceOf 全 null → 一个都滤不掉、全量导入，绝不阻断导入
             val pairs = balances.mapNotNull { priceKeyFor(it.asset) }.distinct()
-            val priceMap = BinanceAccountAPI.getPrices(pairs)
+
+            // 汇率刷新（estimatedValueCny → USD 汇率折算，先确保汇率新鲜）与批量取价
+            // 是两条互不依赖的网络请求，并发执行省掉一次串行往返。
+            // 汇率刷新失败也无所谓（ExchangeRateManager.refresh 内部已吞异常、沿用当前汇率，
+            // 返回 false 而非抛），绝不影响导入本身，故无需 try/catch。
+            val priceMap = coroutineScope {
+                val refreshDeferred = async(Dispatchers.IO) { ExchangeRateManager.refresh() }
+                val pricesDeferred = async(Dispatchers.IO) { BinanceAccountAPI.getPrices(pairs) }
+                refreshDeferred.await()
+                pricesDeferred.await()
+            }
             val priceOf: (String) -> Double? = { priceMap[it] }
 
             // 按市值过滤零碎（阈值用户可设，默认 ¥10）；估不出价的一律保留

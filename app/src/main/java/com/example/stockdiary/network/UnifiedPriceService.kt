@@ -302,13 +302,16 @@ object UnifiedPriceService {
             pair = BinanceAPI.cryptoTradingPairFor(code)
         }
         // 稳定币锚定 1 美元，币安上没有 XXXUSDT 自我交易对，查价必然空——直接按 1.0 计
-        if (pair == null) {
+        // （pair 为 null 即稳定币）。非 USDT 报价的交易对（ADABTC / ETHBTC）其 lastPrice
+        // 是「以报价币计」，不能直接当美元，统一转成基础资产的 USDT 对按美元估值（见 P2）。
+        val pricedPair = pair?.let { BinanceAPI.toUsdtPair(it) }
+        if (pricedPair == null) {
             AppLogger.d("稳定币 $code 按 1.0 美元计，跳过查价", TAG)
             return@withContext Result.success(
                 CryptoData(code = code.uppercase().trim(), name = code.uppercase().trim(), price = 1.0, change = null, changePercent = null)
             )
         }
-        val url = "${APIEndpoints.Binance.BASE_URL}/ticker/24hr?symbol=$pair"
+        val url = "${APIEndpoints.Binance.BASE_URL}/ticker/24hr?symbol=$pricedPair"
 
         // 主机级熔断闸门：币安连续网络级失败达阈值后，冷却期内直接短路、不发请求。
         // 主机压根连不上时，逐个标的各烧最多 20s 连接超时纯属浪费，且会计入
@@ -350,7 +353,7 @@ object UnifiedPriceService {
                     return@withContext Result.failure(Exception("响应格式错误"))
                 }
 
-                // 注意传的是原 code（如 LDBNBUSDT）而不是底层交易对：落库 key 必须是
+                // 注意传的是原 code（如 LDBNB）而不是底层交易对：落库 key 必须是
                 // 原 symbol，价格才是底层币 1:1 的市价——不能把资产名/代码改成 BNBUSDT
                 val cryptoData = parseBinanceCrypto(code, body)
 

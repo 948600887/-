@@ -78,6 +78,10 @@ class StockDiaryApplication : Application() {
             // 一次性把纯数字形态的场外基金（004502）归一成 fund_ 形态（fund_004502）：
             // 导入链路一律拼 fund_ 前缀，两种形态并存会让同一只基金被判成两只资产
             repairOtcSymbolForms()
+            // 一次性把历史里形态不规范的老三板 symbol（sh400030 / 400030）归一成
+            // bj400xxx：符号形态不统一会让同一只退市股被判成两条、分红/交易流水按
+            // symbol 关联对不上，归一后与 normalizeSymbol 规范形态对齐
+            repairDelistedSymbolForms()
             // 崩溃日志的磁盘裁剪挪到启动阶段：崩溃现场多一次目录遍历与排序，
             // 在 OOM/StackOverflow 时只会火上浇油。
             GlobalExceptionHandler.pruneCrashFiles()
@@ -142,6 +146,23 @@ class StockDiaryApplication : Application() {
             throw e
         } catch (e: Exception) {
             AppLogger.e("修复场外基金 symbol 形态失败: ${e.message}", e, "StockDiaryApplication")
+        }
+    }
+
+    /**
+     * 一次性把历史里形态不规范的老三板 symbol 归一成 `bj400xxx`。
+     *
+     * 见 [com.example.stockdiary.data.repository.AssetRepository.repairDelistedSymbolForms]：
+     * 同样的 SharedPreferences 守卫 + 碰撞跳过 + 失败可重试的降级策略，
+     * 绝不因为修复失败而拖垮启动。
+     */
+    private suspend fun repairDelistedSymbolForms() {
+        try {
+            container.assetRepository.repairDelistedSymbolForms()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            AppLogger.e("修复老三板 symbol 形态失败: ${e.message}", e, "StockDiaryApplication")
         }
     }
 

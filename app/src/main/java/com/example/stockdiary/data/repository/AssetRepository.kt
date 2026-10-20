@@ -277,7 +277,83 @@ class AssetRepository private constructor(
         prefs.edit().putBoolean(KEY_OTC_SYMBOL_REPAIR_DONE, true).apply()
         return OtcRepairSummary(updated = plan.updates.size, skipped = plan.skipped.size, alreadyDone = false)
     }
-    
+
+    /**
+     * 一次性修复「历史库里形态不规范的老三板（退市股）symbol」：
+     * 把 `sh400030` / 裸 `400030` 统一归一成 `bj400xxx`。
+     *
+     * ## 背景
+     *
+     * 老三板代码段 400xxx / 420xxx 在同步链路被 [com.example.stockdiary.utils.StockCodeManager.isDelistedForSync]
+     * 主动跳过（有意设计），但历史数据里可能存在形态不规范的退市 symbol（带 `sh` 前缀、
+     * 或裸纯数字）。这些形态 `isDelistedForSync` 能正确识别并跳过，同步不会炸；但 symbol
+     * 形态不统一会造成快照对齐把同一只判成两只、持仓页市场分组错乱、分红/交易流水按
+     * symbol 关联对不上等隐患。这里把它们归一成 `bj400xxx`，与 [repairOtcSymbolForms]
+     * 同源不同标的（标的是老三板退市股而非场外基金）。
+     *
+     * ## 幂等 & 零数据丢失
+     *
+     * - SharedPreferences 守卫保证每个安装只跑一次；即使守卫失效重复调用，
+     *   [computeDelistedSymbolRepairs] 本身是幂等纯函数，已修过的库 updates 为空。
+     * - 只改 symbol 字段；改的同时把 dividend / transactions 里的同名记录一起改过去，
+     *   否则分红与交易流水会因为 symbol 对不上而整段失联。
+     * - 碰撞的条目整体跳过（记 AppLogger.w），绝不覆盖、不丢数据。
+     *
+     * @return [DelistedRepairSummary]：实际改了几条、跳了几条、是否因守卫而跳过
+     */
+    suspend fun repairDelistedSymbolForms(): DelistedRepairSummary {
+        val prefs = context.getSharedPreferences(REPAIR_PREFS, Context.MODE_PRIVATE)
+        if (prefs.getBoolean(KEY_DELISTED_SYMBOL_REPAIR_DONE, false)) {
+            AppLogger.d("老三板 symbol 形态修复已执行过，跳过", "AssetRepository")
+            return DelistedRepairSummary(updated = 0, skipped = 0, alreadyDone = true)
+        }
+
+        // 只查股票与基金：老三板是 STOCK；FUND 也查以防类型错配
+        val assets = assetDao.getAssetsByTypes(listOf(AssetType.STOCK, AssetType.FUND))
+        val plan = computeDelistedSymbolRepairs(assets)
+
+        if (plan.updates.isEmpty()) {
+            AppLogger.i("老三板 symbol 形态修复：无需修复（库中无形态不规范的老三板 symbol）", "AssetRepository")
+            prefs.edit().putBoolean(KEY_DELISTED_SYMBOL_REPAIR_DONE, true).apply()
+            return DelistedRepairSummary(updated = 0, skipped = plan.skipped.size, alreadyDone = false)
+        }
+
+        val byId = assets.associateBy { it.id }
+        val db = StockDatabase.getInstance(context)
+        try {
+            db.withTransaction {
+                for ((id, newSymbol) in plan.updates) {
+                    val asset = byId[id] ?: continue
+                    val oldSymbol = asset.symbol ?: continue
+                    assetDao.updateAsset(asset.copy(symbol = newSymbol))
+                    // 分红与交易流水按 symbol 关联，必须跟着改名，否则整段失联
+                    db.dividendDao().renameSymbol(oldSymbol, newSymbol)
+                    db.transactionDao().renameSymbol(oldSymbol, newSymbol)
+                }
+            }
+            // 碰撞跳过的记警告：不覆盖、不丢数据，留给用户手工处理
+            plan.skipped.forEach { id ->
+                AppLogger.w(
+                    "老三板 symbol 形态修复跳过（规范形态已存在，不覆盖）：${byId[id]?.symbol}",
+                    "AssetRepository"
+                )
+            }
+            AppLogger.i(
+                "老三板 symbol 形态修复完成：改 ${plan.updates.size} 条，跳过 ${plan.skipped.size} 条",
+                "AssetRepository"
+            )
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            AppLogger.e("老三板 symbol 形态修复失败: ${e.message}", e, "AssetRepository")
+            // 失败不标记已完成：下次启动可重试，避免脏数据永久卡在守卫外
+            return DelistedRepairSummary(updated = 0, skipped = plan.skipped.size, alreadyDone = false)
+        }
+
+        prefs.edit().putBoolean(KEY_DELISTED_SYMBOL_REPAIR_DONE, true).apply()
+        return DelistedRepairSummary(updated = plan.updates.size, skipped = plan.skipped.size, alreadyDone = false)
+    }
+
     /**
      * 创建快照。如果指定日期已存在快照，则先删除旧快照再插入新快照，
      * 确保同一天只有一条记录，避免图表上出现多个重叠点。
@@ -486,6 +562,9 @@ class AssetRepository private constructor(
 
         /** 标记「场外基金 symbol 形态归一」已执行过的 key，保证每个安装只跑一次 */
         private const val KEY_OTC_SYMBOL_REPAIR_DONE = "otc_symbol_form_repair_done"
+
+        /** 标记「老三板 symbol 形态归一」已执行过的 key，保证每个安装只跑一次 */
+        private const val KEY_DELISTED_SYMBOL_REPAIR_DONE = "delisted_symbol_repair_done"
 
         fun getInstance(context: Context): AssetRepository {
             return instance ?: synchronized(this) {

@@ -35,8 +35,14 @@ class StockDataManager(
      */
     private val breakers = ConcurrentHashMap<String, SourceCircuitBreaker>()
 
+    /**
+     * 取（或建）该源的熔断器。用 [ConcurrentHashMap.computeIfAbsent] 而非 stdlib `getOrPut`：
+     * getOrPut 非原子（get→defaultValue→putIfAbsent 且返回本地新建实例），冷图 + 并发时
+     * 同一 key 的两个线程可能各持一个 breaker 实例（状态分裂，QA 已确定性实证）。
+     * computeIfAbsent 的 mapping function 在桶锁内至多执行一次，同一 key 全局唯一实例。
+     */
     private fun breakerFor(apiName: String): SourceCircuitBreaker =
-        breakers.getOrPut(apiName) { SourceCircuitBreaker() }
+        breakers.computeIfAbsent(apiName) { SourceCircuitBreaker() }
 
     /**
      * 价格是否可用于"写缓存 + 认定成功"。

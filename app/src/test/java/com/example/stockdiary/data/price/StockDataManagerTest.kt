@@ -3,16 +3,23 @@ package com.example.stockdiary.data.price
 import android.content.Context
 import com.example.stockdiary.common.Result
 import com.example.stockdiary.network.EastmoneySkillApi
+import com.example.stockdiary.network.NetworkRetryHelper
 import com.example.stockdiary.network.SinaStockAPI
 import com.example.stockdiary.network.TencentStockAPI
+import com.example.stockdiary.network.model.StockData
+import io.mockk.coAnswers
 import io.mockk.coEvery
+import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.mockkObject
 import io.mockk.unmockkAll
 import java.io.File
 import java.io.IOException
+import java.net.SocketTimeoutException
 import kotlinx.coroutines.runBlocking
+import okhttp3.Call
+import okhttp3.OkHttpClient
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -49,6 +56,8 @@ class StockDataManagerTest {
     @After
     fun tearDown() {
         EastmoneySkillApi.apiKey = originalKey
+        SinaStockAPI.resetHttpClientForTesting()
+        SinaStockAPI.invalidateCache()
         unmockkAll()
     }
 
@@ -134,6 +143,38 @@ class StockDataManagerTest {
         }
 
         // 累计 5 次源级失败 → 熔禁
+        assertEquals(SourcePhase.OPEN, manager.sourcePhaseForTesting(ApiManager.API_SINA))
+    }
+
+    /**
+     * 回归（QA 缺陷见证的工程师侧对应）：新浪无缓存 + **网络超时**，走**真实** SinaStockAPI 路径
+     * （mock OkHttp 层抛 SocketTimeoutException，不 mock getStockData/getRealtimeData——内部 sink
+     * 转换必须真实执行）→ 透出源级异常 → 累计 5 次熔禁。
+     *
+     * 这是 ③ 主体测试（mock 在 getStockData 接缝）覆盖不到的点：那绕过了吞异常的批处理代码。
+     * 用 NetworkRetryHelper 旁路跳过重试延迟，聚焦「sink 透出 → 分类 → 熔禁」链路本身。
+     */
+    @Test
+    fun `回归_新浪无缓存网络超时_真实Sink路径_5次熔禁`() = runBlocking {
+        mockkObject(NetworkRetryHelper)
+        coEvery { NetworkRetryHelper.executeWithRetry<StockData>(any(), any(), any(), any(), any()) } coAnswers {
+            @Suppress("UNCHECKED_CAST")
+            (args[4] as suspend () -> Result<StockData>)()
+        }
+
+        val call = mockk<Call>()
+        every { call.execute() } throws SocketTimeoutException("timeout")
+        val httpClient = mockk<OkHttpClient>()
+        every { httpClient.newCall(any()) } returns call
+        SinaStockAPI.httpClientForTesting = httpClient
+        SinaStockAPI.invalidateCache()
+        mockkObject(TencentStockAPI)
+        coEvery { TencentStockAPI.getStockData(any()) } returns Result.failure(IOException("腾讯也不通"))
+
+        repeat(5) {
+            manager.getStockData("sh600000", forceRefresh = true, networkAvailable = true, preferredApi = ApiManager.API_SINA)
+        }
+
         assertEquals(SourcePhase.OPEN, manager.sourcePhaseForTesting(ApiManager.API_SINA))
     }
 }

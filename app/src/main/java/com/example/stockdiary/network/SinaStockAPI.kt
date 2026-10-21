@@ -45,6 +45,20 @@ object SinaStockAPI : StockAPI {
             it.proceed(request)
         }
         .build()
+
+    /**
+     * 测试覆写：注入 mock OkHttpClient，在单测里驱动**真实**的批处理 / sink 转换逻辑
+     * （不碰网络、不让 [getRealtimeData] 被 mock 掉）。null = 用上面的真实 [client]。
+     * 见 [resetHttpClientForTesting]。
+     */
+    internal var httpClientForTesting: OkHttpClient? = null
+
+    private val activeClient: OkHttpClient get() = httpClientForTesting ?: client
+
+    /** 测试专用复位：还原真实 OkHttpClient */
+    internal fun resetHttpClientForTesting() {
+        httpClientForTesting = null
+    }
     
     fun initCache(context: Context) {
         PriceCacheManager.init(context)
@@ -112,7 +126,14 @@ object SinaStockAPI : StockAPI {
                 val batches = needRequest.chunked(batchSize)
                 val allResults = mutableMapOf<String, SinaStockData>()
                 allResults.putAll(cachedResults)
-                
+
+                // 批间跟踪「首个批级异常」：批内 catch 历来把任何异常（超时/连接失败/403限流/空body）
+                // 都吞成「部分缓存结果」，allResults 空时又被统一扔成符号级文案「未获取到股票数据」，
+                // 导致上层源级熔断器把真·源级故障误判成「代码不支持」而永不熔禁（饿死）。
+                // 这里把原始异常记下，空结果时优先透出它（见下方 allResults.isEmpty 分支）。
+                // mapIndexed 是串行的，捕获改写局部 var 无线程竞争。
+                var lastBatchException: Exception? = null
+
                 val batchResults = batches.mapIndexed { index, batch ->
                     try {
                         val batchKey = batch.sorted().joinToString(",")
@@ -134,7 +155,7 @@ object SinaStockAPI : StockAPI {
                                 .url(url)
                                 .build()
                             
-                            val response = client.newCall(httpRequest).execute()
+                            val response = activeClient.newCall(httpRequest).execute()
                             response.use {
                                 if (!it.isSuccessful) {
                                     val errorMsg = "API响应错误: ${it.code}"
@@ -180,6 +201,7 @@ object SinaStockAPI : StockAPI {
                         } catch (e: Exception) {
                             AppLogger.e("批次请求失败: ${e.message}", e, TAG)
                             request.complete(Result.failure(e))
+                            if (lastBatchException == null) lastBatchException = e
                             val partialResult = mutableMapOf<String, SinaStockData>()
                             batch.forEach { code ->
                                 getCachedData(code)?.let { partialResult[code] = it }
@@ -195,6 +217,7 @@ object SinaStockAPI : StockAPI {
                         throw e
                     } catch (e: Exception) {
                         AppLogger.e("批次请求异常: ${e.message}", e, TAG)
+                        if (lastBatchException == null) lastBatchException = e
                         val partialResult = mutableMapOf<String, SinaStockData>()
                         batch.forEach { code ->
                             getCachedData(code)?.let { partialResult[code] = it }
@@ -211,7 +234,17 @@ object SinaStockAPI : StockAPI {
                 }
                 
                 if (allResults.isEmpty()) {
-                    AppLogger.e("未获取到股票数据", tag = TAG)
+                    val batchError = lastBatchException
+                    if (batchError != null) {
+                        // 曾有批级异常（超时 / 连接失败 / 403 限流 / 空 body）：透出原始异常，
+                        // 让上层源级熔断器与 NetworkRetryHelper 拿到真实原因，而不是被吞成
+                        // 「未获取到股票数据」这种符号级文案——那会把真·源级故障误判成「代码不支持」，
+                        // 导致新浪熔断器被饿死（每个标的仍先白烧一轮新浪才回落腾讯）。
+                        AppLogger.e("所有批次失败，透出原始异常: ${batchError.message}", batchError, TAG)
+                        return@withContext Result.failure(batchError)
+                    }
+                    // 所有批次都正常应答、但没有任何代码命中：这才是真·符号级失败
+                    AppLogger.e("未获取到股票数据（所有批次正常应答但无代码命中）", tag = TAG)
                     return@withContext Result.failure(IOException("未获取到股票数据，请检查股票代码"))
                 }
                 

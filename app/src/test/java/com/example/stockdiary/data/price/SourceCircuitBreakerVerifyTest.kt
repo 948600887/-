@@ -16,6 +16,8 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.runBlocking
+import okhttp3.Call
+import okhttp3.OkHttpClient
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -28,20 +30,15 @@ import org.junit.Test
  * QA 独立复验（fresh eyes）：f6ad923 源级熔断的边界补测。
  *
  * 工程师已测：SourceCircuitBreaker 三态 10 条 + StockDataManager 集成 6 条（均真实）。
- * 以下四条补工程师没覆盖的点，其中两条是**缺陷见证**（witness）：
+ * 以下四条补工程师没覆盖的点：
  *
  *  1. `ConcurrentHashMap.getOrPut` 竞态实证（确定性交错，非概率重试）：
- *     StockDataManager.breakerFor 用 getOrPut 建每源 breaker，stdlib 的 getOrPut
- *     非原子（get→defaultValue→putIfAbsent 且返回本地新建实例）——冷图 + 3 并发时
- *     可能出现「两个线程各持一个 breaker 实例」的状态分裂。
+ *     记录 stdlib getOrPut 非原子——工程师已据此把 breakerFor 改成 computeIfAbsent。
  *  2. 闭环：单波 3 次源级失败（=同步并发度）不熔禁——③ 修复的核心算术。
- *  3+4. **新浪 sink 消息碰撞见证**：SinaStockAPI.getRealtimeData 把批内任何异常
- *     （超时/连接失败/403 限流/空 body）都吞成「部分缓存结果」，无缓存时整体落空 →
- *     :213-215 统一抛出「未获取到股票数据，请检查股票代码」；单符号路径
- *     （getStockData :53-64）原样透出该消息。isSymbolLevelFailure 按文本命中 →
- *     判为符号级不计源级 → **新浪真实故障（无缓存场景）熔断器被饿死**。
- *     腾讯的同名消息只在「源正常应答且无此代码」时抛（TencentStockAPI:81-83），不受影响。
- *     这两条用例钉的是**当前（缺陷）行为**；工程师修复 sink 后应改为断言源级累计并熔禁。
+ *  3+4. **新浪 sink 消息碰撞**（原为缺陷见证，修复后已反转为回归）：
+ *     旧 SinaStockAPI.getRealtimeData 把批内任何异常吞成「未获取到股票数据」符号级文案，
+ *     饿死源级熔断器。修复（透出原始异常）后，这两条改走**真实** SinaStockAPI 路径
+ *     （mock OkHttp 层抛源级异常、不 mock getRealtimeData），断言透出源级异常 + 累计 5 次熔禁。
  */
 class SourceCircuitBreakerVerifyTest {
 
@@ -61,7 +58,19 @@ class SourceCircuitBreakerVerifyTest {
     @After
     fun tearDown() {
         EastmoneySkillApi.apiKey = originalKey
+        SinaStockAPI.resetHttpClientForTesting()
+        SinaStockAPI.invalidateCache()
         unmockkAll()
+    }
+
+    /** 让真实 SinaStockAPI 的 OkHttp 层在 execute() 时抛 throwable（驱动真实 sink 转换，不 mock getRealtimeData） */
+    private fun stubSinaHttpFailure(throwable: Throwable) {
+        val call = mockk<Call>()
+        every { call.execute() } throws throwable
+        val httpClient = mockk<OkHttpClient>()
+        every { httpClient.newCall(any()) } returns call
+        SinaStockAPI.httpClientForTesting = httpClient
+        SinaStockAPI.invalidateCache() // 清内存缓存，确保走「无缓存」真实路径
     }
 
     /**
@@ -130,43 +139,38 @@ class SourceCircuitBreakerVerifyTest {
     }
 
     /**
-     * 缺陷见证 1（分类层）：新浪 sink 消息当前被判为符号级。
-     * 该消息在无缓存场景下同时是「网络超时/连接失败/403 限流/空 body」的归宿
-     * （SinaStockAPI.kt:180-190 吞异常 → :213-215 统一文案）——真故障被误判。
+     * （原缺陷见证 1，修复后反转）新浪 sink 现在透出原始异常，网络故障不再被判符号级。
+     * 走**真实** SinaStockAPI.getStockData 路径（mock OkHttp 层抛源级异常，不 mock getRealtimeData），
+     * 断言透出的异常是源级（isSymbolLevelFailure=false）且不再是 sink 符号级文案。
      */
     @Test
-    fun `缺陷见证_新浪sink消息当前被判为符号级`() {
-        // 当前实现：文本命中即符号级
-        assertTrue(isSymbolLevelFailure(IOException("未获取到股票数据，请检查股票代码")))
-        //  genuinely 源级的消息不受影响
-        assertFalse(isSymbolLevelFailure(IOException("API请求频率过高，请稍后再试")))
-        assertFalse(isSymbolLevelFailure(IOException("API返回空数据")))
-        assertFalse(isSymbolLevelFailure(IOException("API响应错误: 403")))
+    fun `回归_新浪sink透出原始异常_网络故障不再被判符号级`() = runBlocking {
+        stubSinaHttpFailure(IOException("API请求频率过高，请稍后再试")) // 403 限流：源级、不可重试
+        val failure = SinaStockAPI.getStockData("sh600000").exceptionOrNull() as? Exception
+        assertTrue("真实新浪故障应返回失败", failure != null)
+        assertFalse("透出的应是源级异常，而非符号级 sink 文案", isSymbolLevelFailure(failure!!))
+        assertFalse("不应再出现 sink 符号级文案", failure.message?.contains("未获取到股票数据") ?: false)
     }
 
     /**
-     * 缺陷见证 2（集成层）：模拟「新浪无缓存 + 网络故障」在真实链路上的表现形状
-     * （getStockData 返回 sink 消息）——6 轮过去新浪熔断器仍是 CLOSED：被饿死。
-     * 修复 SinaStockAPI sink（透出原始异常或改用专用异常类型）后，
-     * 本用例应反过来断言「累计 5 次后 OPEN」。
+     * （原缺陷见证 2，修复后反转）新浪无缓存 + 网络故障，熔断器不再被饿死。
+     * 走真实 SinaStockAPI 路径（mock OkHttp 抛源级异常）经 StockDataManager 分类，
+     * 累计 5 次后必须熔禁（OPEN）——修复前会永远 CLOSED。
      */
     @Test
-    fun `缺陷见证_新浪无缓存网络故障_熔断器被饿死`() = runBlocking {
-        mockkObject(SinaStockAPI)
+    fun `回归_新浪无缓存网络故障_熔断器不再饿死_5次熔禁`() = runBlocking {
+        stubSinaHttpFailure(IOException("API请求频率过高，请稍后再试"))
         mockkObject(TencentStockAPI)
-        // 真实链路形状：新浪批内异常被吞 → allResults 空 → sink 消息（见用例注释）
-        coEvery { SinaStockAPI.getStockData(any()) } returns
-            Result.failure(IOException("未获取到股票数据，请检查股票代码"))
         coEvery { TencentStockAPI.getStockData(any()) } returns
-            Result.failure(IOException("未获取到股票数据，请检查股票代码"))
+            Result.failure(IOException("腾讯也不通"))
 
-        repeat(6) {
+        repeat(5) {
             manager.getStockData("sh600000", forceRefresh = true, networkAvailable = true, preferredApi = ApiManager.API_SINA)
         }
 
         assertEquals(
-            "缺陷见证：新浪真实故障（无缓存）6 轮仍未熔禁——熔断器被 sink 消息饿死",
-            SourcePhase.CLOSED,
+            "修复后：新浪真实故障（无缓存）累计 5 次必须熔禁，不再被 sink 消息饿死",
+            SourcePhase.OPEN,
             manager.sourcePhaseForTesting(ApiManager.API_SINA)
         )
     }

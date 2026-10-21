@@ -50,6 +50,15 @@ object EastmoneySkillApi {
     /** 退避窗口内返回 true —— 调用方应短路、不再向该主机发请求 */
     fun isSkillHostBlocked(): Boolean = System.currentTimeMillis() < skillHostBlockedUntil
 
+    /**
+     * 是否已配置 API Key。
+     *
+     * 供 [com.example.stockdiary.data.price.StockDataManager] 在组候选源时判断：未配置则把妙想
+     * 移出候选链，避免每次刷新都白试一遍、还计入源级禁用计数（[executeApi] 对空 Key 直接返回
+     * 「未配置东方财富 Skill API Key」）。用户**显式**选中妙想时不静默移除，由调用方另行处理。
+     */
+    fun isApiKeyConfigured(): Boolean = apiKey.isNotEmpty()
+
     /** 标记主机进入退避：置退避窗口结束时间戳 */
     private fun markSkillHostBlocked() {
         skillHostBlockedUntil = System.currentTimeMillis() + SKILL_BACKOFF_MS

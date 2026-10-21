@@ -80,6 +80,30 @@ fun DashboardConfigSheet(
                 checked = preferences.showDistribution,
                 onCheckedChange = { onPreferencesChange(preferences.copy(showDistribution = it)) }
             )
+            SwitchPreference(
+                title = "显示资产增值",
+                checked = preferences.showAssetGrowth,
+                onCheckedChange = { onPreferencesChange(preferences.copy(showAssetGrowth = it)) }
+            )
+
+            HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+
+            SectionTitle("收入组件")
+            SwitchPreference(
+                title = "显示收息进度",
+                checked = preferences.showDividendProgress,
+                onCheckedChange = { onPreferencesChange(preferences.copy(showDividendProgress = it)) }
+            )
+            SwitchPreference(
+                title = "显示下一笔分红",
+                checked = preferences.showNextPayout,
+                onCheckedChange = { onPreferencesChange(preferences.copy(showNextPayout = it)) }
+            )
+            SwitchPreference(
+                title = "显示月度现金流",
+                checked = preferences.showMonthlyCashFlow,
+                onCheckedChange = { onPreferencesChange(preferences.copy(showMonthlyCashFlow = it)) }
+            )
 
             HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
 

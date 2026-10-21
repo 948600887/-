@@ -9,6 +9,20 @@ data class DashboardPreferences(
     val showNetAssets: Boolean = true,
     val showProfit: Boolean = true,
     val showDistribution: Boolean = true,
+    /**
+     * 是否显示「资产增值」卡片（本月 / 今年净资产增加额）。
+     * 默认 true：这是后加的开关，老用户升级后不能凭空少一张卡。
+     */
+    val showAssetGrowth: Boolean = true,
+    /**
+     * 是否显示「收息进度」卡片（今年已收 / 今年预计）。
+     * 默认 true：同上，老用户升级后这张卡还在。
+     */
+    val showDividendProgress: Boolean = true,
+    /** 是否显示「下一笔分红」卡片。默认 true。仅当有下一笔待派息时才会真正出场 */
+    val showNextPayout: Boolean = true,
+    /** 是否显示「月度现金流」卡片。默认 true */
+    val showMonthlyCashFlow: Boolean = true,
     val showBankDeposits: Boolean = true,
     val showStocks: Boolean = true,
     val showFunds: Boolean = true,
@@ -64,6 +78,10 @@ enum class DashboardComponent(val key: String, val title: String) {
      */
     PROFIT("profit", "收入预估"),
     DISTRIBUTION("distribution", "资产分布"),
+    ASSET_GROWTH("asset_growth", "资产增值"),
+    DIVIDEND_PROGRESS("dividend_progress", "收息进度"),
+    NEXT_PAYOUT("next_payout", "下一笔分红"),
+    MONTHLY_CASH_FLOW("monthly_cash_flow", "月度现金流"),
     BANK_DEPOSITS("bank_deposits", "银行存款"),
     STOCKS("stocks", "股票"),
     FUNDS("funds", "基金"),
@@ -82,6 +100,10 @@ class DashboardPreferencesManager(context: Context) {
         private const val KEY_SHOW_NET_ASSETS = "show_net_assets"
         private const val KEY_SHOW_PROFIT = "show_profit"
         private const val KEY_SHOW_DISTRIBUTION = "show_distribution"
+        private const val KEY_SHOW_ASSET_GROWTH = "show_asset_growth"
+        private const val KEY_SHOW_DIVIDEND_PROGRESS = "show_dividend_progress"
+        private const val KEY_SHOW_NEXT_PAYOUT = "show_next_payout"
+        private const val KEY_SHOW_MONTHLY_CASH_FLOW = "show_monthly_cash_flow"
         private const val KEY_SHOW_BANK_DEPOSITS = "show_bank_deposits"
         private const val KEY_SHOW_STOCKS = "show_stocks"
         private const val KEY_SHOW_FUNDS = "show_funds"
@@ -131,6 +153,11 @@ class DashboardPreferencesManager(context: Context) {
             showNetAssets = prefs.getBoolean(KEY_SHOW_NET_ASSETS, true),
             showProfit = prefs.getBoolean(KEY_SHOW_PROFIT, true),
             showDistribution = prefs.getBoolean(KEY_SHOW_DISTRIBUTION, true),
+            // 后加的开关，缺省 true：老用户升级后这张卡还在
+            showAssetGrowth = prefs.getBoolean(KEY_SHOW_ASSET_GROWTH, true),
+            showDividendProgress = prefs.getBoolean(KEY_SHOW_DIVIDEND_PROGRESS, true),
+            showNextPayout = prefs.getBoolean(KEY_SHOW_NEXT_PAYOUT, true),
+            showMonthlyCashFlow = prefs.getBoolean(KEY_SHOW_MONTHLY_CASH_FLOW, true),
             showBankDeposits = prefs.getBoolean(KEY_SHOW_BANK_DEPOSITS, true),
             showStocks = prefs.getBoolean(KEY_SHOW_STOCKS, true),
             showFunds = prefs.getBoolean(KEY_SHOW_FUNDS, true),
@@ -155,6 +182,10 @@ class DashboardPreferencesManager(context: Context) {
             putBoolean(KEY_SHOW_NET_ASSETS, preferences.showNetAssets)
             putBoolean(KEY_SHOW_PROFIT, preferences.showProfit)
             putBoolean(KEY_SHOW_DISTRIBUTION, preferences.showDistribution)
+            putBoolean(KEY_SHOW_ASSET_GROWTH, preferences.showAssetGrowth)
+            putBoolean(KEY_SHOW_DIVIDEND_PROGRESS, preferences.showDividendProgress)
+            putBoolean(KEY_SHOW_NEXT_PAYOUT, preferences.showNextPayout)
+            putBoolean(KEY_SHOW_MONTHLY_CASH_FLOW, preferences.showMonthlyCashFlow)
             putBoolean(KEY_SHOW_BANK_DEPOSITS, preferences.showBankDeposits)
             putBoolean(KEY_SHOW_STOCKS, preferences.showStocks)
             putBoolean(KEY_SHOW_FUNDS, preferences.showFunds)
@@ -181,6 +212,10 @@ class DashboardPreferencesManager(context: Context) {
             DashboardComponent.NET_ASSETS -> KEY_SHOW_NET_ASSETS
             DashboardComponent.PROFIT -> KEY_SHOW_PROFIT
             DashboardComponent.DISTRIBUTION -> KEY_SHOW_DISTRIBUTION
+            DashboardComponent.ASSET_GROWTH -> KEY_SHOW_ASSET_GROWTH
+            DashboardComponent.DIVIDEND_PROGRESS -> KEY_SHOW_DIVIDEND_PROGRESS
+            DashboardComponent.NEXT_PAYOUT -> KEY_SHOW_NEXT_PAYOUT
+            DashboardComponent.MONTHLY_CASH_FLOW -> KEY_SHOW_MONTHLY_CASH_FLOW
             DashboardComponent.BANK_DEPOSITS -> KEY_SHOW_BANK_DEPOSITS
             DashboardComponent.STOCKS -> KEY_SHOW_STOCKS
             DashboardComponent.FUNDS -> KEY_SHOW_FUNDS
@@ -196,6 +231,10 @@ class DashboardPreferencesManager(context: Context) {
             DashboardComponent.NET_ASSETS -> KEY_SHOW_NET_ASSETS
             DashboardComponent.PROFIT -> KEY_SHOW_PROFIT
             DashboardComponent.DISTRIBUTION -> KEY_SHOW_DISTRIBUTION
+            DashboardComponent.ASSET_GROWTH -> KEY_SHOW_ASSET_GROWTH
+            DashboardComponent.DIVIDEND_PROGRESS -> KEY_SHOW_DIVIDEND_PROGRESS
+            DashboardComponent.NEXT_PAYOUT -> KEY_SHOW_NEXT_PAYOUT
+            DashboardComponent.MONTHLY_CASH_FLOW -> KEY_SHOW_MONTHLY_CASH_FLOW
             DashboardComponent.BANK_DEPOSITS -> KEY_SHOW_BANK_DEPOSITS
             DashboardComponent.STOCKS -> KEY_SHOW_STOCKS
             DashboardComponent.FUNDS -> KEY_SHOW_FUNDS

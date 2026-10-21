@@ -224,23 +224,31 @@ fun DashboardScreen(
                 }
 
                 // 资产增值：本月 / 今年净资产增加额
-                item {
-                    AssetGrowthCard(growth = growth)
-                }
-
-                // 收息进度：今年已收 / 今年预计（收入这一半的主角，同为自然年口径）
-                item {
-                    DividendProgressCard(progress = dividendProgress)
-                }
-
-                dividendProgress.nextPayout?.let { next ->
+                if (preferences.showAssetGrowth) {
                     item {
-                        NextPayoutCard(next = next)
+                        AssetGrowthCard(growth = growth)
                     }
                 }
 
-                item {
-                    MonthlyCashFlowCard(progress = dividendProgress)
+                // 收息进度：今年已收 / 今年预计（收入这一半的主角，同为自然年口径）
+                if (preferences.showDividendProgress) {
+                    item {
+                        DividendProgressCard(progress = dividendProgress)
+                    }
+                }
+
+                if (preferences.showNextPayout) {
+                    dividendProgress.nextPayout?.let { next ->
+                        item {
+                            NextPayoutCard(next = next)
+                        }
+                    }
+                }
+
+                if (preferences.showMonthlyCashFlow) {
+                    item {
+                        MonthlyCashFlowCard(progress = dividendProgress)
+                    }
                 }
 
                 // 资产分布（分母用可见资产，保证百分比之和为 100%）

@@ -257,8 +257,9 @@ class DividendProgressCalculatorTest {
     }
 
     @Test
-    fun `下一笔显示到账日而不是除息日`() {
-        // 除息日只是「有没有资格」的界点，钱真正到账要晚几天
+    fun `下一笔按除息日显示与倒计时而不是到账日`() {
+        // 收息进度统一按除息日：即便数据源给了发放日（晚 5 天），
+        // 显示的也是除息日、倒计时也按除息日算（与「今年已收/预计」同一把尺子）
         val exDate = today.plusDays(10)
         val payDate = exDate.plusDays(5)
         val assets = listOf(asset("长江电力", "600900", 1000.0))
@@ -271,14 +272,17 @@ class DividendProgressCalculatorTest {
         val progress = DividendProgressCalculator.calculate(assets, records, today)
 
         val next = progress.nextPayout
-        assertEquals(exDate.toString(), next?.date)          // 资格日
-        assertEquals(payDate.toString(), next?.displayDate)   // 界面显示到账日
-        assertEquals(15, next?.daysUntil)                     // 倒计时按到账日算
+        assertEquals(exDate.toString(), next?.date)          // 除息日
+        assertNull(next?.payDate)                             // 不再带推算/透传的到账日
+        assertEquals(exDate.toString(), next?.displayDate)    // 界面显示除息日
+        assertEquals(10, next?.daysUntil)                     // 倒计时按除息日算
     }
 
     @Test
-    fun `推算下一笔时会沿用该标的历史的除息到到账间隔`() {
-        // 历史上除息 → 到账隔了 7 天，推算出的那笔也应该加同样的天数
+    fun `推算下一笔时按推算出的除息日倒计时且不再编造发放日`() {
+        // 历史上除息 → 到账隔了 7 天，但收息进度统一按除息日：
+        // 推算出的那笔不再带 payDate（不给用户一个编造的发放日），
+        // daysUntil 严格等于「今天 → 推算出的除息日」的天数
         val lastEx = today.minusMonths(4)
         val lastPay = lastEx.plusDays(7)
         val assets = listOf(asset("长江电力", "600900", 1000.0))
@@ -291,14 +295,17 @@ class DividendProgressCalculatorTest {
         val progress = DividendProgressCalculator.calculate(assets, records, today)
 
         val next = progress.nextPayout
-        assertNotNull(next?.payDate)
+        assertNotNull(next)
+        assertTrue(next!!.isEstimated)
+        assertNull(next.payDate)                       // 不再沿用历史 ex→pay 间隔推算发放日
+        assertEquals(next.date, next.displayDate)      // 界面显示的就是推算出的除息日
         assertEquals(
-            7,
-            java.time.temporal.ChronoUnit.DAYS.between(
-                java.time.LocalDate.parse(next!!.date),
-                java.time.LocalDate.parse(next.payDate!!)
-            )
+            java.time.temporal.ChronoUnit.DAYS
+                .between(today, java.time.LocalDate.parse(next.date))
+                .toInt(),
+            next.daysUntil
         )
+        assertTrue(next.daysUntil >= 0)
     }
 
     @Test
@@ -327,9 +334,9 @@ class DividendProgressCalculatorTest {
     private val midYear: LocalDate = LocalDate.of(year, 10, 14)
 
     @Test
-    fun `跨月到账的分红归到到账日所在月而不是除息日所在月`() {
-        // 3/28 除息、4/10 到账：钱是 4 月进来的，柱子必须画在 4 月。
-        // 改之前按除息日归月，这笔会画进 3 月 —— 整张节奏图前移、跨月的那笔还画错月份。
+    fun `跨月到账的分红归到除息日所在月而不是到账日所在月`() {
+        // 3/28 除息、4/10 到账：收息进度按除息日，柱子画在 3 月。
+        // （从前按到账日归月画在 4 月，与按除息日统计的分母不同源，会算出「已收 > 预计」）
         val assets = listOf(asset("红利LOF", "sh510880", 1000.0))
         val records = mapOf(
             "sh510880" to listOf(
@@ -341,13 +348,14 @@ class DividendProgressCalculatorTest {
 
         // 每十股 2 元 × 1000 份 ÷ 10 = 200
         assertEquals(200.0, progress.yearReceived, 0.001)
-        assertEquals(0.0, progress.monthly[2].received, 0.001)   // 3 月：空的
-        assertEquals(200.0, progress.monthly[3].received, 0.001) // 4 月：200
+        assertEquals(200.0, progress.monthly[2].received, 0.001) // 3 月：200（除息日所在月）
+        assertEquals(0.0, progress.monthly[3].received, 0.001)   // 4 月：空的
     }
 
     @Test
-    fun `已除息但钱还没到账不算已收而算待到账`() {
-        // 10/04 除息、10/29 到账：今天 10/14 只是「有资格」，钱还没进来
+    fun `已除息即使钱还没到账也算已收`() {
+        // 10/04 除息、10/29 到账：今天 10/14 已过除息日 → 按新口径算已收。
+        // （从前按到账日，这笔算「待到账」；正是跨年那笔只进分子不进分母的同一处错位）
         val assets = listOf(asset("红利LOF", "sh510880", 1000.0))
         val records = mapOf(
             "sh510880" to listOf(
@@ -357,16 +365,17 @@ class DividendProgressCalculatorTest {
 
         val progress = DividendProgressCalculator.calculate(assets, records, midYear)
 
-        assertEquals(0.0, progress.yearReceived, 0.001)           // 还没收到
-        assertEquals(0, progress.receivedCount)
-        assertEquals(0.0, progress.monthly[9].received, 0.001)    // 10 月已到账：0
-        assertEquals(200.0, progress.monthly[9].scheduled, 0.001) // 10 月待到账：200
+        assertEquals(200.0, progress.yearReceived, 0.001)        // 已除息 → 已收
+        assertEquals(1, progress.receivedCount)
+        assertEquals(200.0, progress.monthly[9].received, 0.001) // 10 月已收：200
+        assertEquals(0.0, progress.monthly[9].scheduled, 0.001)  // 10 月待到账：0
+        assertTrue(progress.yearReceived <= progress.yearProjected + 0.001)
     }
 
     @Test
-    fun `年末排定次年初到账的派息仍算下一笔但不画进今年柱图`() {
-        // 12/20 除息、次年 1/10 到账：柱图只有今年 12 个月，这笔不画进今年；
-        // 但它是钱下一次真正进来的日子，必须作为「下一笔」显示（数据源排定的真数据）
+    fun `年末排定的派息仍算下一笔且画进今年12月的柱图`() {
+        // 12/20 除息（次年 1/10 才到账）：按除息日归月 → 画进今年 12 月；
+        // 同时它是下一次除息的日子，必须作为「下一笔」显示（数据源排定的真数据）
         val assets = listOf(asset("红利LOF", "sh510880", 1000.0))
         val records = mapOf(
             "sh510880" to listOf(
@@ -378,10 +387,11 @@ class DividendProgressCalculatorTest {
 
         val next = progress.nextPayout
         assertNotNull(next)
-        assertEquals("$year-12-20", next?.date)               // 资格日
-        assertEquals("${year + 1}-01-10", next?.displayDate)  // 界面显示到账日
+        assertEquals("$year-12-20", next?.date)               // 除息日
+        assertEquals("$year-12-20", next?.displayDate)        // 界面显示的也是除息日
         assertFalse(next?.isEstimated ?: true)                // 排定的，不是推算
-        assertEquals(0.0, progress.monthly[0].scheduled, 0.001) // 今年 1 月柱图：不画
+        assertEquals(0.0, progress.monthly[0].scheduled, 0.001)  // 今年 1 月柱图：不画
+        assertEquals(200.0, progress.monthly[11].scheduled, 0.001) // 今年 12 月柱图：200
     }
 
     @Test
@@ -550,9 +560,12 @@ class DividendProgressCalculatorTest {
 
         // 每十股 2 元 × 1000 份 ÷ 10 = 200
         assertEquals(200.0, progress.yearProjected, 0.001)
+        // 12/20 还没到（今天 10/14）→ 未收，画进 12 月的「待到账」柱
         assertEquals(0.0, progress.yearReceived, 0.001)
         assertEquals(0, progress.receivedCount)
         assertEquals(0.0, progress.ratio, 0.001)
+        assertEquals(200.0, progress.monthly[11].scheduled, 0.001)
+        assertEquals(0.0, progress.monthly[0].received, 0.001)   // 次年 1 月到账 ≠ 今年 1 月
     }
 
     @Test
@@ -575,6 +588,63 @@ class DividendProgressCalculatorTest {
         assertEquals(1.0, progress.ratio, 0.001)
         assertEquals(0.0, progress.remaining, 0.001)
         assertTrue(progress.yearReceived <= progress.yearProjected + 0.001)
+    }
+
+    // ===== 跨年分红不再让「今年已收」反超「今年预计」（核心契约）=====
+    //
+    // 症状：除息在去年、发放日拖到今年的跨年分红，旧口径按发放日 → 只进分子（已收）、
+    // 不进分母（预计按除息日）→ 仪表盘出现「已收 > 预计」并弹「请检查分红数据」。
+    // 新口径分子分母都用除息日：已收集合恒为预计集合的子集。
+
+    @Test
+    fun `去年除息今年发放的跨年分红不计入今年已收且已收不超过预计`() {
+        // 去年 12/20 除息、今年 1/10 发放：这笔按除息日属于**去年**，
+        // 既不计入今年已收、也不画进今年的柱图。
+        // 同标的今年 6/10 还有一笔已宣告 → 预计走**实额分支**（不是 TTM），
+        // 跨年那笔不会漏进分母，于是已收 300 ≤ 预计 300。
+        val assets = listOf(asset("红利LOF", "sh510880", 1000.0))
+        val records = mapOf(
+            "sh510880" to listOf(
+                record("${year - 1}-12-20", 2.0).copy(paymentDate = "$year-01-10"), // 跨年那笔
+                record(dateIn(6, 10), 3.0)                                          // 今年已宣告
+            )
+        )
+
+        val progress = DividendProgressCalculator.calculate(assets, records, midYear)
+
+        // 预计：只有今年除息那笔 3/10 × 1000 = 300（跨年那笔的 200 不在今年）
+        assertEquals(300.0, progress.yearProjected, 0.001)
+        // 已收：6/10 已过 → 300；跨年那笔的 200 不再混进来（旧口径会混 → 500 > 300）
+        assertEquals(300.0, progress.yearReceived, 0.001)
+        assertEquals(1, progress.receivedCount)
+        // 核心契约：分子恒为分母的子集
+        assertTrue(progress.yearReceived <= progress.yearProjected + 0.001)
+        // 柱图：跨年那笔不画进今年任何一个月（尤其不是今年 1 月）
+        assertEquals(0.0, progress.monthly[0].received, 0.001)
+        assertEquals(0.0, progress.monthly[11].received, 0.001)
+        assertEquals(300.0, progress.monthly[5].received, 0.001) // 6 月那笔
+    }
+
+    @Test
+    fun `只有跨年分红时已收为0预计退回TTM也不会超额`() {
+        // 极端情形：标的今年根本没宣告，只有那笔跨年分红。
+        // 旧口径已收 200、预计走 TTM 也是 200（勉强不超额）；但只要 TTM 窗口
+        // 再窄一点就会出现「已收 > 预计」。新口径已收恒为 0。
+        val assets = listOf(asset("红利LOF", "sh510880", 1000.0))
+        val records = mapOf(
+            "sh510880" to listOf(
+                record("${year - 1}-12-20", 2.0).copy(paymentDate = "$year-01-10")
+            )
+        )
+
+        val progress = DividendProgressCalculator.calculate(assets, records, midYear)
+
+        assertEquals(0.0, progress.yearReceived, 0.001)
+        assertEquals(0, progress.receivedCount)
+        // 今年无已宣告 → 退回 TTM：去年 12/20 落在 [去年-10-14, 今年-10-14] 内 → 200
+        assertEquals(200.0, progress.yearProjected, 0.001)
+        assertTrue(progress.yearReceived <= progress.yearProjected + 0.001)
+        assertEquals(0.0, progress.ratio, 0.001)
     }
 
     // ===== 多币种折算（calc-P1-1 回归）=====

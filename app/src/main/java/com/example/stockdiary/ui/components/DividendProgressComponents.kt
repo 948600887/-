@@ -168,8 +168,10 @@ fun NextPayoutCard(
                     style = MaterialTheme.typography.bodySmall,
                     color = AppTheme.colors.onSurfaceVariant
                 )
+                // 收息进度一律按除息日：NextPayout.payDate 恒为 null（见 DividendProgressCalculator），
+                // 这里不再按到账日分叉——口径统一到除息日，避免「钱还没到却显示成到账日」的误导。
                 Text(
-                    if (next.payDate != null) "到账日" else "除息日（数据源未提供到账日）",
+                    "除息日",
                     style = MaterialTheme.typography.labelSmall,
                     color = AppTheme.colors.onSurfaceVariant
                 )
@@ -182,7 +184,7 @@ fun NextPayoutCard(
                     color = AppTheme.colors.primary
                 )
                 Text(
-                    if (next.payDate != null) "天后到账" else "天后除息",
+                    "天后除息",
                     style = MaterialTheme.typography.labelSmall,
                     color = AppTheme.colors.onSurfaceVariant
                 )

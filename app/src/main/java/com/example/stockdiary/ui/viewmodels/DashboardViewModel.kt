@@ -106,7 +106,7 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
     private val _dividendWarning = MutableStateFlow<String?>(null)
     val dividendWarning: StateFlow<String?> = _dividendWarning.asStateFlow()
 
-    // 收息进度：今年已收 / 今年预计 / 月度现金流 / 下一笔到账（分子分母同为自然年口径）
+    // 收息进度：今年已收 / 今年预计 / 月度现金流 / 下一笔除息（分子分母同为自然年口径，且一律按除息日）
     private val _dividendProgress = MutableStateFlow(DividendProgressCalculator.EMPTY)
     val dividendProgress: StateFlow<DividendProgressCalculator.Progress> = _dividendProgress.asStateFlow()
 

@@ -302,7 +302,10 @@ class DividendProgressCalculatorTest {
     }
 
     @Test
-    fun `银行存款不计入收息进度`() {
+    fun `银行存款利息计入今年预计但不产生下一笔`() {
+        // 自然年口径下，银行存款利息是「年度收入」的一部分（与 Dashboard/组合/日历/FIRE 的
+        // totalAnnualIncome 同源，经 naturalYearAnnualIncome 算出），因此会进 yearProjected、
+        // 让 hasData 为真；但存款没有除息日，不产生「下一笔」倒计时。
         val deposit = Asset(
             name = "定期存款",
             type = AssetType.BANK_DEPOSIT,
@@ -313,7 +316,9 @@ class DividendProgressCalculatorTest {
         )
         val progress = DividendProgressCalculator.calculate(listOf(deposit), emptyMap(), today)
 
-        assertFalse(progress.hasData)
+        // 利息 = 本金 100000 × 3% = 3000，计入今年预计
+        assertEquals(3000.0, progress.yearProjected, 0.001)
+        assertTrue(progress.hasData)
         assertNull(progress.nextPayout)
     }
 

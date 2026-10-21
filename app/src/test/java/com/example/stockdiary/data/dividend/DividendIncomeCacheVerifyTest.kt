@@ -92,8 +92,23 @@ class DividendIncomeCacheVerifyTest {
     fun `save 后 loadCached 往返_日期哈希金额全部一致`() {
         val prefs = FakePrefs()
         val cache = cacheWith(prefs)
+        // 用「自然年口径」真实算一笔年度收入（新口径：与收息进度今年预计同源），
+        // 经缓存 JSON 往返后必须 bit 级不变，证明缓存层能原样保住新口径数字。
+        val today = LocalDate.of(2026, 10, 20)
+        val recordsBySymbol = mapOf(
+            "sh600519" to listOf(record("2026-06-01", "50.0")),   // 今年已宣告：每十股 50 → 100 份 = 500
+            "sh000001" to emptyList(),                              // 未宣告 → 退回 TTM（无记录=0）
+            "fund_000300" to listOf(record("2025-12-01", "123.4")) // 去年记录、今年无 → 退回 TTM
+        )
+        val assets = listOf(
+            stock("sh600519"),
+            stock("sh000001"),
+            stock("fund_000300")
+        )
+        val total = DividendProgressCalculator.naturalYearAnnualIncome(assets, recordsBySymbol, today)
+
         val saved = result(
-            total = 3552.6084214775,
+            total = total,
             perSymbol = mapOf("sh600519" to 5.0, "sh000001" to 0.0, "fund_000300" to 12.34)
         )
 
@@ -103,7 +118,7 @@ class DividendIncomeCacheVerifyTest {
         assertNotNull(loaded)
         assertEquals("2026-10-20", loaded!!.date)
         assertEquals("hash-abc", loaded.dataHash)
-        assertEquals(3552.6084214775, loaded.totalAnnualIncome, 0.0) // delta=0：要求 bit 级一致
+        assertEquals(total, loaded.totalAnnualIncome, 0.0) // delta=0：要求 bit 级一致（新口径实算值）
         assertTrue(loaded.hasDividendData)
         assertEquals(3, loaded.dividendsBySymbol.size)
         assertEquals(5.0, loaded.dividendsBySymbol["sh600519"]!!, 0.0)

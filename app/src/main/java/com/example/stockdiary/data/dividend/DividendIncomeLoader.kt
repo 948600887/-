@@ -152,7 +152,7 @@ class DividendIncomeLoader(
             }
         }
 
-        val totalAnnualIncome = DividendIncomeCalculator.calculateTotalAnnualIncome(assets, dividendsBySymbol)
+        val totalAnnualIncome = DividendProgressCalculator.naturalYearAnnualIncome(assets, recordsBySymbol, LocalDate.now())
 
         val result = IncomeResult(
             dividendsBySymbol = dividendsBySymbol,
@@ -203,7 +203,7 @@ class DividendIncomeLoader(
         return IncomeResult(
             dividendsBySymbol = dividendsBySymbol,
             recordsBySymbol = recordsBySymbol,
-            totalAnnualIncome = DividendIncomeCalculator.calculateTotalAnnualIncome(assets, dividendsBySymbol),
+            totalAnnualIncome = DividendProgressCalculator.naturalYearAnnualIncome(assets, recordsBySymbol, LocalDate.now()),
             hasDividendData = dividendsBySymbol.values.any { it > 0 }
         )
     }

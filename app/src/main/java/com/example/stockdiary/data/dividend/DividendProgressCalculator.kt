@@ -5,6 +5,7 @@ import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.database.amountFor
 import com.example.stockdiary.database.perTenSharesToAmount
 import com.example.stockdiary.utils.ExchangeRateManager
+import com.example.stockdiary.utils.totalValueCny
 import java.time.LocalDate
 import java.time.Year
 import java.time.YearMonth
@@ -131,37 +132,20 @@ object DividendProgressCalculator {
 
             // 货币基金不发现金分红，收益是每日「每万份收益」，必须在这里单独进收息进度：
             // 否则它会撞上下面「无分红记录 → 跳过」，今年预计里永远是 0。
-            // 与现金分红分支并存累加：极少数货基可能同时带分红记录，两条路都该算进来。
+            // moneyFundIncome 只负责往 yearReceived 与月度柱图填货基的「已收/待收」；
+            // 它的 projected 不再累加到 yearProjected —— 今年预计统一在循环外由
+            // naturalYearAnnualIncome 一次性算出（与 DividendIncomeLoader.totalAnnualIncome 同源），
+            // 这里重复加会重复计入货基。
             val moneyFund = moneyFundIncome(asset, today, monthlyReceived, monthlyScheduled)
-            yearProjected += moneyFund.projected
             yearReceived += moneyFund.received
 
             if (records.isEmpty()) return@assetLoop
 
             val balance = asset.balance
 
-            // 预计口径 = 自然年（与分子 yearReceived、月度柱图同一个日历口径）：
-            // - 今年已宣告（除息日在今年，含已排定未到账的）→ 按这些记录的金额合计
-            // - 今年还没宣告的标的 → 退回 TTM 预估，否则年初分母会是 0，进度条显得空
-            // 从前这里是纯 TTM，与按日历年统计的 yearReceived 不同口径：
-            // 进度条可能永远填不满，TTM 窗口横跨两年时还会算出「已收 > 预计」。
-            // 判定用除息日、不用到账日：12 月除息、次年 1 月到账的分红，
-            // 宣告发生在今年，就该计入今年的预计（否则年末分母会突然少一块）。
-            val thisYearRecords = records.filter {
-                val exDate = it.exDividendDate.take(10)
-                // 脏数据保护与该函数里归月处同一风格：日期串不满 10 位的一律不采信
-                exDate.length == 10 && exDate >= yearStart
-            }
-            // 折算成人民币再累加：持仓可能是美元/港币基金，native 金额不能直接和 A 股相加。
-            // 默认币种 CNY 时 toCny 是恒等变换，不影响原有的纯人民币组合。
-            yearProjected += if (thisYearRecords.isNotEmpty()) {
-                thisYearRecords.sumOf { ExchangeRateManager.toCny(it.amountFor(balance), asset.currency) }
-            } else {
-                ExchangeRateManager.toCny(
-                    perTenSharesToAmount(DividendYieldCalculator.getTTMDividend(records, today), balance),
-                    asset.currency
-                )
-            }
+            // 「今年预计」的现金部分不再在这里累加：统一由循环外的 naturalYearAnnualIncome 负责，
+            // 保证与 Dashboard/组合/日历/FIRE 的「年度收入」头条数字严格同源一致。
+            // 下面「已排定未来派息」循环只填 yearReceived / 月度柱图 / nextPayout，不影响 yearProjected。
 
             // 已排定的未来派息：用于倒计时（数据源给的日期比推算更可信）
             // 三元组 = 除息日 / 到账日 / 金额
@@ -227,6 +211,11 @@ object DividendProgressCalculator {
             }
         }
 
+        // 今年预计 = 自然年口径的年度收入（单一数据源）：与 DividendIncomeLoader.totalAnnualIncome
+        // 同源，保证「收息进度今年预计」与「预计年度收入/年度分红/年收入」两个头条数字严格一致。
+        // 循环里只算过 yearReceived / 月度柱图 / nextPayout，yearProjected 在此一次性算出。
+        yearProjected = naturalYearAnnualIncome(assets, recordsBySymbol, today)
+
         return Progress(
             yearReceived = yearReceived,
             yearProjected = yearProjected,
@@ -234,6 +223,77 @@ object DividendProgressCalculator {
             nextPayout = next,
             monthly = (1..12).map { MonthCash(it, monthlyReceived[it], monthlyScheduled[it]) }
         )
+    }
+
+    /**
+     * 自然年口径的「年度收入」——**单一数据源**，同时喂给：
+     * - [DividendIncomeLoader.IncomeResult.totalAnnualIncome]（驱动 Dashboard 预计年度收入、
+     *   Portfolio 年度分红、Calendar 年收入、FIRE 月均）；
+     * - [calculate] 的 [Progress.yearProjected]（收息进度「今年预计」）。
+     *
+     * 与收息进度的「今年预计」逐字节同源：同一把自然年尺子，保证这两个头条数字严格相等。
+     *
+     * 口径（自然年 = 除息日落在今年 1/1 ~ 12/31；与 [Progress.yearProjected] 完全一致）：
+     * - 银行存款：年化利息 = totalValueCny × 利率/100（存款无现金分红，只有利息）；
+     * - 股票/基金且为货币基金（[Asset.millionCopiesIncome] > 0）：日收益 × 当年天数
+     *   （闰年 366、平年 365，与 [moneyFundIncome] 的 projected 同一公式，避免两处差 365/366）；
+     * - 股票/基金非货基：今年已宣告（除息日 ≥ 今年 1/1）的记录实额 × 持仓累加；
+     *   今年还没宣告的 → 退回 TTM（[DividendYieldCalculator.getTTMDividend]）每十股分红 × 持仓，
+     *   否则年初分母会塌成 0，进度条显得空。
+     * - 其它类型（虚拟货币、负债等）→ 0。
+     *
+     * 注意：货币基金「同时带分红记录」的极少见情况下只走货基分支（不重复累加现金），
+     * 与 [calculate] 经本函数算出的 [Progress.yearProjected] 保持同源一致。
+     */
+    fun naturalYearAnnualIncome(
+        assets: List<Asset>,
+        recordsBySymbol: Map<String, List<DividendRecord>>,
+        today: LocalDate
+    ): Double {
+        val year = today.year
+        val yearStart = "$year-01-01"
+        val daysInYear = Year.of(year).length()
+
+        return assets.sumOf { asset ->
+            when (asset.type) {
+                AssetType.BANK_DEPOSIT -> {
+                    // 存款：年化利息 = 本金（totalValue=balance）× 利率/100
+                    val rate = asset.interestRate ?: 0.0
+                    asset.totalValueCny * (rate / 100.0)
+                }
+                AssetType.STOCK, AssetType.FUND -> {
+                    val balance = asset.balance
+                    val mci = asset.millionCopiesIncome
+                    // 货币基金：日收益 = 份额 × 每万份收益 ÷ 10000，年化 = 日收益 × 当年天数
+                    if (mci != null && mci > 0.0 && balance > 0.0) {
+                        val daily = ExchangeRateManager.toCny(balance * mci / COPIES_PER_UNIT, asset.currency)
+                        daily * daysInYear
+                    } else {
+                        val records = recordsBySymbol[asset.symbol ?: ""].orEmpty()
+                        // 今年已宣告（除息日 ≥ 今年 1/1，含已排定未到账）→ 这些记录实额 × 持仓
+                        val thisYear = records.filter { record ->
+                            val exDate = record.exDividendDate.take(10)
+                            exDate.length == 10 && exDate >= yearStart
+                        }
+                        if (thisYear.isNotEmpty()) {
+                            thisYear.sumOf { record ->
+                                ExchangeRateManager.toCny(record.amountFor(balance), asset.currency)
+                            }
+                        } else {
+                            // 今年还没宣告 → 退回 TTM 每十股分红 × 持仓
+                            ExchangeRateManager.toCny(
+                                perTenSharesToAmount(
+                                    DividendYieldCalculator.getTTMDividend(records, today),
+                                    balance
+                                ),
+                                asset.currency
+                            )
+                        }
+                    }
+                }
+                else -> 0.0
+            }
+        }
     }
 
     private data class MoneyFundIncome(val projected: Double, val received: Double) {

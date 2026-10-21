@@ -9,6 +9,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.IOException
 import java.net.ConnectException
 import java.net.SocketTimeoutException
 import java.net.URLEncoder
@@ -114,6 +115,21 @@ object BinanceAccountAPI {
      *         失败时 [Result.failure] 的 message 带币安 code+msg，便于用户排障。
      */
     suspend fun getAccount(apiKey: String, apiSecret: String): Result<List<BinanceBalance>> =
+        getAccount(apiKey, apiSecret, client)
+
+    /**
+     * internal 重载：允许单测注入假 client（自定义 [okhttp3.Interceptor] 模拟币安语义）。
+     *
+     * 与 [getPrices] 的 internal 重载完全同惯例：公开 API 语义与 [getAccount] 一致——
+     * 只是把用于发请求的那个 client 提出来，便于测试时用走假 Interceptor 的 client
+     * 替换 [NetworkClient.binanceClient]（账户接口要 HMAC 签名、又需要真实密钥，
+     * 用假 client 才能在单测里复现「连不上 / 451 地区封锁」这类网络与 HTTP 语义）。
+     */
+    internal suspend fun getAccount(
+        apiKey: String,
+        apiSecret: String,
+        httpClient: OkHttpClient
+    ): Result<List<BinanceBalance>> =
         withContext(Dispatchers.IO) {
             try {
                 // timestamp 用本地时钟：币安按它判断请求是否在 recvWindow 内。
@@ -133,7 +149,13 @@ object BinanceAccountAPI {
                     .addHeader("User-Agent", "Mozilla/5.0")
                     .build()
 
-                val response = client.newCall(request).execute()
+                val response = httpClient.newCall(request).execute()
+                // 主机能应答即视为网络级成功（含 451 地区封锁 / 4xx 业务错误）：
+                // 与行情路径（UnifiedPriceService.getCryptoPrice）统一口径，让主机级熔断器
+                // 复位连续失败计数——账户路径此前漏接 gate，连不上的时候行情路径知道、
+                // 资产路径不知道，UI 也不会对「币安暂不可达」做统一展示。真正的"连不上"
+                // 走下面 catch 的 onNetworkFailure。
+                BinanceHostGate.onSuccess()
                 response.use { resp ->
                     val body = resp.body?.string() ?: return@withContext Result.failure(
                         Exception("币安返回了空响应")
@@ -151,6 +173,14 @@ object BinanceAccountAPI {
                 // 协程取消必须原样抛回，不能被 catch(Exception) 吞成失败结果
                 throw e
             } catch (e: Exception) {
+                // 网络级失败（连不上 / 超时 / 域名解析不了 / IO 错误）喂给主机级熔断器：
+                // 账户路径原本只返回 Result.failure、从没喂过 gate，导致连不上的时候行情
+                // 路径知道、资产路径不知道——UI 不会对「币安暂不可达」做统一展示，
+                // 也不会像行情那样在冷却期短路、自愈。现在与行情路径共用同一闸门。
+                // 注意：JSON 解析等非 IO 异常不应顶爆熔断——它们不是"主机不可达"。
+                if (e is IOException) {
+                    BinanceHostGate.onNetworkFailure(System.currentTimeMillis())
+                }
                 // 连接类失败（连不上 / 超时 / 域名解析不了）换成一句人话。
                 // OkHttp 的原始 message 形如 "failed to connect to api.binance.com/2001:… (port 443)
                 // from /2409:… (port 48944) after 10000ms"——既看不懂，又把设备 IP/端口
@@ -230,8 +260,15 @@ object BinanceAccountAPI {
                 }
                 result
             } catch (e: CancellationException) {
+                // 协程取消必须原样抛回：取消不是"主机不可达"，绝不能被记成网络失败
                 throw e
             } catch (e: Exception) {
+                // 网络级失败（连不上 / 超时 / 域名解析不了 / IO 错误）喂给主机级熔断器，
+                // 与 getAccount / fetchBatch 口径一致——批量取价此前也漏接 gate。
+                // 注意：JSON 解析等非 IO 异常不记账——它们不是"主机不可达"，不该顶爆熔断。
+                if (e is IOException) {
+                    BinanceHostGate.onNetworkFailure(System.currentTimeMillis())
+                }
                 // 只记异常类型，不记 message（可能含 URL）；返回已取到的部分（通常为空）
                 AppLogger.e("批量取价失败: ${e::class.simpleName}", e, "BinanceAccountAPI")
                 result
@@ -262,6 +299,11 @@ object BinanceAccountAPI {
             .build()
 
         val response = httpClient.newCall(request).execute()
+        // 记账放在 response.use 之前，所以语义就是「只要拿到 HTTP 响应就算主机可达」：
+        // 含 451 地区封锁、含一个坏符号导致整批 400——与 getAccount / 行情路径统一口径，
+        // 让主机级熔断器复位连续失败计数。非 2xx 不是"主机不可达"，不该顶爆熔断；
+        // 真正的"连不上"由 [getPrices] 的兜底 catch 记 [BinanceHostGate.onNetworkFailure]。
+        BinanceHostGate.onSuccess()
         response.use { resp ->
             if (!resp.isSuccessful) return null
             val body = resp.body?.string() ?: return null

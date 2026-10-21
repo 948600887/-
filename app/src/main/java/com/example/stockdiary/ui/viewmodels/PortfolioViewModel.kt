@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.example.stockdiary.data.sync.AssetSyncManager
+import com.example.stockdiary.data.sync.saveTodaySnapshotIfEligible
 import com.example.stockdiary.data.prefs.DashboardPreferences
 import com.example.stockdiary.data.dividend.DividendIncomeUseCase
 import com.example.stockdiary.data.prefs.SortOrder
@@ -250,6 +251,16 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
                     "价格同步完成（成功 ${syncResult.successCount}，失败 ${syncResult.failedCount}），开始计算分红",
                     "PortfolioVM"
                 )
+                // 全量手动刷新成功 → 覆盖当日快照（补齐手动路径，后台 Worker 早已这么做）：
+                // ① 只挂全量手动刷新——batchSync/导入后同步/详情页单标的刷新都是子集刷新，
+                //    全量快照会混入大量旧价；后台 Worker 有自己的存快照，不重复；
+                // ② 截断不存——saveTodaySnapshotIfEligible 内的门槛挡掉 truncatedByTimeLimit，
+                //    避免把「部分新价 + 部分旧价」固化成当日快照、污染净值曲线；
+                // ③ 放 phase-2（分红计算）前——快照只取决于价格（sync 内已逐标的落库），
+                //    sync 一返回就能存、不必等分红；且避开「phase-2 中途协程被取消时，finally 里的
+                //    suspend 调用立刻抛 CancellationException」的坑；取消若发生在 phase-1，
+                //    上面 catch(CancellationException){复位;throw} 已直接跳出，走不到这里。
+                saveTodaySnapshotIfEligible(repository, syncResult, "PortfolioVM")
             } catch (e: CancellationException) {
                 // 取消（退后台 onStop / VM 销毁）时 rethrow 会跳过下面第二阶段的 finally，
                 // _isRefreshing 会永远停在 true、后续刷新全被挡死、界面一直转圈——

@@ -214,7 +214,7 @@ class StockDataManager(
         for ((apiName, dataSource) in currentDataSources) {
             // 三态熔断闸门：CLOSED 放行；OPEN 冷却期跳过；冷却结束只放行一个探测（其余跳过）。
             // 取代旧的「失败计数 >= maxFailures 就跳过错过的全部请求」。
-            if (!breakerFor(apiName).shouldAllow(System.currentTimeMillis())) {
+            if (!breakerFor(apiName).tryAcquireProbe(System.currentTimeMillis())) {
                 AppLogger.w("跳过数据源 $apiName（熔断冷却中 / 半开探测已在进行）", TAG)
                 continue
             }

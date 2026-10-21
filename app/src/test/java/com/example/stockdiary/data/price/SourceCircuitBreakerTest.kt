@@ -16,7 +16,7 @@ import org.junit.Test
  * 钉的契约（与 BinanceHostGate 同构，阈值/冷却按数据源侧取值）：
  * - 单波 3 连失败（=旧阈值=同步并发度）不再误禁；
  * - 累计 5 次源级失败才禁用、进入 OPEN；
- * - 冷却期内 shouldAllow 恒拒绝；
+ * - 冷却期内 tryAcquireProbe 恒拒绝；
  * - 冷却结束只放行 1 个半开探测、第 2 个仍拒；
  * - 探测成功闭路、失败立即重开冷却；
  * - 卡死的探测过期后自愈重新武装；
@@ -46,7 +46,7 @@ class SourceCircuitBreakerTest {
     fun `连续 4 次失败未达阈值5，不熔禁`() {
         repeat(SourceCircuitBreaker.FAIL_THRESHOLD - 1) { breaker.onFailure(base) }
         assertEquals(SourcePhase.CLOSED, breaker.phaseForTesting())
-        assertTrue(breaker.shouldAllow(base))
+        assertTrue(breaker.tryAcquireProbe(base))
         assertEquals(SourceCircuitBreaker.FAIL_THRESHOLD - 1, breaker.failuresForTesting())
     }
 
@@ -55,7 +55,7 @@ class SourceCircuitBreakerTest {
         // 3 = 旧阈值 = 同步并发度：Part B 把挂死变 20s 失败后，单波 3 个并发同时超时即误禁。
         repeat(3) { breaker.onFailure(base) }
         assertEquals(SourcePhase.CLOSED, breaker.phaseForTesting())
-        assertTrue(breaker.shouldAllow(base))
+        assertTrue(breaker.tryAcquireProbe(base))
         assertFalse(breaker.isUnavailable())
     }
 
@@ -64,51 +64,51 @@ class SourceCircuitBreakerTest {
         tripOpen()
         assertEquals(SourcePhase.OPEN, breaker.phaseForTesting())
         assertTrue(breaker.isUnavailable())
-        assertFalse(breaker.shouldAllow(base))
+        assertFalse(breaker.tryAcquireProbe(base))
         // 触发时计数清零
         assertEquals(0, breaker.failuresForTesting())
         assertEquals(base + SourceCircuitBreaker.COOLDOWN_MS, breaker.blockedUntilForTesting())
     }
 
     @Test
-    fun `冷却期内 shouldAllow 恒拒绝`() {
+    fun `冷却期内 tryAcquireProbe 恒拒绝`() {
         tripOpen()
-        assertFalse(breaker.shouldAllow(base))
-        assertFalse(breaker.shouldAllow(base + SourceCircuitBreaker.COOLDOWN_MS - 1))
+        assertFalse(breaker.tryAcquireProbe(base))
+        assertFalse(breaker.tryAcquireProbe(base + SourceCircuitBreaker.COOLDOWN_MS - 1))
         assertTrue(breaker.isUnavailable())
     }
 
     @Test
     fun `冷却结束恰好 1 个探测放行_第 2 个仍拒`() {
         tripOpen()
-        assertTrue("冷却结束后应放行恰好一个探测", breaker.shouldAllow(afterCooldown))
+        assertTrue("冷却结束后应放行恰好一个探测", breaker.tryAcquireProbe(afterCooldown))
         assertEquals(SourcePhase.HALF_OPEN, breaker.phaseForTesting())
-        assertFalse(breaker.shouldAllow(afterCooldown))
-        assertFalse(breaker.shouldAllow(afterCooldown + 1))
+        assertFalse(breaker.tryAcquireProbe(afterCooldown))
+        assertFalse(breaker.tryAcquireProbe(afterCooldown + 1))
         assertTrue(breaker.isUnavailable())
     }
 
     @Test
     fun `探测成功闭路_后续全放行且计数清零`() {
         tripOpen()
-        assertTrue(breaker.shouldAllow(afterCooldown)) // 成为探测
+        assertTrue(breaker.tryAcquireProbe(afterCooldown)) // 成为探测
         breaker.onSuccess() // 探测成功
         assertEquals(SourcePhase.CLOSED, breaker.phaseForTesting())
         assertEquals(0, breaker.failuresForTesting())
         assertEquals(0L, breaker.blockedUntilForTesting())
-        assertTrue(breaker.shouldAllow(afterCooldown))
-        assertTrue(breaker.shouldAllow(afterCooldown + 1))
+        assertTrue(breaker.tryAcquireProbe(afterCooldown))
+        assertTrue(breaker.tryAcquireProbe(afterCooldown + 1))
         assertFalse(breaker.isUnavailable())
     }
 
     @Test
     fun `探测失败立即重开冷却_不等阈值`() {
         tripOpen()
-        assertTrue(breaker.shouldAllow(afterCooldown)) // 成为探测
+        assertTrue(breaker.tryAcquireProbe(afterCooldown)) // 成为探测
         breaker.onFailure(afterCooldown) // 探测失败
         assertEquals(SourcePhase.OPEN, breaker.phaseForTesting())
         assertEquals(afterCooldown + SourceCircuitBreaker.COOLDOWN_MS, breaker.blockedUntilForTesting())
-        assertFalse(breaker.shouldAllow(afterCooldown))
+        assertFalse(breaker.tryAcquireProbe(afterCooldown))
     }
 
     @Test
@@ -118,17 +118,17 @@ class SourceCircuitBreakerTest {
         breaker.onSuccess() // 迟到成功：清计数，不解封
         assertEquals(0, breaker.failuresForTesting())
         assertEquals(SourcePhase.OPEN, breaker.phaseForTesting())
-        assertFalse(breaker.shouldAllow(base + 2_000))
+        assertFalse(breaker.tryAcquireProbe(base + 2_000))
     }
 
     @Test
     fun `探测卡死自愈_超过 PROBE_TIMEOUT 重新武装`() {
         tripOpen()
-        assertTrue(breaker.shouldAllow(afterCooldown)) // 探测，probeUntil = afterCooldown + PROBE_TIMEOUT
-        assertFalse(breaker.shouldAllow(afterCooldown + SourceCircuitBreaker.PROBE_TIMEOUT_MS - 1))
-        assertTrue(breaker.shouldAllow(afterCooldown + SourceCircuitBreaker.PROBE_TIMEOUT_MS))
+        assertTrue(breaker.tryAcquireProbe(afterCooldown)) // 探测，probeUntil = afterCooldown + PROBE_TIMEOUT
+        assertFalse(breaker.tryAcquireProbe(afterCooldown + SourceCircuitBreaker.PROBE_TIMEOUT_MS - 1))
+        assertTrue(breaker.tryAcquireProbe(afterCooldown + SourceCircuitBreaker.PROBE_TIMEOUT_MS))
         assertEquals(SourcePhase.HALF_OPEN, breaker.phaseForTesting())
-        assertFalse(breaker.shouldAllow(afterCooldown + SourceCircuitBreaker.PROBE_TIMEOUT_MS))
+        assertFalse(breaker.tryAcquireProbe(afterCooldown + SourceCircuitBreaker.PROBE_TIMEOUT_MS))
     }
 
     @Test

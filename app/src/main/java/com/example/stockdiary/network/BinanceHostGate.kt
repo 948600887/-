@@ -86,7 +86,7 @@ internal object BinanceHostGate {
      * 但探测请求可能被**取消**（看门狗超预算 / 退后台 / VM 销毁）——取消走
      * CancellationException 重抛，[onSuccess] / [onNetworkFailure] 都不会被调用，
      * 相位将永远卡在 HALF_OPEN，之后所有加密货币请求都被拒、价格永久冻结。
-     * 取 30s（> callTimeout 20s，留足正常探测的余量）：[shouldAllow] 若发现 HALF_OPEN
+     * 取 30s（> callTimeout 20s，留足正常探测的余量）：[tryAcquireProbe] 若发现 HALF_OPEN
      * 已超过这个期限，判定探测卡死，重新武装一个新探测——自愈，不永久冻结。
      * internal：供单测引用，钉死自愈行为。
      */
@@ -99,8 +99,13 @@ internal object BinanceHostGate {
     private val blockCount = AtomicInteger(0)
 
     /**
-     * 请求前闸门（带副作用）：这次加密货币询价到底发不发。
+     * 请求闸门（**带 CAS 副作用，调用即可能消耗唯一的半开探测槽**）：这次加密货币询价到底发不发。
      *
+     * ⚠️ 严禁在「非真正要发请求」的路径上调用（典型反面教材：UI 想判断可用性而顺手调它）——
+     * 误调会悄悄吃掉探测名额、让真请求被拒，直到 [PROBE_TIMEOUT_MS] 自愈。判断是否「暂不可达」
+     * 只应走纯读的 [isUnavailable]。
+     *
+     * 各分支：
      * - CLOSED → 放行；
      * - OPEN 且冷却未到 → 拒绝（不烧时间）；
      * - OPEN 且冷却已过 → CAS 转 HALF_OPEN，**仅这一个调用**作为探测放行，其余拒绝；
@@ -109,7 +114,7 @@ internal object BinanceHostGate {
      *
      * 用 CAS 保证「冷却结束瞬间的并发请求里只有一个能成为探测」。
      */
-    fun shouldAllow(now: Long): Boolean {
+    fun tryAcquireProbe(now: Long): Boolean {
         while (true) {
             val s = state.get()
             when (s.phase) {
@@ -136,7 +141,7 @@ internal object BinanceHostGate {
      * 当前是否「暂不可达」（纯读、无副作用，供 UI 展示「币安暂不可达」标签）。
      *
      * 只要不是 CLOSED（即 OPEN 冷却中或 HALF_OPEN 探测中）就返回 true。
-     * **不要**用它做请求闸门——那是 [shouldAllow] 的职责（带 CAS 副作用）；
+     * **不要**用它做请求闸门——那是 [tryAcquireProbe] 的职责（带 CAS 副作用）；
      * UI 只读展示，不能驱动状态机。
      */
     fun isUnavailable(): Boolean = state.get().phase != Phase.CLOSED

@@ -16,7 +16,7 @@ import org.junit.Test
  * 钉的契约：
  * - 单波抖动（3 连失败，=旧阈值=同步并发度）不再误熔；
  * - 累计 5 次才熔断、blockCount +1；
- * - 冷却期内 shouldAllow 恒拒绝；
+ * - 冷却期内 tryAcquireProbe 恒拒绝；
  * - 冷却结束只放行 1 个半开探测、并发第 2 个仍拒；
  * - 探测成功闭路、后续全放行、计数清零、blockCount 不涨；
  * - 探测失败立即重开冷却（不等计数到阈值）；
@@ -61,7 +61,7 @@ class BinanceHostGateTest {
         repeat(BinanceHostGate.FAIL_THRESHOLD - 1) { BinanceHostGate.onNetworkFailure(base) }
         assertEquals(Phase.CLOSED, BinanceHostGate.phaseForTesting())
         // CLOSED 仍放行
-        assertTrue(BinanceHostGate.shouldAllow(base))
+        assertTrue(BinanceHostGate.tryAcquireProbe(base))
         assertEquals(BinanceHostGate.FAIL_THRESHOLD - 1, BinanceHostGate.consecutiveFailuresForTesting())
         assertEquals(0, BinanceHostGate.blockCountForTesting())
     }
@@ -72,7 +72,7 @@ class BinanceHostGateTest {
         // 新阈值 5，3 连失败必须仍在 CLOSED、后续请求照常放行、不熔断。
         repeat(3) { BinanceHostGate.onNetworkFailure(base) }
         assertEquals(Phase.CLOSED, BinanceHostGate.phaseForTesting())
-        assertTrue(BinanceHostGate.shouldAllow(base))
+        assertTrue(BinanceHostGate.tryAcquireProbe(base))
         assertFalse(BinanceHostGate.isUnavailable())
         assertEquals(0, BinanceHostGate.blockCountForTesting())
     }
@@ -82,7 +82,7 @@ class BinanceHostGateTest {
         tripOpen()
         assertEquals(Phase.OPEN, BinanceHostGate.phaseForTesting())
         assertTrue(BinanceHostGate.isUnavailable())
-        assertFalse(BinanceHostGate.shouldAllow(base))
+        assertFalse(BinanceHostGate.tryAcquireProbe(base))
         assertEquals(1, BinanceHostGate.blockCountForTesting())
         // 触发熔断时计数清零：冷却期内的迟来失败重新累计
         assertEquals(0, BinanceHostGate.consecutiveFailuresForTesting())
@@ -92,10 +92,10 @@ class BinanceHostGateTest {
     // ---------- OPEN 冷却期 ----------
 
     @Test
-    fun `冷却期内 shouldAllow 恒拒绝`() {
+    fun `冷却期内 tryAcquireProbe 恒拒绝`() {
         tripOpen()
-        assertFalse(BinanceHostGate.shouldAllow(base))
-        assertFalse(BinanceHostGate.shouldAllow(base + BinanceHostGate.COOLDOWN_MS - 1))
+        assertFalse(BinanceHostGate.tryAcquireProbe(base))
+        assertFalse(BinanceHostGate.tryAcquireProbe(base + BinanceHostGate.COOLDOWN_MS - 1))
         // 冷却期一直是「暂不可达」，UI 该显示提示
         assertTrue(BinanceHostGate.isUnavailable())
     }
@@ -111,8 +111,8 @@ class BinanceHostGateTest {
         assertEquals(0, BinanceHostGate.consecutiveFailuresForTesting())
         // 但熔断不因此提前解封：成功不清 blockedUntil，避免抖动解封
         assertEquals(Phase.OPEN, BinanceHostGate.phaseForTesting())
-        assertFalse(BinanceHostGate.shouldAllow(base + 3_000))
-        assertFalse(BinanceHostGate.shouldAllow(base + BinanceHostGate.COOLDOWN_MS - 1))
+        assertFalse(BinanceHostGate.tryAcquireProbe(base + 3_000))
+        assertFalse(BinanceHostGate.tryAcquireProbe(base + BinanceHostGate.COOLDOWN_MS - 1))
     }
 
     @Test
@@ -124,11 +124,11 @@ class BinanceHostGateTest {
         // 若计数没被清零，这里 4+2=6 早已越过阈值；清零后只到 4，不熔断
         repeat(4) { BinanceHostGate.onNetworkFailure(base) }
         assertEquals(Phase.CLOSED, BinanceHostGate.phaseForTesting())
-        assertTrue(BinanceHostGate.shouldAllow(base))
+        assertTrue(BinanceHostGate.tryAcquireProbe(base))
         // 再失败一次（第 5 次）才重新熔断
         BinanceHostGate.onNetworkFailure(base)
         assertEquals(Phase.OPEN, BinanceHostGate.phaseForTesting())
-        assertFalse(BinanceHostGate.shouldAllow(base))
+        assertFalse(BinanceHostGate.tryAcquireProbe(base))
     }
 
     // ---------- HALF_OPEN 半开探测 ----------
@@ -136,12 +136,12 @@ class BinanceHostGateTest {
     @Test
     fun `冷却结束恰好 1 个探测放行_并发第 2 个仍拒`() {
         tripOpen()
-        // 冷却已过：第一个 shouldAllow 竞争成为唯一的半开探测
-        assertTrue("冷却结束后应放行恰好一个探测", BinanceHostGate.shouldAllow(afterCooldown))
+        // 冷却已过：第一个 tryAcquireProbe 竞争成为唯一的半开探测
+        assertTrue("冷却结束后应放行恰好一个探测", BinanceHostGate.tryAcquireProbe(afterCooldown))
         assertEquals(Phase.HALF_OPEN, BinanceHostGate.phaseForTesting())
         // 半开期探测已在进行：其余请求全部拒绝，不烧时间
-        assertFalse(BinanceHostGate.shouldAllow(afterCooldown))
-        assertFalse(BinanceHostGate.shouldAllow(afterCooldown + 1))
+        assertFalse(BinanceHostGate.tryAcquireProbe(afterCooldown))
+        assertFalse(BinanceHostGate.tryAcquireProbe(afterCooldown + 1))
         // 半开期对 UI 仍是「暂不可达」
         assertTrue(BinanceHostGate.isUnavailable())
     }
@@ -149,7 +149,7 @@ class BinanceHostGateTest {
     @Test
     fun `探测成功闭路_后续全放行且 blockCount 不涨`() {
         tripOpen()
-        assertTrue(BinanceHostGate.shouldAllow(afterCooldown)) // 成为探测
+        assertTrue(BinanceHostGate.tryAcquireProbe(afterCooldown)) // 成为探测
         BinanceHostGate.onSuccess() // 探测成功
         // 闭路：全部清零，blockCount 不涨（探测成功是恢复，不是又一次判死）
         assertEquals(Phase.CLOSED, BinanceHostGate.phaseForTesting())
@@ -157,15 +157,15 @@ class BinanceHostGateTest {
         assertEquals(0L, BinanceHostGate.blockedUntilForTesting())
         assertEquals(1, BinanceHostGate.blockCountForTesting())
         // 后续请求全放行、UI 提示消失
-        assertTrue(BinanceHostGate.shouldAllow(afterCooldown))
-        assertTrue(BinanceHostGate.shouldAllow(afterCooldown + 1))
+        assertTrue(BinanceHostGate.tryAcquireProbe(afterCooldown))
+        assertTrue(BinanceHostGate.tryAcquireProbe(afterCooldown + 1))
         assertFalse(BinanceHostGate.isUnavailable())
     }
 
     @Test
     fun `探测失败立即重开冷却_不等计数到阈值`() {
         tripOpen()
-        assertTrue(BinanceHostGate.shouldAllow(afterCooldown)) // 成为探测
+        assertTrue(BinanceHostGate.tryAcquireProbe(afterCooldown)) // 成为探测
         // 探测失败：主机仍不可达的确定证据，立即重开冷却，不等累计到阈值
         BinanceHostGate.onNetworkFailure(afterCooldown)
         assertEquals(Phase.OPEN, BinanceHostGate.phaseForTesting())
@@ -174,21 +174,21 @@ class BinanceHostGateTest {
         // 重开不计入 blockCount（是同一次熔断 episode 的延续，不是新的判死）
         assertEquals(1, BinanceHostGate.blockCountForTesting())
         // 新一轮冷却内继续拒绝
-        assertFalse(BinanceHostGate.shouldAllow(afterCooldown))
-        assertFalse(BinanceHostGate.shouldAllow(afterCooldown + BinanceHostGate.COOLDOWN_MS - 1))
+        assertFalse(BinanceHostGate.tryAcquireProbe(afterCooldown))
+        assertFalse(BinanceHostGate.tryAcquireProbe(afterCooldown + BinanceHostGate.COOLDOWN_MS - 1))
     }
 
     @Test
     fun `探测卡死自愈_超过 PROBE_TIMEOUT 重新武装`() {
         tripOpen()
-        assertTrue(BinanceHostGate.shouldAllow(afterCooldown)) // 成为探测，probeUntil = afterCooldown + PROBE_TIMEOUT
+        assertTrue(BinanceHostGate.tryAcquireProbe(afterCooldown)) // 成为探测，probeUntil = afterCooldown + PROBE_TIMEOUT
         // 探测窗口内：仍是 HALF_OPEN、拒绝新请求
-        assertFalse(BinanceHostGate.shouldAllow(afterCooldown + BinanceHostGate.PROBE_TIMEOUT_MS - 1))
+        assertFalse(BinanceHostGate.tryAcquireProbe(afterCooldown + BinanceHostGate.PROBE_TIMEOUT_MS - 1))
         // 探测卡死（被取消、未 resolve）：超过 PROBE_TIMEOUT 后自愈，重新武装一个新探测并放行
-        assertTrue(BinanceHostGate.shouldAllow(afterCooldown + BinanceHostGate.PROBE_TIMEOUT_MS))
+        assertTrue(BinanceHostGate.tryAcquireProbe(afterCooldown + BinanceHostGate.PROBE_TIMEOUT_MS))
         assertEquals(Phase.HALF_OPEN, BinanceHostGate.phaseForTesting())
         // 重新武装后立刻又是「只有一个探测」：同一 now 再来一个仍被拒
-        assertFalse(BinanceHostGate.shouldAllow(afterCooldown + BinanceHostGate.PROBE_TIMEOUT_MS))
+        assertFalse(BinanceHostGate.tryAcquireProbe(afterCooldown + BinanceHostGate.PROBE_TIMEOUT_MS))
     }
 
     // ---------- 并发：只熔断一次 ----------

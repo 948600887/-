@@ -52,7 +52,9 @@ internal class SourceCircuitBreaker {
     private val state = AtomicReference(SourceGateState(SourcePhase.CLOSED, 0L, 0L, 0))
 
     /**
-     * 请求前闸门（带副作用）：这个数据源这次到底用不用。
+     * 请求闸门（**带 CAS 副作用，调用即可能消耗唯一的半开探测槽**）：这个数据源这次到底用不用。
+     *
+     * ⚠️ 严禁在「非真正要发请求」的路径上调用。判断是否「暂不可用」只应走纯读的 [isUnavailable]。
      *
      * - CLOSED → 放行；
      * - OPEN 且冷却未到 → 跳过；
@@ -60,7 +62,7 @@ internal class SourceCircuitBreaker {
      * - HALF_OPEN 且探测未卡死 → 跳过（探测已在进行，半开期不白试）；
      * - HALF_OPEN 但已超过 [PROBE_TIMEOUT_MS] → 探测卡死（被取消未 resolve），重新武装一个新探测并放行。
      */
-    fun shouldAllow(now: Long): Boolean {
+    fun tryAcquireProbe(now: Long): Boolean {
         while (true) {
             val s = state.get()
             when (s.phase) {

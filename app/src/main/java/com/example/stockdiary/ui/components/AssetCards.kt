@@ -245,7 +245,7 @@ fun StockAssetItem(
                         // 区别于「价格待更新」的提示：前者是网络/主机问题，后者可能是数据源缺数据。
                         // 注意 isUnavailable 是普通 volatile 读、不可观察；列表在每轮同步结束后会重组，
                         // 届时标签会刷新——这个局限写进注释，别做成轮询。它是纯读、无副作用，
-                        // 不会驱动熔断状态机（请求闸门是 shouldAllow 的职责）。
+                        // 不会驱动熔断状态机（请求闸门是 tryAcquireProbe 的职责）。
                         asset.type == AssetType.CRYPTO &&
                             BinanceHostGate.isUnavailable() -> "币安暂不可达"
                         else -> "价格待更新"

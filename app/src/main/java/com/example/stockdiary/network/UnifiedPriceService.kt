@@ -315,9 +315,9 @@ object UnifiedPriceService {
 
         // 主机级熔断闸门：币安连续网络级失败达阈值后，冷却期内直接短路、不发请求。
         // 主机压根连不上时，逐个标的各烧最多 20s 连接超时纯属浪费，且会计入
-        // 同步失败数触发误导性通知（见 BinanceHostGate）。shouldAllow 带副作用：
+        // 同步失败数触发误导性通知（见 BinanceHostGate）。tryAcquireProbe 带副作用：
         // 冷却结束那一刻，竞争到的这一个请求会成为半开探测（只此一个，其余仍拒）。
-        if (!BinanceHostGate.shouldAllow(System.currentTimeMillis())) {
+        if (!BinanceHostGate.tryAcquireProbe(System.currentTimeMillis())) {
             return@withContext Result.failure(
                 BinanceHostUnavailableException(
                     "币安接口连续失败，已暂停访问 ${BinanceHostGate.COOLDOWN_MS / 1000} 秒"

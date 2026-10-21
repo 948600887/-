@@ -43,6 +43,7 @@ fun DashboardScreen(
     val existingAccounts by viewModel.existingAccounts.collectAsStateWithLifecycle()
     val dividendProgress by viewModel.dividendProgress.collectAsStateWithLifecycle()
     val errorMessage by viewModel.errorMessage.collectAsStateWithLifecycle()
+    val dividendWarning by viewModel.dividendWarning.collectAsStateWithLifecycle()
 
     var showAddDialog by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
@@ -126,6 +127,15 @@ fun DashboardScreen(
         LaunchedEffect(message) {
             snackbarHostState.showSnackbar(message)
             viewModel.clearError()
+        }
+    }
+
+    // 天天基金限流提示：刷新撞 514 时，部分场外基金分红没抓全，给个非阻塞提示 + 可稍后重试。
+    // 与上面的 errorMessage 分开（那是「同步失败」），避免混淆。
+    dividendWarning?.let { warning ->
+        LaunchedEffect(warning) {
+            snackbarHostState.showSnackbar(warning)
+            viewModel.clearDividendWarning()
         }
     }
 

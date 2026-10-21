@@ -6,6 +6,8 @@ import com.example.stockdiary.data.dividend.DividendService
 import com.example.stockdiary.network.EastmoneyDividendApiService
 import com.example.stockdiary.network.FundDividendApiService
 import com.example.stockdiary.data.sync.withHeartbeat
+import com.example.stockdiary.data.dividend.isFetchedToday
+import com.example.stockdiary.data.dividend.shouldRefetchOtc
 import android.annotation.SuppressLint
 import android.content.Context
 import androidx.room.withTransaction
@@ -40,6 +42,16 @@ class DividendRepository private constructor(
 
     /** 分红缓存上限：与行情侧各缓存同量级（~200），避免长会话里无限增长 */
     private val MAX_CACHE_ENTRIES = 200
+
+    /**
+     * 本轮 [preFetchDividends] 是否撞过天天基金限流（514/429）。
+     *
+     * 进程级的 [FundDividendApiService.otcRateLimitHit] 在每轮预取开头清零、结尾读走，
+     * 这里存的是「读走那一瞬间的状态」，由 [consumeOtcRateLimitWarning] 消费一次（读即清零），
+     * 这样 ViewModel 在刷新收尾弹过一次提示后，不会在下一轮 / 同一轮别处入口重复弹。
+     */
+    @Volatile
+    private var _otcRateLimitedThisCycle: Boolean = false
 
     /**
      * 每个代码「上次抓过的时间」，跨进程存活。
@@ -376,6 +388,30 @@ class DividendRepository private constructor(
     fun close() {
         cache.clear()
     }
+
+    /**
+     * 消费本轮「天天基金限流」信号。
+     *
+     * 返回 true 表示这一轮手动刷新撞过 514/429（部分场外基金分红因限流没抓全），
+     * 并**清零**，避免下一次刷新（或同一轮别处的入口）重复提示。
+     * 不消费 [FundDividendApiService.otcRateLimitHit] 本身（那是进程级退避标志，
+     * 由 [preFetchDividends] 结尾读走后清零）；这里只回仓库实例级累积的结论。
+     */
+    internal fun consumeOtcRateLimitWarning(): Boolean {
+        val hit = _otcRateLimitedThisCycle
+        _otcRateLimitedThisCycle = false
+        return hit
+    }
+
+    /**
+     * 判断 [symbol] 今天是否已经成功抓过一次分红。
+     *
+     * 基于 [lastFetchedAt]（markFetched 写入的时间戳）与**同一自然日**比较
+     * （按设备时区的 LocalDate，而非只比毫秒差 24h——跨零点刷新也要算「今天」）。
+     * 抽成成员 + 顶部 [isFetchedToday] 纯函数，便于单测跨日 / 同日边界。
+     */
+    private fun isFetchedToday(symbol: String): Boolean =
+        isFetchedToday(lastFetchedAt(symbol), System.currentTimeMillis())
     
     /**
      * 取某个标的的分红记录。
@@ -949,6 +985,10 @@ class DividendRepository private constructor(
         timeBudgetMs: Long = 0L
     ) {
         withContext(Dispatchers.IO) {
+            // 本轮「天天基金限流」信号清零：otcRateLimitHit 是进程级的，每轮预取开头清一次、
+            // 结尾读走，避免上一轮撞的 514 误带到这一轮的提示里。
+            FundDividendApiService.otcRateLimitHit = false
+
             val normalizedSymbols = symbols.map { StockCodeManager.normalizeSymbol(it) }.distinct()
 
             val batchResults = prefetchDividends(normalizedSymbols, forceRefresh)
@@ -974,7 +1014,20 @@ class DividendRepository private constructor(
                 coroutineScope {
                     normalizedSymbols.map { symbol ->
                         val entry = cache[symbol]
-                        if (forceRefresh || entry == null || !entry.isValid(cacheTTL)) {
+                        val isOtc = StockCodeManager.isOTCFund(symbol)
+                        val ttlExpired = entry == null || !entry.isValid(cacheTTL)
+                        val shouldFetch = if (isOtc) {
+                            // 手动刷新(forceRefresh)时，场外基金只补抓「TTL 已过期 且 今天还没成功抓过」的，
+                            // 避免每次刷新把所有场外基金打一遍再踩 514 请求风暴；非手动刷新维持原 TTL 语义。
+                            shouldRefetchOtc(
+                                ttlExpired = ttlExpired,
+                                forceRefresh = forceRefresh,
+                                fetchedToday = isFetchedToday(symbol)
+                            )
+                        } else {
+                            forceRefresh || ttlExpired
+                        }
+                        if (shouldFetch) {
                             async {
                                 if (deadline > 0L && System.currentTimeMillis() > deadline) {
                                     AppLogger.w(
@@ -991,6 +1044,13 @@ class DividendRepository private constructor(
                         } else null
                     }.filterNotNull().forEach { it.await() }
                 }
+
+                // 把本轮天天基金限流信号读走（非消费读）：供 ViewModel 在刷新收尾时弹 Snackbar。
+                // 读到的是进程级 otcRateLimitHit 这一瞬间的状态，读完即清零；
+                // 真正给 UI 的「这一轮撞过限流」结论存在仓库实例级的 _otcRateLimitedThisCycle，
+                // 由 consumeOtcRateLimitWarning 消费一次（读即清零），下次刷新不会重复提示。
+                _otcRateLimitedThisCycle = FundDividendApiService.otcRateLimitHit
+                FundDividendApiService.otcRateLimitHit = false
             }
         }
     }

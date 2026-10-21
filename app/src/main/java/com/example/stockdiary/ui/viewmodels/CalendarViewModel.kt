@@ -54,6 +54,18 @@ class CalendarViewModel(
     private val _uiState = MutableStateFlow(UiState())
     val uiState: StateFlow<UiState> = _uiState.asStateFlow()
 
+    /**
+     * 天天基金限流提示（非阻塞）：本轮手动刷新撞过 514/429 时置位，
+     * 由界面对应的 LaunchedEffect 弹 Snackbar 后调 [clearDividendWarning] 清空。
+     * 与 uiState.errorMessage 分开，避免和「同步失败」混淆——限流只是「部分分红没抓全」。
+     */
+    private val _dividendWarning = MutableStateFlow<String?>(null)
+    val dividendWarning: StateFlow<String?> = _dividendWarning.asStateFlow()
+
+    fun clearDividendWarning() {
+        _dividendWarning.value = null
+    }
+
     private val supportedTypes = listOf(AssetType.STOCK, AssetType.FUND, AssetType.BANK_DEPOSIT)
 
     init {
@@ -129,6 +141,10 @@ class CalendarViewModel(
     fun refresh() {
         viewModelScope.launch {
             generateCalendarData(_uiState.value.assets, forceRefresh = true)
+            // 手动刷新撞过天天基金限流（514/429）→ 提示「部分场外基金分红没抓全」（非阻塞）
+            if (dividendRepository.consumeOtcRateLimitWarning()) {
+                _dividendWarning.value = "今日部分场外基金分红因天天基金限流未能抓取完整，可稍后手动重试"
+            }
         }
     }
 

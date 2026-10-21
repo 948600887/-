@@ -10,6 +10,7 @@ import com.example.stockdiary.data.dividend.DividendIncomeUseCase
 import com.example.stockdiary.data.prefs.SortOrder
 import com.example.stockdiary.data.sync.SyncProgress
 import com.example.stockdiary.data.sync.SyncResult
+import com.example.stockdiary.data.repository.DividendRepository
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.di.AppContainer
@@ -50,6 +51,7 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
 
     private val repository = container.assetRepository
     private val incomeUseCase = container.dividendIncomeUseCase
+    private val dividendRepository = DividendRepository.getInstance(container.context)
 
     val assets: StateFlow<List<Asset>> = repository.getAllAssets()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
@@ -84,6 +86,18 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
 
     private val _errorMessage = MutableStateFlow<String?>(null)
     val errorMessage: StateFlow<String?> = _errorMessage.asStateFlow()
+
+    /**
+     * 天天基金限流提示（非阻塞）：本轮手动刷新撞过 514/429 时置位，
+     * 由界面对应的 LaunchedEffect 弹 Snackbar 后调 [clearDividendWarning] 清空。
+     * 与 [_errorMessage] 分开，避免和「同步失败」混淆——限流只是「部分分红没抓全」。
+     */
+    private val _dividendWarning = MutableStateFlow<String?>(null)
+    val dividendWarning: StateFlow<String?> = _dividendWarning.asStateFlow()
+
+    fun clearDividendWarning() {
+        _dividendWarning.value = null
+    }
 
     private val _existingAccounts = MutableStateFlow<List<String>>(emptyList())
 
@@ -313,6 +327,10 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
                             _errorMessage.value = "同步超时，已保留上次数据"
                     }
                 }
+                // 手动刷新撞过天天基金限流（514/429）→ 提示「部分场外基金分红没抓全」（非阻塞）
+                if (dividendRepository.consumeOtcRateLimitWarning()) {
+                    _dividendWarning.value = "今日部分场外基金分红因天天基金限流未能抓取完整，可稍后手动重试"
+                }
                 _syncResult.value = syncResult
                 _isRefreshing.value = false
             }
@@ -416,6 +434,10 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
                 AppLogger.w("批量同步失败: ${e.message}", "PortfolioVM")
                 _errorMessage.value = "批量同步失败"
             } finally {
+                // 批量同步同样可能撞天天基金限流：收尾消费一次提示（与 refresh 同一套）
+                if (dividendRepository.consumeOtcRateLimitWarning()) {
+                    _dividendWarning.value = "今日部分场外基金分红因天天基金限流未能抓取完整，可稍后手动重试"
+                }
                 _isRefreshing.value = false
             }
         }

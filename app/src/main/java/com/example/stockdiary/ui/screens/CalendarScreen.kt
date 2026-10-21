@@ -40,6 +40,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.di.LocalAppContainer
 import com.example.stockdiary.ui.screens.calendar.components.CalendarCard
@@ -70,6 +73,18 @@ fun CalendarScreen(modifier: Modifier = Modifier) {
     val errorMessage = uiState.errorMessage
     val monthlyExpense = uiState.monthlyExpense
     val realAnnualIncome = uiState.realAnnualIncome
+
+    val dividendWarning by viewModel.dividendWarning.collectAsStateWithLifecycle()
+    val snackbarHostState = remember { SnackbarHostState() }
+
+    // 天天基金限流提示：手动刷新撞 514 时，部分场外基金分红没抓全，给个非阻塞 Snackbar + 可稍后重试。
+    // 与下面的 errorMessage（ErrorMessagCard，代表「同步失败」）分开，避免混淆。
+    LaunchedEffect(dividendWarning) {
+        dividendWarning?.let {
+            snackbarHostState.showSnackbar(it)
+            viewModel.clearDividendWarning()
+        }
+    }
 
     var showFireDialog by remember { mutableStateOf(false) }
 
@@ -139,6 +154,8 @@ fun CalendarScreen(modifier: Modifier = Modifier) {
                 onDismiss = { viewModel.clearError() }
             )
         }
+
+        SnackbarHost(hostState = snackbarHostState)
     }
 
     if (showFireDialog) {

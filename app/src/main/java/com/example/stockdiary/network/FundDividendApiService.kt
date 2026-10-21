@@ -35,6 +35,17 @@ class FundDividendApiService {
 
         /** 限流后强制退避时长（60 秒），覆盖绝大多数天天基金限流窗口。 */
         private const val RATE_LIMIT_BACKOFF_MS = 60_000L
+
+        /**
+         * 本轮是否撞过天天基金限流（514/429）。
+         *
+         * 与 [rateLimitedUntil]（进程级退避窗口，撞了就别再打）分开：
+         * 这里只是「**本轮**打过且被限」的一个信号，供 Repository 在每轮预取结尾读走、
+         * 再由 ViewModel 在刷新收尾时弹一个非阻塞 Snackbar
+         * 「今天部分分红可能因限流没抓全」。Repository 每轮开头清零、结尾非消费读走。
+         */
+        @Volatile
+        internal var otcRateLimitHit = false
     }
 
     // 复用统一客户端：通过 defaultClient.newBuilder() 派生，共享底层 ConnectionPool/Dispatcher
@@ -101,6 +112,7 @@ class FundDividendApiService {
                     // 主机补刀——那只会让限流窗口更久。其它非 2xx 仍保留降级到 Jsoup 的机会。
                     if (response.code == 514 || response.code == 429) {
                         rateLimitedUntil = System.currentTimeMillis() + RATE_LIMIT_BACKOFF_MS
+                        otcRateLimitHit = true
                         AppLogger.w("天天基金限流（${response.code}），本周期退避，不再用 Jsoup 兜底猛打", TAG)
                         return@withContext Result.failure(Exception("天天基金限流（${response.code}），本周期退避"))
                     }
@@ -134,6 +146,7 @@ class FundDividendApiService {
             // 或重复对限流主机发请求。其它 HttpStatusException（如 404/503）仍按普通异常处理。
             if (e.statusCode == 514 || e.statusCode == 429) {
                 rateLimitedUntil = System.currentTimeMillis() + RATE_LIMIT_BACKOFF_MS
+                otcRateLimitHit = true
                 AppLogger.w("天天基金限流（${e.statusCode}），本周期退避，不再用 Jsoup 兜底猛打", TAG)
                 return@withContext Result.failure(Exception("天天基金限流（${e.statusCode}），本周期退避"))
             }

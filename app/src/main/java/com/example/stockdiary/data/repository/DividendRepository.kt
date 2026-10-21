@@ -605,7 +605,7 @@ class DividendRepository private constructor(
         emptyList()
     }
 
-    private suspend fun fetchDividendData(
+    internal suspend fun fetchDividendData(
         normalizedSymbol: String,
         batchResults: Map<String, List<DividendRecord>>?
     ): List<DividendRecord> {
@@ -639,6 +639,13 @@ class DividendRepository private constructor(
         val isEtf = !StockCodeManager.hasFundPrefix(normalizedSymbol) &&
             StockCodeManager.isETF(pureSymbol)
 
+        // 场内交易型基金：含 ETF 与「非 ETF 的场内基金」（REITs 508xxx、封闭式基金 500/501xxx）。
+        // 它们都在交易所挂牌、却不是股票也不是场外基金，分红/收益分配只在天天基金有，
+        // 东财股票分红报告(RPT_SHAREBONUS_DET)与 Sina 都不覆盖。从前只把 isEtf 当门槛，
+        // 导致 REIT 永远到不了基金分红源、静默显示 0 并被 7 天负缓存固化（见 sh508085）。
+        val isExchangeFund = isEtf || (!StockCodeManager.hasFundPrefix(normalizedSymbol) &&
+            StockCodeManager.classifyCode(pureSymbol) == StockCodeManager.CodeCategory.EXCHANGE_FUND)
+
         // 「本轮有没有任何一个数据源应答过」。只要有一个应答，空结果就是有效结论
         // （该写负缓存）；一个都没应答说明是网络/限流问题，上抛让调用方什么都不写
         val answered = AtomicBoolean(eastmoneyAnswered)
@@ -649,25 +656,27 @@ class DividendRepository private constructor(
             else -> fetchSource("东方财富", stockCode, answered) { fetchFromEastmoney(stockCode) }
         }
 
-        if (data.isEmpty() && isEtf) {
+        if (data.isEmpty() && isExchangeFund) {
             // 批量已经覆盖了东财的三种代码格式，别再问一遍；
             // 直接走天天基金这个独立数据源，只砍重复问东财
-            // （fetchETFDividends 内部最后本来就会调 fetchFromFundApiForETF，不损失数据源）
-            data = if (eastmoneyAnswered) {
-                fetchSource("天天基金(ETF)", stockCode, answered) { fetchFromFundApiForETF(stockCode) }
+            // （fetchETFDividends 内部最后本来就会调 fetchFromFundApiForETF，不损失数据源）。
+            // 非 ETF 的场内基金（REITs、封基）此前被 isEtf 这道门槛挡在基金源之外，
+            // 改走天天基金后才能拿到收益分配记录——东财股票分红表与 Sina 都不覆盖它们。
+            data = if (eastmoneyAnswered || !isEtf) {
+                fetchSource("天天基金(场内)", stockCode, answered) { fetchFromFundApiForETF(stockCode) }
             } else {
                 fetchSource("ETF", stockCode, answered) { fetchETFDividends(stockCode) }
             }
         }
 
-        if (data.isEmpty() && !isOTCFund && !isEtf) {
+        if (data.isEmpty() && !isOTCFund && !isExchangeFund) {
             val market = StockCodeManager.getMarketPrefix(pureSymbol)
             data = fetchSource("新浪", stockCode, answered) { fetchFromSina(stockCode, market) }
         }
 
         if (!answered.get()) {
             throw DividendSourceUnavailableException(
-                "分红数据源全部未应答[$normalizedSymbol]（场外=$isOTCFund ETF=$isEtf 批量=$eastmoneyAnswered）"
+                "分红数据源全部未应答[$normalizedSymbol]（场外=$isOTCFund ETF=$isEtf 场内=$isExchangeFund 批量=$eastmoneyAnswered）"
             )
         }
 
@@ -798,7 +807,7 @@ class DividendRepository private constructor(
         }
     }
     
-    private suspend fun fetchFromFundApiForETF(fundCode: String): List<DividendRecord> {
+    internal suspend fun fetchFromFundApiForETF(fundCode: String): List<DividendRecord> {
         return try {
             val result = fundDividendApi.getFundDividendHistory(fundCode)
             if (result.isSuccess) {
@@ -816,7 +825,7 @@ class DividendRepository private constructor(
         }
     }
     
-    private suspend fun fetchFromSina(stockCode: String, market: String): List<DividendRecord> {
+    internal suspend fun fetchFromSina(stockCode: String, market: String): List<DividendRecord> {
         return try {
             val result = sinaService.fetchDividendData(stockCode, market)
             if (result.isSuccess) {

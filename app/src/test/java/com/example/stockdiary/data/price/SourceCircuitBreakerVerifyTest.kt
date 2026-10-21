@@ -12,12 +12,17 @@ import io.mockk.mockkObject
 import io.mockk.unmockkAll
 import java.io.File
 import java.io.IOException
+import java.nio.charset.Charset
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.runBlocking
 import okhttp3.Call
 import okhttp3.OkHttpClient
+import okhttp3.Protocol
+import okhttp3.Request
+import okhttp3.Response
+import okhttp3.ResponseBody
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -71,6 +76,29 @@ class SourceCircuitBreakerVerifyTest {
         every { httpClient.newCall(any()) } returns call
         SinaStockAPI.httpClientForTesting = httpClient
         SinaStockAPI.invalidateCache() // 清内存缓存，确保走「无缓存」真实路径
+    }
+
+    /**
+     * 让真实 SinaStockAPI 的 OkHttp 层返回 HTTP 200，但响应体里没有任何能匹配请求代码的
+     * hq_str 行（这里放一个字段不足 32 的「假」代码行）——模拟「源正常应答但无此代码」的真符号级场景。
+     * 驱动真实 sink 转换（不 mock getRealtimeData），验证修复后这条路径**仍**走符号级分支、
+     * 不被误判成源级失败（否则合法「代码不支持」会被累计并误禁整源）。
+     */
+    private fun stubSinaHttp200NoMatch() {
+        val bodyBytes = "var hq_str_sh999999=\"0,0,0,0,0,0,0,0,0\";".toByteArray(Charset.forName("GBK"))
+        val response = Response.Builder()
+            .request(Request.Builder().url("https://hq.sinajs.cn/list=sh600000").build())
+            .protocol(Protocol.HTTP_1_1)
+            .code(200)
+            .message("OK")
+            .body(ResponseBody.create(null, bodyBytes))
+            .build()
+        val call = mockk<Call>()
+        every { call.execute() } returns response
+        val httpClient = mockk<OkHttpClient>()
+        every { httpClient.newCall(any()) } returns call
+        SinaStockAPI.httpClientForTesting = httpClient
+        SinaStockAPI.invalidateCache()
     }
 
     /**
@@ -173,5 +201,28 @@ class SourceCircuitBreakerVerifyTest {
             SourcePhase.OPEN,
             manager.sourcePhaseForTesting(ApiManager.API_SINA)
         )
+    }
+
+    /**
+     * 边界保护（防修复把合法「代码不支持」也误判成源级）：新浪 200 应答但无任何代码命中，
+     * 走**真实** sink 路径，必须**仍**落符号级分支（isSymbolLevelFailure=true），
+     * 且不计入源级熔禁——否则合法不支持代码会被累计、错误禁用整源。
+     */
+    /**
+     * 边界保护（防修复把合法「代码不支持」也误判成源级）：新浪 200 应答但无任何代码命中，
+     * 走**真实** sink 路径（mock OkHttp 层返回 200 + 无命中响应体，不 mock getStockData），
+     * 必须**仍**落符号级分支（isSymbolLevelFailure=true）且保留符号级文案——
+     * 否则合法不支持代码会被累计、错误禁用整源。
+     * （经 StockDataManager 的「符号级不计源级熔禁」集成判定已由工程师
+     *  StockDataManagerTest.符号级确定性失败不计入_远超阈值也不熔禁 覆盖，这里只钉住
+     *  sink 这一层在修复后仍正确区分「真符号级」与「源级故障」。）
+     */
+    @Test
+    fun `回归_新浪200应答无代码命中_仍判符号级`() = runBlocking {
+        stubSinaHttp200NoMatch()
+        val failure = SinaStockAPI.getStockData("sh600000").exceptionOrNull() as? Exception
+        assertTrue("200 但无命中应返回失败", failure != null)
+        assertTrue("仍应判为符号级（代码不支持），不得被修复误判成源级", isSymbolLevelFailure(failure!!))
+        assertTrue("符号级文案应保留", failure.message?.contains("未获取到股票数据") ?: false)
     }
 }

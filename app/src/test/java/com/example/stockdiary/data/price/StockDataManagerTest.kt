@@ -7,7 +7,6 @@ import com.example.stockdiary.network.NetworkRetryHelper
 import com.example.stockdiary.network.SinaStockAPI
 import com.example.stockdiary.network.TencentStockAPI
 import com.example.stockdiary.network.model.StockData
-import io.mockk.coAnswers
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every

@@ -20,17 +20,23 @@
 
 ## 快速开始
 
+**新克隆的机器必须先告诉 Gradle SDK 在哪**，否则直接报 `SDK location not found`：
+`local.properties` 被 `.gitignore` 排除（它存本机路径，本就不入库），需自己建一行
+`sdk.dir=C\:\\Users\\<你的用户名>\\AppData\\Local\\Android\\Sdk`（Windows 的 `\` 写成 `\\`），
+或设置环境变量 `ANDROID_HOME`。
+
 ```bash
 # 构建 debug APK
 ./gradlew assembleDebug          # macOS / Linux
 gradlew.bat assembleDebug        # Windows
 
-# 跑 JVM 单元测试（当前 943 个，全绿）
+# 跑 JVM 单元测试（当前 956 个，全绿）
 ./gradlew testDebugUnitTest
 gradlew.bat testDebugUnitTest
 ```
 
-构建产物：`app/build/outputs/apk/debug/app-debug.apk`
+构建产物：`app/build/outputs/apk/debug/app-debug.apk`（约 65 MB）。
+仓库里**不含 APK**（`*.apk` 已排除），必须自行构建。
 
 ### 两个构建坑（改依赖前务必看）
 
@@ -51,9 +57,12 @@ app/src/main/java/com/example/stockdiary/
 
 配套文档：
 
-- `CODE_ARCHITECTURE.md` —— 详细分层、依赖关系、命名规范、常见修改指南
-- `BUILD_INSTRUCTIONS.md` —— 构建与签名说明
-- `docs/system_design.md` —— 系统设计
+- **`AI_GUIDE.md` —— 首选入口**：操作 + 阅读手册（30 秒定位、命令速查、四条核心链路、改功能对照表、已知坑、怎么加测试、提交约定、从零构建 APK）。
+- **`docs/PROJECT_MEMORY.md` —— 项目记忆**：关键决策表、7 条不变量、开发流水（含提交号）、未解决限制。**动手前先看，别推翻已拍板的决策。**
+- `docs/system_design.md` —— 系统设计（附 `.mermaid` 图）
+- ⚠️ `CODE_ARCHITECTURE.md` —— **部分过时**：导航实际是 `ui/navigation/GoldVaultNavHost.kt`（不是 `StockDiaryNavHost.kt`）；`common/` 现在只有 `APIConfig.kt` 和 `Result.kt`。以实际代码为准。
+- 🟡 `BUILD_INSTRUCTIONS.md` —— 步骤没错但**没提上面的 `local.properties` 坑**，照它做新克隆会失败。
+- 📜 根目录其余 `*.md`（体检/诊断/review 报告等）均为**历史快照**，不代表现状。
 
 ## 数据源
 
@@ -73,6 +82,7 @@ app/src/main/java/com/example/stockdiary/
 
 ## 给协作者（含 AI）的建议
 
-1. 先读 `CODE_ARCHITECTURE.md`（分层 + 命名规范）与 `BUILD_INSTRUCTIONS.md`（构建）。
-2. 再看 `app/src`，从 `MainActivity` → `StockDiaryNavHost` → 各 `Screen` / `ViewModel` / `Repository` 顺下来。
-3. 改完请跑 `gradlew.bat testDebugUnitTest`，保证 943 个测试不回归；新增逻辑请配套单测（网络路径可用注入假 `OkHttpClient` 的方式测试，仓库已有先例）。
+1. **先读 `AI_GUIDE.md`**（最新、路径均已核实），再看 `docs/PROJECT_MEMORY.md`（别推翻既有决策）。
+2. 然后看 `app/src`，从 `MainActivity` → `GoldVaultNavHost` → 各 `Screen` / `ViewModel` / `Repository` 顺下来。
+3. 改完请跑 `gradlew.bat testDebugUnitTest`，保证 **956 个**测试不回归；新增逻辑请配套单测（网络路径可用注入假 `OkHttpClient` 的方式测试，仓库已有先例）。
+4. 改动做完默认直接 commit + push，但**按主题分批**，且 push 前必须编译 + 全量测试通过。

@@ -125,9 +125,10 @@ fun SearchAssetItem(asset: Asset, onClick: () -> Unit, onDividendClick: () -> Un
                         StockCodeManager.isDelistedForSync(asset.symbol) -> "退市"
                         // 与 AssetCards.StockAssetItem 同一套口径：币安主机级熔断期间
                         // （连不上 api.binance.com，见 BinanceHostGate）显示「币安暂不可达」，
-                        // 区别于「价格待更新」。isBlocked 不可观察，列表每轮同步结束后重组时刷新
+                        // 区别于「价格待更新」。isUnavailable 不可观察，列表每轮同步结束后重组时刷新；
+                        // 纯读无副作用，不驱动熔断状态机（请求闸门是 shouldAllow 的职责）。
                         asset.type == AssetType.CRYPTO &&
-                            BinanceHostGate.isBlocked(System.currentTimeMillis()) -> "币安暂不可达"
+                            BinanceHostGate.isUnavailable() -> "币安暂不可达"
                         else -> "价格待更新"
                     },
                     style = MaterialTheme.typography.bodySmall, color = AppTheme.colors.onSurfaceVariant, fontWeight = FontWeight.Medium

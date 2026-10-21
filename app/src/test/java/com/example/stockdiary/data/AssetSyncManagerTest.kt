@@ -9,6 +9,7 @@ import android.content.Context
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.network.UnifiedPriceService
+import com.example.stockdiary.network.BinanceHostUnavailableException
 import com.example.stockdiary.network.model.AssetPrice
 import com.example.stockdiary.network.model.FundData
 import io.mockk.coEvery
@@ -321,5 +322,31 @@ class AssetSyncManagerTest {
         // 末尾 .let{} 令 runBlocking 块返回 Unit，满足 JUnit「测试方法返回 void」约定。
         gate.complete(Unit)
         runCatching { withTimeout(5000) { syncJob.await() } }.let { }
+    }
+
+    // ---------- 熔断期跳过不计失败（BinanceHostGate 的原始目的） ----------
+
+    @Test
+    fun `熔断期加密货币跳过不计失败_不触发同步失败通知`() = runBlocking {
+        // 币安主机级熔断期间，UnifiedPriceService 对加密货币返回 BinanceHostUnavailableException；
+        // syncSingleAsset 必须走 isUnavailable(lastError) 分支：不计 failedCount、不计 errorType、
+        // 不推高「同步多次失败」通知——这是熔断器存在的原始目的，任何改动都不该破。
+        val crypto = Asset(
+            name = "BTC", type = AssetType.CRYPTO, symbol = "BTCUSDT",
+            account = "币安", balance = 1.0
+        )
+        coEvery {
+            UnifiedPriceService.getPrice("BTCUSDT", AssetType.CRYPTO, any())
+        } returns Result.failure(BinanceHostUnavailableException("币安接口连续失败，已暂停访问 300 秒"))
+
+        val result = AssetSyncManager.syncAllAssets(
+            context, repository, listOf(crypto), {}, forceRefresh = true
+        )
+
+        // 跳过而非失败：不计成功也不计失败，无可重试错误，无主导错误类型
+        assertEquals(0, result.successCount)
+        assertEquals(0, result.failedCount)
+        assertTrue("熔断跳过不该产生可重试错误", !result.hasRetryableErrors)
+        assertNull("熔断跳过不该计入任何错误类型（否则触发误导性通知）", result.dominantErrorType)
     }
 }

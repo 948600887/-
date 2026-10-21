@@ -27,8 +27,8 @@ internal fun OverviewMetric(label: String, value: String, valueColor: Color = Ap
 }
 
 @Composable
-internal fun RiskMetric(label: String, value: String, valueColor: Color = AppTheme.colors.onSurface) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+internal fun RiskMetric(modifier: Modifier = Modifier, label: String, value: String, valueColor: Color = AppTheme.colors.onSurface) {
+    Column(modifier = modifier, horizontalAlignment = Alignment.CenterHorizontally) {
         Text(text = value, fontSize = 14.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold, color = valueColor)
         Text(text = label, fontSize = 11.sp, color = AppTheme.colors.onSurfaceVariant)
     }

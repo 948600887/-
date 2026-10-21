@@ -228,11 +228,12 @@ fun LazyListScope.historyRiskCard(stats: SnapshotStats) {
                 horizontalArrangement = Arrangement.SpaceEvenly
             ) {
                 // 最大回撤是「下跌」的度量，按国内惯例绿=跌，用 profitGreen 语义正确，勿改
-                RiskMetric("最大回撤", "${stats.maxDrawdown.format(2)}%", AppTheme.colors.profitGreen)
-                RiskMetric("年化波动率", "${stats.volatility.format(2)}%", AppTheme.colors.onSurface)
+                RiskMetric(Modifier.weight(1f), "最大回撤", "${stats.maxDrawdown.format(2)}%", AppTheme.colors.profitGreen)
+                RiskMetric(Modifier.weight(1f), "年化波动率", "${stats.volatility.format(2)}%", AppTheme.colors.onSurface)
                 // 首期净资产 ≤0 时增长率为 null，显示「—」：0.00% 会被读成零增长，
                 // 与旁边的正日均增值额自相矛盾（与期间增值卡同一处理）
                 RiskMetric(
+                    Modifier.weight(1f),
                     "日均复合增长",
                     stats.avgDailyReturnPercent?.let { "${it.format(2)}%" } ?: "—",
                     stats.avgDailyReturnPercent?.profitColor() ?: AppTheme.colors.onSurfaceVariant
@@ -243,9 +244,9 @@ fun LazyListScope.historyRiskCard(stats: SnapshotStats) {
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceEvenly
             ) {
-                RiskMetric("日均增值额", stats.avgDailyReturnAmount.toProfitDisplay("¥"), stats.avgDailyReturnAmount.profitColor())
-                RiskMetric("最高净资产", "¥${stats.maxValue.format(0)}", AppTheme.colors.onSurface)
-                RiskMetric("最低净资产", "¥${stats.minValue.format(0)}", AppTheme.colors.onSurface)
+                RiskMetric(Modifier.weight(1f), "日均增值额", stats.avgDailyReturnAmount.toProfitDisplay("¥"), stats.avgDailyReturnAmount.profitColor())
+                RiskMetric(Modifier.weight(1f), "最高净资产", "¥${stats.maxValue.format(0)}", AppTheme.colors.onSurface)
+                RiskMetric(Modifier.weight(1f), "最低净资产", "¥${stats.minValue.format(0)}", AppTheme.colors.onSurface)
             }
             Spacer(modifier = Modifier.height(8.dp))
             // 快照有缺口时，日均/年化指标的分母是覆盖天数而非快照份数；

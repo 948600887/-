@@ -199,4 +199,33 @@ class CalendarViewModelTest {
         assertTrue(vm.uiState.value.dividends.isEmpty())
         assertNull(vm.uiState.value.errorMessage)
     }
+
+    @Test
+    fun `只变实时价不触发日历重算_数量或币种变化才触发`() = runBlocking {
+        // getAllAssets() 是 Room 流：同步时每更新一个 currentPrice 就重发一次，实测一次全量刷新
+        // 让「生成资产日历」白跑 20+ 次。日历与实时价无关，故按 (symbol,balance,currency) 签名去重。
+        // 下面三次发射里，只有「首次」和「数量变化」应触发重算，「仅价格变化」那次必须被去重掉。
+        val regenCount = java.util.concurrent.atomic.AtomicInteger(0)
+        coEvery { divRepo.getDividendsBySymbol(any(), any()) } coAnswers {
+            regenCount.incrementAndGet()
+            emptyList<DividendRecord>()
+        }
+        every { prefsMgr.loadPreferences() } returns DashboardPreferences()
+        every { assetRepo.getAllAssets() } returns flowOf(
+            listOf(stockAsset),
+            listOf(stockAsset.copy(currentPrice = 99.0)),  // 仅变实时价 → 不重算
+            listOf(stockAsset.copy(balance = 2000.0))       // 变数量 → 重算
+        )
+        coEvery { snapshotDao.getAllSnapshotsSync() } returns emptyList()
+        coEvery { divRepo.preFetchDividends(any(), any(), any()) } returns Unit
+
+        val vm = CalendarViewModel(assetRepo, divRepo, snapshotDao, prefsMgr, useCase)
+
+        // VM 已构造并处理完首次发射（末次发射的 balance=2000 已反映到 assets）
+        waitUntil { vm.uiState.value.assets.firstOrNull()?.balance == 2000.0 }
+        waitUntil(timeoutMs = 6000) { regenCount.get() >= 2 }
+        // 再稳一手：若去重失效，价格那次会晚到凑成第 3 次，这里必须仍是 2
+        Thread.sleep(400)
+        assertEquals("价格抖动应被去重、只重算 2 次（首次 + 数量变化）", 2, regenCount.get())
+    }
 }

@@ -22,6 +22,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -75,6 +76,12 @@ class CalendarViewModel(
         viewModelScope.launch {
             assetRepository.getAllAssets()
                 .map { assets -> assets.filter { it.type in supportedTypes } }
+                // 日历只依赖「有哪些标的 + 数量/币种」：资产日历按 symbol 取分红，收支日历还按
+                // balance/currency 折算金额——都与**实时价无关**。而 getAllAssets() 是 Room 流，
+                // 同步时每更新一个 currentPrice 就重发一次，实测一次全量刷新让「生成资产日历」
+                // 白跑 20+ 次（快照/分红都没变，结果一模一样）。按日历真正关心的字段做签名去重，
+                // 价格抖动不再触发重算；首值直接放行、零延迟，不影响冷启动加载。
+                .distinctUntilChanged { old, new -> calendarSignature(old) == calendarSignature(new) }
                 .collect { assets ->
                     _uiState.update { state -> state.copy(assets = assets) }
                     generateCalendarData(assets)
@@ -82,6 +89,14 @@ class CalendarViewModel(
                 }
         }
     }
+
+    /**
+     * 日历输出真正依赖的资产字段签名：symbol（取哪些分红）、balance（收支日历折算金额）、
+     * currency（外币换算）。**不含 currentPrice/lastSyncTime 等实时字段**——它们变了日历结果也不变，
+     * 故不应触发重算（见 init 里的 distinctUntilChanged）。
+     */
+    private fun calendarSignature(assets: List<Asset>): List<Triple<String?, Double, String>> =
+        assets.map { Triple(it.symbol, it.balance, it.currency) }
 
     private fun loadDividendIncome(assets: List<Asset>) {
         if (assets.isEmpty()) return

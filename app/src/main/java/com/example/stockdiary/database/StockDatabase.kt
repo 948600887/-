@@ -21,9 +21,14 @@ import com.example.stockdiary.utils.AppLogger
     ],
     version = 16,
     // 必须开着：项目铁律是「迁移 SQL 取自 Room 自己导出的 JSON，不手敲」。
-    // 关掉它 kapt 不会导任何 schema（room.schemaLocation 形同虚设），
-    // 于是 5~16.json 全缺，下一次 bump version 没有基准可对照，
-    // Room 的 schema 一致性校验（MigrationTestHelper）也没法做
+    // 当前导出的 schema JSON 只有 1/2/3/4/16 —— **5~15.json 永久缺失**：
+    // 那段时间 exportSchema 是关的，kapt 一次都没生成过，git 历史里也查无此文件
+    // （`git log --all` 确认 5~15.json 从未被提交过），因此无法从仓库恢复。
+    // 缺失不会让 App 崩溃——本库**不**靠 schema JSON 做运行时校验，而是靠手写、逐列对齐的
+    // 代码迁移（MIGRATION_1_2 … MIGRATION_15_16 全部存在，且无 fallbackToDestructiveMigration，
+    // 漏一条老用户升级就会崩）。真正的坑在**测试侧**：日后若引入 Room 的 MigrationTestHelper
+    // 做 schema 一致性校验，校验 4→16 会因为没有 5~15.json 基准而失败，届时须先 reconstruct
+    // 那些版本（checkout 对应 tag 跑 kapt）或显式跳过该区间。
     exportSchema = true
 )
 @TypeConverters(Converters::class)

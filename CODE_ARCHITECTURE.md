@@ -1,5 +1,13 @@
 # 新股日记 App 代码架构文档
 
+> ⚠️ **本文件已过时，仅供参考目录结构，不可作为实现事实依据。**
+>
+> 本架构文档停留在早期版本，与当前代码存在多处出入（例如它把价格层写成
+> 不存在的 `DataManager.kt`，实际是 `StockDataManager`；仪表盘开关的真实生效
+> 逻辑是 `DashboardPreferences` data class，而非 `DashboardComponent` 枚举——后者
+> 已确认为死代码并删除）。**以 [`docs/PROJECT_MEMORY.md`](docs/PROJECT_MEMORY.md)
+> 与 [`AI_GUIDE.md`](AI_GUIDE.md) 为准**，需要精确实现细节请直接读源码或查这两份文档。
+
 ## 📁 项目结构
 
 ```
@@ -35,8 +43,7 @@ com.example.stockdiary/
 │   ├── SnapshotWorker.kt           # 快照后台任务
 │   ├── DataExporter.kt             # 数据导出器
 │   ├── AssetRepository.kt          # 资产数据仓库
-│   ├── DataManager.kt              # 数据管理器 (旧版，全局状态)
-│   ├── StockDataManager.kt         # 股票数据管理器
+│   ├── StockDataManager.kt         # 股票行情数据管理器（v2，多源聚合，当前活跃，非旧版）
 │   ├── ApiManager.kt               # API 管理器
 │   ├── StockAPIManager.kt         # 股票 API 管理
 │   ├── StockData.kt               # 股票数据模型

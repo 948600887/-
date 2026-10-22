@@ -206,7 +206,7 @@ app/src/main/java/com/example/stockdiary/
 6. **场内基金/REIT（508xxx、500/501xxx、16xxxx）分红不在东财股票分红报告**（返回 9201 空），必须走天天基金源。见 `DividendRepository.fetchDividendData` 的 `isExchangeFund`。
 7. **分红负缓存**：数据源"未应答"（网络失败）时 `answered` 不置位、末尾 `throw DividendSourceUnavailableException`，**不写负缓存**；只有真正应答过才缓存"无分红"。
 8. **货币基金**不发现金分红，走"每万份收益"估算，与现金分红口径不同（见 `moneyFundIncome`）。
-9. `DataManager` 是旧版全局状态容器，与 `Repository` 并存；**新代码一律走 Repository**。
+9. 代码里**没有** `DataManager.kt`：早期架构文档曾称其为「旧版全局状态容器」，实际不存在。活跃的行情抓取层是 `StockDataManager`（多源聚合 + `SourceCircuitBreaker` 数据源级熔断），本身被 Repository 调用，是现行代码不是遗留物。**不要**为了「消灭 DataManager」做大重构。
 
 ## 8. 测试怎么加
 
@@ -244,7 +244,7 @@ app/src/main/java/com/example/stockdiary/
 ### 仍未解决 / 外部限制（别再试图"修复"）
 
 - **币安资产在中国大陆拿不到**：地区封锁（HTTP 451 + DNS 屏蔽），代码层面无解，唯一办法是挂代理。
-- `DataManager`（旧版全局状态容器）与 `Repository` 并存，属历史遗留；新代码一律走 Repository。
+- 代码里**没有** `DataManager.kt`：早期文档误称其为旧版全局状态容器，实际不存在；活跃行情层是 `StockDataManager`（多源 + 熔断），被 Repository 调用，是现行代码。无需为「消灭 DataManager」做重构。
 - `CODE_ARCHITECTURE.md` 部分过时，以实际代码与本手册为准。
 
 ## 11. 记忆在哪（三层）

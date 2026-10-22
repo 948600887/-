@@ -69,7 +69,7 @@
 
 - **币安资产在中国大陆拿不到**：HTTP **451**（地区合规拒绝）+ `UnknownHostException`（DNS 屏蔽）双层封锁。
   **代码层面无解**，唯一办法是挂代理到允许地区的节点。App 已能优雅降级并给出明确中文提示。
-- **`DataManager` 与 `Repository` 并存**：`DataManager` 是旧版全局状态容器，属历史遗留；新代码一律走 Repository。
+- **代码里没有 `DataManager.kt`**：早期架构文档（CODE_ARCHITECTURE.md）曾写「DataManager 旧版全局状态容器」，但仓库中**不存在**该文件（已核实）。当前行情抓取层是 `StockDataManager`（多源聚合 + `SourceCircuitBreaker` 数据源级熔断），它本身**被 Repository 调用**，是活跃代码而非历史遗留。**不要**按「消灭 DataManager」去做大规模重构——它不存在，`StockDataManager` 也无需大改。新增功能仍尽量走 Repository 边界。
 - **`CODE_ARCHITECTURE.md` 部分过时**：导航实际是 `ui/navigation/GoldVaultNavHost.kt`（不是 `StockDiaryNavHost.kt`）；`common/` 现在只有 `APIConfig.kt` 和 `Result.kt`。**以实际代码为准**。
 - **设备端网络不稳会放大问题**：诊断日志曾出现东财/新浪/天天基金多域名同时 DNS 失败、价格同步 0/102。这是当时的网络状况，不是逻辑 Bug。
 

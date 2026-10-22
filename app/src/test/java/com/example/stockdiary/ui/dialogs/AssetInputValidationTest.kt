@@ -140,6 +140,47 @@ class AssetInputValidationTest {
         assertTrue(errors(type = AssetType.STOCK, rate = "abc").isValid)
     }
 
+    // ---------- 贷款利率：选填，但填了就得合法 ----------
+
+    @Test
+    fun 贷款利率选填_新增留空合法() {
+        // 界面对贷款显示利率但选填；rateRequired=false（添加页对贷款传 isDeposit=false）
+        val e = validateAssetInput(
+            selectedType = AssetType.LOAN,
+            name = "房贷",
+            symbol = "",
+            account = "工商银行",
+            balance = "120000",
+            purchasePrice = "",
+            interestRate = "",
+            rateRequired = false
+        )
+        assertNull(e.rate)
+        assertTrue(e.isValid)
+    }
+
+    @Test
+    fun 贷款利率填了非法值照样报错() {
+        val e = errors(type = AssetType.LOAN, symbol = "", rate = "abc")
+        assertEquals("请输入有效数字", e.rate?.message)
+    }
+
+    // ---------- 参考单价：仅证券 + 加密货币适用 ----------
+
+    @Test
+    fun 存款与负债不校验参考单价() {
+        // 界面对存款/信用卡/贷款不显示单价字段，填了脏值也不该拦住提交
+        assertNull(errors(type = AssetType.BANK_DEPOSIT, symbol = "", rate = "1", price = "abc").price)
+        assertNull(errors(type = AssetType.CREDIT_CARD, symbol = "", price = "abc").price)
+        assertNull(errors(type = AssetType.LOAN, symbol = "", price = "abc").price)
+    }
+
+    @Test
+    fun 证券与加密仍校验参考单价() {
+        assertEquals("请输入有效数字", errors(type = AssetType.STOCK, price = "abc").price?.message)
+        assertEquals("请输入有效数字", errors(type = AssetType.CRYPTO, symbol = "BTC", price = "abc").price?.message)
+    }
+
     // ---------- 数量 ----------
 
     @Test
@@ -163,8 +204,10 @@ class AssetInputValidationTest {
     fun 数量标签随资产类型变化() {
         assertEquals("持股数量", errors(type = AssetType.STOCK, balance = "x").balance?.label)
         assertEquals("持有份额", errors(type = AssetType.FUND, balance = "x").balance?.label)
+        assertEquals("持有数量", errors(type = AssetType.CRYPTO, symbol = "BTC", balance = "x").balance?.label)
         assertEquals("存款金额", errors(type = AssetType.BANK_DEPOSIT, symbol = "", rate = "1", balance = "x").balance?.label)
-        assertEquals("数量/金额", errors(type = AssetType.LOAN, symbol = "", balance = "x").balance?.label)
+        assertEquals("欠款金额", errors(type = AssetType.CREDIT_CARD, symbol = "", balance = "x").balance?.label)
+        assertEquals("贷款余额", errors(type = AssetType.LOAN, symbol = "", balance = "x").balance?.label)
     }
 
     // ---------- 参考单价：可选，但填了就得合法 ----------
@@ -216,6 +259,7 @@ class AssetInputValidationTest {
         cases.forEach { (type, input) ->
             val (sym, bal, price) = input
             val rate = if (type == AssetType.BANK_DEPOSIT) "2.75" else ""
+            // 镜像添加页接线：利率必填仅存款，贷款/其它选填
             val e = validateAssetInput(
                 selectedType = type,
                 name = "测试",
@@ -223,7 +267,8 @@ class AssetInputValidationTest {
                 account = "测试账户",
                 balance = bal,
                 purchasePrice = price,
-                interestRate = rate
+                interestRate = rate,
+                rateRequired = type == AssetType.BANK_DEPOSIT
             )
             assertTrue("${type} 应判定为合法，实际: ${e.summary}", e.isValid)
             // 校验放行却构造失败 = 两处口径漂移，会直接崩在主线程
@@ -237,7 +282,10 @@ class AssetInputValidationTest {
                 interestRate = rate,
                 notes = "",
                 fundPrice = null,
-                stockPrice = null
+                stockPrice = null,
+                // 覆盖新增的币种 / 到期日入参
+                currency = if (type == AssetType.CRYPTO) "USD" else "CNY",
+                dueDate = if (type == AssetType.BANK_DEPOSIT || type == AssetType.LOAN) "2027-01-01" else null
             )
         }
     }

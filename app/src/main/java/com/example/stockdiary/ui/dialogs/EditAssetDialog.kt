@@ -58,6 +58,9 @@ fun EditAssetDialog(
     var purchasePriceInput by remember { mutableStateOf(asset.purchasePrice.toString()) }
     var notes by remember { mutableStateOf(asset.notes ?: "") }
     var interestRateInput by remember { mutableStateOf(asset.interestRate?.toString() ?: "") }
+    // 币种 / 到期日：一一对应改造新增，编辑时从原资产带出
+    var currency by remember { mutableStateOf(asset.currency) }
+    var dueDate by remember { mutableStateOf(asset.dueDate) }
     var isSaving by remember { mutableStateOf(false) }
     var saveError by remember { mutableStateOf<String?>(null) }
 
@@ -75,6 +78,13 @@ fun EditAssetDialog(
         selectedType == AssetType.FUND ||
         selectedType == AssetType.CRYPTO
     val isDeposit = selectedType == AssetType.BANK_DEPOSIT
+    val isLiability = selectedType.isLiability
+    // 与添加页同一套按类型精细化：参考单价仅证券+加密；年利率存款+贷款；到期日存款+负债
+    val showPrice = selectedType == AssetType.STOCK ||
+        selectedType == AssetType.FUND ||
+        selectedType == AssetType.CRYPTO
+    val showRate = isDeposit || selectedType == AssetType.LOAN
+    val showDueDate = isDeposit || isLiability
 
     /** 下一个该聚焦的字段：跳过当前类型下不可见的那些 */
     fun focusAfter(field: String) {
@@ -82,7 +92,11 @@ fun EditAssetDialog(
             "name" -> if (symbolVisible) symbolFocus else accountFocus
             "symbol" -> accountFocus
             "account" -> balanceFocus
-            "balance" -> if (isDeposit) rateFocus else priceFocus
+            "balance" -> when {
+                showPrice -> priceFocus
+                showRate -> rateFocus
+                else -> notesFocus
+            }
             "price", "rate" -> notesFocus
             else -> return
         }.requestFocus()
@@ -163,7 +177,7 @@ fun EditAssetDialog(
                                 DialogTypeChip(
                                     type = type,
                                     selected = selectedType == type,
-                                    onClick = { selectedType = type },
+                                    onClick = { selectedType = type; currency = defaultCurrencyForType(type) },
                                     modifier = Modifier.weight(1f)
                                 )
                             }
@@ -176,7 +190,7 @@ fun EditAssetDialog(
                                 DialogTypeChip(
                                     type = type,
                                     selected = selectedType == type,
-                                    onClick = { selectedType = type },
+                                    onClick = { selectedType = type; currency = defaultCurrencyForType(type) },
                                     modifier = Modifier.weight(1f)
                                 )
                             }
@@ -230,7 +244,13 @@ fun EditAssetDialog(
                         onNext = { focusAfter("balance") }
                     )
 
-                    if (!isDeposit) {
+                    // 币种：所有类型都显示
+                    AssetCurrencyField(
+                        currency = currency,
+                        onCurrencyChange = { currency = it }
+                    )
+
+                    if (showPrice) {
                         AssetPriceField(
                             purchasePrice = purchasePriceInput,
                             onPriceChange = {
@@ -244,7 +264,7 @@ fun EditAssetDialog(
                         )
                     }
 
-                    if (isDeposit) {
+                    if (showRate) {
                         AssetInterestRateField(
                             interestRate = interestRateInput,
                             onRateChange = {
@@ -254,6 +274,13 @@ fun EditAssetDialog(
                             error = errorFor("rate", errors.rate),
                             focusRequester = rateFocus,
                             onNext = { focusAfter("rate") }
+                        )
+                    }
+
+                    if (showDueDate) {
+                        AssetDueDateField(
+                            dueDate = dueDate,
+                            onDueDateChange = { dueDate = it }
                         )
                     }
 
@@ -311,12 +338,15 @@ fun EditAssetDialog(
                                     asset.type == AssetType.BANK_DEPOSIT -> null
                                     else -> asset.currentPrice
                                 },
-                                // 留空表示沿用原利率，与校验的 rateRequired = false 对应
-                                interestRate = if (isDeposit) {
+                                // 利率：存款/贷款都可能有；留空表示沿用原值，与校验的 rateRequired = false 对应
+                                interestRate = if (showRate) {
                                     interestRateInput.toDoubleOrNull() ?: asset.interestRate
                                 } else {
                                     null
                                 },
+                                // 币种 / 到期日：一一对应改造新增写入
+                                currency = currency,
+                                dueDate = dueDate,
                                 notes = notes.takeIf { it.isNotBlank() }
                             )
                         } catch (e: Exception) {

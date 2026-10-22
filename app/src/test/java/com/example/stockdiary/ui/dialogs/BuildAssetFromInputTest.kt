@@ -21,6 +21,8 @@ class BuildAssetFromInputTest {
         purchasePrice: String = "",
         interestRate: String = "",
         notes: String = "",
+        currency: String = "CNY",
+        dueDate: String? = null,
         fundPrice: Double? = null,
         stockPrice: Double? = null
     ) = buildAssetFromInput(
@@ -33,7 +35,9 @@ class BuildAssetFromInputTest {
         interestRate = interestRate,
         notes = notes,
         fundPrice = fundPrice,
-        stockPrice = stockPrice
+        stockPrice = stockPrice,
+        currency = currency,
+        dueDate = dueDate
     )
 
     @Test
@@ -80,6 +84,26 @@ class BuildAssetFromInputTest {
     fun 非存款类型的利率恒为null() {
         val asset = build(AssetType.STOCK, interestRate = "3.5")
         assertNull(asset.interestRate)
+    }
+
+    @Test
+    fun 贷款利率会保留_不再恒为null() {
+        // 一一对应改造：利率从「仅存款」扩展到「存款 + 贷款」
+        val asset = build(AssetType.LOAN, name = "房贷", balance = "120000", interestRate = "4.2")
+        assertEquals(4.2, asset.interestRate!!, 0.0)
+    }
+
+    @Test
+    fun 币种按传入写入_默认CNY() {
+        assertEquals("CNY", build(AssetType.STOCK, symbol = "600519").currency)
+        assertEquals("USD", build(AssetType.CRYPTO, symbol = "BTC", currency = "USD").currency)
+    }
+
+    @Test
+    fun 到期日写入_空白落null() {
+        assertEquals("2027-01-01", build(AssetType.LOAN, name = "房贷", balance = "1000", dueDate = "2027-01-01").dueDate)
+        assertNull(build(AssetType.LOAN, name = "房贷", balance = "1000", dueDate = "   ").dueDate)
+        assertNull(build(AssetType.LOAN, name = "房贷", balance = "1000").dueDate)
     }
 
     @Test

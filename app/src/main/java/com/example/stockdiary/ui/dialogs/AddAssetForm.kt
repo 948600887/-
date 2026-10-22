@@ -1,6 +1,7 @@
 package com.example.stockdiary.ui.dialogs
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -15,12 +16,16 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.DateRange
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DatePicker
+import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuBox
 import androidx.compose.material3.ExposedDropdownMenuDefaults
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -29,7 +34,13 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -39,6 +50,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import java.time.Instant
+import java.time.LocalDate
+import java.time.ZoneOffset
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.network.FundAPI
@@ -437,6 +451,117 @@ internal fun AssetInterestRateField(
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
+/**
+ * 币种选择：CNY / USD / HKD 三选一。
+ *
+ * 一一对应改造新增：Asset 本就有 currency 字段（默认 CNY），但添加/编辑页一直没暴露，
+ * 于是加密货币（美元价）、港股（港币价）的市值被按人民币口径算，totalValueCny 全错。
+ */
+@Composable
+internal fun AssetCurrencyField(
+    currency: String,
+    onCurrencyChange: (String) -> Unit
+) {
+    val options = listOf(
+        "CNY" to "¥ 人民币",
+        "USD" to "$ 美元",
+        "HKD" to "HK$ 港币"
+    )
+    Column {
+        Text(
+            text = "币种",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(bottom = 6.dp)
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            options.forEach { (code, label) ->
+                FilterChip(
+                    selected = currency == code,
+                    onClick = { onCurrencyChange(code) },
+                    label = { Text(label) }
+                )
+            }
+        }
+    }
+}
+
+/**
+ * 到期日（可选）：只读输入框 + 日期选择器。存款 / 信用卡 / 贷款等有"期限"的类型才显示。
+ *
+ * 一一对应改造新增：Asset 有 dueDate 字段但添加/编辑页没暴露，定期存款、贷款、信用卡
+ * 还款日都填不了。选中存 yyyy-MM-dd，点右侧 × 清除。
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+internal fun AssetDueDateField(
+    dueDate: String?,
+    onDueDateChange: (String?) -> Unit
+) {
+    var showPicker by remember { mutableStateOf(false) }
+    val initialMillis = remember(dueDate) {
+        dueDate?.let {
+            runCatching {
+                LocalDate.parse(it).atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli()
+            }.getOrNull()
+        }
+    }
+    val pickerState = rememberDatePickerState(initialSelectedDateMillis = initialMillis)
+
+    OutlinedTextField(
+        value = dueDate ?: "",
+        onValueChange = {},
+        readOnly = true,
+        label = { Text("到期日（可选）") },
+        placeholder = { Text("点击选择日期") },
+        trailingIcon = {
+            if (dueDate != null) {
+                IconButton(onClick = { onDueDateChange(null) }) {
+                    Icon(
+                        Icons.Default.Close,
+                        contentDescription = "清除到期日",
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+            } else {
+                Icon(
+                    Icons.Default.DateRange,
+                    contentDescription = "选择到期日",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        },
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { showPicker = true }
+    )
+
+    if (showPicker) {
+        DatePickerDialog(
+            onDismissRequest = { showPicker = false },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        // DatePicker 的 selectedDateMillis 是 UTC 零点毫秒；按 UTC 还原成本地日期，
+                        // 避免 UTC+8 下被时区挪动一天。
+                        val date = pickerState.selectedDateMillis
+                            ?.let {
+                                Instant.ofEpochMilli(it).atZone(ZoneOffset.UTC).toLocalDate().toString()
+                            }
+                        onDueDateChange(date)
+                        showPicker = false
+                    }
+                ) { Text("确定") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showPicker = false }) { Text("取消") }
+            }
+        ) {
+            DatePicker(state = pickerState)
+        }
+    }
+}
+
 @Composable
 internal fun AssetNotesField(
     notes: String,
@@ -538,7 +663,9 @@ fun buildAssetFromInput(
     interestRate: String,
     notes: String,
     fundPrice: Double?,
-    stockPrice: Double?
+    stockPrice: Double?,
+    currency: String = "CNY",
+    dueDate: String? = null
 ): Asset {
     val normalizedSymbol = if (selectedType == AssetType.STOCK || selectedType == AssetType.FUND) {
         StockCodeManager.normalizeSymbol(symbol)
@@ -562,11 +689,22 @@ fun buildAssetFromInput(
         } else {
             fundPrice ?: stockPrice ?: purchasePrice.toDoubleOrNull()
         },
-        interestRate = if (selectedType == AssetType.BANK_DEPOSIT) {
+        // 利率：存款与贷款都可能有；存款新增时必填（由校验保证），贷款可选
+        interestRate = if (selectedType == AssetType.BANK_DEPOSIT || selectedType == AssetType.LOAN) {
             interestRate.toDoubleOrNull()
         } else {
             null
         },
+        // 币种 / 到期日：一一对应改造新增写入（原本 Asset 有这两字段但表单没暴露）
+        currency = currency,
+        dueDate = dueDate?.takeIf { it.isNotBlank() },
         notes = notes.takeIf { it.isNotBlank() }
     )
 }
+
+/**
+ * 按资产类型给币种一个合理默认值：加密货币行情以美元计价（币安），默认 USD；
+ * 其余（股票/基金/存款/负债）默认人民币。用户可随时在表单里改。
+ */
+internal fun defaultCurrencyForType(type: AssetType): String =
+    if (type == AssetType.CRYPTO) "USD" else "CNY"

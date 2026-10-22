@@ -63,6 +63,8 @@ internal fun balanceLabel(type: AssetType): String = when (type) {
     AssetType.FUND -> "持有份额"
     AssetType.CRYPTO -> "持有数量"
     AssetType.BANK_DEPOSIT -> "存款金额"
+    AssetType.CREDIT_CARD -> "欠款金额"
+    AssetType.LOAN -> "贷款余额"
     else -> "数量/金额"
 }
 
@@ -87,6 +89,12 @@ fun validateAssetInput(
     rateRequired: Boolean = true
 ): AssetInputErrors {
     val isDeposit = selectedType == AssetType.BANK_DEPOSIT
+    // 参考单价只对"数量×单价=市值"的类型有意义：证券 + 加密货币。存款单价恒 1、负债按 balance 计,不适用。
+    val priceApplies = selectedType == AssetType.STOCK ||
+        selectedType == AssetType.FUND ||
+        selectedType == AssetType.CRYPTO
+    // 利率:存款(必填)与贷款(可选)都可能有
+    val rateApplies = isDeposit || selectedType == AssetType.LOAN
     val balanceValue = balance.toDoubleOrNull()
     val priceValue = purchasePrice.toDoubleOrNull()
     val rateValue = interestRate.toDoubleOrNull()
@@ -110,19 +118,19 @@ fun validateAssetInput(
             else -> null
         },
 
-        // 参考单价是可选的：空着不报错，但填了就得是合法非负数
+        // 参考单价是可选的：空着不报错，但填了就得是合法非负数；仅对有"单价"的类型生效
         price = when {
-            isDeposit -> null
+            !priceApplies -> null
             purchasePrice.isBlank() -> null
             priceValue == null -> FieldError("参考单价", "请输入有效数字")
             priceValue < 0 -> FieldError("参考单价", "不能为负数")
             else -> null
         },
 
-        // 存款的利率：新增时必填（没有利率就算不出到期收益），
-        // 编辑时留空是合法的——asset.copy() 会回落到原有利率，等于「不改这一项」。
+        // 存款/贷款的利率：存款新增时必填（没有利率就算不出到期收益/还款额），
+        // 贷款选填；编辑时留空是合法的——表示「不改这一项」，回落到原值。
         rate = when {
-            !isDeposit -> null
+            !rateApplies -> null
             interestRate.isBlank() -> if (rateRequired) {
                 FieldError("年利率", "必填，请输入有效数字")
             } else {

@@ -63,6 +63,9 @@ fun AddAssetDialog(
     var isSaving by remember { mutableStateOf(false) }
     var saveError by remember { mutableStateOf<String?>(null) }
     var interestRate by remember { mutableStateOf("") }
+    // 币种 / 到期日：一一对应改造新增。初始类型是证券 → 默认 CNY
+    var currency by remember { mutableStateOf(defaultCurrencyForType(AssetType.STOCK)) }
+    var dueDate by remember { mutableStateOf<String?>(null) }
     var isLoading by remember { mutableStateOf(false) }
     var loadError by remember { mutableStateOf<String?>(null) }
     var fundInfo by remember { mutableStateOf<FundAPI.FundInfo?>(null) }
@@ -82,6 +85,16 @@ fun AddAssetDialog(
         selectedType == AssetType.FUND ||
         selectedType == AssetType.CRYPTO
     val isDeposit = selectedType == AssetType.BANK_DEPOSIT
+    val isLiability = selectedType.isLiability
+    // 按类型精细化的字段可见性：
+    // - 参考单价：仅证券 + 加密货币（存款恒 1、负债按 balance 计，不适用）
+    // - 年利率：存款（必填）+ 贷款（可选）
+    // - 到期日：存款 + 负债（信用卡/贷款）
+    val showPrice = selectedType == AssetType.STOCK ||
+        selectedType == AssetType.FUND ||
+        selectedType == AssetType.CRYPTO
+    val showRate = isDeposit || selectedType == AssetType.LOAN
+    val showDueDate = isDeposit || isLiability
 
     /** 下一个该聚焦的字段：跳过当前类型下不可见的那些 */
     fun focusAfter(field: String) {
@@ -89,7 +102,11 @@ fun AddAssetDialog(
             "name" -> if (symbolVisible) symbolFocus else accountFocus
             "symbol" -> accountFocus
             "account" -> balanceFocus
-            "balance" -> if (isDeposit) rateFocus else priceFocus
+            "balance" -> when {
+                showPrice -> priceFocus
+                showRate -> rateFocus
+                else -> notesFocus
+            }
             "price", "rate" -> notesFocus
             else -> return
         }.requestFocus()
@@ -270,7 +287,9 @@ fun AddAssetDialog(
                 account = account,
                 balance = balance,
                 purchasePrice = purchasePrice,
-                interestRate = interestRate
+                interestRate = interestRate,
+                // 利率必填仅存款；贷款选填（留空表示不计息）
+                rateRequired = isDeposit
             )
         }
     }
@@ -316,6 +335,8 @@ fun AddAssetDialog(
                         selectedType = selectedType,
                         onSelectType = { type ->
                             selectedType = type
+                            // 切类型时按类型给币种一个合理默认（加密→USD，其余→CNY）
+                            currency = defaultCurrencyForType(type)
                             fundInfo = null
                             stockInfo = null
                             loadError = null
@@ -393,7 +414,13 @@ fun AddAssetDialog(
                         onNext = { focusAfter("balance") }
                     )
 
-                    if (!isDeposit) {
+                    // 币种：所有类型都显示（决定市值换算口径，加密默认 USD）
+                    AssetCurrencyField(
+                        currency = currency,
+                        onCurrencyChange = { currency = it }
+                    )
+
+                    if (showPrice) {
                         val autoPrice = when {
                             fundInfo?.price != null && fundInfo?.price ?: 0.0 > 0 -> fundInfo?.price
                             stockInfo?.price != null -> stockInfo?.price
@@ -412,7 +439,7 @@ fun AddAssetDialog(
                         )
                     }
 
-                    if (isDeposit) {
+                    if (showRate) {
                         AssetInterestRateField(
                             interestRate = interestRate,
                             onRateChange = {
@@ -422,6 +449,13 @@ fun AddAssetDialog(
                             error = errorFor("rate", errors.rate),
                             focusRequester = rateFocus,
                             onNext = { focusAfter("rate") }
+                        )
+                    }
+
+                    if (showDueDate) {
+                        AssetDueDateField(
+                            dueDate = dueDate,
+                            onDueDateChange = { dueDate = it }
                         )
                     }
 
@@ -465,7 +499,9 @@ fun AddAssetDialog(
                                 interestRate = interestRate,
                                 notes = notes,
                                 fundPrice = fundInfo?.price,
-                                stockPrice = stockInfo?.price
+                                stockPrice = stockInfo?.price,
+                                currency = currency,
+                                dueDate = dueDate
                             )
                         } catch (e: Exception) {
                             // 别把 loader 留在转圈状态——那会让"添加"按钮永久禁用且没有任何提示

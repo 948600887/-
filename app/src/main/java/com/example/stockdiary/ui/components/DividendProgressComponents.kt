@@ -177,14 +177,15 @@ fun NextPayoutCard(
                 )
             }
             Column(horizontalAlignment = Alignment.End) {
+                // 0 天读着别扭：当天除息时大字显示「今日」、标签显示「除息」，连读「今日除息」
                 Text(
-                    "${next.daysUntil}",
+                    if (next.daysUntil == 0) "今日" else "${next.daysUntil}",
                     style = MaterialTheme.typography.headlineSmall,
                     fontWeight = FontWeight.Bold,
                     color = AppTheme.colors.primary
                 )
                 Text(
-                    "天后除息",
+                    if (next.daysUntil == 0) "除息" else "天后除息",
                     style = MaterialTheme.typography.labelSmall,
                     color = AppTheme.colors.onSurfaceVariant
                 )

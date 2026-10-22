@@ -3,16 +3,21 @@ package com.example.stockdiary.ui.screens.settings.components
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -35,7 +40,7 @@ import androidx.compose.ui.unit.dp
 import com.example.stockdiary.data.prefs.DashboardPreferences
 import com.example.stockdiary.data.prefs.SortOrder
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun DashboardConfigSheet(
     preferences: DashboardPreferences,
@@ -48,6 +53,11 @@ fun DashboardConfigSheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                // 关键修复：内容远超一屏，这里必须可滚动，否则 ModalBottomSheet 撑到上限后
+                // 下方（排序 / 历史周期 / 恢复默认）被裁掉且够不着——即「不能下滑」。
+                .verticalScroll(rememberScrollState())
+                // 阈值输入框弹键盘时，把内容顶到键盘之上，避免输入框被键盘挡住。
+                .imePadding()
                 .padding(horizontal = 16.dp)
                 .windowInsetsPadding(WindowInsets.navigationBars)
                 .padding(bottom = 16.dp)
@@ -134,7 +144,7 @@ fun DashboardConfigSheet(
                 onCheckedChange = { onPreferencesChange(preferences.copy(showLiabilities = it)) }
             )
 
-            HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+            HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
 
             SwitchPreference(
                 title = "隐藏低价值虚拟货币",
@@ -201,9 +211,11 @@ fun DashboardConfigSheet(
             HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
 
             SectionTitle("默认历史周期")
-            Row(
+            // 用 FlowRow：6 个周期 chip 横排在窄屏会被裁掉/溢出，改成自动换行更整齐。
+            FlowRow(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 val periods = listOf(
                     "1W" to "1周",

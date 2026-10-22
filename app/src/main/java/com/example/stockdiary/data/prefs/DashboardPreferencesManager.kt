@@ -68,27 +68,6 @@ enum class SortOrder {
 fun DashboardPreferences.lowValueThreshold(): Double =
     lowValueThresholdCny.toDoubleOrNull()?.takeIf { it >= 0 } ?: 10.0
 
-enum class DashboardComponent(val key: String, val title: String) {
-    TOTAL_ASSETS("total_assets", "总资产"),
-    NET_ASSETS("net_assets", "净资产"),
-    /**
-     * 「收入预估」卡片。
-     * key 沿用旧名 profit —— 它是 SharedPreferences 的键，改了老用户的显示开关会失效。
-     * 显示名已经从「盈亏」改成「收入预估」，界面上不再出现盈亏字样。
-     */
-    PROFIT("profit", "收入预估"),
-    DISTRIBUTION("distribution", "资产分布"),
-    ASSET_GROWTH("asset_growth", "资产增值"),
-    DIVIDEND_PROGRESS("dividend_progress", "收息进度"),
-    NEXT_PAYOUT("next_payout", "下一笔分红"),
-    MONTHLY_CASH_FLOW("monthly_cash_flow", "月度现金流"),
-    BANK_DEPOSITS("bank_deposits", "银行存款"),
-    STOCKS("stocks", "股票"),
-    FUNDS("funds", "基金"),
-    CRYPTO("crypto", "虚拟货币"),
-    LIABILITIES("liabilities", "负债")
-}
-
 class DashboardPreferencesManager(context: Context) {
     
     private val prefs: SharedPreferences = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -206,49 +185,7 @@ class DashboardPreferencesManager(context: Context) {
         }
     }
     
-    fun updateComponentVisibility(component: DashboardComponent, visible: Boolean) {
-        val key = when (component) {
-            DashboardComponent.TOTAL_ASSETS -> KEY_SHOW_TOTAL_ASSETS
-            DashboardComponent.NET_ASSETS -> KEY_SHOW_NET_ASSETS
-            DashboardComponent.PROFIT -> KEY_SHOW_PROFIT
-            DashboardComponent.DISTRIBUTION -> KEY_SHOW_DISTRIBUTION
-            DashboardComponent.ASSET_GROWTH -> KEY_SHOW_ASSET_GROWTH
-            DashboardComponent.DIVIDEND_PROGRESS -> KEY_SHOW_DIVIDEND_PROGRESS
-            DashboardComponent.NEXT_PAYOUT -> KEY_SHOW_NEXT_PAYOUT
-            DashboardComponent.MONTHLY_CASH_FLOW -> KEY_SHOW_MONTHLY_CASH_FLOW
-            DashboardComponent.BANK_DEPOSITS -> KEY_SHOW_BANK_DEPOSITS
-            DashboardComponent.STOCKS -> KEY_SHOW_STOCKS
-            DashboardComponent.FUNDS -> KEY_SHOW_FUNDS
-            DashboardComponent.CRYPTO -> KEY_SHOW_CRYPTO
-            DashboardComponent.LIABILITIES -> KEY_SHOW_LIABILITIES
-        }
-        prefs.edit().putBoolean(key, visible).apply()
-    }
-    
-    fun isComponentVisible(component: DashboardComponent): Boolean {
-        val key = when (component) {
-            DashboardComponent.TOTAL_ASSETS -> KEY_SHOW_TOTAL_ASSETS
-            DashboardComponent.NET_ASSETS -> KEY_SHOW_NET_ASSETS
-            DashboardComponent.PROFIT -> KEY_SHOW_PROFIT
-            DashboardComponent.DISTRIBUTION -> KEY_SHOW_DISTRIBUTION
-            DashboardComponent.ASSET_GROWTH -> KEY_SHOW_ASSET_GROWTH
-            DashboardComponent.DIVIDEND_PROGRESS -> KEY_SHOW_DIVIDEND_PROGRESS
-            DashboardComponent.NEXT_PAYOUT -> KEY_SHOW_NEXT_PAYOUT
-            DashboardComponent.MONTHLY_CASH_FLOW -> KEY_SHOW_MONTHLY_CASH_FLOW
-            DashboardComponent.BANK_DEPOSITS -> KEY_SHOW_BANK_DEPOSITS
-            DashboardComponent.STOCKS -> KEY_SHOW_STOCKS
-            DashboardComponent.FUNDS -> KEY_SHOW_FUNDS
-            DashboardComponent.CRYPTO -> KEY_SHOW_CRYPTO
-            DashboardComponent.LIABILITIES -> KEY_SHOW_LIABILITIES
-        }
-        return prefs.getBoolean(key, component != DashboardComponent.TOTAL_ASSETS)
-    }
-    
     fun resetToDefaults() {
         prefs.edit().clear().apply()
-    }
-    
-    fun getVisibleComponents(): List<DashboardComponent> {
-        return DashboardComponent.entries.filter { isComponentVisible(it) }
     }
 }

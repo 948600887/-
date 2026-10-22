@@ -173,13 +173,13 @@ fun CalendarCard(
 
 /**
  * 日历格子固定高度：行高不因内容多少而参差不齐。
- * 注意要给足：三段文字即便带 Compose 默认字体 padding 也能完整容身，
- * 否则最贴底的分红标记会被 Surface 的 clip() 切掉半截（曾复现：有金额的格子「分」只显示一半）。
+ * 槽位高度按「字号 + Compose 默认字体 padding」给足，贴底的分红标记才不会被 clip 切尾。
  */
 private val CALENDAR_CELL_HEIGHT = 56.dp
-/** 三段固定「槽位」高度：日期 / 金额 / 分红标记各占一位，有无内容都占位，保证横向对齐 */
-private val CALENDAR_SLOT_DATE = 20.dp
-private val CALENDAR_SLOT_VALUE = 18.dp
+/** 三段固定「槽位」高度：日期 / 金额 / 分红标记各占一位，有无内容都占位，保证横向对齐。
+ *  三段之和(50) < 格子内容区(54)，配合 Arrangement.Top 让底部留 ~4dp 空隙，分红标记不上顶下沿 */
+private val CALENDAR_SLOT_DATE = 18.dp
+private val CALENDAR_SLOT_VALUE = 16.dp
 private val CALENDAR_SLOT_DIVIDEND = 16.dp
 
 @Composable
@@ -212,9 +212,9 @@ private fun CalendarDayCell(
                 .fillMaxSize()
                 .padding(horizontal = 2.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
-            // 三段固定高度槽位 + SpaceBetween：日期贴顶、分红标记贴底、金额居中；
-            // 无论有无金额 / 分红，槽位都在，所以每个格子的三段都对齐在同一水平线，行高也一致。
-            verticalArrangement = Arrangement.SpaceBetween
+            // Top：三段从上往下排，剩余空隙垫在底部——分红标记不被顶到格子下沿（用户要求「分」往上移一点）。
+            // 槽位固定高度，有无内容都占位，所以每个格子的三段仍对齐在同一水平线，行高也一致。
+            verticalArrangement = Arrangement.Top
         ) {
             Box(modifier = Modifier.height(CALENDAR_SLOT_DATE), contentAlignment = Alignment.Center) {
                 Text(

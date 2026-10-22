@@ -171,12 +171,16 @@ fun CalendarCard(
     }
 }
 
-/** 日历格子固定高度：行高不再因内容多少而参差不齐 */
-private val CALENDAR_CELL_HEIGHT = 52.dp
+/**
+ * 日历格子固定高度：行高不因内容多少而参差不齐。
+ * 注意要给足：三段文字即便带 Compose 默认字体 padding 也能完整容身，
+ * 否则最贴底的分红标记会被 Surface 的 clip() 切掉半截（曾复现：有金额的格子「分」只显示一半）。
+ */
+private val CALENDAR_CELL_HEIGHT = 56.dp
 /** 三段固定「槽位」高度：日期 / 金额 / 分红标记各占一位，有无内容都占位，保证横向对齐 */
-private val CALENDAR_SLOT_DATE = 18.dp
-private val CALENDAR_SLOT_VALUE = 16.dp
-private val CALENDAR_SLOT_DIVIDEND = 12.dp
+private val CALENDAR_SLOT_DATE = 20.dp
+private val CALENDAR_SLOT_VALUE = 18.dp
+private val CALENDAR_SLOT_DIVIDEND = 16.dp
 
 @Composable
 private fun CalendarDayCell(

@@ -135,6 +135,9 @@ object SinaStockAPI : StockAPI {
                 var lastBatchException: Exception? = null
 
                 val batchResults = batches.mapIndexed { index, batch ->
+                    // 放在最外层 try 之前：try 块内声明的局部变量对其自身 catch 不可见（兄弟作用域），
+                    // 而内/外两层 catch 的日志都要带出失败 URL，故声明在最外层 try 外面。
+                    var reqUrl: String = "(未构造URL)"
                     try {
                         val batchKey = batch.sorted().joinToString(",")
                         
@@ -156,13 +159,18 @@ object SinaStockAPI : StockAPI {
                                 .build()
                             
                             val response = activeClient.newCall(httpRequest).execute()
+                            reqUrl = httpRequest.url.toString()
                             response.use {
                                 if (!it.isSuccessful) {
-                                    val errorMsg = "API响应错误: ${it.code}"
+                                    // 诊断增强：新浪偶发被限流/封禁时只给个 code 很难定位，
+                                    // 这里把 URL 和响应体前 200 字一起记下来，方便区分
+                                    // 「被墙/403 限流」与「真·源级故障」（上层源级熔断靠这个判断）。
+                                    val bodyPeek = runCatching { it.body?.string()?.take(200) }.getOrNull().orEmpty()
+                                    AppLogger.e("新浪行情 HTTP ${it.code} 非成功 | url=$reqUrl | 响应体前200=$bodyPeek", tag = TAG)
                                     if (it.code == 403) {
                                         throw IOException("API请求频率过高，请稍后再试")
                                     }
-                                    throw IOException(errorMsg)
+                                    throw IOException("API响应错误: ${it.code}")
                                 }
 
                                 val responseBody = it.body
@@ -171,6 +179,7 @@ object SinaStockAPI : StockAPI {
                                 }
                                 val bytes = responseBody.use { body -> body.bytes() }
                                 if (bytes.isEmpty()) {
+                                    AppLogger.e("新浪行情返回空 body | url=$reqUrl", tag = TAG)
                                     throw IOException("API返回空数据")
                                 }
                                 val text = String(bytes, Charset.forName("GBK"))
@@ -199,7 +208,7 @@ object SinaStockAPI : StockAPI {
                         } catch (e: CancellationException) {
                             throw e
                         } catch (e: Exception) {
-                            AppLogger.e("批次请求失败: ${e.message}", e, TAG)
+                            AppLogger.e("批次请求失败 url=$reqUrl: ${e.message}", e, TAG)
                             request.complete(Result.failure(e))
                             if (lastBatchException == null) lastBatchException = e
                             val partialResult = mutableMapOf<String, SinaStockData>()
@@ -216,7 +225,7 @@ object SinaStockAPI : StockAPI {
                     } catch (e: CancellationException) {
                         throw e
                     } catch (e: Exception) {
-                        AppLogger.e("批次请求异常: ${e.message}", e, TAG)
+                        AppLogger.e("批次请求异常 url=$reqUrl: ${e.message}", e, TAG)
                         if (lastBatchException == null) lastBatchException = e
                         val partialResult = mutableMapOf<String, SinaStockData>()
                         batch.forEach { code ->

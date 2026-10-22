@@ -127,14 +127,27 @@ object AssetSyncManager {
             if (memoryTrimCallback != null) return
             val cb = object : ComponentCallbacks2 {
                 override fun onTrimMemory(level: Int) {
-                    // 只关心「快被杀了」的等级，避免后台周期回调刷屏
-                    if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) {
-                        AppLogger.w(
-                            "onTrimMemory(level=$level) — 进程面临被系统回收风险，" +
-                                "level≥${ComponentCallbacks2.TRIM_MEMORY_COMPLETE} 即临死前通牒",
-                            TAG
-                        )
+                    // 不同 level 含义差很多，措辞必须分级，不能把所有回调都叫「临死前通牒」——
+                    // 那样低级别（运行中内存偏低、切后台 UI 不可见）会被误判成快被杀，反而误导排查。
+                    // 常量定义见 android.content.ComponentCallbacks2：
+                    //   20 UI_HIDDEN：切后台（最频繁，纯正常事件）
+                    //   10 RUNNING_LOW / 15 RUNNING_MODERATE：运行中内存偏低，系统建议释放
+                    //   40 BACKGROUND 起：进程入后台，可能被回收
+                    //   60 RUNNING_CRITICAL：运行中内存吃紧，随时可能杀
+                    //   80 COMPLETE：进程即将被回收——这才是「最后通牒」
+                    val desc = when (level) {
+                        ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN ->
+                            "UI 不可见（切后台），正常事件"
+                        ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW,
+                        ComponentCallbacks2.TRIM_MEMORY_RUNNING_MODERATE ->
+                            "运行中内存偏低，系统建议释放资源"
+                        in ComponentCallbacks2.TRIM_MEMORY_BACKGROUND..ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL ->
+                            "后台运行，可能被系统回收"
+                        ComponentCallbacks2.TRIM_MEMORY_COMPLETE ->
+                            "进程即将被回收——最后通牒"
+                        else -> "内存压力通知(level=$level)"
                     }
+                    AppLogger.w("onTrimMemory — $desc", TAG)
                 }
 
                 override fun onConfigurationChanged(newConfig: Configuration) = Unit

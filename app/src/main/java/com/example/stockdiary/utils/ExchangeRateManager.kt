@@ -83,6 +83,12 @@ object ExchangeRateManager {
     @Volatile
     private var lastRefreshTimeMs: Long = 0L
 
+    /**
+     * 已经告警过的未知币种集合：每个未知币种只警告一次，避免 Compose 重组合期
+     * 反复调 [getRate] 把日志刷爆。同进程内去重，不落盘——重启后重新告警即可。
+     */
+    private val warnedUnknownCurrencies = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
     /** 刷新互斥：防止启动触发与导入触发并发回源（TTL 判定在锁内进行） */
     private val refreshMutex = Mutex()
 
@@ -115,7 +121,20 @@ object ExchangeRateManager {
         lastRefreshTimeMs = saved.timestampMs
     }
 
-    fun getRate(currency: String): Double = liveRates[currency.uppercase()] ?: 1.0
+    fun getRate(currency: String): Double {
+        val code = currency.uppercase()
+        return liveRates[code] ?: run {
+            // 未知币种：保留 1.0 兜底（等同人民币，比返回 0 把金额清零安全），但告警一次，
+            // 否则「离岸人民币」「泰铢」之类会被无声无息地按人民币汇总，错得毫无痕迹。
+            if (warnedUnknownCurrencies.add(code)) {
+                AppLogger.w(
+                    "未知币种 '$code'，汇率按 1.0（等同人民币）兜底；请在 defaultRates 补汇率或核对币种代码",
+                    "ExchangeRateManager"
+                )
+            }
+            1.0
+        }
+    }
 
     fun toCny(amount: Double, currency: String): Double = amount * getRate(currency)
 
@@ -221,6 +240,7 @@ object ExchangeRateManager {
         lastRefreshTimeMs = 0L
         rateStore = store
         rateSource = NoOpRateSource()
+        warnedUnknownCurrencies.clear()
     }
 
     private const val MIN_RATE_FACTOR = 0.2

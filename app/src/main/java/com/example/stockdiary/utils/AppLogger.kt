@@ -230,7 +230,9 @@ object AppLogger {
                         }
                     }
                 }
-                file.writeText(linesToKeep.joinToString("\n"))
+                // 末尾补一个换行：否则裁剪后文件最后一行缺 \n，下次追加的第一条日志会
+                // 接在最后一行屁股后面造成粘连（日志持续超上限时每次 flush 都触发裁剪，累积成片）。
+                file.writeText(linesToKeep.joinToString("\n", postfix = "\n"))
             }
         } catch (e: CancellationException) {
             throw e

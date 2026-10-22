@@ -11,7 +11,6 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -35,6 +34,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.stockdiary.ui.theme.AppTheme
@@ -171,6 +171,13 @@ fun CalendarCard(
     }
 }
 
+/** 日历格子固定高度：行高不再因内容多少而参差不齐 */
+private val CALENDAR_CELL_HEIGHT = 52.dp
+/** 三段固定「槽位」高度：日期 / 金额 / 分红标记各占一位，有无内容都占位，保证横向对齐 */
+private val CALENDAR_SLOT_DATE = 18.dp
+private val CALENDAR_SLOT_VALUE = 16.dp
+private val CALENDAR_SLOT_DIVIDEND = 12.dp
+
 @Composable
 private fun CalendarDayCell(
     day: CalendarDay,
@@ -182,10 +189,11 @@ private fun CalendarDayCell(
 ) {
     val isToday = day.date == LocalDate.now() && day.isCurrentMonth
     val isWeekend = day.date.dayOfWeek.value >= 6
+    val hasValue = day.isCurrentMonth && day.value != 0.0
 
     Surface(
         modifier = modifier
-            .heightIn(min = 44.dp)
+            .height(CALENDAR_CELL_HEIGHT)
             .padding(1.dp)
             .clip(RoundedCornerShape(6.dp))
             .clickable(onClick = onClick),
@@ -198,41 +206,48 @@ private fun CalendarDayCell(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(2.dp),
+                .padding(horizontal = 2.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center
+            // 三段固定高度槽位 + SpaceBetween：日期贴顶、分红标记贴底、金额居中；
+            // 无论有无金额 / 分红，槽位都在，所以每个格子的三段都对齐在同一水平线，行高也一致。
+            verticalArrangement = Arrangement.SpaceBetween
         ) {
-            Text(
-                text = day.date.dayOfMonth.toString(),
-                fontSize = 12.sp,
-                fontWeight = if (isToday) FontWeight.Bold else FontWeight.Normal,
-                color = when {
-                    !day.isCurrentMonth -> AppTheme.colors.onSurfaceVariant.copy(alpha = 0.4f)
-                    isWeekend && !isToday -> AppTheme.colors.onSurfaceVariant.copy(alpha = 0.7f)
-                    isToday -> AppTheme.colors.primary
-                    else -> AppTheme.colors.onSurface
-                }
-            )
-            if (day.isCurrentMonth && day.value != 0.0) {
+            Box(modifier = Modifier.height(CALENDAR_SLOT_DATE), contentAlignment = Alignment.Center) {
                 Text(
-                    text = if (isAssetCalendar) day.value.compactFormat()
-                    else if (day.value > 0) "+${day.value.format(0)}" else day.value.format(0),
-                    fontSize = 9.sp,
-                    color = if (isAssetCalendar) AppTheme.colors.primary else day.value.profitColor(),
-                    fontWeight = FontWeight.SemiBold,
-                    maxLines = 1,
-                    modifier = Modifier.padding(top = 1.dp)
+                    text = day.date.dayOfMonth.toString(),
+                    fontSize = 12.sp,
+                    fontWeight = if (isToday) FontWeight.Bold else FontWeight.Normal,
+                    color = when {
+                        !day.isCurrentMonth -> AppTheme.colors.onSurfaceVariant.copy(alpha = 0.4f)
+                        isWeekend && !isToday -> AppTheme.colors.onSurfaceVariant.copy(alpha = 0.7f)
+                        isToday -> AppTheme.colors.primary
+                        else -> AppTheme.colors.onSurface
+                    }
                 )
             }
-            if (hasDividend) {
-                Text(
-                    text = "分",
-                    fontSize = 8.sp,
-                    color = AppTheme.colors.lossRed,
-                    fontWeight = FontWeight.Bold,
-                    maxLines = 1,
-                    modifier = Modifier.padding(top = 1.dp)
-                )
+            Box(modifier = Modifier.height(CALENDAR_SLOT_VALUE), contentAlignment = Alignment.Center) {
+                if (hasValue) {
+                    Text(
+                        text = if (isAssetCalendar) day.value.compactFormat()
+                        else if (day.value > 0) "+${day.value.format(0)}" else day.value.format(0),
+                        fontSize = 9.sp,
+                        color = if (isAssetCalendar) AppTheme.colors.primary else day.value.profitColor(),
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+            Box(modifier = Modifier.height(CALENDAR_SLOT_DIVIDEND), contentAlignment = Alignment.Center) {
+                if (hasDividend) {
+                    Text(
+                        text = "分",
+                        fontSize = 8.sp,
+                        color = AppTheme.colors.lossRed,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1
+                    )
+                }
             }
         }
     }

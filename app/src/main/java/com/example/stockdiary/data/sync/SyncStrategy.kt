@@ -7,6 +7,7 @@ import java.time.DayOfWeek
 import java.time.LocalDateTime
 import java.time.LocalTime
 import java.time.ZoneId
+import com.example.stockdiary.database.AssetType
 import kotlin.math.min
 
 /**
@@ -58,6 +59,30 @@ object SyncStrategy {
         } else {
             NON_TRADING_INTERVAL_MILLIS
         }
+    }
+
+    /**
+     * 某类资产当前是否应被后台自动同步（按用户偏好 + 交易时段分频）。
+     *
+     * 三类的市场时钟本就不同，不该被 A 股时钟一刀切：
+     * - **STOCK / FUND**：默认**仅盘后 / 非交易时段**刷（捕获收盘价即止），
+     *   盘中要刷需打开 `stockIntradaySync`；
+     * - **CRYPTO**：默认**不自动刷**（24/7 市场，与 A 股时钟错拍），
+     *   要自动刷需打开 `cryptoAutoSync`；
+     * - 其它类型：后台从不自动同步。
+     *
+     * 抽成纯函数便于单测跨时段 / 偏好组合；[com.example.stockdiary.data.sync.PriceSyncWorker]
+     * 每轮按它过滤资产。手动刷新不受此约束（用户显式要求，照旧全刷）。
+     */
+    fun shouldAutoSyncType(
+        type: AssetType,
+        inTradingHours: Boolean,
+        stockIntradaySync: Boolean,
+        cryptoAutoSync: Boolean
+    ): Boolean = when (type) {
+        AssetType.STOCK, AssetType.FUND -> stockIntradaySync || !inTradingHours
+        AssetType.CRYPTO -> cryptoAutoSync
+        else -> false
     }
 
     /**

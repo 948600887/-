@@ -68,6 +68,12 @@ class SettingsViewModel(
     private val _lastPriceSyncTime = MutableStateFlow(priceSyncPreferencesManager.getLastSyncTimeMillis())
     val lastPriceSyncTime: StateFlow<Long> = _lastPriceSyncTime.asStateFlow()
 
+    private val _stockIntradaySyncEnabled = MutableStateFlow(priceSyncPreferencesManager.isStockIntradaySyncEnabled())
+    val stockIntradaySyncEnabled: StateFlow<Boolean> = _stockIntradaySyncEnabled.asStateFlow()
+
+    private val _cryptoAutoSyncEnabled = MutableStateFlow(priceSyncPreferencesManager.isCryptoAutoSyncEnabled())
+    val cryptoAutoSyncEnabled: StateFlow<Boolean> = _cryptoAutoSyncEnabled.asStateFlow()
+
     /**
      * 每日提醒状态。
      *
@@ -353,6 +359,34 @@ class SettingsViewModel(
         }
     }
 
+    /** 盘中是否也自动刷股票/场内基金。关=仅盘后刷(默认)。改完由调用方重排后台周期 */
+    fun setStockIntradaySyncEnabled(enabled: Boolean) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                priceSyncPreferencesManager.setStockIntradaySyncEnabled(enabled)
+                _stockIntradaySyncEnabled.value = enabled
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                AppLogger.e("保存盘中同步股票设置失败: ${e.message}", e, "SettingsVM")
+            }
+        }
+    }
+
+    /** 是否自动刷虚拟货币。关=只手动刷(默认)。改完由调用方重排后台周期 */
+    fun setCryptoAutoSyncEnabled(enabled: Boolean) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                priceSyncPreferencesManager.setCryptoAutoSyncEnabled(enabled)
+                _cryptoAutoSyncEnabled.value = enabled
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                AppLogger.e("保存自动同步虚拟货币设置失败: ${e.message}", e, "SettingsVM")
+            }
+        }
+    }
+
     /**
      * 从磁盘重读价格同步与每日提醒的快照状态。
      *
@@ -364,6 +398,8 @@ class SettingsViewModel(
         viewModelScope.launch(Dispatchers.IO) {
             _autoPriceSyncEnabled.value = priceSyncPreferencesManager.isAutoSyncEnabled()
             _lastPriceSyncTime.value = priceSyncPreferencesManager.getLastSyncTimeMillis()
+            _stockIntradaySyncEnabled.value = priceSyncPreferencesManager.isStockIntradaySyncEnabled()
+            _cryptoAutoSyncEnabled.value = priceSyncPreferencesManager.isCryptoAutoSyncEnabled()
             _reminderEnabled.value = NotificationHelper.isReminderEnabled(appContext)
             val reminderTime = NotificationHelper.getReminderTime(appContext)
             _reminderHour.value = reminderTime.first

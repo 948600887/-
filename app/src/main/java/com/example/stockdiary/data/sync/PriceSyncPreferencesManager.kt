@@ -16,6 +16,28 @@ class PriceSyncPreferencesManager(context: Context) {
         prefs.edit().putBoolean(KEY_ENABLED, enabled).apply()
     }
 
+    /**
+     * 盘中（9:30–15:00）是否也自动同步股票 / 场内基金。
+     *
+     * 默认 false：后台只在盘后 / 非交易时段刷股票，捕获收盘价即止，不在盘中反复刷
+     * （用户不要盘中刷新）。true = 维持旧的「盘中 15 分钟」节奏。见 [com.example.stockdiary.data.sync.PriceSyncWorker]。
+     */
+    fun isStockIntradaySyncEnabled(): Boolean = prefs.getBoolean(KEY_STOCK_INTRADAY_SYNC, false)
+
+    fun setStockIntradaySyncEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_STOCK_INTRADAY_SYNC, enabled).apply()
+    }
+
+    /**
+     * 是否自动同步虚拟货币。默认 false：加密 24/7 交易、与 A 股时钟错拍，
+     * 用户只想在点「刷新」时手动刷，故后台默认不碰。见 [com.example.stockdiary.data.sync.PriceSyncWorker]。
+     */
+    fun isCryptoAutoSyncEnabled(): Boolean = prefs.getBoolean(KEY_CRYPTO_AUTO_SYNC, false)
+
+    fun setCryptoAutoSyncEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_CRYPTO_AUTO_SYNC, enabled).apply()
+    }
+
     fun getLastSyncTimeMillis(): Long = prefs.getLong(KEY_LAST_SYNC_TIME, 0L)
 
     fun setLastSyncTimeMillis(timeMillis: Long) {
@@ -50,6 +72,8 @@ class PriceSyncPreferencesManager(context: Context) {
     companion object {
         private const val PREFS_NAME = "price_sync_prefs"
         private const val KEY_ENABLED = "auto_price_sync_enabled"
+        private const val KEY_STOCK_INTRADAY_SYNC = "stock_intraday_sync_enabled"
+        private const val KEY_CRYPTO_AUTO_SYNC = "crypto_auto_sync_enabled"
         private const val KEY_LAST_SYNC_TIME = "last_price_sync_time"
         private const val KEY_CONSECUTIVE_FAILURES = "consecutive_sync_failures"
         private const val KEY_LAST_ERROR_TYPE = "last_sync_error_type"

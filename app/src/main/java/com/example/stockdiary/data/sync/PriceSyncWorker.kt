@@ -33,11 +33,26 @@ class PriceSyncWorker(
 
         return try {
             val repository = AssetRepository.getInstance(applicationContext)
+            // 按用户偏好 + 交易时段分频：盘中默认不刷股票/基金、加密默认不自动刷（见 SyncStrategy.shouldAutoSyncType）。
+            // 手动刷新不受此约束——用户显式点刷新，照旧全类型强制刷。
+            val inTradingHours = SyncStrategy.isInTradingHours()
+            val stockIntradaySync = prefs.isStockIntradaySyncEnabled()
+            val cryptoAutoSync = prefs.isCryptoAutoSyncEnabled()
             val assets = repository.getAllAssets().first()
-                .filter { it.type == AssetType.STOCK || it.type == AssetType.FUND || it.type == AssetType.CRYPTO }
+                .filter {
+                    (it.type == AssetType.STOCK || it.type == AssetType.FUND || it.type == AssetType.CRYPTO) &&
+                        SyncStrategy.shouldAutoSyncType(it.type, inTradingHours, stockIntradaySync, cryptoAutoSync)
+                }
 
             if (assets.isEmpty()) {
-                AppLogger.i("没有需要同步价格的资产，跳过", "PriceSyncWorker")
+                // 本轮被偏好/时段全部过滤掉（典型：盘中 + 两个开关都关）：正常跳过，
+                // 但仍重排下一轮，保证 15min↔4h 的自适应切换不失效。
+                AppLogger.i(
+                    "按同步偏好与交易时段无可同步资产，跳过本轮" +
+                        "（交易时段=$inTradingHours, 盘中同步股票=$stockIntradaySync, 自动同步加密=$cryptoAutoSync）",
+                    "PriceSyncWorker"
+                )
+                PriceSyncScheduler.scheduleSmartSync(applicationContext, runImmediately = false)
                 return Result.success()
             }
 

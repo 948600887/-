@@ -24,6 +24,7 @@ import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Schedule
+import androidx.compose.material.icons.filled.CurrencyBitcoin
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
@@ -92,6 +93,8 @@ fun SettingsScreen(
     val dashboardPrefs by viewModel.dashboardPreferences.collectAsStateWithLifecycle()
     val autoPriceSyncEnabled by viewModel.autoPriceSyncEnabled.collectAsStateWithLifecycle()
     val lastPriceSyncTime by viewModel.lastPriceSyncTime.collectAsStateWithLifecycle()
+    val stockIntradaySyncEnabled by viewModel.stockIntradaySyncEnabled.collectAsStateWithLifecycle()
+    val cryptoAutoSyncEnabled by viewModel.cryptoAutoSyncEnabled.collectAsStateWithLifecycle()
     val reminderEnabled by viewModel.reminderEnabled.collectAsStateWithLifecycle()
     val reminderHour by viewModel.reminderHour.collectAsStateWithLifecycle()
     val reminderMinute by viewModel.reminderMinute.collectAsStateWithLifecycle()
@@ -185,6 +188,8 @@ fun SettingsScreen(
         currentTheme,
         autoPriceSyncEnabled,
         lastPriceSyncTime,
+        stockIntradaySyncEnabled,
+        cryptoAutoSyncEnabled,
         reminderEnabled,
         reminderHour,
         reminderMinute,
@@ -263,6 +268,35 @@ fun SettingsScreen(
                         } else {
                             PriceSyncScheduler.cancelDailySync(context)
                         }
+                    }
+                ),
+                SettingsItemData(
+                    icon = Icons.Default.Schedule,
+                    title = "盘中同步股票",
+                    subtitle = if (stockIntradaySyncEnabled)
+                        "盘中每 ${SyncStrategy.TRADING_INTERVAL_MINUTES} 分钟也刷新"
+                    else
+                        "仅收盘后刷新，盘中不刷（更省）",
+                    isSwitch = true,
+                    switchChecked = stockIntradaySyncEnabled,
+                    onSwitchCheckedChange = { enabled ->
+                        viewModel.setStockIntradaySyncEnabled(enabled)
+                        // 仅在自动同步已开时重排周期；总开关关着时只存偏好，等开启再生效
+                        if (autoPriceSyncEnabled) PriceSyncScheduler.scheduleDailySync(context)
+                    }
+                ),
+                SettingsItemData(
+                    icon = Icons.Default.CurrencyBitcoin,
+                    title = "自动同步虚拟货币",
+                    subtitle = if (cryptoAutoSyncEnabled)
+                        "跟随自动同步周期刷新"
+                    else
+                        "不自动刷新，仅手动点刷新时更新",
+                    isSwitch = true,
+                    switchChecked = cryptoAutoSyncEnabled,
+                    onSwitchCheckedChange = { enabled ->
+                        viewModel.setCryptoAutoSyncEnabled(enabled)
+                        if (autoPriceSyncEnabled) PriceSyncScheduler.scheduleDailySync(context)
                     }
                 ),
                 SettingsItemData(

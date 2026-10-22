@@ -45,7 +45,7 @@ class DataExporter(private val context: Context) {
             val file = File(exportDir, fileName)
             
             FileWriter(file).use { writer ->
-                writer.append("名称,类型,代码,账户,数量,参考单价,当前价,总价值(原币),总价值(人民币),币种,汇率,备注\n")
+                writer.append("名称,类型,代码,账户,数量,参考单价,当前价,总价值(原币),总价值(人民币),币种,汇率,备注,到期日\n")
 
                 assets.forEach { asset ->
                     writer.append(buildCsvRow(asset))
@@ -184,7 +184,7 @@ class DataExporter(private val context: Context) {
 
                 // 资产部分
                 writer.append("## 资产持仓\n")
-                writer.append("名称,类型,代码,账户,数量,参考单价,当前价,总价值(原币),总价值(人民币),币种,汇率,备注\n")
+                writer.append("名称,类型,代码,账户,数量,参考单价,当前价,总价值(原币),总价值(人民币),币种,汇率,备注,到期日\n")
                 assets.forEach { asset ->
                     writer.append(buildCsvRow(asset))
                     writer.append("\n")
@@ -316,7 +316,8 @@ class DataExporter(private val context: Context) {
             asset.totalValueCny.format(2),
             escapeCsv(asset.currency),
             ExchangeRateManager.getRate(asset.currency).format(4),
-            escapeCsv(asset.notes ?: "")
+            escapeCsv(asset.notes ?: ""),
+            escapeCsv(asset.dueDate ?: "")
         ).joinToString(",")
     }
 

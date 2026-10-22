@@ -28,20 +28,12 @@ class AssetRepository private constructor(
     
     fun getAssetsByType(type: AssetType): Flow<List<Asset>> = assetDao.getAssetsByType(type)
     
-    fun getAssetsByAccount(account: String): Flow<List<Asset>> = assetDao.getAssetsByAccount(account)
-    
     suspend fun getAssetById(id: Long): Asset? = assetDao.getAssetById(id)
     
     suspend fun getAssetBySymbol(symbol: String): Asset? = assetDao.getAssetBySymbol(symbol)
     
     suspend fun getAssetsBySymbols(symbols: List<String>): List<Asset> = 
         assetDao.getAssetsBySymbols(symbols)
-    
-    fun getTotalValueByCurrency(currency: String): Flow<Double?> = 
-        assetDao.getTotalValueByCurrency(currency)
-    
-    suspend fun getAccountsByType(type: AssetType): List<String> = 
-        assetDao.getAccountsByType(type)
     
     suspend fun getAllAccounts(): List<String> = assetDao.getAllAccounts()
     
@@ -411,7 +403,12 @@ class AssetRepository private constructor(
         price: Double,
         account: String,
         assetType: AssetType = AssetType.STOCK,
-        fee: Double = 0.0
+        fee: Double = 0.0,
+        currency: String = "CNY",
+        dueDate: String? = null,
+        notes: String? = null,
+        interestRate: Double? = null,
+        currentPrice: Double? = null
     ): Asset {
         val now = System.currentTimeMillis()
         // 存储边界强制统一代码形态：全项目约定存库的一律是 normalizeSymbol 的结果
@@ -448,6 +445,13 @@ class AssetRepository private constructor(
                     balance = balance,
                     // 新建成仓时同样把手续费摊入成本
                     purchasePrice = if (balance > 0) price + fee / balance else price,
+                    // 新建分支：把表单里的币种/到期日/备注/利率/现价一并落库，
+                    // 否则外币（如美股 USD）会被静默重置成 CNY、到期日存了看不到。
+                    currency = currency,
+                    dueDate = dueDate,
+                    notes = notes,
+                    interestRate = interestRate,
+                    currentPrice = currentPrice,
                     lastUpdateTime = now
                 )
                 val newId = assetDao.insertAsset(newAsset)

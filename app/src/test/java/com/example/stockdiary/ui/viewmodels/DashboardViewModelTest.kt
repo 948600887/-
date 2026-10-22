@@ -95,7 +95,7 @@ class DashboardViewModelTest {
             totalAnnualIncome = 1234.5,
             hasDividendData = true
         )
-        coEvery { assetRepo.addOrUpdateStockAsset(any(), any(), any(), any(), any(), any(), any()) } returns stockAsset
+        coEvery { assetRepo.addOrUpdateStockAsset(any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any()) } returns stockAsset
         coEvery { assetRepo.insertAsset(any()) } returns 1L
         return DashboardViewModel(container)
     }
@@ -124,7 +124,7 @@ class DashboardViewModelTest {
     fun `addAsset 股票走 addOrUpdateStockAsset 而非 insertAsset`() = runBlocking {
         val vm = buildVm()
         vm.addAsset(stockAsset)
-        coVerify { assetRepo.addOrUpdateStockAsset(any(), any(), any(), any(), any(), any(), any()) }
+        coVerify { assetRepo.addOrUpdateStockAsset(any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any()) }
         coVerify(exactly = 0) { assetRepo.insertAsset(any()) }
     }
 
@@ -133,7 +133,37 @@ class DashboardViewModelTest {
         val vm = buildVm()
         vm.addAsset(depositAsset)
         coVerify { assetRepo.insertAsset(depositAsset) }
-        coVerify(exactly = 0) { assetRepo.addOrUpdateStockAsset(any(), any(), any(), any(), any(), any(), any()) }
+        coVerify(exactly = 0) { assetRepo.addOrUpdateStockAsset(any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any()) }
+    }
+
+    @Test
+    fun `addAsset 外币股票的币种与到期日透传给 addOrUpdateStockAsset 不被重置成 CNY`() = runBlocking {
+        // 回归：此前新建美股（USD）会经 addOrUpdateStockAsset 把币种静默重置成 CNY、
+        // 到期日丢了。这里断言 ViewModel 把表单的 currency/dueDate 原样透传下去。
+        val vm = buildVm()
+        val usdAsset = Asset(
+            name = "Apple", type = AssetType.STOCK, symbol = "AAPL",
+            account = "美股", balance = 10.0, currency = "USD", dueDate = "2026-12-31"
+        )
+        vm.addAsset(usdAsset)
+        coVerify {
+            assetRepo.addOrUpdateStockAsset(
+                symbol = "AAPL",
+                name = "Apple",
+                balance = 10.0,
+                price = any(),
+                account = "美股",
+                assetType = AssetType.STOCK,
+                fee = any(),
+                currency = "USD",
+                dueDate = "2026-12-31",
+                notes = any(),
+                interestRate = any(),
+                currentPrice = any()
+            )
+        }
+        // 股票/基金仍走合并专用路径，不该走 insertAsset
+        coVerify(exactly = 0) { assetRepo.insertAsset(any()) }
     }
 
     @Test

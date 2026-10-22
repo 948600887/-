@@ -183,6 +183,10 @@ fun AssetDetailScreen(
                             a.interestRate?.let { rate ->
                                 if (rate > 0) DetailRow("年利率", "${rate.format(2)}%")
                             }
+                            // 到期日：存款/贷款/信用卡等固定期限资产才有，有值就显示
+                            a.dueDate?.let { due ->
+                                DetailRow("到期日", due)
+                            }
                         }
                     }
                 }

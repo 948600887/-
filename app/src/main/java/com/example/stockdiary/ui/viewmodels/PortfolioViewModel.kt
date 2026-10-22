@@ -345,7 +345,12 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
                 balance = asset.balance,
                 price = asset.purchasePrice,
                 account = asset.account,
-                assetType = asset.type
+                assetType = asset.type,
+                currency = asset.currency,
+                dueDate = asset.dueDate,
+                notes = asset.notes,
+                interestRate = asset.interestRate,
+                currentPrice = asset.currentPrice
             )
         } else {
             repository.insertAsset(asset)

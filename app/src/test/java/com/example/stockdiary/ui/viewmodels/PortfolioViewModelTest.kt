@@ -93,7 +93,7 @@ class PortfolioViewModelTest {
             totalAnnualIncome = 888.0,
             hasDividendData = true
         )
-        coEvery { assetRepo.addOrUpdateStockAsset(any(), any(), any(), any(), any(), any(), any()) } returns stockAsset
+        coEvery { assetRepo.addOrUpdateStockAsset(any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any()) } returns stockAsset
         coEvery { assetRepo.insertAsset(any()) } returns 1L
         return PortfolioViewModel(container)
     }
@@ -134,7 +134,7 @@ class PortfolioViewModelTest {
     fun `addAsset 股票走 addOrUpdateStockAsset`() = runBlocking {
         val vm = buildVm()
         vm.addAsset(stockAsset)
-        coVerify { assetRepo.addOrUpdateStockAsset(any(), any(), any(), any(), any(), any(), any()) }
+        coVerify { assetRepo.addOrUpdateStockAsset(any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any()) }
         coVerify(exactly = 0) { assetRepo.insertAsset(any()) }
     }
 
@@ -143,7 +143,7 @@ class PortfolioViewModelTest {
         val vm = buildVm()
         vm.addAsset(depositAsset)
         coVerify { assetRepo.insertAsset(depositAsset) }
-        coVerify(exactly = 0) { assetRepo.addOrUpdateStockAsset(any(), any(), any(), any(), any(), any(), any()) }
+        coVerify(exactly = 0) { assetRepo.addOrUpdateStockAsset(any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any()) }
     }
 
     @Test

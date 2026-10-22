@@ -256,6 +256,11 @@ fun StockAssetItem(
                     Text("万份收益 ${asset.millionCopiesIncome.format(4)}",
                         style = MaterialTheme.typography.bodySmall, color = AppTheme.colors.onSurfaceVariant)
                 }
+                // 到期日：存款/贷款/信用卡等固定期限资产才有，但统一「有值就显示」
+                asset.dueDate?.let {
+                    Text("到期日 $it",
+                        style = MaterialTheme.typography.bodySmall, color = AppTheme.colors.onSurfaceVariant)
+                }
             }
             // 分红入口只对能分红的类型有意义，负债点了也是空列表
             if (!selectionMode && !isLiability) {

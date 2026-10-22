@@ -216,20 +216,23 @@ fun SettingsScreen(
                     onClick = { showDashboardConfigSheet = true }
                 )
             )),
-            SettingsSectionData("数据", listOf(
-                SettingsItemData(
+            // 「数据」分区：两个自动同步子开关收纳进主开关——
+            // 仅当「自动刷新价格与分红」开启时才渲染「盘中同步股票」「自动同步虚拟货币」，
+            // 关闭时只留主开关一行，子项自身的勾选/点击逻辑保持不变
+            SettingsSectionData("数据", buildList {
+                add(SettingsItemData(
                     icon = Icons.Default.UploadFile,
                     title = "导入持仓与资产",
                     subtitle = "交割单 / 持仓截图 / 场外基金 / 币安",
                     onClick = { showImportSourceDialog = true }
-                ),
-                SettingsItemData(
+                ))
+                add(SettingsItemData(
                     icon = Icons.Default.Download,
                     title = "导出数据",
                     subtitle = "导出为 CSV 或文本文件",
                     onClick = { showExportDialog = true }
-                ),
-                SettingsItemData(
+                ))
+                add(SettingsItemData(
                     icon = Icons.Default.SyncAlt,
                     title = "行情数据源",
                     subtitle = "当前: $currentPriceApi",
@@ -239,8 +242,8 @@ fun SettingsScreen(
                         viewModel.checkDataSourceHealth()
                         showApiSelectionDialog = true
                     }
-                ),
-                SettingsItemData(
+                ))
+                add(SettingsItemData(
                     icon = Icons.Default.Sync,
                     title = "自动刷新价格与分红",
                     // 实际策略是 SyncStrategy：交易时段 15 分钟一次、非交易时段 4 小时一次，
@@ -269,37 +272,40 @@ fun SettingsScreen(
                             PriceSyncScheduler.cancelDailySync(context)
                         }
                     }
-                ),
-                SettingsItemData(
-                    icon = Icons.Default.Schedule,
-                    title = "盘中同步股票",
-                    subtitle = if (stockIntradaySyncEnabled)
-                        "盘中每 ${SyncStrategy.TRADING_INTERVAL_MINUTES} 分钟也刷新"
-                    else
-                        "仅收盘后刷新，盘中不刷（更省）",
-                    isSwitch = true,
-                    switchChecked = stockIntradaySyncEnabled,
-                    onSwitchCheckedChange = { enabled ->
-                        viewModel.setStockIntradaySyncEnabled(enabled)
-                        // 仅在自动同步已开时重排周期；总开关关着时只存偏好，等开启再生效
-                        if (autoPriceSyncEnabled) PriceSyncScheduler.scheduleDailySync(context)
-                    }
-                ),
-                SettingsItemData(
-                    icon = Icons.Default.CurrencyBitcoin,
-                    title = "自动同步虚拟货币",
-                    subtitle = if (cryptoAutoSyncEnabled)
-                        "跟随自动同步周期刷新"
-                    else
-                        "不自动刷新，仅手动点刷新时更新",
-                    isSwitch = true,
-                    switchChecked = cryptoAutoSyncEnabled,
-                    onSwitchCheckedChange = { enabled ->
-                        viewModel.setCryptoAutoSyncEnabled(enabled)
-                        if (autoPriceSyncEnabled) PriceSyncScheduler.scheduleDailySync(context)
-                    }
-                ),
-                SettingsItemData(
+                ))
+                // 子开关紧邻主开关、排在「汇率」之前，仅主开关开启时可见
+                if (autoPriceSyncEnabled) {
+                    add(SettingsItemData(
+                        icon = Icons.Default.Schedule,
+                        title = "盘中同步股票",
+                        subtitle = if (stockIntradaySyncEnabled)
+                            "盘中每 ${SyncStrategy.TRADING_INTERVAL_MINUTES} 分钟也刷新"
+                        else
+                            "仅收盘后刷新，盘中不刷（更省）",
+                        isSwitch = true,
+                        switchChecked = stockIntradaySyncEnabled,
+                        onSwitchCheckedChange = { enabled ->
+                            viewModel.setStockIntradaySyncEnabled(enabled)
+                            // 仅在自动同步已开时重排周期；总开关关着时只存偏好，等开启再生效
+                            if (autoPriceSyncEnabled) PriceSyncScheduler.scheduleDailySync(context)
+                        }
+                    ))
+                    add(SettingsItemData(
+                        icon = Icons.Default.CurrencyBitcoin,
+                        title = "自动同步虚拟货币",
+                        subtitle = if (cryptoAutoSyncEnabled)
+                            "跟随自动同步周期刷新"
+                        else
+                            "不自动刷新，仅手动点刷新时更新",
+                        isSwitch = true,
+                        switchChecked = cryptoAutoSyncEnabled,
+                        onSwitchCheckedChange = { enabled ->
+                            viewModel.setCryptoAutoSyncEnabled(enabled)
+                            if (autoPriceSyncEnabled) PriceSyncScheduler.scheduleDailySync(context)
+                        }
+                    ))
+                }
+                add(SettingsItemData(
                     icon = Icons.Default.CurrencyExchange,
                     title = "汇率",
                     subtitle = buildString {
@@ -315,15 +321,15 @@ fun SettingsScreen(
                     onClick = { },
                     // 纯展示行：不置灰会被渲染成可点击，误导用户
                     enabled = false
-                ),
-                SettingsItemData(
+                ))
+                add(SettingsItemData(
                     icon = Icons.Default.DeleteForever,
                     title = "清除所有数据",
                     subtitle = "删除所有资产和历史快照",
                     onClick = { showClearDataDialog = true },
                     isDestructive = true
-                )
-            )),
+                ))
+            }),
             SettingsSectionData("应用", listOf(
                 SettingsItemData(
                     icon = Icons.Default.Notifications,

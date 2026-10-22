@@ -42,7 +42,7 @@
 2. **两个头条数字同源**：`DividendIncomeLoader.totalAnnualIncome` 与 `DividendProgressCalculator.yearProjected` 必须同源同值。
 3. **股息率不受影响**：`dividendsBySymbol` 走 TTM，改年度收入口径时**不要碰它**。
 4. **日历不改口径**：见决策表第 2 条。
-5. **`DashboardComponent` 两处穷举 `when` 必须同步补分支**（`updateComponentVisibility` / `isComponentVisible`）。
+5. **`DashboardComponent` 两处穷举 `when` 是死代码**（`updateComponentVisibility` / `isComponentVisible` 生产零消费）；真正生效的开关在 `DashboardPreferences` data class。别在死代码上改开关，改了界面不变。
 6. **不写"假负缓存"**：数据源未应答（网络失败）时**不得**缓存"无分红"，否则一次断网把数据锁死 7 天。
 7. **密钥不落盘**：日志一律走 `AppLogger`（对 OkHttp 日志脱敏），禁止把 API Key/Secret 写进日志或异常 message。
 

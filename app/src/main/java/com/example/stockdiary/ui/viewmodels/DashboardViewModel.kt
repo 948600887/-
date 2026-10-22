@@ -116,6 +116,18 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
     private val _existingAccounts = MutableStateFlow<List<String>>(emptyList())
     val existingAccounts: StateFlow<List<String>> = _existingAccounts.asStateFlow()
 
+    /**
+     * 从磁盘重新加载偏好并推送到 [_preferences]。
+     *
+     * 偏好只在构造期加载一次（见 [_preferences]），但用户在「设置 → 自定义仪表盘」
+     * 改完开关后，`SettingsViewModel` 写入的是 SharedPreferences，本 VM 的内存副本仍是旧值，
+     * 导致回到仪表盘界面不刷新、且收入算完用旧值整体回写会把新开关覆盖掉（P0-3）。
+     * 仪表盘每次回前台（ON_RESUME）调一次本方法即可与磁盘同步。
+     */
+    fun reloadPreferences() {
+        _preferences.value = preferencesManager.loadPreferences()
+    }
+
     private var hasLoadedIncome = false
 
     init {
@@ -198,13 +210,14 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
                 }
                 hasLoadedIncome = true
 
-                // 存下来：下次进场先摆这个值，不用等这一轮算完
-                _preferences.update { state ->
-                    state.copy(
-                        annualDividendCache = result.totalAnnualIncome,
-                        annualDividendSymbols = assetsOnly.mapNotNull { it.symbol }.toSet()
-                    )
-                }
+                // 存下来：下次进场先摆这个值，不用等这一轮算完。
+                // 关键修复（P0-3）：先拉一次磁盘最新偏好，再只覆盖两个缓存字段，
+                // 避免用构造期陈旧的偏好整体回写，覆盖用户在设置页刚改的开关。
+                val fresh = preferencesManager.loadPreferences()
+                _preferences.value = fresh.copy(
+                    annualDividendCache = result.totalAnnualIncome,
+                    annualDividendSymbols = assetsOnly.mapNotNull { it.symbol }.toSet()
+                )
                 preferencesManager.savePreferences(_preferences.value)
             } catch (e: CancellationException) {
                 throw e

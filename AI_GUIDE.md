@@ -178,7 +178,7 @@ app/src/main/java/com/example/stockdiary/
 
 | 需求 | 主要文件 |
 |---|---|
-| 加/改仪表盘卡片显示开关 | `data/prefs/DashboardPreferencesManager.kt`（字段+KEY+枚举+两个 when）、`ui/screens/settings/components/DashboardConfigSheet.kt`（开关 UI）、`ui/screens/DashboardScreen.kt`（条件渲染） |
+| 加/改仪表盘卡片显示开关 | 真正生效的是 `data/prefs/DashboardPreferencesManager.kt` 里的 **`DashboardPreferences` data class**（字段 + KEY + `load/savePreferences`）；UI 在 `ui/screens/settings/components/DashboardConfigSheet.kt`（手写 `SwitchPreference`）+ `ui/screens/DashboardScreen.kt`（条件渲染）。⚠️ 同文件里还有个 `DashboardComponent` 枚举 + 两处 `when`（`updateComponentVisibility` / `isComponentVisible`），那是**死代码**，生产零消费，改它界面不会变，别动。 |
 | 改收息进度口径 | `data/dividend/DividendProgressCalculator.kt` |
 | 改年度收入/预计收入 | `data/dividend/DividendIncomeLoader.kt` + `DividendProgressCalculator.naturalYearAnnualIncome`（两者必须同源） |
 | 加分红数据源 | `network/` 新建 API 类 → `data/repository/DividendRepository.kt` 接路由 → `data/sync/AssetSyncManager.kt` |
@@ -202,7 +202,7 @@ app/src/main/java/com/example/stockdiary/
 2. **项目路径含非 ASCII 字符**：构建已统一加 `-Dfile.encoding=UTF-8`，别删（`app/build.gradle.kts` 的 `tasks.withType<Test>`）。
 3. **币安在中国大陆被地区封锁**：行情返 **HTTP 451**、账户常 `UnknownHostException`。**这是网络/合规限制，不是代码 Bug**，换币安自家域名同样 451。已用 `network/BinanceHostGate.kt`（三态断路器：CLOSED/OPEN/HALF_OPEN + 半开探测自愈）做主机级短路；**行情路径与账户/资产路径共用同一闸门**。
 4. **两套日期口径，不要混**：`收息进度` 按**除息日**；`日历页`按**发放日**（`DividendData.cashDateOrNull`）。日历用发放日是专门修"钱没到却显示分红"这个 bug 换的，**改回除息日会让它复活**。
-5. **`DashboardComponent` 枚举有两处穷举 `when`**（`updateComponentVisibility` / `isComponentVisible`，无 else）。**新增枚举项必须两处都补分支**。注意：两个分支若误指向同一 KEY，**编译照样能过**，只表现为开关互相牵连、界面查不出来——靠 `DashboardPreferencesCardVisibilityTest` 的"互不串 key"用例守着。
+5. **`DashboardComponent` 枚举 + 两处穷举 `when`（`updateComponentVisibility` / `isComponentVisible`）是死代码**：生产代码零消费，真正生效的开关在 `DashboardPreferences` data class（见第 5 节对照表）。保留它只为兼容 SharedPreferences KEY，**别在它上面加新开关**——改了界面也不会变。若要做大扫除，连同 `DashboardPreferencesCardVisibilityTest` 一起删。
 6. **场内基金/REIT（508xxx、500/501xxx、16xxxx）分红不在东财股票分红报告**（返回 9201 空），必须走天天基金源。见 `DividendRepository.fetchDividendData` 的 `isExchangeFund`。
 7. **分红负缓存**：数据源"未应答"（网络失败）时 `answered` 不置位、末尾 `throw DividendSourceUnavailableException`，**不写负缓存**；只有真正应答过才缓存"无分红"。
 8. **货币基金**不发现金分红，走"每万份收益"估算，与现金分红口径不同（见 `moneyFundIncome`）。

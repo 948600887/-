@@ -149,6 +149,14 @@ object DividendProgressCalculator {
             val moneyFund = moneyFundIncome(asset, today, monthlyReceived, monthlyScheduled)
             yearReceived += moneyFund.received
 
+            // 货基（mci>0）只走货基分支，与分母 naturalYearAnnualIncome 对齐：
+            // 分母对货基只算「日收益 × 当年天数」、不累加现金分红；
+            // 若该货基还带着今年现金分红记录，下面的现金循环会再算一次 → 双重计入，
+            // 直接违反不变量 #1「已收 ≤ 今年预计」。命中即跳过现金循环。
+            val isMoneyFund =
+                asset.millionCopiesIncome != null && asset.millionCopiesIncome > 0.0 && asset.balance > 0.0
+            if (isMoneyFund) return@assetLoop
+
             if (records.isEmpty()) return@assetLoop
 
             val balance = asset.balance

@@ -487,6 +487,27 @@ class DividendProgressCalculatorTest {
         assertEquals(1, progress.receivedCount)             // 只有股票那 1 笔
     }
 
+    @Test
+    fun `货币基金带今年现金分红记录时不双重计入`() {
+        // 货基：10000 份、每万份收益 1.0 → 日收益 1.0 元；
+        // moneyFundToday = 2026-03-01（当年第 60 天，平年 365 天）
+        // 今年已收 = 1×60 = 60，今年预计 = 1×365 = 365。
+        // 同时给它一条今年 6/15 除息、每十份 1.0 的现金记录（折合 1000 元）。
+        // 修复前：现金循环会再 +1000 → 已收 1060 > 预计 365，违反不变量 #1「已收 ≤ 预计」；
+        // 修复后：命中货基分支即跳过现金循环，已收 60 ≤ 预计 365。
+        val fund = moneyFundAsset("某货基", "000001", 10_000.0, 1.0)
+        val records = mapOf("000001" to listOf(record("2026-06-15", 1.0)))
+        val progress = DividendProgressCalculator.calculate(
+            assets = listOf(fund),
+            recordsBySymbol = records,
+            today = moneyFundToday
+        )
+        assertTrue(
+            "货基带现金记录时不应双重计入：已收 ${progress.yearReceived} 应 ≤ 预计 ${progress.yearProjected}",
+            progress.yearReceived <= progress.yearProjected
+        )
+    }
+
     // ===== 今年预计 = 自然年口径（分子分母同一把日历尺）=====
     //
     // 改之前分母是纯 TTM（滚动 12 个月），与按日历年统计的今年已收不同口径：

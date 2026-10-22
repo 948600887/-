@@ -63,9 +63,9 @@
 ### ✅ 仓库完整性自检（拿到仓库先跑一遍）
 
 ```bash
-git ls-files | wc -l                 # 应为 320（全部源码 + 资源，无 APK）
+git ls-files | wc -l                 # 应为 323（全部源码 + 资源，无 APK）
 git status                           # 工作树应干净
-git log --oneline -1                 # 最新应为 106657a（或更新）
+git log --oneline -1                 # 最新应为 e79c758（或更新）
 ```
 
 想确认**源码一个不少**（比如怀疑对方给的 zip 不完整），用官方仓库比对：
@@ -81,7 +81,7 @@ git archive --format=zip --prefix=NewStockDiary/ -o NewStockDiary.zip HEAD   # �
 ```
 
 > 别整仓打包：仓库含 350 个 jar、`gradle-8.13` 146 MB、build 目录，整仓 **767 MB**；
-> 而 `app/src` 只有 **4.1 MB / 259 个 .kt**。
+> 而 `app/src` 只有 **4.1 MB / 261 个 .kt**。
 
 ---
 
@@ -97,6 +97,8 @@ git archive --format=zip --prefix=NewStockDiary/ -o NewStockDiary.zip HEAD   # �
 | 分红怎么抓的 | `data/repository/DividendRepository.kt` |
 | 收息进度怎么算的 | `data/dividend/DividendProgressCalculator.kt` |
 | 仪表盘显示开关 | `data/prefs/DashboardPreferencesManager.kt` |
+| 后台同步按类型分频 | `data/sync/SyncStrategy.kt` + `data/sync/PriceSyncWorker.kt` |
+| 资产币种/到期日 | `database/Asset.kt`（`currency`/`dueDate`）+ `utils/ExchangeRateManager.kt` |
 | 币安持仓导入 | `data/importer/BinanceImportService.kt` + `ui/viewmodels/BinanceImportViewModel.kt` |
 | 依赖注入 | `di/AppContainer.kt`（手写单例容器，**没有 Hilt**） |
 
@@ -109,7 +111,7 @@ git archive --format=zip --prefix=NewStockDiary/ -o NewStockDiary.zip HEAD   # �
 # 编译（改 Kotlin 后最快反馈，约 1~3 分钟）
 ./gradlew.bat compileDebugKotlin
 
-# 全量 JVM 单元测试（当前 956 个，约 2~3 分钟）
+# 全量 JVM 单元测试（当前 969 个，约 2~4 分钟）
 ./gradlew.bat testDebugUnitTest
 
 # 只跑某一个测试类
@@ -133,7 +135,8 @@ app/src/main/java/com/example/stockdiary/
 ├── database/                    Room：实体 + DAO（Asset / Dividend / Transaction / AssetSnapshot / Portfolio / StockBasic）
 ├── data/
 │   ├── repository/              AssetRepository、DividendRepository
-│   ├── sync/                    AssetSyncManager（价格同步编排 + 看门狗）
+│   ├── sync/                    AssetSyncManager（价格同步编排 + 看门狗）、PriceSyncWorker（后台周期任务）、
+│   │                            SyncStrategy（按资产类型分频判定）、PriceSyncPreferencesManager（同步偏好）
 │   ├── price/                   StockDataManager（股票行情多源 + 数据源级熔断）、SourceCircuitBreaker
 │   ├── dividend/                DividendProgressCalculator（收息进度）、DividendIncomeLoader、
 │   │                            DividendYieldCalculator、DividendIncomeCalculator、DividendService
@@ -178,7 +181,7 @@ app/src/main/java/com/example/stockdiary/
 
 | 需求 | 主要文件 |
 |---|---|
-| 加/改仪表盘卡片显示开关 | 真正生效的是 `data/prefs/DashboardPreferencesManager.kt` 里的 **`DashboardPreferences` data class**（字段 + KEY + `load/savePreferences`）；UI 在 `ui/screens/settings/components/DashboardConfigSheet.kt`（手写 `SwitchPreference`）+ `ui/screens/DashboardScreen.kt`（条件渲染）。⚠️ 同文件里还有个 `DashboardComponent` 枚举 + 两处 `when`（`updateComponentVisibility` / `isComponentVisible`），那是**死代码**，生产零消费，改它界面不会变，别动。 |
+| 加/改仪表盘卡片显示开关 | 真正生效的是 `data/prefs/DashboardPreferencesManager.kt` 里的 **`DashboardPreferences` data class**（字段 + KEY + `load/savePreferences`）；UI 在 `ui/screens/settings/components/DashboardConfigSheet.kt`（手写 `SwitchPreference`）+ `ui/screens/DashboardScreen.kt`（条件渲染）。⚠️ 开关改完要**即时生效**：`DashboardViewModel` 有 `reloadPreferences()`、`DashboardScreen` 用 `DisposableEffect(ON_RESUME)` 回前台触发；存年度收入缓存前必须先 `loadPreferences()` 再只覆盖 `annualDividendCache`/`annualDividendSymbols` 两个字段，否则会把用户刚改的开关回滚（见 `3a10cc3`）。 |
 | 改收息进度口径 | `data/dividend/DividendProgressCalculator.kt` |
 | 改年度收入/预计收入 | `data/dividend/DividendIncomeLoader.kt` + `DividendProgressCalculator.naturalYearAnnualIncome`（两者必须同源） |
 | 加分红数据源 | `network/` 新建 API 类 → `data/repository/DividendRepository.kt` 接路由 → `data/sync/AssetSyncManager.kt` |
@@ -193,7 +196,7 @@ app/src/main/java/com/example/stockdiary/
 - **依赖注入**：手写 `AppContainer`（`di/AppContainer.kt`），`by lazy` 单例，**没用 Hilt**（别引入，会与现有构造冲突）。
 - **命名**：`XxxScreen` / `XxxDialog` / `XxxData` / `XxxManager` / `XxxAPI` / `XxxRepository` / `XxxViewModel`。
 - **日志**：一律用 `AppLogger`，它会对 OkHttp 日志做**脱敏**（币安签名/密钥不会落盘）。**禁止**把 API Key/Secret 写进日志或异常 message。
-- **币种**：金额一律经 `ExchangeRateManager.toCny(...)` 折成人民币后再汇总。
+- **币种**：金额一律经 `ExchangeRateManager.toCny(...)` 折成人民币后再汇总。`Asset.currency`（默认 `"CNY"`）已在添加/编辑表单暴露（CNY/USD/HKD，切换类型时给默认值）；未知币种 `getRate` 兜底 1.0 且**每币种只告警一次**。⚠️ 调用 `AssetRepository.addOrUpdateStockAsset` 时**必须传 `currency`**——它是 12 参数函数，新建分支才写入 currency/dueDate 等；**合并分支刻意不改这些字段**（靠 `existingAsset.copy` 保留既有），否则加仓会把既有外币仓重置成 CNY。详见第 7 节第 10 条。
 - **KDoc**：本仓库注释写得重，尤其"为什么这么做"。**改代码前先读注释**，很多坑都写在里面了。
 
 ## 7. 已知约束与坑（必读）
@@ -202,11 +205,15 @@ app/src/main/java/com/example/stockdiary/
 2. **项目路径含非 ASCII 字符**：构建已统一加 `-Dfile.encoding=UTF-8`，别删（`app/build.gradle.kts` 的 `tasks.withType<Test>`）。
 3. **币安在中国大陆被地区封锁**：行情返 **HTTP 451**、账户常 `UnknownHostException`。**这是网络/合规限制，不是代码 Bug**，换币安自家域名同样 451。已用 `network/BinanceHostGate.kt`（三态断路器：CLOSED/OPEN/HALF_OPEN + 半开探测自愈）做主机级短路；**行情路径与账户/资产路径共用同一闸门**。
 4. **两套日期口径，不要混**：`收息进度` 按**除息日**；`日历页`按**发放日**（`DividendData.cashDateOrNull`）。日历用发放日是专门修"钱没到却显示分红"这个 bug 换的，**改回除息日会让它复活**。
-5. **`DashboardComponent` 枚举 + 两处穷举 `when`（`updateComponentVisibility` / `isComponentVisible`）是死代码**：生产代码零消费，真正生效的开关在 `DashboardPreferences` data class（见第 5 节对照表）。保留它只为兼容 SharedPreferences KEY，**别在它上面加新开关**——改了界面也不会变。若要做大扫除，连同 `DashboardPreferencesCardVisibilityTest` 一起删。
+5. ~~`DashboardComponent` 枚举死代码~~ **已于 `b47cee8` 删除**（连同 `updateComponentVisibility` / `isComponentVisible` / `getVisibleComponents`）。开关现在只在 `DashboardPreferences` data class 一处，不再有两套实现。旧资料（含某些审查报告）若让你去改那个枚举——**忽略，它已不存在**。
 6. **场内基金/REIT（508xxx、500/501xxx、16xxxx）分红不在东财股票分红报告**（返回 9201 空），必须走天天基金源。见 `DividendRepository.fetchDividendData` 的 `isExchangeFund`。
 7. **分红负缓存**：数据源"未应答"（网络失败）时 `answered` 不置位、末尾 `throw DividendSourceUnavailableException`，**不写负缓存**；只有真正应答过才缓存"无分红"。
 8. **货币基金**不发现金分红，走"每万份收益"估算，与现金分红口径不同（见 `moneyFundIncome`）。
 9. 代码里**没有** `DataManager.kt`：早期架构文档曾称其为「旧版全局状态容器」，实际不存在。活跃的行情抓取层是 `StockDataManager`（多源聚合 + `SourceCircuitBreaker` 数据源级熔断），本身被 Repository 调用，是现行代码不是遗留物。**不要**为了「消灭 DataManager」做大重构。
+10. **`addOrUpdateStockAsset` 的参数契约（2026-10-22 新增，最易踩）**：签名现为 **12 参**（原 symbol/name/balance/price/account/assetType/fee + `currency`/`dueDate`/`notes`/`interestRate`/`currentPrice`）。**新建持仓分支**把这些字段落库；**合并（加仓）分支刻意只更新 `balance`/`purchasePrice`/`lastUpdateTime`**，currency/dueDate 等靠 `existingAsset.copy` 默认保留。原因是 `AssetDetailViewModel.adjustPosition` 走合并分支且不传币种——若把合并分支写成"用传入值覆盖"，加仓会把既有 USD 仓重置成 CNY。**新增调用方必须传 `currency`**，否则外币资产被静默按 CNY 折算（`2e1f208`）。
+11. **后台同步按资产类型分频，不再一刀切**（`5c7410b`）：判定集中在一个纯函数 `data/sync/SyncStrategy.kt` 的 `shouldAutoSyncType(type, inTradingHours, stockIntradaySync, cryptoAutoSync)`——股票/基金 = `stockIntradaySync || !inTradingHours`（**仅盘后/非交易时段刷**）、加密 = `cryptoAutoSync`（**默认关，只手动刷**）。两偏好在 `data/sync/PriceSyncPreferencesManager.kt`，默认均为 **false**；`PriceSyncWorker` 每轮据此过滤资产，全被过滤掉时跳过本轮但仍重排下次。要改同步时机先看这个函数，别直接改 `AssetSyncManager` 的时钟。
+12. **日历有两处专门修过的坑，别改回去**：① `CalendarViewModel` 对 assets 流按 `(symbol, balance, currency)` 签名做 `distinctUntilChanged`（`ee6054e`）——日历不依赖实时价，去掉它一次同步会重算日历 20+ 次；② 日期格子是**固定高度 + 三段固定槽位**（`41e71a9` / `b17fe07` / `cee874b`），贴底的「分」槽位收太紧会被 Surface 的 `clip` 切掉半截。动日历布局前先读这三笔注释。
+13. **以下死代码已删除，旧资料别再引用**（`f5b44f5`、`b47cee8`）：`AssetDao` 的 `getAssetsByAccount(Flow)` / `getTotalValueByCurrency` / `getAccountsByType` / `getAssetsPaged` / `deleteAssetsByType` 及其 Repository 转发、`Extensions.DividendData.isNewest()`、`DashboardComponent` 枚举及三处方法。若某份审查报告让你用它们，说明那份报告基于旧版本。
 
 ## 8. 测试怎么加
 

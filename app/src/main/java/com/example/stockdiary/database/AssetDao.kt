@@ -15,9 +15,6 @@ interface AssetDao {
     @Query("SELECT * FROM assets WHERE type = :type ORDER BY name")
     fun getAssetsByType(type: AssetType): Flow<List<Asset>>
     
-    @Query("SELECT * FROM assets WHERE account = :account ORDER BY name")
-    fun getAssetsByAccount(account: String): Flow<List<Asset>>
-    
     @Query("SELECT * FROM assets WHERE id = :id")
     suspend fun getAssetById(id: Long): Asset?
     
@@ -32,12 +29,6 @@ interface AssetDao {
     
     @Query("SELECT * FROM assets WHERE type IN (:types) ORDER BY type, name")
     suspend fun getAssetsByTypes(types: List<AssetType>): List<Asset>
-    
-    @Query("SELECT SUM(balance * COALESCE(currentPrice, purchasePrice)) FROM assets WHERE currency = :currency")
-    fun getTotalValueByCurrency(currency: String): Flow<Double?>
-    
-    @Query("SELECT DISTINCT account FROM assets WHERE type = :type")
-    suspend fun getAccountsByType(type: AssetType): List<String>
     
     @Query("SELECT DISTINCT account FROM assets")
     suspend fun getAllAccounts(): List<String>
@@ -69,14 +60,8 @@ interface AssetDao {
     @Query("DELETE FROM assets WHERE id = :id")
     suspend fun deleteAssetById(id: Long)
     
-    @Query("DELETE FROM assets WHERE type = :type")
-    suspend fun deleteAssetsByType(type: AssetType)
-    
     @Query("DELETE FROM assets")
     suspend fun deleteAllAssets()
-
-    @Query("SELECT * FROM assets ORDER BY type, name LIMIT :limit OFFSET :offset")
-    suspend fun getAssetsPaged(offset: Int, limit: Int): List<Asset>
 
     @Query("UPDATE assets SET balance = :balance, purchasePrice = :purchasePrice, lastUpdateTime = :updateTime WHERE id = :id")
     suspend fun updateBalanceAndPrice(id: Long, balance: Double, purchasePrice: Double, updateTime: Long)

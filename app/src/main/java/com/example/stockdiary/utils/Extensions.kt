@@ -146,8 +146,6 @@ fun <T> List<T>.joinToStringLimited(separator: String = ", ", limit: Int = 3): S
     return "${take(limit).joinToString(separator)}...(+${size - limit})"
 }
 
-fun com.example.stockdiary.data.dividend.DividendData.isNewest(): Boolean = true
-
 fun List<com.example.stockdiary.data.dividend.DividendData>.getLatest(): List<com.example.stockdiary.data.dividend.DividendData> =
     this.sortedByDescending { it.date }.take(1)
 

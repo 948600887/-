@@ -366,7 +366,10 @@ fun PortfolioScreen(
     // 每写一个标的就 emit 一次）都会把所有可见行重排一遍，列表发抖。
     val toggleExpand: (String) -> Unit = remember {
         { key: String ->
-            if (!selectionMode) viewModel.toggleGroup(key)
+            // 选择态（批量编辑）下也必须允许展开/收起：折叠的组看不到里面的持仓，
+            // 用户根本没法勾选组内资产。分组头点击是「展开/收起」，资产行点击才是
+            // 「勾选/取消勾选」，两个目标不同，互不冲突。
+            viewModel.toggleGroup(key)
         }
     }
     val onAssetClick: (Long) -> Unit = remember {

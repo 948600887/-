@@ -19,14 +19,6 @@ import com.example.stockdiary.ui.theme.AppTheme
 import com.example.stockdiary.utils.format
 
 @Composable
-internal fun OverviewMetric(label: String, value: String, valueColor: Color = AppTheme.colors.onSurface) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(text = value, fontSize = 15.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold, color = valueColor)
-        Text(text = label, fontSize = 11.sp, color = AppTheme.colors.onSurfaceVariant)
-    }
-}
-
-@Composable
 internal fun RiskMetric(modifier: Modifier = Modifier, label: String, value: String, valueColor: Color = AppTheme.colors.onSurface) {
     Column(modifier = modifier, horizontalAlignment = Alignment.CenterHorizontally) {
         Text(text = value, fontSize = 14.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold, color = valueColor)

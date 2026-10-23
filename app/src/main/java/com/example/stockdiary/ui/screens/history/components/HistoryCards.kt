@@ -28,7 +28,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.example.stockdiary.data.calculator.AssetGrowthCalculator
 import com.example.stockdiary.data.calculator.MonthlyReturn
 import com.example.stockdiary.data.calculator.SnapshotStats
 import com.example.stockdiary.database.AssetSnapshot
@@ -114,41 +113,24 @@ private fun SectionCard(
 }
 
 fun LazyListScope.historyOverviewCard(
-    latest: AssetSnapshot,
-    snapshots: List<AssetSnapshot>
+    latest: AssetSnapshot
 ) {
-    // 「资产增值」口径：净资产相对历史基准的增加额，与资产页用同一个计算器，
-    // 基准取「本月 1 号之前」/「今年 1 月 1 号之前」的最后一条快照。
-    val growth = AssetGrowthCalculator.fromSnapshots(
-        snapshots = snapshots,
-        currentNetAssets = latest.netAssets,
-        today = latest.date
-    )
-    val monthDelta = growth.monthDelta
-    val yearDelta = growth.yearDelta
-
+    // 只摆净资产总额。原先这里还挂了「本月新增 / 今年新增」两个指标，与下方
+    // 「期间增值」卡片（净资产增加 + 增幅 + 起止日期）语义重复 —— 而且下方那张是
+    // 跟着所选周期（1周/1月/3月…）变的，信息更完整，上面这行固定口径反而容易让人
+    // 以为是两个不同的数。按需求去掉，增值一律看下方的「期间增值」。
     item {
         SectionCard(title = "资产总览", titleGap = 4.dp, spacerBefore = false) {
             Text(
                 text = "¥${latest.netAssets.format(2)}",
                 fontSize = 28.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.onSurface
             )
-            Spacer(modifier = Modifier.height(12.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                OverviewMetric(
-                    "本月新增",
-                    monthDelta?.toProfitDisplay("¥") ?: "—",
-                    monthDelta?.profitColor() ?: AppTheme.colors.onSurface
-                )
-                OverviewMetric(
-                    "今年新增",
-                    yearDelta?.toProfitDisplay("¥") ?: "—",
-                    yearDelta?.profitColor() ?: AppTheme.colors.onSurface
-                )
-            }
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = "截至 ${latest.date}",
+                fontSize = 11.sp,
+                color = AppTheme.colors.onSurfaceVariant
+            )
         }
     }
 }

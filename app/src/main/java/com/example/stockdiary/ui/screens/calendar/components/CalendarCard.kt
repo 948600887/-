@@ -181,10 +181,14 @@ fun CalendarCard(
 private val CALENDAR_CELL_HEIGHT = 56.dp
 /** 三段固定「槽位」高度：日期 / 金额 / 分红标记各占一位，有无内容都占位，保证横向对齐。
  *  金额升到 11sp 后同步把金额槽位加到 18dp；三段之和 18+18+16=52dp，
- *  仍小于格子扣除上下 1dp padding 后约 54dp 的内容区，底部保留约 2dp，分红字不会被 clip。 */
+ *  仍小于格子扣除上下 1dp padding 后约 54dp 的内容区，底部保留约 2dp，分红字不会被 clip。
+ *  分红槽前另有 DIVIDEND_LIFT = 2dp 的间距（用户要求「分」再高 2dp），
+ *  三段 + 间距 = 54dp 恰好等于内容区；分红槽 16dp 仍比 10sp 的字高约 3dp，不会 clip 切尾。 */
 private val CALENDAR_SLOT_DATE = 18.dp
 private val CALENDAR_SLOT_VALUE = 18.dp
 private val CALENDAR_SLOT_DIVIDEND = 16.dp
+/** 金额槽与分红槽之间的间距：把「分」再往上抬 2dp（放在分红槽之前、无条件渲染，保证各格仍对齐） */
+private val DIVIDEND_LIFT = 2.dp
 
 @Composable
 private fun CalendarDayCell(
@@ -247,6 +251,8 @@ private fun CalendarDayCell(
                     )
                 }
             }
+            // 把「分」往上抬 2dp（用户要求）。放在条件渲染之外，所以有分/无分的格子仍对齐。
+            Spacer(modifier = Modifier.height(DIVIDEND_LIFT))
             Box(modifier = Modifier.height(CALENDAR_SLOT_DIVIDEND), contentAlignment = Alignment.Center) {
                 if (hasDividend) {
                     Text(

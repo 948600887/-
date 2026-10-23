@@ -220,13 +220,12 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
                 hasLoadedDividend = true
 
                 // 抓到手就存缓存：下次进场同一批持仓直接命中
-                _preferences.update { state ->
+                persistPreferences { state ->
                     state.copy(
                         annualDividendCache = result.totalAnnualIncome,
                         annualDividendSymbols = symbols
                     )
                 }
-                container.dashboardPreferencesManager.savePreferences(_preferences.value)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -307,13 +306,12 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
 
                 // 手动刷新说明用户想看最新数，抓到就更新缓存
                 val symbols = assetsOnly.mapNotNull { it.symbol }.toSet()
-                _preferences.update { state ->
+                persistPreferences { state ->
                     state.copy(
                         annualDividendCache = result.totalAnnualIncome,
                         annualDividendSymbols = symbols
                     )
                 }
-                container.dashboardPreferencesManager.savePreferences(_preferences.value)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -375,20 +373,38 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
     // 「设置 → 仪表盘显示」里把某类资产全关掉后，这里会整片空白，
     // 而开关只在设置页 —— 必须给一个就地恢复的出口。
     fun showAllAssetTypes() {
-        // update{} 原子读-改-写，与 UiState 的处理保持一致
-        _preferences.update { state -> state.copy(
+        // 先拉磁盘最新偏好再合并，避免用陈旧副本整体回写（见 persistPreferences 说明）
+        persistPreferences { state -> state.copy(
             showBankDeposits = true,
             showStocks = true,
             showFunds = true,
             showCrypto = true,
             showLiabilities = true
         ) }
-        container.dashboardPreferencesManager.savePreferences(_preferences.value)
     }
 
     fun updateSortOrder(sortOrder: SortOrder) {
-        _preferences.update { state -> state.copy(sortOrder = sortOrder) }
-        container.dashboardPreferencesManager.savePreferences(_preferences.value)
+        persistPreferences { state -> state.copy(sortOrder = sortOrder) }
+    }
+
+    /**
+     * 持久化偏好：先拉一次磁盘最新值，把要改的字段合并进去再整体回写，并同步内存副本。
+     *
+     * 必须的修复点：原先直接 `savePreferences(_preferences.value)` 把**构造期一次性加载、
+     * 可能已过期**的内存副本整体回写，会覆盖别的页面刚写盘的值——最典型的就是
+     * 日历页 FIRE 计算里改的 [DashboardPreferences.monthlyExpense]：用户在日历改了月度生活费，
+     * 一旦持仓页（或任何持有一份陈旧偏好的页面）因为刷新/排序/恢复显示等无关操作触发保存，
+     * 就会把 monthlyExpense 冲回旧值，表现为「改了但不保存」。
+     *
+     * 这与 DashboardViewModel 的 P0-3 修复是同一类问题：所有页面共享一个
+     * DashboardPreferences 整块，任一页面用陈旧副本整体回写都会踩掉别的页面刚改的字段。
+     * 这里统一改成「先 load 再 merge 再 save」对齐 P0-3 的做法。
+     */
+    private fun persistPreferences(mutate: (DashboardPreferences) -> DashboardPreferences) {
+        val fresh = container.dashboardPreferencesManager.loadPreferences()
+        val updated = mutate(fresh)
+        container.dashboardPreferencesManager.savePreferences(updated)
+        _preferences.value = updated
     }
 
     fun batchDelete(assetIds: Set<Long>) {

@@ -208,7 +208,21 @@ object PriceCacheManager {
                     jsonArray.put(jsonObject)
                 }
 
-                file.writeText(jsonArray.toString())
+                // 原子落盘：先写临时文件再 rename 覆盖。直接 file.writeText 若在
+                // 进程中途被杀时被打断，会留下半截文件，下次 loadFromDisk 解析失败 →
+                // 外层 catch 把整份缓存清空删掉，离线兜底数据全丢。
+                val tmpFile = File(file.parentFile, "${file.name}.tmp")
+                try {
+                    tmpFile.writeText(jsonArray.toString())
+                    if (!tmpFile.renameTo(file)) {
+                        // rename 失败（极少见）：退回直接写，也别丢这次落盘
+                        file.writeText(jsonArray.toString())
+                        tmpFile.delete()
+                    }
+                } catch (e: Exception) {
+                    tmpFile.delete()
+                    throw e
+                }
                 AppLogger.d("缓存已保存到磁盘: ${snapshot.size} 条", TAG)
             } catch (e: CancellationException) {
                 throw e
@@ -227,17 +241,28 @@ object PriceCacheManager {
                 val jsonString = file.readText()
                 val jsonArray = JSONArray(jsonString)
 
+                var skipped = 0
                 for (i in 0 until jsonArray.length()) {
-                    val jsonObject = jsonArray.getJSONObject(i)
+                    val jsonObject = jsonArray.optJSONObject(i)
+                    if (jsonObject == null) { skipped++; continue }
 
-                    val code = jsonObject.getString("code")
-                    val timestamp = jsonObject.getLong("timestamp")
+                    // 一律 optXxx + 逐条校验：**一条坏数据只跳过它自己**。
+                    // 早年用 getString/getDouble/getLong，任一条目字段缺失或类型错就抛，
+                    // 被外层 catch 连累成「清空整个内存缓存 + 删掉缓存文件」——
+                    // 一条坏数据毁掉全部离线兜底数据，代价远大于问题本身。
+                    val code = jsonObject.optString("code")
+                    if (code.isEmpty()) { skipped++; continue }
+                    val timestamp = jsonObject.optLong("timestamp", 0L)
                     val source = jsonObject.optString("source", "sina")
 
+                    // 价格非正 = 坏数据：进了缓存会让市值按 0 显示
+                    val price = jsonObject.optDouble("price", 0.0)
+                    if (price <= 0.0) { skipped++; continue }
+
                     val data = SinaStockData(
-                        name = jsonObject.getString("name"),
+                        name = jsonObject.optString("name"),
                         code = code,
-                        price = jsonObject.getDouble("price"),
+                        price = price,
                         change = jsonObject.optDouble("change", 0.0),
                         changePercent = jsonObject.optDouble("changePercent", 0.0),
                         open = jsonObject.optDouble("open", 0.0),
@@ -253,7 +278,11 @@ object PriceCacheManager {
                     memoryCache[code] = CachedPriceData(data, timestamp, source)
                 }
 
-                AppLogger.d("从磁盘加载缓存: ${memoryCache.size} 条", TAG)
+                AppLogger.d(
+                    "从磁盘加载缓存: ${memoryCache.size} 条" +
+                        if (skipped > 0) "（跳过 $skipped 条坏数据）" else "",
+                    TAG
+                )
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {

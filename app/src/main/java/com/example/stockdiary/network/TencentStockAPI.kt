@@ -30,7 +30,16 @@ interface StockAPI {
  */
 object TencentStockAPI : StockAPI {
     private const val BASE_URL = "https://qt.gtimg.cn/q="
-    
+
+    /**
+     * 解析所需的最小字段数。
+     *
+     * 下面**直接下标**取到的最大位置是 37（成交额），故门槛取 38。
+     * 真实响应都是 50+ 字段；短于此说明响应不完整，按「字段数量不足」处理，
+     * 而不是带着下标 3/4 的有效价格一路走到 fields[33] 才抛越界。
+     */
+    private const val MIN_FIELD_COUNT = 38
+
     private val client = NetworkClient.tencentClient.newBuilder()
         .addInterceptor { chain ->
             val request = chain.request().newBuilder()
@@ -128,9 +137,13 @@ object TencentStockAPI : StockAPI {
                 val fields = dataString.split("~")
                 
                 AppLogger.d("股票代码: $code, 字段数量: ${fields.size}", "TencentStockAPI")
-                
-                // 确保至少有基本的字段
-                if (fields.size >= 11) {
+
+                // 字段数门槛必须覆盖**我们实际直接取的最大下标**（37 = 成交额）。
+                // 原门槛是 >= 11，短于 37 的响应会带着有效价格（下标 3/4）一路走到
+                // fields[33] 才抛 IndexOutOfBounds，被外层 catch 吞成「未获取到股票数据」
+                // —— 一只能取到价的白扔，还借异常做流程控制。抬高门槛后短响应走上面
+                // 明确的「字段数量不足」分支，语义清晰、不依赖抛异常。
+                if (fields.size >= MIN_FIELD_COUNT) {
                     val name = fields[1]
                     val price = fields[3].toDoubleOrNull() ?: 0.0
                     val open = fields[5].toDoubleOrNull() ?: 0.0

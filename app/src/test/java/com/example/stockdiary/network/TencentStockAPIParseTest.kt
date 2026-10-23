@@ -202,9 +202,10 @@ class TencentStockAPIParseTest {
     }
 
     @Test
-    fun `字段数在 11 与 34 之间_越界被内层 catch 兜住返回 null`() {
-        // 20 个字段：过了 11 的门槛，但够不着 33/34 下标 ——
-        // IndexOutOfBounds 被 parseTencentData 外层 catch 兜住转 null，不会崩。
+    fun `字段数不足 MIN_FIELD_COUNT_直接返回 null 不崩`() {
+        // 20 个字段：够不到 MIN_FIELD_COUNT(38) 的门槛，应安全返回 null（不抛、不置 suspended）。
+        // 早年门槛是 11，短响应会带着有效价格走到 fields[33] 抛 IndexOutOfBounds、
+        // 被外层 catch 吞成 null——那是借异常做流程控制，已改为明确的门槛分支。
         val text = quote("sh600000", List(20) { "1" })
 
         val suspended = booleanArrayOf(false)

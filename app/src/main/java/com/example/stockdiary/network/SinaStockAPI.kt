@@ -65,8 +65,13 @@ object SinaStockAPI : StockAPI {
     }
     
     override suspend fun getStockData(stockCode: String): Result<SinaStockData> {
-        suspendedCodes.clear()
-        val result = getRealtimeData(listOf(stockCode))
+        // 停牌代码集合必须是**每次调用一份**，不能用进程级共享字段：
+        // 价格同步是 3 并发扇出的（手动刷新与后台 Worker 还可能撞车），共享字段会被
+        // 别的协程 clear()/addAll() 抹掉或串味——后果是「停牌」被误判成「源级失败」
+        // 喂给熔断器，累积 5 次可能把整个新浪源误禁；并发 add/clear 在非线程安全的
+        // LinkedHashSet 上还可能抛 ConcurrentModificationException。
+        val suspendedCodes = ConcurrentHashMap.newKeySet<String>()
+        val result = getRealtimeData(listOf(stockCode), suspendedOut = suspendedCodes)
         return result.mapCatching { map ->
             map[stockCode] ?: if (stockCode in suspendedCodes) {
                 // 明确告诉上层「这是停牌，不是数据源坏了」，不要去累计失败次数
@@ -76,14 +81,18 @@ object SinaStockAPI : StockAPI {
             }
         }
     }
-
-    /** 最近一次请求里被判定为无有效报价（停牌）的代码，供 [getStockData] 区分失败语义 */
-    private val suspendedCodes = mutableSetOf<String>()
     
     suspend fun getRealtimeData(
         stockCodes: List<String>,
         context: Context? = null,
-        forceRefresh: Boolean = false
+        forceRefresh: Boolean = false,
+        /**
+         * 停牌代码的收集出口：解析中发现「响应里出现了、但报价无效」的代码会写进这里。
+         *
+         * 由调用方传入**自己这次调用**的集合——绝不能用进程级共享字段：并发调用会互相
+         * clear()/addAll()，把停牌误判成源级失败喂熔断器（见 [getStockData]）。
+         */
+        suspendedOut: MutableSet<String>? = null
     ): Result<Map<String, SinaStockData>> {
         return withContext(Dispatchers.IO) {
             try {
@@ -186,9 +195,7 @@ object SinaStockAPI : StockAPI {
 
                                 val suspended = mutableSetOf<String>()
                                 val batchResult = parseRealtimeData(text, batch, suspended)
-                                if (suspended.isNotEmpty()) {
-                                    suspendedCodes.addAll(suspended)
-                                }
+                                suspendedOut?.addAll(suspended)
 
                                 batchResult.forEach { (code, data) ->
                                     cacheData(code, data)
@@ -281,7 +288,7 @@ object SinaStockAPI : StockAPI {
                     .url(url)
                     .build()
                 
-                val response = client.newCall(request).execute()
+                val response = activeClient.newCall(request).execute()
                 response.use {
                     if (!it.isSuccessful) {
                         val errorMsg = "API响应错误: ${it.code}"
@@ -352,7 +359,7 @@ object SinaStockAPI : StockAPI {
                     .url(url)
                     .build()
                 
-                val response = client.newCall(request).execute()
+                val response = activeClient.newCall(request).execute()
                 response.use {
                     if (!it.isSuccessful) {
                         val errorMsg = "API响应错误: ${it.code}"

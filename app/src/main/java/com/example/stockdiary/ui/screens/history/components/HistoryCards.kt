@@ -11,7 +11,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.animation.Crossfade
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Card
@@ -21,6 +20,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.key
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -160,19 +160,15 @@ fun LazyListScope.historyTrendChart(
 ) {
     item {
         Spacer(modifier = Modifier.height(12.dp))
-        Crossfade(
-            targetState = selectedPeriod,
-            label = "historyTrendChart"
-        ) { period ->
-            key(period) {
-                AssetTrendChart(
-                    snapshots = snapshots,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(height)
-                        .padding(horizontal = 16.dp)
-                )
-            }
+        // 周期切换直接静态重建一次；Crossfade 会在动画每帧同时维护两棵重图表树，造成卡顿。
+        key(selectedPeriod) {
+            AssetTrendChart(
+                snapshots = snapshots,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(height)
+                    .padding(horizontal = 16.dp)
+            )
         }
     }
 }
@@ -186,11 +182,14 @@ fun LazyListScope.historyPeriodReturnCard(
     // 显示 "+0.00%" 会误导——看着像零增长，实际可能是一整段新增。与本月/今年
     // 新增的「—」口径保持一致
     val periodYield = if (earliest.netAssets > 0) (periodChange / earliest.netAssets) * 100 else null
-    val firstLabel = earliest.date.formatDateLabel()
-    val lastLabel = latest.date.formatDateLabel()
-    val periodLabel = if (firstLabel == lastLabel) firstLabel else "$firstLabel ~ $lastLabel"
 
     item {
+        // LazyListScope 构建期只登记 item；日期格式化在真正组合该 item 时执行并缓存。
+        val periodLabel = remember(earliest.date, latest.date) {
+            val firstLabel = earliest.date.formatDateLabel()
+            val lastLabel = latest.date.formatDateLabel()
+            if (firstLabel == lastLabel) firstLabel else "$firstLabel ~ $lastLabel"
+        }
         SectionCard(title = "期间增值", titleGap = 4.dp) {
             Row(
                 modifier = Modifier.fillMaxWidth(),

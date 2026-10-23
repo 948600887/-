@@ -150,6 +150,8 @@ fun GoldVaultNavHost() {
                     modifier = Modifier.padding(padding)
                 )
                 Screen.Calendar -> CalendarScreen(
+                    // 日历空状态的「去添加资产」：跳到仪表盘（添加资产入口所在页）
+                    onNavigateToAssets = { selectedScreenRoute = Screen.Dashboard.route },
                     modifier = Modifier.padding(padding)
                 )
                 Screen.History -> HistoryScreen(

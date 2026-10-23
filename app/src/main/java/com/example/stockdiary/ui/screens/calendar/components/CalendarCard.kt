@@ -1,6 +1,6 @@
 package com.example.stockdiary.ui.screens.calendar.components
 
-import androidx.compose.foundation.background
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -157,15 +157,18 @@ fun CalendarCard(
             ) {
                 if (isAssetCalendar) {
                     LegendItem(color = AppTheme.colors.primary, label = "有数据")
-                    Spacer(modifier = Modifier.width(12.dp))
+                    Spacer(modifier = Modifier.width(8.dp))
                     LegendItem(color = AppTheme.colors.onSurfaceVariant.copy(alpha = 0.3f), label = "无数据")
                 } else {
                     LegendItem(color = AppTheme.colors.lossRed, label = "正收益")
-                    Spacer(modifier = Modifier.width(12.dp))
+                    Spacer(modifier = Modifier.width(8.dp))
                     LegendItem(color = AppTheme.colors.profitGreen, label = "负收益")
                 }
-                Spacer(modifier = Modifier.width(12.dp))
-                LegendItem(color = AppTheme.colors.primary.copy(alpha = 0.35f), label = "今天")
+                Spacer(modifier = Modifier.width(8.dp))
+                DividendLegendItem()
+                Spacer(modifier = Modifier.width(8.dp))
+                // 今天只用描边，不再用与“负收益”相近的绿色底色，色弱环境也能区分。
+                LegendItem(color = AppTheme.colors.primary, label = "今天", outlined = true)
             }
         }
     }
@@ -177,9 +180,10 @@ fun CalendarCard(
  */
 private val CALENDAR_CELL_HEIGHT = 56.dp
 /** 三段固定「槽位」高度：日期 / 金额 / 分红标记各占一位，有无内容都占位，保证横向对齐。
- *  三段之和(50) < 格子内容区(54)，配合 Arrangement.Top 让底部留 ~4dp 空隙，分红标记不上顶下沿 */
+ *  金额升到 11sp 后同步把金额槽位加到 18dp；三段之和 18+18+16=52dp，
+ *  仍小于格子扣除上下 1dp padding 后约 54dp 的内容区，底部保留约 2dp，分红字不会被 clip。 */
 private val CALENDAR_SLOT_DATE = 18.dp
-private val CALENDAR_SLOT_VALUE = 16.dp
+private val CALENDAR_SLOT_VALUE = 18.dp
 private val CALENDAR_SLOT_DIVIDEND = 16.dp
 
 @Composable
@@ -203,9 +207,10 @@ private fun CalendarDayCell(
             .clickable(onClick = onClick),
         color = when {
             isSelected -> AppTheme.colors.primary.copy(alpha = 0.25f)
-            isToday -> AppTheme.colors.primary.copy(alpha = 0.15f)
             else -> AppTheme.colors.surfaceContainerLow
-        }
+        },
+        // “今天”用边框而非语义色底色；被选中时优先展示选中态，避免双重强调。
+        border = if (isToday && !isSelected) BorderStroke(1.dp, AppTheme.colors.primary) else null
     ) {
         Column(
             modifier = Modifier
@@ -234,7 +239,7 @@ private fun CalendarDayCell(
                     Text(
                         text = if (isAssetCalendar) day.value.compactFormat()
                         else if (day.value > 0) "+${day.value.format(0)}" else day.value.format(0),
-                        fontSize = 9.sp,
+                        fontSize = 11.sp,
                         color = if (isAssetCalendar) AppTheme.colors.primary else day.value.profitColor(),
                         fontWeight = FontWeight.SemiBold,
                         maxLines = 1,
@@ -246,7 +251,7 @@ private fun CalendarDayCell(
                 if (hasDividend) {
                     Text(
                         text = "分",
-                        fontSize = 8.sp,
+                        fontSize = 10.sp,
                         color = AppTheme.colors.lossRed,
                         fontWeight = FontWeight.Bold,
                         maxLines = 1
@@ -258,16 +263,30 @@ private fun CalendarDayCell(
 }
 
 @Composable
-private fun LegendItem(color: Color, label: String) {
+private fun LegendItem(color: Color, label: String, outlined: Boolean = false) {
     Row(verticalAlignment = Alignment.CenterVertically) {
-        Box(
-            modifier = Modifier
-                .size(12.dp)
-                .clip(RoundedCornerShape(2.dp))
-                .background(color)
-        )
+        Surface(
+            modifier = Modifier.size(12.dp),
+            shape = RoundedCornerShape(2.dp),
+            color = if (outlined) Color.Transparent else color,
+            border = if (outlined) BorderStroke(1.dp, color) else null
+        ) {}
         Spacer(modifier = Modifier.width(4.dp))
         Text(text = label, fontSize = 11.sp, color = AppTheme.colors.onSurfaceVariant)
+    }
+}
+
+@Composable
+private fun DividendLegendItem() {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            text = "分",
+            fontSize = 10.sp,
+            fontWeight = FontWeight.Bold,
+            color = AppTheme.colors.lossRed
+        )
+        Spacer(modifier = Modifier.width(2.dp))
+        Text(text = "= 有分红", fontSize = 11.sp, color = AppTheme.colors.onSurfaceVariant)
     }
 }
 

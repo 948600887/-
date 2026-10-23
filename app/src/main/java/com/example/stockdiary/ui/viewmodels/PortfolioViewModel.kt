@@ -15,10 +15,12 @@ import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.di.AppContainer
 import com.example.stockdiary.utils.AppLogger
+import com.example.stockdiary.utils.isDisplayEquivalentTo
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -54,6 +56,8 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
     private val dividendRepository = DividendRepository.getInstance(container.context)
 
     val assets: StateFlow<List<Asset>> = repository.getAllAssets()
+        // 同 DashboardViewModel：按界面真正依赖的字段去重，避免落价只改时间戳也整屏重组
+        .distinctUntilChanged { a, b -> a.isDisplayEquivalentTo(b) }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     private val _isRefreshing = MutableStateFlow(false)

@@ -15,10 +15,10 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -30,7 +30,9 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.stockdiary.database.AssetSnapshot
@@ -137,13 +139,134 @@ internal fun List<AssetSnapshot>.dayTimestamps(): List<Long> =
         snapshot.date.toLocalDate()?.toEpochDay()?.times(86_400_000L) ?: snapshot.timestamp
     }
 
+private data class TrendLabelCache(
+    val texts: List<String>,
+    val widths: List<Float>
+)
+
+private data class TrendGridLine(
+    val y: Float,
+    val label: String
+)
+
+private data class TrendSegment(
+    val path: Path,
+    val crossesMissingDays: Boolean
+)
+
+private data class TrendChartGeometry(
+    val width: Float,
+    val paddingTop: Float,
+    val paddingBottomY: Float,
+    val paddingLeft: Float,
+    val paddingRightX: Float,
+    val positions: List<Float>,
+    val points: List<Offset>,
+    val dates: List<java.time.LocalDate?>,
+    val gridLines: List<TrendGridLine>,
+    val labelY: Float,
+    val labelIndices: List<Int>,
+    val fillPath: Path?,
+    val segments: List<TrendSegment>
+)
+
+/**
+ * 把只随快照和画布尺寸变化的计算集中到 draw 之外。
+ * 拖动选中点时这份几何不会重建，主图层只执行 drawLine/drawPath/drawText。
+ */
+private fun buildTrendChartGeometry(
+    snapshots: List<AssetSnapshot>,
+    canvasSize: IntSize,
+    labelWidths: List<Float>
+): TrendChartGeometry? {
+    val width = canvasSize.width.toFloat()
+    val height = canvasSize.height.toFloat()
+    val chartWidth = width - TREND_PADDING_LEFT - TREND_PADDING_RIGHT
+    val chartHeight = height - TREND_PADDING_TOP - TREND_PADDING_BOTTOM
+    if (snapshots.isEmpty() || chartWidth <= 0f || chartHeight <= 0f) return null
+
+    val minValue = snapshots.minOf { it.netAssets }
+    val maxValue = snapshots.maxOf { it.netAssets }
+    val valueRange = (maxValue - minValue).takeIf { it > 0.0 } ?: 1.0
+    val dates = snapshots.map { it.date.toLocalDate() }
+    val dayTimestamps = snapshots.mapIndexed { index, snapshot ->
+        dates[index]?.toEpochDay()?.times(86_400_000L) ?: snapshot.timestamp
+    }
+    val positions = trendXPositions(
+        timestamps = dayTimestamps,
+        left = TREND_PADDING_LEFT,
+        width = chartWidth
+    )
+    val points = snapshots.mapIndexed { index, snapshot ->
+        val y = TREND_PADDING_TOP + chartHeight -
+            ((snapshot.netAssets - minValue) / valueRange * chartHeight).toFloat()
+        Offset(positions[index], y)
+    }
+
+    val gridCount = 4
+    val stepY = chartHeight / gridCount
+    val yStep = valueRange / gridCount
+    val gridLines = (0..gridCount).map { index ->
+        TrendGridLine(
+            y = TREND_PADDING_TOP + index * stepY,
+            label = (maxValue - index * valueRange / gridCount).formatYAxisLabel(step = yStep)
+        )
+    }
+    val labelIndices = trendXLabelIndices(
+        positions = positions,
+        labelWidths = labelWidths,
+        minGap = TREND_LABEL_GAP
+    )
+
+    val fillPath = if (points.size >= 2) {
+        Path().apply {
+            moveTo(points.first().x, TREND_PADDING_TOP + chartHeight)
+            points.forEach { lineTo(it.x, it.y) }
+            lineTo(points.last().x, TREND_PADDING_TOP + chartHeight)
+            close()
+        }
+    } else null
+    val segments = if (points.size >= 2) {
+        (1 until points.size).map { index ->
+            val previousDate = dates[index - 1]
+            val currentDate = dates[index]
+            val gapDays = if (previousDate != null && currentDate != null) {
+                ChronoUnit.DAYS.between(previousDate, currentDate)
+            } else 1L
+            TrendSegment(
+                path = Path().apply {
+                    moveTo(points[index - 1].x, points[index - 1].y)
+                    lineTo(points[index].x, points[index].y)
+                },
+                crossesMissingDays = gapDays > 1L
+            )
+        }
+    } else emptyList()
+
+    return TrendChartGeometry(
+        width = width,
+        paddingTop = TREND_PADDING_TOP,
+        paddingBottomY = TREND_PADDING_TOP + chartHeight,
+        paddingLeft = TREND_PADDING_LEFT,
+        paddingRightX = width - TREND_PADDING_RIGHT,
+        positions = positions,
+        points = points,
+        dates = dates,
+        gridLines = gridLines,
+        labelY = TREND_PADDING_TOP + chartHeight + 24f,
+        labelIndices = labelIndices,
+        fillPath = fillPath,
+        segments = segments
+    )
+}
+
 @Composable
 fun AssetTrendChart(
     snapshots: List<AssetSnapshot>,
     modifier: Modifier = Modifier
 ) {
-    var selectedPointIndex by remember { mutableStateOf<Int?>(null) }
-    val currentSnapshots by rememberUpdatedState(snapshots)
+    val selectedPointIndex = remember { mutableStateOf<Int?>(null) }
+    var canvasSize by remember { mutableStateOf(IntSize.Zero) }
 
     // 设计规范 4.4：颜色在 @Composable 组体内读出并捕获为局部 val 后再进 draw lambda
     val colors = AppTheme.colors
@@ -151,225 +274,210 @@ fun AssetTrendChart(
     val gridColor = colors.outline.copy(alpha = 0.2f)
     val areaColor = colors.primary.copy(alpha = 0.12f)
     val pointFill = colors.chartPointFill
+    val crosshairColor = colors.onSurfaceVariant.copy(alpha = 0.4f)
     val axisText = colors.chartAxisText.toArgb()
 
     if (snapshots.isEmpty()) return
 
+    // Paint 和日期格式化/测量都不应在 draw 或循环中反复分配；文本只在快照变化时重算。
+    val axisPaint = remember(axisText) {
+        android.graphics.Paint().apply {
+            color = axisText
+            textSize = 22f
+            isAntiAlias = true
+        }
+    }
+    val labelCache = remember(snapshots) {
+        val texts = snapshots.map { it.date.formatDateLabel() }
+        TrendLabelCache(texts = texts, widths = texts.map(axisPaint::measureText))
+    }
+    val geometry = remember(snapshots, canvasSize, labelCache.widths) {
+        buildTrendChartGeometry(snapshots, canvasSize, labelCache.widths)
+    }
+    val areaBrush = remember(areaColor, lineColor, geometry) {
+        geometry?.let {
+            Brush.verticalGradient(
+                colors = listOf(areaColor, lineColor.copy(alpha = 0f)),
+                startY = it.paddingTop,
+                endY = it.paddingBottomY
+            )
+        }
+    }
+    val solidStroke = remember { Stroke(width = 2.5f) }
+    val dashedStroke = remember {
+        Stroke(width = 2.5f, pathEffect = PathEffect.dashPathEffect(floatArrayOf(14f, 8f), 0f))
+    }
+
     Box(modifier = modifier) {
+        // 主图层不读取 selectedPointIndex：拖动时只重绘下面的选中态图层，避免整图重跑。
         Canvas(
             modifier = Modifier
                 .fillMaxSize()
-                .pointerInput(snapshots) {
+                .onSizeChanged { canvasSize = it }
+        ) {
+            val chart = geometry ?: return@Canvas
+
+            chart.gridLines.forEach { gridLine ->
+                drawLine(
+                    gridColor,
+                    Offset(chart.paddingLeft, gridLine.y),
+                    Offset(chart.paddingRightX, gridLine.y),
+                    1f
+                )
+                drawContext.canvas.nativeCanvas.drawText(
+                    gridLine.label,
+                    2f,
+                    gridLine.y + 4f,
+                    axisPaint
+                )
+            }
+
+            // 标签文本、宽度和需要显示的下标均已缓存，draw 期不再整表 format/measure。
+            chart.labelIndices.forEach { index ->
+                val labelX = when (index) {
+                    0 -> chart.paddingLeft
+                    snapshots.lastIndex -> chart.paddingRightX - labelCache.widths[index]
+                    else -> chart.points[index].x - labelCache.widths[index] / 2f
+                }
+                drawContext.canvas.nativeCanvas.drawText(
+                    labelCache.texts[index],
+                    labelX,
+                    chart.labelY,
+                    axisPaint
+                )
+            }
+
+            chart.fillPath?.let { path ->
+                areaBrush?.let { brush -> drawPath(path = path, brush = brush) }
+            }
+            // 日期解析、缺口判断和 Path 构建都在 geometry 中完成；这里仅按实/虚线绘制。
+            chart.segments.forEach { segment ->
+                drawPath(
+                    path = segment.path,
+                    color = lineColor,
+                    style = if (segment.crossesMissingDays) dashedStroke else solidStroke
+                )
+            }
+        }
+
+        // 选中态独立图层同时承接手势；状态变化不会让主 draw 块依赖失效。
+        Canvas(
+            modifier = Modifier
+                .fillMaxSize()
+                .pointerInput(geometry?.positions) {
                     detectTapGestures { tapOffset ->
-                        val snaps = currentSnapshots
-                        if (snaps.size < 2) return@detectTapGestures
-                        val positions = trendXPositions(
-                            timestamps = snaps.dayTimestamps(),
-                            left = TREND_PADDING_LEFT,
-                            width = size.width - TREND_PADDING_LEFT - TREND_PADDING_RIGHT
-                        )
+                        val positions = geometry?.positions.orEmpty()
+                        if (positions.size < 2) return@detectTapGestures
                         val index = nearestPointIndex(tapOffset.x, positions)
                         if (index >= 0) {
-                            selectedPointIndex = if (selectedPointIndex == index) null else index
+                            selectedPointIndex.value = if (selectedPointIndex.value == index) null else index
                         }
                     }
                 }
-                .pointerInput(snapshots) {
+                .pointerInput(geometry?.positions) {
                     detectHorizontalDragGestures(
                         onDragEnd = {},
                         onDragCancel = {},
                         onHorizontalDrag = { _, dragAmount ->
-                            val snaps = currentSnapshots
-                            if (snaps.size < 2) return@detectHorizontalDragGestures
-                            val positions = trendXPositions(
-                                timestamps = snaps.dayTimestamps(),
-                                left = TREND_PADDING_LEFT,
-                                width = size.width - TREND_PADDING_LEFT - TREND_PADDING_RIGHT
-                            )
-                            // 拖动 = 沿时间轴平移手指位置，再吸附到最近的点；
-                            // 缺口处点更稀，拖同样的像素数会自然跨过更多数据
-                            val currentIdx = selectedPointIndex ?: 0
-                            val anchorX = positions.getOrNull(currentIdx) ?: positions.first()
-                            val newIdx = nearestPointIndex(anchorX + dragAmount, positions)
-                            if (newIdx >= 0) {
-                                selectedPointIndex = newIdx
-                            }
+                            val positions = geometry?.positions.orEmpty()
+                            if (positions.size < 2) return@detectHorizontalDragGestures
+                            // 拖动仍按原交互从当前吸附点平移，但位置表不再每个手势事件重算。
+                            val currentIndex = selectedPointIndex.value ?: 0
+                            val anchorX = positions.getOrNull(currentIndex) ?: positions.first()
+                            val newIndex = nearestPointIndex(anchorX + dragAmount, positions)
+                            if (newIndex >= 0) selectedPointIndex.value = newIndex
                         }
                     )
                 }
         ) {
-            val width = size.width
-            val height = size.height
-            val paddingTop = TREND_PADDING_TOP
-            val paddingBottom = TREND_PADDING_BOTTOM
-            val paddingLeft = TREND_PADDING_LEFT
-            val paddingRight = TREND_PADDING_RIGHT
-
-            val cWidth = width - paddingLeft - paddingRight
-            val cHeight = height - paddingTop - paddingBottom
-
-            val minValue = snapshots.minOf { it.netAssets }
-            val maxValue = snapshots.maxOf { it.netAssets }
-            val valueRange = if (maxValue - minValue > 0) maxValue - minValue else 1.0
-
-            // x 按日期（当天零点）排布：缺口在横向上被拉开，且宽度与日期差严格成正比，
-            // 不再伪装成连续数据，也不会因「几点几分创建的」让等日期差画出不等宽
-            val positions = trendXPositions(
-                timestamps = snapshots.dayTimestamps(),
-                left = paddingLeft,
-                width = cWidth
-            )
-            val points = snapshots.mapIndexed { index, snapshot ->
-                val x = positions[index]
-                val y = (paddingTop + cHeight - ((snapshot.netAssets - minValue) / valueRange * cHeight)).toFloat()
-                Offset(x, y)
-            }
-
-            // Y轴网格线
-            val gridCount = 4
-            val stepY = cHeight / gridCount
-            // 相邻网格线的差值：Y 轴标签精度随它自适应，范围极窄时不会五条全标"18万"
-            val yStep = valueRange / gridCount
-            for (i in 0..gridCount) {
-                val yPos = paddingTop + i * stepY
-                drawLine(gridColor, Offset(paddingLeft, yPos), Offset(width - paddingRight, yPos), 1f)
-                val yValue = maxValue - (i * valueRange / gridCount)
-                drawContext.canvas.nativeCanvas.drawText(
-                    yValue.formatYAxisLabel(step = yStep), 2f, yPos + 4f,
-                    android.graphics.Paint().apply {
-                        color = axisText; textSize = 22f; isAntiAlias = true
-                    }
-                )
-            }
-
-            // X轴日期标签：**每份快照的日期都标在它自己的点上**，与上一个标签放不下
-            // （间隔不足 TREND_LABEL_GAP）才跳过，首末永远保留。快照稀疏时全部可见——
-            // 用户能直接看出哪些天有数据、缺口在哪（与虚线段互相印证）；密集时自动稀疏化。
-            // 曾经只标首/中/末三个，中间的点在哪天全靠猜，缺口被读成「间距画错了」
-            if (snapshots.isNotEmpty()) {
-                val paint = android.graphics.Paint().apply {
-                    color = axisText; textSize = 22f; isAntiAlias = true
-                }
-                val labelY = paddingTop + cHeight + 24f
-                val labelWidths = snapshots.map { paint.measureText(it.date.formatDateLabel()) }
-                val labelIndices = trendXLabelIndices(
-                    positions = positions,
-                    labelWidths = labelWidths,
-                    minGap = TREND_LABEL_GAP
-                )
-                labelIndices.forEach { index ->
-                    val label = snapshots[index].date.formatDateLabel()
-                    // 首个左对齐到绘图区左沿、末个右对齐到右沿，其余居中于各自的点
-                    val labelX = when (index) {
-                        0 -> paddingLeft
-                        snapshots.lastIndex -> width - paddingRight - labelWidths[index]
-                        else -> points[index].x - labelWidths[index] / 2f
-                    }
-                    drawContext.canvas.nativeCanvas.drawText(label, labelX, labelY, paint)
-                }
-            }
-
-            // 渐变填充区域
-            if (points.size >= 2) {
-                val fillPath = Path().apply {
-                    moveTo(points.first().x, paddingTop + cHeight)
-                    for (point in points) lineTo(point.x, point.y)
-                    lineTo(points.last().x, paddingTop + cHeight)
-                    close()
-                }
-                drawPath(
-                    path = fillPath,
-                    brush = Brush.verticalGradient(
-                        colors = listOf(areaColor, lineColor.copy(alpha = 0.0f)),
-                        startY = paddingTop, endY = paddingTop + cHeight
+            val chart = geometry ?: return@Canvas
+            selectedPointIndex.value?.let { index ->
+                if (index in chart.points.indices) {
+                    val point = chart.points[index]
+                    drawLine(
+                        crosshairColor,
+                        Offset(point.x, chart.paddingTop),
+                        Offset(point.x, chart.paddingBottomY),
+                        1f
                     )
-                )
-
-                // 折线按段画：相邻快照日期连续（相差 1 天）画实线；跨缺口
-                // （相差 >1 天，中间没有快照）画虚线。X 轴按真实日期排布，缺数据的
-                // 日子横向占位，所以不同日期的间隔不一样——虚线就是把这件事画出来：
-                // 这一段是跨无数据期的连线，不是逐日实测
-                for (i in 1 until points.size) {
-                    val prevDate = snapshots[i - 1].date.toLocalDate()
-                    val currDate = snapshots[i].date.toLocalDate()
-                    val gapDays = if (prevDate != null && currDate != null) {
-                        ChronoUnit.DAYS.between(prevDate, currDate)
-                    } else 1L
-                    val segPath = Path().apply {
-                        moveTo(points[i - 1].x, points[i - 1].y)
-                        lineTo(points[i].x, points[i].y)
-                    }
-                    drawPath(
-                        path = segPath,
-                        color = lineColor,
-                        style = Stroke(
-                            width = 2.5f,
-                            pathEffect = if (gapDays > 1L) PathEffect.dashPathEffect(floatArrayOf(14f, 8f), 0f) else null
-                        )
+                    drawLine(
+                        crosshairColor,
+                        Offset(chart.paddingLeft, point.y),
+                        Offset(chart.paddingRightX, point.y),
+                        1f
                     )
-                }
-            }
-
-            // 十字线
-            selectedPointIndex?.let { index ->
-                if (index in points.indices) {
-                    val point = points[index]
-                    drawLine(colors.onSurfaceVariant.copy(alpha = 0.4f), Offset(point.x, paddingTop), Offset(point.x, paddingTop + cHeight), 1f)
-                    drawLine(colors.onSurfaceVariant.copy(alpha = 0.4f), Offset(paddingLeft, point.y), Offset(width - paddingRight, point.y), 1f)
                     drawCircle(color = pointFill, radius = 6f, center = point)
                     drawCircle(color = lineColor, radius = 6f, center = point, style = Stroke(width = 2f))
                 }
             }
         }
 
-        // 选中的数据卡片
-        val idx = selectedPointIndex
-        if (idx != null && idx in snapshots.indices) {
-            val snapshot = snapshots[idx]
-            // 资产增值口径：与上一期快照比净资产的增量，不再展示基于成本的盈亏
-            val previous = if (idx > 0) snapshots[idx - 1] else null
-            val delta = previous?.let { snapshot.netAssets - it.netAssets }
-            // 时间跨度：中间隔了 N 天，这个「增减额」就是 N 天的变化，必须说明白，
-            // 否则用户会把跨缺口增量当成单日增量
-            val spanText = previous?.let { prevSnapshot ->
-                val prevDate = prevSnapshot.date.toLocalDate()
-                val currDate = snapshot.date.toLocalDate()
-                if (prevDate != null && currDate != null) {
-                    val days = ChronoUnit.DAYS.between(prevDate, currDate).toInt()
-                    if (days > 1) "较 ${prevSnapshot.date} · 共 $days 天" else "较 ${prevSnapshot.date}"
-                } else null
-            }
-            Card(
-                modifier = Modifier.fillMaxWidth().align(Alignment.BottomCenter).padding(horizontal = 16.dp),
-                colors = CardDefaults.cardColors(containerColor = colors.surfaceContainerLow.copy(alpha = 0.95f)),
-                shape = RoundedCornerShape(10.dp)
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(12.dp),
-                    horizontalArrangement = androidx.compose.foundation.layout.Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column {
-                        Text(snapshot.date, fontSize = 13.sp, fontWeight = FontWeight.Medium, color = colors.onSurface)
-                        if (spanText != null) {
-                            Text(
-                                spanText,
-                                style = MaterialTheme.typography.labelSmall,
-                                color = colors.onSurfaceVariant
-                            )
-                        }
-                        // 不要再在这里显示 totalAssets（总资产，含负债）：本页所有卡片
-                        // （资产总览/期间增值/风险指标）与本图画的都是净资产 netAssets，
-                        // 混进一个含负债的总资产，数值可能差数倍，用户会以为图本身画错了
-                    }
-                    Column(horizontalAlignment = Alignment.End) {
-                        Text("¥${snapshot.netAssets.format(2)}", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = colors.onSurface)
-                        Text(
-                            delta?.toProfitDisplay("¥") ?: "起始",
-                            fontSize = 12.sp, color = delta?.profitColor() ?: colors.onSurface
-                        )
-                    }
+        TrendSelectionCard(
+            selectedPointIndex = selectedPointIndex,
+            snapshots = snapshots,
+            geometry = geometry,
+            modifier = Modifier
+                .fillMaxWidth()
+                .align(Alignment.BottomCenter)
+                .padding(horizontal = 16.dp)
+        )
+    }
+}
+
+/** 详情卡在自己的重组作用域读取选中状态，避免状态变化连带重组主 Canvas。 */
+@Composable
+private fun TrendSelectionCard(
+    selectedPointIndex: State<Int?>,
+    snapshots: List<AssetSnapshot>,
+    geometry: TrendChartGeometry?,
+    modifier: Modifier = Modifier
+) {
+    val idx = selectedPointIndex.value
+    if (idx == null || idx !in snapshots.indices) return
+
+    val colors = AppTheme.colors
+    val snapshot = snapshots[idx]
+    // 资产增值口径：与上一期快照比净资产的增量，不再展示基于成本的盈亏
+    val previous = if (idx > 0) snapshots[idx - 1] else null
+    val delta = previous?.let { snapshot.netAssets - it.netAssets }
+    // 时间跨度：复用几何缓存中的日期解析结果，避免每次拖动再次 toLocalDate。
+    val spanText = previous?.let { prevSnapshot ->
+        val previousDate = geometry?.dates?.getOrNull(idx - 1)
+        val currentDate = geometry?.dates?.getOrNull(idx)
+        if (previousDate != null && currentDate != null) {
+            val days = ChronoUnit.DAYS.between(previousDate, currentDate).toInt()
+            if (days > 1) "较 ${prevSnapshot.date} · 共 $days 天" else "较 ${prevSnapshot.date}"
+        } else null
+    }
+    Card(
+        modifier = modifier,
+        colors = CardDefaults.cardColors(containerColor = colors.surfaceContainerLow.copy(alpha = 0.95f)),
+        shape = RoundedCornerShape(10.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(12.dp),
+            horizontalArrangement = androidx.compose.foundation.layout.Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column {
+                Text(snapshot.date, fontSize = 13.sp, fontWeight = FontWeight.Medium, color = colors.onSurface)
+                if (spanText != null) {
+                    Text(
+                        spanText,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = colors.onSurfaceVariant
+                    )
                 }
+                // 不要再在这里显示 totalAssets（总资产，含负债）：本页所有卡片
+                // （资产总览/期间增值/风险指标）与本图画的都是净资产 netAssets，
+                // 混进一个含负债的总资产，数值可能差数倍，用户会以为图本身画错了
+            }
+            Column(horizontalAlignment = Alignment.End) {
+                Text("¥${snapshot.netAssets.format(2)}", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = colors.onSurface)
+                Text(
+                    delta?.toProfitDisplay("¥") ?: "起始",
+                    fontSize = 12.sp, color = delta?.profitColor() ?: colors.onSurface
+                )
             }
         }
     }

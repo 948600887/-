@@ -4,15 +4,12 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import com.example.stockdiary.ui.theme.*
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Savings
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalFocusManager
@@ -20,12 +17,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import com.example.stockdiary.database.Asset
-import com.example.stockdiary.database.AssetType
-import com.example.stockdiary.network.BinanceHostGate
-import com.example.stockdiary.utils.ExchangeRateManager
-import com.example.stockdiary.utils.StockCodeManager
-import com.example.stockdiary.utils.format
-import com.example.stockdiary.utils.totalValueCny
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -92,55 +83,19 @@ fun PortfolioSearchDialog(
     )
 }
 
+/**
+ * 搜索结果行。
+ *
+ * 以前这里和 `AssetCards.StockAssetItem` 是两份几乎一样的实现，已经漂移：这边少了到期日、
+ * 没有批量选择态，价格的几种状态（退市 / 币安不可达 / 待更新）又抄了一遍。
+ * 现在直接委托给 `StockAssetItem`——顺带把触摸目标（32dp→40dp）、资产名省略号、
+ * 到期日显示三处差异一并抹平，以后改价格口径只改一处。
+ */
 @Composable
 fun SearchAssetItem(asset: Asset, onClick: () -> Unit, onDividendClick: () -> Unit) {
-    val pricePrecision = if (asset.type == AssetType.FUND || StockCodeManager.isETF(asset.symbol)) 3 else 2
-
-    Card(
-        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick),
-        shape = RoundedCornerShape(8.dp),
-        colors = CardDefaults.cardColors(containerColor = AppTheme.colors.surfaceContainerLow)
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(12.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(asset.name, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold, color = AppTheme.colors.onSurface, maxLines = 1)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text(asset.symbol ?: "", style = MaterialTheme.typography.bodySmall, color = AppTheme.colors.onSurfaceVariant)
-                    Text("•", style = MaterialTheme.typography.bodySmall, color = AppTheme.colors.onSurfaceVariant)
-                    Text("${asset.balance.format(0)}${if (asset.type == AssetType.STOCK) "股" else "份"}", style = MaterialTheme.typography.bodySmall, color = AppTheme.colors.onSurfaceVariant)
-                }
-            }
-            Column(modifier = Modifier.weight(1f), horizontalAlignment = Alignment.End) {
-                Text("¥${asset.totalValueCny.format(2)}", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold, color = AppTheme.colors.onSurface)
-                Text(
-                    when {
-                        // 同 AssetCards：价格是原币口径，套 ¥ 前必须折算，
-                        // 否则 USD 报价的加密货币显示成人民币数字（差一个汇率）
-                        asset.currentPrice != null ->
-                            "¥${ExchangeRateManager.toCny(asset.currentPrice, asset.currency).format(pricePrecision)}"
-                        StockCodeManager.isDelistedForSync(asset.symbol) -> "退市"
-                        // 与 AssetCards.StockAssetItem 同一套口径：币安主机级熔断期间
-                        // （连不上 api.binance.com，见 BinanceHostGate）显示「币安暂不可达」，
-                        // 区别于「价格待更新」。isUnavailable 不可观察，列表每轮同步结束后重组时刷新；
-                        // 纯读无副作用，不驱动熔断状态机（请求闸门是 tryAcquireProbe 的职责）。
-                        asset.type == AssetType.CRYPTO &&
-                            BinanceHostGate.isUnavailable() -> "币安暂不可达"
-                        else -> "价格待更新"
-                    },
-                    style = MaterialTheme.typography.bodySmall, color = AppTheme.colors.onSurfaceVariant, fontWeight = FontWeight.Medium
-                )
-                if (asset.millionCopiesIncome != null) {
-                    Text("万份收益 ${asset.millionCopiesIncome.format(4)}",
-                        style = MaterialTheme.typography.bodySmall, color = AppTheme.colors.onSurfaceVariant)
-                }
-            }
-            IconButton(onClick = onDividendClick, modifier = Modifier.size(32.dp)) {
-                Icon(Icons.Filled.Savings, contentDescription = "分红", tint = AppTheme.colors.primary, modifier = Modifier.size(18.dp))
-            }
-        }
-    }
+    StockAssetItem(
+        asset = asset,
+        onClick = { onClick() },
+        onDividendClick = { onDividendClick() }
+    )
 }

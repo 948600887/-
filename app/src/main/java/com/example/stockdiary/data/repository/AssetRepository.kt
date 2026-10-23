@@ -18,6 +18,23 @@ import kotlinx.coroutines.flow.first
 import java.time.LocalDate
 import kotlinx.coroutines.CancellationException
 
+/**
+ * 一条「待落库的价格」意图。
+ *
+ * 同步侧拿到价后**不立刻写库**，先把意图放进批量缓冲，凑够一批才整体落盘
+ * （见 [AssetRepository.updatePricesInTransaction]）：单独一次 UPDATE 就会让 Room 的
+ * 观察查询整表重查重发一次，逐个写即「每只标的 = 一次整页重组」。
+ *
+ * @param symbol 落价按代码匹配（与单条 [AssetRepository.updatePriceBySymbol] 同一口径）
+ * @param price 现价；非正/NaN 在落库前被拦，不会把市值清零
+ * @param millionCopiesIncome 场外基金的万份收益，股票/加密为 null
+ */
+data class PendingPriceWrite(
+    val symbol: String,
+    val price: Double,
+    val millionCopiesIncome: Double? = null
+)
+
 class AssetRepository private constructor(
     private val assetDao: AssetDao,
     private val snapshotDao: SnapshotDao,
@@ -74,6 +91,45 @@ class AssetRepository private constructor(
             return
         }
         assetDao.updatePriceBySymbol(symbol, price, System.currentTimeMillis(), millionCopiesIncome)
+    }
+
+    /**
+     * **批量**落价：把一批 Update 收进**一个 Room 事务**（[inTransaction]）。
+     *
+     * ## 为什么必须批
+     *
+     * [getAllAssets] 是 Room 的 Flow，assets 表每写一行 Room 就通知观察查询整表重查、
+     * 重发一次；同步一轮要写上百个标的，「逐个写」= 上百次全表重查 + 上百次整页重组，
+     * 这正是「点刷新就卡」的引擎（日历页同类问题已在 CalendarViewModel 实测到
+     * 「一次全量刷新白跑 20+ 次」）。放进同一个事务后，Room **只在事务提交时失效一次**，
+     * 发射次数降到约 N/批大小。
+     *
+     * 为什么不干脆把整轮同步的所有写都塞进一个事务：那样一旦进程中途被杀或被
+     * 停止（看门狗截断 / 退后台取消），已抓取的价格会全部丢失；分批在中途落盘，
+     * 最坏只丢最后不足一批的几个。这里只负责「怎么批」，批多大由调用方决定。
+     *
+     * @param writes 待落库的落价意图；内部照样逐条做非正价格拦截，与 [updatePriceBySymbol] 同口径
+     */
+    suspend fun updatePricesInTransaction(writes: List<PendingPriceWrite>) {
+        if (writes.isEmpty()) return
+        inTransaction {
+            writes.forEach { write ->
+                // 与单条版本完全相同的护栏：一次拽回来的 0.0 / NaN 不能把市值清零
+                if (!write.price.isFinite() || write.price <= 0.0) {
+                    AppLogger.w(
+                        "拒绝写入非正价格: ${write.symbol} = ${write.price}（可能为解析失败）",
+                        "AssetRepository"
+                    )
+                    return@forEach
+                }
+                assetDao.updatePriceBySymbol(
+                    write.symbol,
+                    write.price,
+                    System.currentTimeMillis(),
+                    write.millionCopiesIncome
+                )
+            }
+        }
     }
 
     suspend fun updatePriceById(id: Long, price: Double) {

@@ -10,6 +10,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
+import com.example.stockdiary.ui.components.BoundedText
 
 @Composable
 fun SettingsSection(title: String) {
@@ -47,9 +48,14 @@ fun SettingsItem(
             )
         },
         supportingContent = {
-            Text(
+            // 副标题最长的一句能到 40 多个字（"交易时段每 15 分钟、其余时段每 4 小时 ·
+            // 上次: 09-30 14:20"）。以前完全没有行数上限，极端情况下会一路撑高整行；
+            // 但截成一行又会丢掉"上次同步时间"这类关键信息，所以给 2 行 + 省略号，
+            // 而不是照抄其它单行文本的 1 行策略。
+            BoundedText(
                 text = subtitle,
-                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = contentAlpha)
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = contentAlpha),
+                maxLines = 2
             )
         },
         leadingContent = {

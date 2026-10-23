@@ -10,11 +10,15 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Calculate
+import androidx.compose.material.icons.filled.CalendarMonth
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -23,6 +27,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -44,6 +49,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import com.example.stockdiary.database.Asset
+import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.di.LocalAppContainer
 import com.example.stockdiary.ui.screens.calendar.components.CalendarCard
 import com.example.stockdiary.ui.components.FireCalculationDialog
@@ -59,7 +65,10 @@ import java.time.format.TextStyle
 import java.util.Locale
 
 @Composable
-fun CalendarScreen(modifier: Modifier = Modifier) {
+fun CalendarScreen(
+    modifier: Modifier = Modifier,
+    onNavigateToAssets: () -> Unit = {}
+) {
     val container = LocalAppContainer.current
     val viewModel: CalendarViewModel = viewModel(factory = CalendarViewModel.Factory(container))
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -90,7 +99,10 @@ fun CalendarScreen(modifier: Modifier = Modifier) {
 
     // 空状态：无资产
     if (!isLoading && assets.isEmpty()) {
-        EmptyCalendarContent(modifier = modifier)
+        EmptyCalendarContent(
+            modifier = modifier,
+            onNavigateToAssets = onNavigateToAssets
+        )
         return
     }
 
@@ -102,60 +114,67 @@ fun CalendarScreen(modifier: Modifier = Modifier) {
         return
     }
 
-    Column(
-        modifier = modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState()),
-        verticalArrangement = androidx.compose.foundation.layout.Arrangement.Top
-    ) {
-        // 切月份/切 Tab 时的进度：数据要重新算，不给反馈会像卡住了
-        if (isLoading) {
-            LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-        }
+    // Snackbar 必须由 Scaffold 固定托管；放进 verticalScroll 会滚到页面底部且撑高内容。
+    Scaffold(
+        modifier = modifier.fillMaxSize(),
+        snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
+        containerColor = AppTheme.colors.background,
+        contentColor = AppTheme.colors.onBackground
+    ) { contentPadding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(contentPadding)
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = androidx.compose.foundation.layout.Arrangement.Top
+        ) {
+            // 切月份/切 Tab 时的进度：数据要重新算，不给反馈会像卡住了
+            if (isLoading) {
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+            }
 
-        CalendarHeader(
-            selectedTab = uiState.selectedTab,
-            onTabSelected = { viewModel.selectTab(it) },
-            onFireClick = { showFireDialog = true }
-        )
+            CalendarHeader(
+                selectedTab = uiState.selectedTab,
+                onTabSelected = { viewModel.selectTab(it) },
+                onFireClick = { showFireDialog = true }
+            )
 
-        CalendarCard(
-            currentMonth = uiState.currentMonth,
-            onMonthChange = { viewModel.selectMonth(it) },
-            calendarData = calendarData,
-            dividendDates = dividendDates,
-            selectedDate = selectedDate,
-            onDateSelected = { viewModel.selectDate(it) },
-            isAssetCalendar = uiState.selectedTab == "资产日历"
-        )
+            CalendarCard(
+                currentMonth = uiState.currentMonth,
+                onMonthChange = { viewModel.selectMonth(it) },
+                calendarData = calendarData,
+                dividendDates = dividendDates,
+                selectedDate = selectedDate,
+                onDateSelected = { viewModel.selectDate(it) },
+                isAssetCalendar = uiState.selectedTab == "资产日历"
+            )
 
-        // 选中日期详情
-        if (selectedDate != null) {
-            SelectedDateDetail(
-                date = selectedDate,
-                value = calendarData[selectedDate] ?: 0.0,
+            // 选中日期详情
+            if (selectedDate != null) {
+                SelectedDateDetail(
+                    date = selectedDate,
+                    value = calendarData[selectedDate] ?: 0.0,
+                    isAssetCalendar = uiState.selectedTab == "资产日历",
+                    dividends = dividends,
+                    assets = assets
+                )
+            }
+
+            // 月度汇总：刷新时保持占位并置灰，避免每次切月都整块消失再出现（闪烁）
+            MonthlySummary(
                 isAssetCalendar = uiState.selectedTab == "资产日历",
-                dividends = dividends,
-                assets = assets
+                calendarData = calendarData,
+                assetCount = assets.size,
+                modifier = Modifier.alpha(if (isLoading) 0.5f else 1f)
             )
+
+            if (errorMessage != null) {
+                ErrorMessageCard(
+                    message = errorMessage,
+                    onDismiss = { viewModel.clearError() }
+                )
+            }
         }
-
-        // 月度汇总：刷新时保持占位并置灰，避免每次切月都整块消失再出现（闪烁）
-        MonthlySummary(
-            isAssetCalendar = uiState.selectedTab == "资产日历",
-            calendarData = calendarData,
-            assetCount = assets.size,
-            modifier = Modifier.alpha(if (isLoading) 0.5f else 1f)
-        )
-
-        if (errorMessage != null) {
-            ErrorMessageCard(
-                message = errorMessage,
-                onDismiss = { viewModel.clearError() }
-            )
-        }
-
-        SnackbarHost(hostState = snackbarHostState)
     }
 
     if (showFireDialog) {
@@ -170,7 +189,10 @@ fun CalendarScreen(modifier: Modifier = Modifier) {
 }
 
 @Composable
-private fun EmptyCalendarContent(modifier: Modifier = Modifier) {
+private fun EmptyCalendarContent(
+    modifier: Modifier = Modifier,
+    onNavigateToAssets: () -> Unit
+) {
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -178,11 +200,27 @@ private fun EmptyCalendarContent(modifier: Modifier = Modifier) {
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = androidx.compose.foundation.layout.Arrangement.Center
     ) {
-        Text("📅", fontSize = 48.sp)
+        // 使用 Material 图标而非平台相关 emoji，保证不同设备上的视觉与无障碍语义一致。
+        Icon(
+            imageVector = Icons.Filled.CalendarMonth,
+            contentDescription = null,
+            tint = AppTheme.colors.primary,
+            modifier = Modifier.size(48.dp)
+        )
         Spacer(modifier = Modifier.height(16.dp))
         Text("暂无资产", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.onSurface)
         Spacer(modifier = Modifier.height(8.dp))
         Text("请先在资产页面添加股票、基金或银行存款", fontSize = 13.sp, color = AppTheme.colors.onSurfaceVariant)
+        Spacer(modifier = Modifier.height(20.dp))
+        Button(
+            onClick = onNavigateToAssets,
+            colors = ButtonDefaults.buttonColors(
+                containerColor = AppTheme.colors.primary,
+                contentColor = AppTheme.colors.onPrimary
+            )
+        ) {
+            Text("去添加资产")
+        }
     }
 }
 
@@ -235,15 +273,36 @@ private fun CalendarHeader(
     }
 }
 
+private data class DividendAssetSignature(
+    val symbol: String?,
+    val name: String,
+    val type: AssetType,
+    val balance: Double,
+    val currency: String
+)
+
 @Composable
 private fun SelectedDateDetail(
     date: LocalDate,
     value: Double,
     isAssetCalendar: Boolean,
-    dividends: List<Pair<String, List<com.example.stockdiary.data.dividend.DividendRecord>>>,
+    dividends: List<Pair<String, List<DividendRecord>>>,
     assets: List<Asset>
 ) {
-    val assetMap = remember(assets) { assets.associateBy { it.symbol } }
+    // Room 会因实时价变化频繁发出新 Asset 列表，但分红详情只依赖以下五个字段。
+    // 先按 UI 字段生成签名，让价格/同步时间变化时沿用旧 Map，避免整表 associateBy。
+    val assetSignature = remember(assets) {
+        assets.map {
+            DividendAssetSignature(
+                symbol = it.symbol,
+                name = it.name,
+                type = it.type,
+                balance = it.balance,
+                currency = it.currency
+            )
+        }
+    }
+    val assetMap = remember(assetSignature) { assets.associateBy { it.symbol } }
 
     Card(
         modifier = Modifier
@@ -295,6 +354,15 @@ private fun SelectedDateDetail(
     }
 }
 
+private data class MonthlyAggregates(
+    val snapshotDays: Int,
+    val noDataDays: Int,
+    val latestValue: Double,
+    val monthlyTotal: Double,
+    val positiveDays: Int,
+    val zeroDays: Int
+)
+
 @Composable
 private fun MonthlySummary(
     isAssetCalendar: Boolean,
@@ -302,14 +370,48 @@ private fun MonthlySummary(
     assetCount: Int,
     modifier: Modifier = Modifier
 ) {
-    val snapshotDays = calendarData.values.count { it > 0 }
-    val noDataDays = calendarData.values.count { it == 0.0 }
-    val latestValue = calendarData.entries
-        .filter { it.value > 0 }
-        .maxByOrNull { it.key }?.value ?: 0.0
-    val monthlyTotal = calendarData.values.filter { it != 0.0 }.sum()
-    val positiveDays = calendarData.values.count { it > 0 }
-    val zeroDays = calendarData.values.count { it == 0.0 }
+    // 同一份月数据一次遍历算齐所有指标，并缓存到数据真正变化时再更新。
+    val aggregates = remember(calendarData) {
+        var snapshotDays = 0
+        var noDataDays = 0
+        var latestDate: LocalDate? = null
+        var latestValue = 0.0
+        var monthlyTotal = 0.0
+        var positiveDays = 0
+        var zeroDays = 0
+
+        calendarData.forEach { (date, value) ->
+            if (value > 0.0) {
+                snapshotDays++
+                positiveDays++
+                val previousLatestDate = latestDate
+                if (previousLatestDate == null || date > previousLatestDate) {
+                    latestDate = date
+                    latestValue = value
+                }
+            }
+            if (value == 0.0) {
+                noDataDays++
+                zeroDays++
+            } else {
+                monthlyTotal += value
+            }
+        }
+        MonthlyAggregates(
+            snapshotDays = snapshotDays,
+            noDataDays = noDataDays,
+            latestValue = latestValue,
+            monthlyTotal = monthlyTotal,
+            positiveDays = positiveDays,
+            zeroDays = zeroDays
+        )
+    }
+    val snapshotDays = aggregates.snapshotDays
+    val noDataDays = aggregates.noDataDays
+    val latestValue = aggregates.latestValue
+    val monthlyTotal = aggregates.monthlyTotal
+    val positiveDays = aggregates.positiveDays
+    val zeroDays = aggregates.zeroDays
 
     Card(
         modifier = modifier

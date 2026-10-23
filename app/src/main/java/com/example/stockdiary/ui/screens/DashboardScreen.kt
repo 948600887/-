@@ -8,6 +8,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -48,7 +49,8 @@ fun DashboardScreen(
     val errorMessage by viewModel.errorMessage.collectAsStateWithLifecycle()
     val dividendWarning by viewModel.dividendWarning.collectAsStateWithLifecycle()
 
-    var showAddDialog by remember { mutableStateOf(false) }
+    // rememberSaveable：旋屏/配置变更后对话框不会凭空消失
+    var showAddDialog by rememberSaveable { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
 
@@ -82,18 +84,19 @@ fun DashboardScreen(
         AssetGrowthCalculator.fromSnapshots(snapshots = snapshots, currentNetAssets = netAssets)
     }
 
-    val assetsByType by remember(visibleAssetsOnly, preferences.sortOrder) {
-        derivedStateOf {
-            val sorted = when (preferences.sortOrder) {
-                SortOrder.BY_TYPE -> visibleAssetsOnly.toList()
-                // 按折算后的人民币排：原币金额跨币种没有可比性
-                // （100 美元和 100 日元按数字一样大，实际差了 150 倍）
-                SortOrder.BY_VALUE_DESC -> visibleAssetsOnly.sortedByDescending { it.totalValueCny }
-                SortOrder.BY_VALUE_ASC -> visibleAssetsOnly.sortedBy { it.totalValueCny }
-                SortOrder.BY_NAME -> visibleAssetsOnly.sortedBy { it.name }
-            }
-            sorted.groupBy { it.type }
+    // 原来是 remember{ derivedStateOf{...} }：lambda 里读的是普通 List 而不是 State，
+    // derivedStateOf 根本不会自动失效，实际靠外层 remember 的 key 失效 ——
+    // 等于白包一层 DerivedState 对象。直接 remember 返回 Map 即可。
+    val assetsByType = remember(visibleAssetsOnly, preferences.sortOrder) {
+        val sorted = when (preferences.sortOrder) {
+            SortOrder.BY_TYPE -> visibleAssetsOnly.toList()
+            // 按折算后的人民币排：原币金额跨币种没有可比性
+            // （100 美元和 100 日元按数字一样大，实际差了 150 倍）
+            SortOrder.BY_VALUE_DESC -> visibleAssetsOnly.sortedByDescending { it.totalValueCny }
+            SortOrder.BY_VALUE_ASC -> visibleAssetsOnly.sortedBy { it.totalValueCny }
+            SortOrder.BY_NAME -> visibleAssetsOnly.sortedBy { it.name }
         }
+        sorted.groupBy { it.type }
     }
 
     // 抓分红的触发条件：持仓代码集合，不是资产列表本身。

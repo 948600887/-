@@ -26,6 +26,7 @@ import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.ui.theme.*
 import com.example.stockdiary.utils.format
+import com.example.stockdiary.utils.formatMoney
 import com.example.stockdiary.utils.profitColor
 import com.example.stockdiary.utils.toProfitDisplay
 import com.example.stockdiary.utils.totalValueCny
@@ -61,16 +62,16 @@ fun TotalAssetCard(
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             if (showNetAssets) {
-                MetricLabel("净资产", "¥${netAssets.format(2)}", MaterialTheme.typography.headlineMedium)
+                MetricLabel("净资产", netAssets.formatMoney(), MaterialTheme.typography.headlineMedium)
                 if (showTotalAssets) {
                     Spacer(modifier = Modifier.height(8.dp))
-                    MetricLabel("总资产", "¥${totalAssets.format(2)}", MaterialTheme.typography.headlineSmall)
+                    MetricLabel("总资产", totalAssets.formatMoney(), MaterialTheme.typography.headlineSmall)
                 }
                 Spacer(modifier = Modifier.height(16.dp))
                 HorizontalDivider(color = AppTheme.colors.outline.copy(alpha = 0.5f))
                 Spacer(modifier = Modifier.height(16.dp))
             } else if (showTotalAssets) {
-                MetricLabel("总资产", "¥${totalAssets.format(2)}", MaterialTheme.typography.headlineMedium)
+                MetricLabel("总资产", totalAssets.formatMoney(), MaterialTheme.typography.headlineMedium)
                 Spacer(modifier = Modifier.height(16.dp))
                 HorizontalDivider(color = AppTheme.colors.outline.copy(alpha = 0.5f))
                 Spacer(modifier = Modifier.height(16.dp))
@@ -83,7 +84,10 @@ fun TotalAssetCard(
                 ) {
                     MetricColumn(
                         label = "预计每日收入",
-                        value = if (dividendLoading) null else "¥${estimatedDailyDividend.coerceAtLeast(0.0).format(2)}",
+                        // 统一走 formatMoney()：以前金额精度在本文件内就用了 2 位，
+                        // 而持仓页的同一份"年度分红"用 0 位，两页切着看像算错了。
+                        // 现在两处都由 formatMoney 决定位数（一律 2 位）
+                        value = if (dividendLoading) null else estimatedDailyDividend.coerceAtLeast(0.0).formatMoney(),
                         loading = dividendLoading
                     )
                     MetricColumn(
@@ -92,7 +96,7 @@ fun TotalAssetCard(
                         loading = dividendLoading
                     )
                     if (showLiabilities) {
-                        MetricColumn(label = "总负债", value = "¥${totalLiabilities.format(2)}")
+                        MetricColumn(label = "总负债", value = totalLiabilities.formatMoney())
                     }
                 }
 
@@ -337,7 +341,8 @@ private fun IncomeDisplay(annualIncome: Double, dividendLoading: Boolean) {
             text = if (dividendLoading) {
                 "预计年度收入：计算中"
             } else {
-                "预计年度收入 ¥${annualIncome.format(2)} · 月均 ¥${(annualIncome / 12).format(2)}"
+                // 与持仓页「年度分红 / 月均分红」同源同口径，位数也由 formatMoney 统一
+                "预计年度收入 ${annualIncome.formatMoney()} · 月均 ${(annualIncome / 12).formatMoney()}"
             },
             style = MaterialTheme.typography.bodyMedium,
             color = AppTheme.colors.primary,

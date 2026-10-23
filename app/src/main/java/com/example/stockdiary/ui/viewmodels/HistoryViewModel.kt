@@ -12,6 +12,7 @@ import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetSnapshot
 import com.example.stockdiary.di.AppContainer
 import com.example.stockdiary.utils.AppLogger
+import com.example.stockdiary.utils.isDisplayEquivalentTo
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -67,7 +68,13 @@ class HistoryViewModel(
         ) { assets, snapshots ->
             assets to snapshots.sortedBy { it.timestamp }
         }
-            .distinctUntilChanged()
+            // 默认的 distinctUntilChanged 用 Pair/Asset 全字段 equals，而 Asset 含
+            // lastSyncTime/lastUpdateTime——落价时它们必变，于是每次都判定"变了"并走一遍
+            // rebuildState（含 3 次排序 + 波动率/最大回撤等 O(n) 统计）。
+            // 改成按"界面真正依赖的字段"比较，只有内容真变了才重建。
+            .distinctUntilChanged { a, b ->
+                a.first.isDisplayEquivalentTo(b.first) && a.second == b.second
+            }
             .onEach { (assets, sortedSnapshots) ->
                 val period = _selectedPeriod.value
                 rebuildState(

@@ -2,6 +2,7 @@ package com.example.stockdiary.data.sync
 
 import com.example.stockdiary.data.repository.AssetRepository
 import com.example.stockdiary.data.repository.DividendRepository
+import com.example.stockdiary.data.repository.PendingPriceWrite
 import android.app.ActivityManager
 import android.content.ComponentCallbacks2
 import android.content.Context
@@ -100,6 +101,33 @@ object AssetSyncManager {
      */
     private const val FUND_MAX_CONCURRENT_SYNC = 2
     private val fundSemaphore = Semaphore(FUND_MAX_CONCURRENT_SYNC)
+
+    /**
+     * 价格**批量落库**的批大小。
+     *
+     * 每写一行 assets，Room 就让 `SELECT * FROM assets` 这个观察查询整表重查重发一次
+     * —— 同步一轮写上百个标的，就是上百次整表重查 + 上百次整页重组（「点刷新就卡」的
+     * 引擎，日历页同类问题已在 CalendarViewModel 实测到「一次全量刷新白跑 20+ 次」）。
+     * 把连续若干条 UPDATE 收进**一个事务**，Room 只在事务提交时失效一次，发射次数约为原来的 1/8。
+     *
+     * 取 8 而不是「整轮一个事务」：后者一旦进程中途被杀（看门狗截断 / 退后台取消 / LMK），
+     * 本轮已经抓到的价格会全部丢失；分批在中途落盘，最坏只丢最后不足一批的那几个。
+     * 8 也是并发上限（3）的几倍，保证并发扇出时仍会攒够批、不会因为收不齐而退化成逐条写。
+     */
+    private const val PRICE_WRITE_BATCH_SIZE = 8
+
+    /**
+     * 进度回调的最小间隔（毫秒）。
+     *
+     * `onProgress` 每完成一个标的就**回主线程**写一次 StateFlow（见 :notifyProgress），
+     * 一次 StateFlow 赋值 = 一次整屏重组。106 个标的 = 106 次全屏重组，而标题栏上
+     * 真正变化的只是一个「已完成 N / 总数」的数字。
+     *
+     * 节流到 200ms：视觉上仍是「走动的进度」（200ms 一跳人眼看是连续的），
+     * 主线程重组次数则从 N 降到约（刷新时长 ÷ 200ms）。**收尾那一次强制发出**，
+     * 保证标题栏不会停在「103 / 106」这种中间态。
+     */
+    private const val PROGRESS_NOTIFY_INTERVAL_MS = 200L
 
     /**
      * 看门狗轮询间隔（毫秒）。
@@ -341,9 +369,30 @@ object AssetSyncManager {
         val semaphore = Semaphore(MAX_CONCURRENT_SYNC)
         val dividendRepository = DividendRepository.getInstance(context)
 
-        // 进度回调回主线程更新 StateFlow；扇出与续体留在 IO
-        val notifyProgress: suspend (SyncProgress) -> Unit = { progress ->
-            withContext(Dispatchers.Main) { onProgress(progress) }
+        // 价格批量落库器：落价不再逐条 UPDATE，而是攒够一批走一个事务（见 [SyncPriceWriter]）
+        val priceWriter = SyncPriceWriter(repository, PRICE_WRITE_BATCH_SIZE)
+
+        // 进度回调节流的时间戳闸门。AtomicLong + CAS 保证「同一时刻只有一个协程拿到发送权」，
+        // 避免三个并发标的各发各的、把节流窗口冲掉
+        val lastProgressNotifyAt = java.util.concurrent.atomic.AtomicLong(0L)
+
+        /**
+         * 进度回调回主线程更新 StateFlow；扇出与续体留在 IO。
+         *
+         * @param force true = 绕过节流立刻发（用于阶段起点的第一条与收尾的最后一条），
+         *        保证标题栏不会停在「103 / 106」这类中间态
+         */
+        val notifyProgress: suspend (SyncProgress, Boolean) -> Unit = { progress, force ->
+            val now = System.currentTimeMillis()
+            val last = lastProgressNotifyAt.get()
+            val withinInterval = now - last < PROGRESS_NOTIFY_INTERVAL_MS
+            if (force) {
+                lastProgressNotifyAt.set(now)
+                withContext(Dispatchers.Main) { onProgress(progress) }
+            } else if (!withinInterval && lastProgressNotifyAt.compareAndSet(last, now)) {
+                // 节流：一次 StateFlow 赋值 = 一次整屏重组，而标题栏上变的只是一个数字
+                withContext(Dispatchers.Main) { onProgress(progress) }
+            }
         }
 
         // 心跳要能读出「卡在哪个标的」：进行中的标的在这里登记/注销
@@ -364,7 +413,8 @@ object AssetSyncManager {
         val stocksAndFunds = assets.filter { it.type == AssetType.STOCK || it.type == AssetType.FUND }
         if (stocksAndFunds.isNotEmpty()) {
             val symbols = stocksAndFunds.mapNotNull { it.symbol }
-            notifyProgress(SyncProgress(0, totalCount, "正在获取分红数据..."))
+            // 注意：notifyProgress 是函数类型变量，Kotlin 不允许对函数类型用命名实参，只能按位置传
+            notifyProgress(SyncProgress(0, totalCount, "正在获取分红数据..."), true)
             // 分红预取是刷新的配角，只划一段子预算（见 SyncBudget），
             // 剩下的留给价格同步——用户点刷新真正要看的是行情
             val prefetchBudget = SyncBudget.prefetchPhaseBudget(timeLimitMs)
@@ -428,6 +478,7 @@ object AssetSyncManager {
                         syncSingleAsset(
                             asset,
                             repository,
+                            priceWriter,
                             successCount,
                             failedCount,
                             errorTypes,
@@ -441,7 +492,11 @@ object AssetSyncManager {
                             inFlightAssets.remove(label)
                         }
                         val completed = completedCount.incrementAndGet()
-                        notifyProgress(SyncProgress(completed, totalCount, "同步 ${asset.name}..."))
+                        // 收尾那一次强制发出：否则标题栏会停在「103 / 106」这类中间态
+                        notifyProgress(
+                            SyncProgress(completed, totalCount, "同步 ${asset.name}..."),
+                            completed >= totalCount
+                        )
                     }
                 }
             }
@@ -518,9 +573,73 @@ object AssetSyncManager {
         }
     }
 
+    /**
+     * 同步期的价格批量落库器。
+     *
+     * ## 为什么必须有它
+     *
+     * 见 [PRICE_WRITE_BATCH_SIZE]：Assets 表每写一行 Room 就整表重查重发一次，
+     * 逐只标的单独 UPDATE 会让「一次刷新 = N 次整页重组」。这里把拿到的价先攒在缓冲区，
+     * 攒够一批才用一个事务写下去，Room 的失效通知次数约为原来的 1/8。
+     *
+     * ## 失败语义（刻意与改造前对齐）
+     *
+     * 凑满一批触发的 flush 是**在调用方（[syncSingleAsset]）自己的协程里同步执行**的，
+     * 落库异常照旧冒到 `syncSingleAsset` 的 catch —— 与改造前「写库失败算这个标的失败」
+     * 的语义一致，不会悄悄吞掉一次写库故障。只有收尾那次 [flushAll] 无法归属到单个标的，
+     * 才退化为记 WARN。
+     *
+     * ## 并发
+     *
+     * 三个并发标的都可能同时放价。缓冲区用无锁队列；flush 用 [Mutex] 串行：
+     * 已在 flush 中的协程会把缓冲区**一次抽干**（含别的协程刚放进去的），
+     * 后来的协程用 [Mutex.tryLock] 抢不到锁就直接返回——它不该在信号量名额里
+     * 为一个已经在进行的写操作空等。
+     */
+    private class SyncPriceWriter(
+        private val repository: AssetRepository,
+        private val batchSize: Int
+    ) {
+        private val pending = ConcurrentLinkedQueue<PendingPriceWrite>()
+        private val flushMutex = Mutex()
+
+        /** 放入一条落价意图；缓冲区够大就顺手 flush 一批（可能抛，交由调用方的 catch 记账） */
+        suspend fun write(write: PendingPriceWrite) {
+            pending.offer(write)
+            flushIfBatchFull()
+        }
+
+        /** 收尾：把缓冲区里剩下的全写掉。同步被取消时也要调用，否则会丢价 */
+        suspend fun flushAll() {
+            flushMutex.withLock { drainAllLocked() }
+        }
+
+        private suspend fun flushIfBatchFull() {
+            if (pending.size < batchSize) return
+            if (!flushMutex.tryLock()) return
+            try {
+                drainAllLocked()
+            } finally {
+                flushMutex.unlock()
+            }
+        }
+
+        /** 调用方必须持有 [flushMutex]。循环抽干：别的协程可能在 flush 期间又放进了新的 */
+        private suspend fun drainAllLocked() {
+            while (true) {
+                val batch = ArrayList<PendingPriceWrite>(batchSize)
+                repeat(batchSize) { pending.poll()?.let(batch::add) }
+                if (batch.isEmpty()) return
+                repository.updatePricesInTransaction(batch)
+            }
+        }
+    }
+
     private suspend fun syncSingleAsset(
         asset: Asset,
         repository: AssetRepository,
+        /** 落价出口：拿到的价交给它攒批，不再逐条 UPDATE（见 [SyncPriceWriter]） */
+        priceWriter: SyncPriceWriter,
         successCount: AtomicInteger,
         failedCount: AtomicInteger,
         errorTypes: ConcurrentLinkedQueue<SyncErrorType>,
@@ -592,7 +711,7 @@ object AssetSyncManager {
                         result.onSuccess { price ->
                             when (price) {
                                 is AssetPrice.Stock -> {
-                                    repository.updatePriceBySymbol(symbol, price.data.price)
+                                    priceWriter.write(PendingPriceWrite(symbol, price.data.price))
                                     if (correctNames) correctAssetName(asset, price.data.name, repository)
                                     isSuccess = true
                                 }
@@ -615,7 +734,9 @@ object AssetSyncManager {
                             fundResult.onSuccess { price ->
                                 when (price) {
                                     is AssetPrice.Fund -> {
-                                        repository.updatePriceBySymbol(symbol, price.data.price, price.data.millionCopiesIncome)
+                                        priceWriter.write(
+                                            PendingPriceWrite(symbol, price.data.price, price.data.millionCopiesIncome)
+                                        )
                                         isSuccess = true
                                     }
                                     else -> { lastError = IllegalStateException("返回类型不匹配") }
@@ -646,7 +767,7 @@ object AssetSyncManager {
                     result.onSuccess { price ->
                         when (price) {
                             is AssetPrice.Stock -> {
-                                repository.updatePriceBySymbol(stockSymbol, price.data.price)
+                                priceWriter.write(PendingPriceWrite(stockSymbol, price.data.price))
                                 if (correctNames) correctAssetName(asset, price.data.name, repository)
                                 isSuccess = true
                             }
@@ -676,7 +797,7 @@ object AssetSyncManager {
                     cryptoResult.onSuccess { price ->
                         when (price) {
                             is com.example.stockdiary.network.model.AssetPrice.Crypto -> {
-                                repository.updatePriceBySymbol(cryptoSymbol, price.data.price)
+                                priceWriter.write(PendingPriceWrite(cryptoSymbol, price.data.price))
                                 isSuccess = true
                             }
                             else -> { lastError = IllegalStateException("返回类型不匹配") }

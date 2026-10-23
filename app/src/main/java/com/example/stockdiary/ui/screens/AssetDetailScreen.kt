@@ -21,6 +21,7 @@ import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.data.dividend.DividendYieldCalculator
 import com.example.stockdiary.data.dividend.DividendIncomeCalculator
+import com.example.stockdiary.ui.components.SingleLineText
 import com.example.stockdiary.ui.dialogs.AdjustPositionDialog
 import com.example.stockdiary.ui.dialogs.EditAssetDialog
 import com.example.stockdiary.ui.theme.*
@@ -29,7 +30,10 @@ import com.example.stockdiary.utils.AppLogger
 import com.example.stockdiary.utils.ExchangeRateManager
 import com.example.stockdiary.utils.StockCodeManager
 import com.example.stockdiary.utils.format
+import com.example.stockdiary.utils.formatMoney
+import com.example.stockdiary.utils.pricePrecisionFor
 import com.example.stockdiary.utils.shareUnitWord
+import com.example.stockdiary.utils.toRelativeTime
 import com.example.stockdiary.utils.totalValueCny
 import kotlinx.coroutines.launch
 
@@ -69,8 +73,13 @@ fun AssetDetailScreen(
                 title = {
                     val currentAsset = asset
                     if (currentAsset != null) {
+                        // 资产名加省略号：标题栏右侧还挂着编辑/删除/刷新三个按钮，
+                        // 基金名动辄二十几个字，不省略的话会一路顶到图标上。
+                        // 这里不需要 weight —— TopAppBar 的 title 槽本身就被限制在
+                        // 返回键与操作按钮之间的剩余宽度里，Text 拿到的是有界宽度，
+                        // maxLines + Ellipsis 就能生效（title 槽不是 RowScope，写 weight 编译不过）。
                         Column {
-                            Text(
+                            SingleLineText(
                                 text = currentAsset.name,
                                 style = MaterialTheme.typography.titleMedium,
                                 fontWeight = FontWeight.Bold
@@ -177,9 +186,15 @@ fun AssetDetailScreen(
                             // 价格/市值都带 ¥ 符号，那就必须是人民币口径：
                             // 原币价格要按资产币种折算，不能直接套 ¥
                             a.currentPrice?.let { price ->
-                                DetailRow("当前价", "¥${ExchangeRateManager.toCny(price, a.currency).format(if (a.type == AssetType.FUND || StockCodeManager.isETF(a.symbol)) 3 else 2)}")
+                                // 精度与持仓页、加减仓弹窗共用同一套判定（utils.pricePrecisionFor），
+                                // 以前这里内联写了一遍，三处各写一份必然漂移
+                                DetailRow(
+                                    "当前价",
+                                    ExchangeRateManager.toCny(price, a.currency)
+                                        .formatMoney(digits = pricePrecisionFor(a.type, a.symbol)) + syncStamp(a.lastSyncTime)
+                                )
                             }
-                            DetailRow("当前市值", "¥${a.totalValueCny.format(2)}")
+                            DetailRow("当前市值", a.totalValueCny.formatMoney())
                             a.interestRate?.let { rate ->
                                 if (rate > 0) DetailRow("年利率", "${rate.format(2)}%")
                             }
@@ -214,10 +229,11 @@ fun AssetDetailScreen(
                                 } else {
                                     val ttm = shareBonus
                                     if (ttm != null) {
-                                        DetailRow("TTM每十${a.shareUnitWord}分红", "¥${ttm.format(2)}")
+                                        DetailRow("TTM每十${a.shareUnitWord}分红", ttm.formatMoney())
+                                        // 股息率是百分比，不走 formatMoney——金额才统一 2 位
                                         DetailRow("股息率", "${DividendYieldCalculator.calculateTTMDividendYield(dividends, a.currentPrice ?: a.purchasePrice).format(2)}%")
                                         val annualIncome = DividendIncomeCalculator.calculateAnnualIncome(a, ttm)
-                                        DetailRow("年化收益", "¥${annualIncome.format(2)}")
+                                        DetailRow("年化收益", annualIncome.formatMoney())
                                     }
                                     DetailRow("分红次数", "${dividends.size}次")
                                 }
@@ -226,8 +242,13 @@ fun AssetDetailScreen(
                     }
                 }
 
-                // 操作按钮
-                if (a.type == AssetType.STOCK || a.type == AssetType.FUND) {
+                // 操作按钮。
+                // 放开 CRYPTO：以前只对 STOCK/FUND 显示，想改加密货币持仓只能进「编辑资产」
+                // 手改总数——那样既不会生成交易流水，参考单价也不会按余额加权摊薄，
+                // 等于绕开了整条加减仓链路。AssetSyncManager.syncSingleAsset 本来就有完整的
+                // CRYPTO 分支（见上方刷新按钮的注释），这里没理由再拦一道。
+                // 银行存款确实没有"加仓/减仓"语义（本金直接改），继续不显示。
+                if (a.type == AssetType.STOCK || a.type == AssetType.FUND || a.type == AssetType.CRYPTO) {
                     item {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
@@ -341,6 +362,18 @@ fun AssetDetailScreen(
         )
     }
 }
+
+/**
+ * 行情新鲜度后缀，形如 " · 12分钟前更新"。
+ *
+ * 用户看到「¥12.34」时无从判断这个价是刚抓的还是三天前的——尤其页面已经给出
+ * 「价格待更新 / 币安暂不可达」这类状态时，一个"多久之前"比状态词更有用。
+ *
+ * `lastSyncTime == 0` 表示这条资产从没同步过（手工录入、或行情一直没抓到），
+ * 此时必须返回空串：toRelativeTime(0) 会算成"几十年前"，比不显示更糟。
+ */
+private fun syncStamp(lastSyncTime: Long): String =
+    if (lastSyncTime > 0) " · ${lastSyncTime.toRelativeTime()}更新" else ""
 
 @Composable
 private fun DetailRow(label: String, value: String, valueColor: androidx.compose.ui.graphics.Color = AppTheme.colors.onSurface) {

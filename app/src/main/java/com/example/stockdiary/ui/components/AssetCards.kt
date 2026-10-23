@@ -20,6 +20,8 @@ import com.example.stockdiary.network.BinanceHostGate
 import com.example.stockdiary.utils.ExchangeRateManager
 import com.example.stockdiary.utils.StockCodeManager
 import com.example.stockdiary.utils.format
+import com.example.stockdiary.utils.formatMoney
+import com.example.stockdiary.utils.pricePrecisionFor
 import com.example.stockdiary.utils.totalValueCny
 
 @Composable
@@ -55,7 +57,7 @@ fun PortfolioOverviewCard(
                 )
             }
             Spacer(modifier = Modifier.height(8.dp))
-            Text("¥${totalAssets.format(2)}", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold, color = AppTheme.colors.onSurface)
+            Text(totalAssets.formatMoney(), style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold, color = AppTheme.colors.onSurface)
             // 有负债时净资产比总资产更值得看，别让用户自己心算
             if (totalLiabilities > 0) {
                 Spacer(modifier = Modifier.height(6.dp))
@@ -63,18 +65,31 @@ fun PortfolioOverviewCard(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    Text("净资产 ¥${netAssets.format(2)}", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium, color = AppTheme.colors.onSurface)
-                    Text("负债 ¥${totalLiabilities.format(2)}", style = MaterialTheme.typography.bodyMedium, color = AppTheme.colors.profitGreen)
+                    Text("净资产 ${netAssets.formatMoney()}", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium, color = AppTheme.colors.onSurface)
+                    // 原来负债用的是 profitGreen：本 App 里绿色 = 跌/负，看上去像"负债在跌"，
+                    // 语义是反的。改成 error 色（Material 里代表需要注意的负面数值）。
+                    Text("负债 ${totalLiabilities.formatMoney()}", style = MaterialTheme.typography.bodyMedium, color = AppTheme.colors.error)
                 }
+                // 用户最容易算错的一件事：顶部大数是总资产，净资产已经减过负债。
+                // 这里显式写一句，省得有人拿列表逐项加总去对总资产、然后发现对不上。
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    "净资产 = 总资产 − 负债，负债不计入净资产",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = AppTheme.colors.onSurfaceVariant
+                )
             }
             Spacer(modifier = Modifier.height(12.dp))
             HorizontalDivider(color = AppTheme.colors.outline.copy(alpha = 0.3f))
             Spacer(modifier = Modifier.height(12.dp))
             // 抓取期间照常显示旧值，不用「计算中」把屏幕占住——
             // 缓存命中时根本不抓，冷启动那一下也会有旧值可看
+            // 精度口径：以前这里用了 format(0)（"¥1234"），而资产页同一份"年度收入"
+            // 用的是 format(2)（"¥1234.56"）。同一个数字在两个标签页位数不同，用户左右
+            // 一切就以为算错了。统一走 formatMoney()（一律 2 位），两处就对得上了。
             val dividendText = when {
                 isDividendLoading && estimatedAnnualDividend <= 0.0 -> "计算中"
-                estimatedAnnualDividend > 0.0 -> "¥${estimatedAnnualDividend.format(0)}"
+                estimatedAnnualDividend > 0.0 -> estimatedAnnualDividend.formatMoney()
                 else -> "-"
             }
             Row(
@@ -82,7 +97,7 @@ fun PortfolioOverviewCard(
                 horizontalArrangement = Arrangement.SpaceEvenly
             ) {
                 PortfolioMetricColumn("年度分红", dividendText, isDividendLoading && estimatedAnnualDividend <= 0.0)
-                PortfolioMetricColumn("月均分红", if (estimatedAnnualDividend > 0) "¥${(estimatedAnnualDividend / 12).format(0)}" else "-", false)
+                PortfolioMetricColumn("月均分红", if (estimatedAnnualDividend > 0) (estimatedAnnualDividend / 12).formatMoney() else "-", false)
                 PortfolioMetricColumn(dividendStatus ?: "持有", if (dividendStatus != null) "" else "$assetCount", isDividendLoading && dividendStatus != null)
             }
         }
@@ -125,7 +140,7 @@ fun MarketHeaderCard(
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    "¥${totalValue.format(2)}",
+                    totalValue.formatMoney(),
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.SemiBold,
                     color = AppTheme.colors.onSurface
@@ -167,12 +182,20 @@ fun AccountHeaderCard(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Column {
-                Text(account, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, color = AppTheme.colors.onSurface)
+            // 账户名是可压缩的那一侧：券商导入的账户名可以很长（"华泰证券-融资融券账户"），
+            // 以前这里没有 weight，Row 会先按它想要的最大宽度去量，结果把右侧金额挤出卡片。
+            // 现在文本侧 weight(1f) 先让位给金额，截断也只截文字、不截数字。
+            Column(modifier = Modifier.weight(1f)) {
+                SingleLineText(
+                    account,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold
+                )
                 Text("$assetCount 项", style = MaterialTheme.typography.bodySmall, color = AppTheme.colors.onSurfaceVariant)
             }
+            // 金额侧不加 weight：先按自身宽度量，永远完整显示
             Column(horizontalAlignment = Alignment.End) {
-                Text("¥${totalValue.format(2)}", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, color = AppTheme.colors.onSurface)
+                Text(totalValue.formatMoney(), style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, color = AppTheme.colors.onSurface)
             }
             Icon(
                 imageVector = if (isExpanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
@@ -183,6 +206,15 @@ fun AccountHeaderCard(
     }
 }
 
+/**
+ * 一只资产的列表行：持仓页与搜索弹窗**共用这一个实现**。
+ *
+ * 以前搜索弹窗里另有一份 `SearchAssetItem`，结构完全相同但已经漂移：少了到期日显示、
+ * 没有批量选择态、价格的几种状态（退市 / 币安不可达 / 待更新）又抄了一遍。
+ * 现在搜索那边直接复用本组件，改价格口径只改一处。
+ *
+ * @param onToggleSelection 批量选择态下勾选/取消；不需要选择功能的调用方可以不传
+ */
 @Composable
 fun StockAssetItem(
     asset: Asset,
@@ -190,11 +222,13 @@ fun StockAssetItem(
     onDividendClick: (Long) -> Unit,
     selectionMode: Boolean = false,
     isSelected: Boolean = false,
-    onToggleSelection: (Long) -> Unit
+    onToggleSelection: (Long) -> Unit = {}
 ) {
     val isLiability = asset.type.isLiability
     val currentPrice = asset.currentPrice
-    val pricePrecision = if (asset.type == AssetType.FUND || StockCodeManager.isETF(asset.symbol)) 3 else 2
+    // 精度口径单点定义（utils/Extensions.pricePrecisionFor）：加减仓弹窗以前硬编成恒 3 位，
+    // 同一只股票列表显示 12.34、弹窗显示 12.340，现在三处共用同一套判定
+    val pricePrecision = pricePrecisionFor(asset.type, asset.symbol)
     val unitLabel = if (asset.type == AssetType.STOCK) "股" else "份"
 
     Card(
@@ -217,7 +251,13 @@ fun StockAssetItem(
                 )
             }
             Column(modifier = Modifier.weight(1f)) {
-                Text(asset.name, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold, color = AppTheme.colors.onSurface, maxLines = 1)
+                // 资产名是可压缩的一侧：基金名动辄二十几个字，以前只写了 maxLines=1
+                // （默认 Clip，从中间硬切、没有省略号），现在统一走 SingleLineText
+                SingleLineText(
+                    asset.name,
+                    style = MaterialTheme.typography.bodyLarge,
+                    fontWeight = FontWeight.SemiBold
+                )
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                     asset.symbol?.let {
                         Text(it, style = MaterialTheme.typography.bodySmall, color = AppTheme.colors.onSurfaceVariant)
@@ -231,7 +271,7 @@ fun StockAssetItem(
                 }
             }
             Column(modifier = Modifier.weight(1f), horizontalAlignment = Alignment.End) {
-                Text("¥${asset.totalValueCny.format(2)}", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold, color = AppTheme.colors.onSurface)
+                Text(asset.totalValueCny.formatMoney(), style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold, color = AppTheme.colors.onSurface)
                 Text(
                     when {
                         isLiability -> "待偿还"
@@ -239,7 +279,7 @@ fun StockAssetItem(
                         // 不过这道换算直接套 ¥，USD 加密货币会把 $67,000 显示成 ¥67,000
                         // （真实约 ¥48 万）——与详情页 AssetDetailScreen:180 同一口径
                         currentPrice != null ->
-                            "¥${ExchangeRateManager.toCny(currentPrice, asset.currency).format(pricePrecision)}"
+                            ExchangeRateManager.toCny(currentPrice, asset.currency).formatMoney(digits = pricePrecision)
                         StockCodeManager.isDelistedForSync(asset.symbol) -> "退市"
                         // 币安主机级熔断期间（连不上 api.binance.com，见 BinanceHostGate）要给一个
                         // 区别于「价格待更新」的提示：前者是网络/主机问题，后者可能是数据源缺数据。
@@ -264,8 +304,15 @@ fun StockAssetItem(
             }
             // 分红入口只对能分红的类型有意义，负债点了也是空列表
             if (!selectionMode && !isLiability) {
-                IconButton(onClick = { onDividendClick(asset.id) }, modifier = Modifier.size(32.dp)) {
-                    Icon(Icons.Filled.Savings, contentDescription = "分红", tint = AppTheme.colors.primary, modifier = Modifier.size(18.dp))
+                // 触摸目标从 32dp 放大到 40dp：这是每行都要点的次高频入口，32dp 明显偏小，
+                // 而且紧贴卡片右缘容易点空。图标同步放大到 20dp，右侧留 4dp 不让按钮贴边。
+                IconButton(onClick = { onDividendClick(asset.id) }, modifier = Modifier.size(40.dp)) {
+                    Icon(
+                        Icons.Filled.Savings,
+                        contentDescription = "查看「${asset.name}」的分红",
+                        tint = AppTheme.colors.primary,
+                        modifier = Modifier.size(20.dp)
+                    )
                 }
             }
         }

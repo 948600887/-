@@ -22,10 +22,12 @@ import com.example.stockdiary.utils.AppLogger
 import com.example.stockdiary.utils.DataSourceHealth
 import com.example.stockdiary.utils.DataSourceHealthChecker
 import com.example.stockdiary.utils.NotificationHelper
+import com.example.stockdiary.utils.isDisplayEquivalentTo
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -152,7 +154,9 @@ class SettingsViewModel(
         // Room Flow 在数据库异常时会向收集者抛错，不兜住会让 viewModelScope 崩溃
         viewModelScope.launch {
             try {
-                assetRepository.getAllAssets().collect { assets ->
+                assetRepository.getAllAssets()
+                    .distinctUntilChanged { a, b -> a.isDisplayEquivalentTo(b) }
+                    .collect { assets ->
                     _uiState.update { state -> state.copy(assets = assets) }
                 }
             } catch (e: CancellationException) {
@@ -163,7 +167,9 @@ class SettingsViewModel(
         }
         viewModelScope.launch {
             try {
-                snapshotDao.getAllSnapshots().collect { snapshots ->
+                snapshotDao.getAllSnapshots()
+                    .distinctUntilChanged()
+                    .collect { snapshots ->
                     _uiState.update { state -> state.copy(snapshots = snapshots) }
                 }
             } catch (e: CancellationException) {
@@ -174,7 +180,9 @@ class SettingsViewModel(
         }
         viewModelScope.launch {
             try {
-                transactionDao.getAllFlow().collect { transactions ->
+                transactionDao.getAllFlow()
+                    .distinctUntilChanged()
+                    .collect { transactions ->
                     _uiState.update { state -> state.copy(transactions = transactions) }
                 }
             } catch (e: CancellationException) {

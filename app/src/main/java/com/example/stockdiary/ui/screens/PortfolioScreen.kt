@@ -14,6 +14,7 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.stockdiary.utils.AppLogger
 import androidx.compose.ui.Alignment
@@ -144,15 +145,18 @@ fun PortfolioScreen(
     val existingAccounts by viewModel.existingAccounts.collectAsStateWithLifecycle()
     val preferences by viewModel.preferences.collectAsStateWithLifecycle()
 
-    var showAddDialog by remember { mutableStateOf(false) }
-    var showSearchDialog by remember { mutableStateOf(false) }
+    // 以下 UI 态改 rememberSaveable：旋屏/配置变更后不丢（对话框不会凭空关掉、多选不丢）。
+    // 注意 selectedDividendAsset 是 Asset?，不是可保存类型，仍用 remember ——
+    // 换成 rememberSaveable 会在保存时抛 IllegalArgumentException。
+    var showAddDialog by rememberSaveable { mutableStateOf(false) }
+    var showSearchDialog by rememberSaveable { mutableStateOf(false) }
     var selectedDividendAsset by remember { mutableStateOf<Asset?>(null) }
     // 展开态提升到 ViewModel：跨标签页存活，切走再回来保持用户的展开/收起
     val expandedAccounts by viewModel.expandedGroups.collectAsStateWithLifecycle()
-    var selectionMode by remember { mutableStateOf(false) }
-    var selectedIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
-    var showMoveAccountDialog by remember { mutableStateOf(false) }
-    var showDeleteConfirmDialog by remember { mutableStateOf(false) }
+    var selectionMode by rememberSaveable { mutableStateOf(false) }
+    var selectedIds by rememberSaveable { mutableStateOf<Set<Long>>(emptySet()) }
+    var showMoveAccountDialog by rememberSaveable { mutableStateOf(false) }
+    var showDeleteConfirmDialog by rememberSaveable { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
 
@@ -167,29 +171,27 @@ fun PortfolioScreen(
         )
     }
 
-    val visibleAssets by remember(assets, visibleAssetTypes, preferences.showLiabilities) {
-        derivedStateOf {
-            assets.filter {
-                it.type in visibleAssetTypes || (it.type.isLiability && preferences.showLiabilities)
-            }
+    // 原来是 remember{ derivedStateOf{...} } 反模式：lambda 里读的是普通 List 不是 State，
+    // derivedStateOf 不会自动失效，白包一层对象。直接 remember 返回 List。
+    val visibleAssets = remember(assets, visibleAssetTypes, preferences.showLiabilities) {
+        assets.filter {
+            it.type in visibleAssetTypes || (it.type.isLiability && preferences.showLiabilities)
         }
     }
     // 低价值虚拟货币隐藏：在「显示开关」按类别过滤之上再滤一层。
     // 仅藏「已知价且人民币市值低于阈值」的加密货币；价格未知的不藏（避免误丢真实持仓）。
     // 总资产仍按全量（allAssetsOnly / allLiabilities）算，这里只影响列表与分组头计数。
-    val displayAssets by remember(
+    val displayAssets = remember(
         visibleAssets,
         preferences.hideLowValueCrypto,
         preferences.hideUnknownPriceCrypto
     ) {
-        derivedStateOf {
-            filterLowValueCrypto(
-                visibleAssets,
-                preferences.hideLowValueCrypto,
-                preferences.lowValueThreshold(),
-                preferences.hideUnknownPriceCrypto
-            )
-        }
+        filterLowValueCrypto(
+            visibleAssets,
+            preferences.hideLowValueCrypto,
+            preferences.lowValueThreshold(),
+            preferences.hideUnknownPriceCrypto
+        )
     }
     val assetsOnly = remember(displayAssets) { displayAssets.filter { !it.type.isLiability } }
     val liabilities = remember(displayAssets) { displayAssets.filter { it.type.isLiability } }

@@ -17,11 +17,13 @@ import com.example.stockdiary.database.AssetSnapshot
 import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.di.AppContainer
 import com.example.stockdiary.utils.AppLogger
+import com.example.stockdiary.utils.isDisplayEquivalentTo
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
@@ -61,11 +63,16 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
     private val dividendRepository = DividendRepository.getInstance(container.context)
 
     val assets: StateFlow<List<Asset>> = repository.getAllAssets()
+        // Room 每次写库都会重发整表；而落价往往只改 lastSyncTime/lastUpdateTime，
+        // 界面其实不用重画。不去重 = 一次同步上百次整屏重组。
+        // 口径见 Extensions.isDisplayEquivalentTo（含 currentPrice，故现价/市值照常刷新）
+        .distinctUntilChanged { a, b -> a.isDisplayEquivalentTo(b) }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     // 「资产增值」卡片的基准数据：净资产要和本月/今年之前的快照对比
     val snapshots: StateFlow<List<AssetSnapshot>> = repository.getAllSnapshots()
         .map { it.sortedBy { snapshot -> snapshot.date } }
+        .distinctUntilChanged()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     private val _preferences = MutableStateFlow(preferencesManager.loadPreferences())
@@ -125,7 +132,11 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
      * 仪表盘每次回前台（ON_RESUME）调一次本方法即可与磁盘同步。
      */
     fun reloadPreferences() {
-        _preferences.value = preferencesManager.loadPreferences()
+        // 一次要读 20 个 SharedPreferences 键（含 getStringSet），SP 首次访问还要等 XML 载入；
+        // 它由 ON_RESUME 触发，放主线程会让「回到仪表盘」那一帧卡一下 → 切 IO 线程读
+        viewModelScope.launch(Dispatchers.IO) {
+            _preferences.value = preferencesManager.loadPreferences()
+        }
     }
 
     private var hasLoadedIncome = false

@@ -34,6 +34,7 @@ import com.example.stockdiary.di.LocalAppContainer
 import com.example.stockdiary.utils.AppLogger
 import com.example.stockdiary.utils.StockCodeManager
 import com.example.stockdiary.utils.format
+import com.example.stockdiary.utils.formatMoney
 import com.example.stockdiary.utils.shareUnitWord
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -94,9 +95,21 @@ fun DividendDetailDialog(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Column {
-                    Text(asset.name, fontWeight = FontWeight.Bold)
-                    Text(symbol, style = MaterialTheme.typography.labelSmall, color = AppTheme.colors.onSurfaceVariant)
+                // 资产名是可压缩的一侧：右侧「管理」按钮是固定宽度，先量它；
+                // 名字过长时省略掉尾巴，不要反过来把按钮顶出去
+                Column(modifier = Modifier.weight(1f)) {
+                    // style 要显式传：AlertDialog 的 title 槽自带 headlineSmall，
+                    // SingleLineText 的默认值是 bodyMedium，不传会把标题字号悄悄改小
+                    SingleLineText(
+                        asset.name,
+                        style = MaterialTheme.typography.headlineSmall,
+                        fontWeight = FontWeight.Bold
+                    )
+                    SingleLineText(
+                        symbol,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = AppTheme.colors.onSurfaceVariant
+                    )
                 }
                 TextButton(onClick = { isEditMode = !isEditMode }) {
                     Text(if (isEditMode) "完成" else "管理")
@@ -219,27 +232,34 @@ fun DividendDetailDialog(
                                     horizontalArrangement = Arrangement.SpaceBetween,
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    Column {
-                                        Text(
+                                    // 可压缩的一侧：进入管理模式后右侧会多出两个图标按钮，
+                                    // 不 weight(1f) 的话这列会把按钮挤出卡片。日期/金额省略尾巴，
+                                    // 但"哪天分的"这几个字必须留住，所以只截后半段的"· 到账 xx-xx"。
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        SingleLineText(
                                             // 除息日只说明「有没有资格拿」，钱到账通常还要等 1~4 周，
                                             // 有发放日就一并标出来，免得被当成到账日
                                             record.date + (record.payDate?.let { " · 到账 ${it.take(5)}" } ?: ""),
-                                            fontSize = 13.sp, fontWeight = FontWeight.Medium, color = AppTheme.colors.onSurface
+                                            style = MaterialTheme.typography.bodyMedium.copy(fontSize = 13.sp),
+                                            fontWeight = FontWeight.Medium
                                         )
-                                        Text(
-                                            "每10$unitWord ¥${record.amount.format(2)}",
-                                            fontSize = 11.sp, color = AppTheme.colors.onSurfaceVariant
+                                        SingleLineText(
+                                            "每10$unitWord ${record.amount.formatMoney()}",
+                                            style = MaterialTheme.typography.bodyMedium.copy(fontSize = 11.sp),
+                                            color = AppTheme.colors.onSurfaceVariant
                                         )
                                     }
                                     Row(verticalAlignment = Alignment.CenterVertically) {
                                         Text(
-                                            "¥${amount.format(2)}",
+                                            amount.formatMoney(),
                                             fontSize = 13.sp,
                                             fontWeight = FontWeight.Bold,
                                             color = AppTheme.colors.lossRed
                                         )
                                 if (isEditMode) {
-                                    Spacer(modifier = Modifier.width(8.dp))
+                                    // 12dp：两个按钮挨太近时（原来只有 8dp）"编辑"和"删除"
+                                    // 极易点串，而删除是不可恢复操作，误触代价太高
+                                    Spacer(modifier = Modifier.width(12.dp))
                                     // remember(record) 缓存 onClick：这段行是 items{} 里的 inline lambda，
                                     // 弹窗自身状态（isEditMode / editingRecord 等）一变就会让所有可见行重排，
                                     // 若不缓存，每个 IconButton 都拿到新 lambda 实例被迫重排。
@@ -250,17 +270,29 @@ fun DividendDetailDialog(
                                     val deleteClick = remember(record) {
                                         { pendingDeleteRecord = record }
                                     }
+                                    // 触摸目标 24dp → 40dp：24dp 只有拇指尖那么大，
+                                    // 在一条每行都要点的列表里误触率很高
                                     IconButton(
                                         onClick = editClick,
-                                        modifier = Modifier.size(24.dp)
+                                        modifier = Modifier.size(40.dp)
                                     ) {
-                                        Icon(Icons.Filled.Edit, contentDescription = "编辑", tint = AppTheme.colors.primary, modifier = Modifier.size(16.dp))
+                                        Icon(
+                                            Icons.Filled.Edit,
+                                            contentDescription = "编辑 ${record.date} 的分红",
+                                            tint = AppTheme.colors.primary,
+                                            modifier = Modifier.size(20.dp)
+                                        )
                                     }
                                     IconButton(
                                         onClick = deleteClick,
-                                        modifier = Modifier.size(24.dp)
+                                        modifier = Modifier.size(40.dp)
                                     ) {
-                                        Icon(Icons.Filled.Delete, contentDescription = "删除", tint = AppTheme.colors.lossRed, modifier = Modifier.size(16.dp))
+                                        Icon(
+                                            Icons.Filled.Delete,
+                                            contentDescription = "删除 ${record.date} 的分红",
+                                            tint = AppTheme.colors.lossRed,
+                                            modifier = Modifier.size(20.dp)
+                                        )
                                     }
                                 }
                                     }
@@ -271,22 +303,20 @@ fun DividendDetailDialog(
                 }
             }
         },
+        // 「新增分红」常驻：以前它被 `if (isEditMode)` 包着，藏在右下角，
+        // 加一笔分红要先点「管理」切成编辑模式才看得到 —— 三步才能做一件高频操作，
+        // 而且新用户根本不知道要切模式。现在打开就能点。
+        // 「关闭」本来就在 dismissButton 里，这里不再重复放一个。
         confirmButton = {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                if (isEditMode) {
-                    TextButton(
-                        onClick = {
-                            editingRecord = null
-                            showEditDialog = true
-                        }
-                    ) {
-                        Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("新增")
-                    }
+            TextButton(
+                onClick = {
+                    editingRecord = null
+                    showEditDialog = true
                 }
-                Spacer(modifier = Modifier.weight(1f))
-                TextButton(onClick = onDismiss) { Text("关闭") }
+            ) {
+                Icon(Icons.Filled.Add, contentDescription = "新增分红", modifier = Modifier.size(18.dp))
+                Spacer(modifier = Modifier.width(4.dp))
+                Text("新增")
             }
         }
     )

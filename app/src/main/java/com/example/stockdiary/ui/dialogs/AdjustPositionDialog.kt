@@ -23,7 +23,10 @@ import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.ui.components.DialogInfoItem
 import com.example.stockdiary.ui.components.DialogSectionHeader
 import com.example.stockdiary.utils.ExchangeRateManager
+import com.example.stockdiary.utils.currencySymbol
 import com.example.stockdiary.utils.format
+import com.example.stockdiary.utils.formatMoney
+import com.example.stockdiary.utils.pricePrecisionFor
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -123,7 +126,20 @@ fun AdjustPositionDialog(
                                 horizontalArrangement = Arrangement.SpaceBetween
                             ) {
                                 DialogInfoItem("持有", "${asset.balance.format(0)}")
-                                DialogInfoItem("现价", "${(asset.currentPrice ?: asset.purchasePrice).format(3)}")
+                                // 现价两处修正：
+                                // 1. 精度原来恒写 3 位，而持仓页是「基金/ETF 3 位、其余 2 位」——
+                                //    同一只股票在列表显示 12.34、在这里显示 12.340。现在共用
+                                //    utils.pricePrecisionFor 同一套判定。
+                                // 2. 下面「交易金额」是折算后的人民币，这里却是原币裸数字，
+                                //    同一屏两套口径（USD 加密会显示成 67000.000）。统一折算成 ¥；
+                                //    外币资产在标签上标出原币符号，让用户知道行情源给的不是人民币价。
+                                val refPrice = asset.currentPrice ?: asset.purchasePrice
+                                val isCny = asset.currency.equals("CNY", ignoreCase = true)
+                                DialogInfoItem(
+                                    label = if (isCny) "现价" else "现价(${currencySymbol(asset.currency)}折¥)",
+                                    value = ExchangeRateManager.toCny(refPrice, asset.currency)
+                                        .formatMoney(digits = pricePrecisionFor(asset.type, asset.symbol))
+                                )
                             }
                         }
                     }
@@ -253,7 +269,7 @@ fun AdjustPositionDialog(
                             // 成交额显示成人民币数字）
                             DialogInfoItem(
                                 "交易金额",
-                                "¥${ExchangeRateManager.toCny(tradeTotal, asset.currency).format(2)}"
+                                ExchangeRateManager.toCny(tradeTotal, asset.currency).formatMoney()
                             )
                                 }
                             }

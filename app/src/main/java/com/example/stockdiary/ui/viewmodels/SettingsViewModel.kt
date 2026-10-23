@@ -12,6 +12,7 @@ import com.example.stockdiary.data.prefs.DashboardPreferencesManager
 import com.example.stockdiary.data.export.DataExporter
 import com.example.stockdiary.data.sync.PriceSyncPreferencesManager
 import com.example.stockdiary.data.sync.PriceSyncScheduler
+import com.example.stockdiary.data.sync.SnapshotScheduler
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetSnapshot
 import com.example.stockdiary.database.SnapshotDao
@@ -257,6 +258,10 @@ class SettingsViewModel(
                 // 数据清了，后台任务和内存缓存不能留着：否则用户以为关干净了，
                 // 后台还在按旧偏好跑同步、到点还弹提醒。最后从磁盘回读真实状态。
                 PriceSyncScheduler.cancelDailySync(appContext)
+                // 每日快照任务同样要取消：原先只取消了价格同步与提醒，漏了快照。
+                // 于是清库后 SnapshotWorker 仍在每天 15:10 运行，对已清空的组合继续建快照
+                // （createSnapshot 不判空），历史净值曲线会多出一串净资产为 0 的点。
+                SnapshotScheduler.cancelDailySnapshot(appContext)
                 NotificationHelper.cancelReminder(appContext)
                 refreshPriceSyncState()
                 _uiState.update { state -> state.copy(isDeleting = false, deleteResult = Result.success(Unit)) }

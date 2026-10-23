@@ -273,11 +273,22 @@ object StockCodeManager {
         if (symbol.isBlank()) return ""
         val trimmed = symbol.trim()
         
-        // 如果已包含市场前缀，直接返回小写
-        if (trimmed.startsWith("sh", ignoreCase = true) || 
-            trimmed.startsWith("sz", ignoreCase = true) ||
-            trimmed.startsWith("bj", ignoreCase = true)) {
-            return trimmed.lowercase()
+        // 已包含 A 股市场前缀（sh/sz/bj）→ 统一小写。
+        //
+        // 必须校验前缀后面是**纯数字代码**，不能只看前缀就转小写：
+        // SHIBUSDT、SHELLUSDT 这类加密交易对恰好以 SH/SZ/BJ 开头，会被整体小写成
+        // "shibusdt"；而币安导入（BinanceImportService.baseAssetToSymbol）与手动添加落库的
+        // 是**大写原样** SHIBUSDT。SQLite 的 = 比较大小写敏感 → 加仓时按 symbol 查不中
+        // 已存在的那条，于是走「新建」分支：原持仓数量不变、另起一条只含本次增量的记录
+        // （持仓列表出现两条），且新建分支 currency 回落默认 CNY —— 美元报价被按人民币
+        // 1.0 汇率折算，市值凭空少算一个汇率倍数。
+        if (trimmed.length > 2 &&
+            (trimmed.startsWith("sh", ignoreCase = true) ||
+                trimmed.startsWith("sz", ignoreCase = true) ||
+                trimmed.startsWith("bj", ignoreCase = true))
+        ) {
+            val codePart = trimmed.substring(2)
+            if (codePart.all { it.isDigit() }) return trimmed.lowercase()
         }
         
         // 保留fund_前缀

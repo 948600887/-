@@ -18,6 +18,7 @@ import com.example.stockdiary.utils.toFileTimestamp
 import com.example.stockdiary.utils.totalValueCny
 import java.io.File
 import java.io.FileWriter
+import java.nio.charset.StandardCharsets
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 import kotlinx.coroutines.CancellationException
@@ -39,12 +40,27 @@ class DataExporter(private val context: Context) {
     private val exportDir: File
         get() = File(context.cacheDir, "exports").apply { mkdirs() }
     
+    /**
+     * 打开一个**带 UTF-8 BOM** 的写入器，供所有 CSV / 文本导出使用。
+     *
+     * 不能再用 `FileWriter(file)`：它走平台默认字符集且**不输出 BOM**，
+     * Windows 中文版 Excel 打开无 BOM 的 CSV 会按 GBK/ANSI 解码，
+     * 表头「名称,类型,代码,账户…」与全部中文资产名/备注直接变乱码 ——
+     * 而导出按钮的目的就是给表格软件打开，等于该功能实际不可用。
+     * 显式 UTF-8 + BOM 后 Excel 能正确识别编码。
+     */
+    private fun openCsvWriter(file: File): java.io.Writer {
+        val writer = java.io.OutputStreamWriter(java.io.FileOutputStream(file), StandardCharsets.UTF_8)
+        writer.write('\uFEFF'.toString()) // UTF-8 BOM
+        return writer
+    }
+
     fun exportAssetsToCSV(assets: List<Asset>): Uri? {
         return try {
             val fileName = "assets_${System.currentTimeMillis().toFileTimestamp()}.csv"
             val file = File(exportDir, fileName)
             
-            FileWriter(file).use { writer ->
+            openCsvWriter(file).use { writer ->
                 writer.append("名称,类型,代码,账户,数量,参考单价,当前价,总价值(原币),总价值(人民币),币种,汇率,备注,到期日\n")
 
                 assets.forEach { asset ->
@@ -76,7 +92,7 @@ class DataExporter(private val context: Context) {
             val fileName = "snapshots_${System.currentTimeMillis().toFileTimestamp()}.csv"
             val file = File(exportDir, fileName)
             
-            FileWriter(file).use { writer ->
+            openCsvWriter(file).use { writer ->
                 writer.append("日期,总资产,总负债,净资产,股票,基金,虚拟货币,银行存款\n")
                 
                 snapshots.sortedBy { it.date }.forEach { snapshot ->
@@ -109,7 +125,7 @@ class DataExporter(private val context: Context) {
             val file = File(exportDir, fileName)
             val assetMap = assets.associateBy { it.symbol }
 
-            FileWriter(file).use { writer ->
+            openCsvWriter(file).use { writer ->
                 writer.append("日期,代码,名称,交易类型,数量,价格,手续费,成交金额(原币),币种,成交金额(人民币),账户,备注\n")
 
                 transactions.sortedByDescending { it.date }.forEach { tx ->
@@ -178,7 +194,7 @@ class DataExporter(private val context: Context) {
             val fileName = "full_statement_${System.currentTimeMillis().toFileTimestamp()}.csv"
             val file = File(exportDir, fileName)
 
-            FileWriter(file).use { writer ->
+            openCsvWriter(file).use { writer ->
                 val dateStr = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"))
                 writer.append("# 综合对账单,生成时间,$dateStr\n\n")
 
@@ -240,7 +256,7 @@ class DataExporter(private val context: Context) {
             val fileName = "assets_${System.currentTimeMillis().toFileTimestamp()}.txt"
             val file = File(exportDir, fileName)
             
-            FileWriter(file).use { writer ->
+            openCsvWriter(file).use { writer ->
                 val dateStr = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy年MM月dd日 HH:mm"))
                 writer.append("=== 资产报告 ===\n")
                 writer.append("生成时间: $dateStr\n\n")

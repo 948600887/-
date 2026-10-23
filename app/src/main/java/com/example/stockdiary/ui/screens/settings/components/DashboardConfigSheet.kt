@@ -237,7 +237,22 @@ fun DashboardConfigSheet(
             Spacer(modifier = Modifier.height(16.dp))
 
             OutlinedButton(
-                onClick = { onPreferencesChange(DashboardPreferences()) },
+                onClick = {
+                    // 「恢复默认」只重置本 sheet 负责的那部分配置（卡片显示开关 / 类别开关 /
+                    // 隐藏低价值阈值 / 排序 / 历史周期），其余一律保持原值。
+                    //
+                    // 不能整块写 DashboardPreferences()：月度生活费（日历 FIRE 算出来的）、
+                    // 年度分红缓存、分组展开态**都不在这个 sheet 里渲染**，整块回默认会把它们
+                    // 静默清掉——月度生活费退回默认的 5000，正是「共享整块偏好互相踩踏」那一类 bug。
+                    onPreferencesChange(
+                        DashboardPreferences(
+                            monthlyExpense = preferences.monthlyExpense,
+                            annualDividendCache = preferences.annualDividendCache,
+                            annualDividendSymbols = preferences.annualDividendSymbols,
+                            defaultExpanded = preferences.defaultExpanded
+                        )
+                    )
+                },
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Icon(Icons.Default.Refresh, contentDescription = null)

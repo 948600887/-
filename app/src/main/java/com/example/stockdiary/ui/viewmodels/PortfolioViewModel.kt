@@ -26,6 +26,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineExceptionHandler
+import kotlinx.coroutines.Dispatchers
 
 class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
 
@@ -112,6 +113,23 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
         container.dashboardPreferencesManager.loadPreferences()
     )
     val preferences: StateFlow<DashboardPreferences> = _preferences.asStateFlow()
+
+    /**
+     * 回前台时从磁盘重新加载偏好，推送到 [_preferences]。
+     *
+     * 与 DashboardViewModel.reloadPreferences 是同一类问题：本 VM 挂在 Activity 作用域、
+     * 跨标签页长期存活，而偏好只在构造期加载一次（见 [_preferences]）。用户在
+     * 「设置 → 自定义仪表盘」改完开关后，设置页只写磁盘，本 VM 的内存副本仍是旧值，
+     * 表现为「回持仓页设置没生效」——负债照旧显示、隐藏低价值开关改不动；
+     * 而首页因为有 ON_RESUME reload 却是正常的，同一份设置两个页面表现不一致。
+     */
+    fun reloadPreferences() {
+        // 与 Dashboard 一致：一次要读 20 个 SharedPreferences 键（含 getStringSet），
+        // 放主线程会让「回到持仓页」那一帧卡一下 → 切 IO 线程读
+        viewModelScope.launch(Dispatchers.IO) {
+            _preferences.value = container.dashboardPreferencesManager.loadPreferences()
+        }
+    }
 
     /**
      * 持仓页各分组的展开/收起状态。
@@ -452,8 +470,19 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
                 if (result.truncatedByTimeLimit) {
                     _errorMessage.value = "同步超时，已保留上次数据"
                 }
-                val income = incomeUseCase.load(assets, forceRefresh = false, tag = "PortfolioVM")
-                _estimatedAnnualDividend.value = income.totalAnnualIncome
+                // 同步完刷新年度分红——但必须按**全量**持仓算，不能用本次勾选的子集。
+                // 原来这里直接 incomeUseCase.load(assets /* 仅勾选项 */) 并把子集合计赋给
+                // _estimatedAnnualDividend，而这个值平时是全量口径（loadDividendIncome/refresh
+                // 都用 assetsOnly）。于是勾选 2~3 只点「同步」后，顶部年度分红变成了这几只的合计；
+                // 更糟的是 dividendSymbolsKey 没变、LaunchedEffect 不会重跑，错值会一直挂着，
+                // 直到全量刷新或持仓集合变化才恢复。
+                // 注意：本函数入参也叫 assets（勾选项），会遮蔽同名的全量 StateFlow，
+                // 故这里必须写 this.assets 显式取全量
+                val allAssets = this@PortfolioViewModel.assets.value.filter { !it.type.isLiability }
+                if (allAssets.isNotEmpty()) {
+                    val income = incomeUseCase.load(allAssets, forceRefresh = false, tag = "PortfolioVM")
+                    _estimatedAnnualDividend.value = income.totalAnnualIncome
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {

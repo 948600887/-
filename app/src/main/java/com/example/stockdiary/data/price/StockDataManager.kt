@@ -11,6 +11,7 @@ import com.example.stockdiary.network.SinaStockData
 import com.example.stockdiary.network.TencentStockAPI
 import com.example.stockdiary.network.model.StockData
 import com.example.stockdiary.utils.AppLogger
+import com.example.stockdiary.utils.StockCodeManager
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -359,6 +360,47 @@ class StockDataManager(
         }
     }
 
+    /**
+     * 批量预取「整体 0 命中」时，按**源级故障**计入一次失败。
+     *
+     * ## 为什么需要这个入口（真机诊断日志 2026-10-23 坐实）
+     * 新浪 `hq.sinajs.cn` 曾对**全部** A 股返回 41 字节空报价：44 次请求 0 成功、
+     * 批量预取 13 个代码「命中 0 个」、逐只问也照样空。但空报价走的是
+     * 「未获取到股票数据，请检查股票代码」→ [isSymbolLevelFailure] 判成**符号级**
+     * （代码不在此源支持范围）→ 不计源级失败 → 熔断器永远不开
+     * → 每轮同步每个标的白打一次新浪再打腾讯（一轮 43 次白打），批量预取也完全废掉。
+     * 这就是「饿死熔断器」的反面：源真的全挂，却因为逐只判成符号级而检测不到。
+     *
+     * ## 为什么必须用「批量整体 0 命中」而不是单只无命中
+     * 单只无命中确实是符号级：REIT（508xxx/500xxx）、老三板（400/420）、部分场内基金
+     * 本就不在新浪支持范围（日志里 33+9 次都是这类），**不能**计入源级，否则会误禁整源。
+     * 但一批十几个代码一个都没回来、且批里存在新浪理应支持的普通 A 股时，就只能是源级问题。
+     *
+     * ## 为什么不在这里直接熔断
+     * 这里只负责「让证据被看见」：喂一次失败，由熔断器按阈值（5 次）与半开探测自行决定
+     * 禁用与恢复。误伤有上限——即使连着喂，5 分钟后半开探测用真实请求试水，源恢复即自动闭路。
+     *
+     * @param sourceName 数据源名（[ApiManager.API_SINA] 等）
+     * @param probedCodes 本轮批量预取的代码（带市场前缀，如 sh600519）
+     */
+    fun reportBatchTotalMiss(sourceName: String, probedCodes: List<String>) {
+        val hasPlainStock = probedCodes.any { code ->
+            StockCodeManager.classifyCode(code) == StockCodeManager.CodeCategory.STOCK
+        }
+        if (!hasPlainStock) {
+            AppLogger.d(
+                "$sourceName 批量 0 命中，但批内没有普通股票代码（可能整批都是场内基金/REIT），不计源级失败",
+                TAG
+            )
+            return
+        }
+        AppLogger.w(
+            "$sourceName 批量预取整体 0 命中（批内含普通股票代码），按源级故障计入一次失败",
+            TAG
+        )
+        breakerFor(sourceName).onFailure(System.currentTimeMillis())
+    }
+
     /** 测试专用复位：清空各数据源熔断器状态，保证用例间隔离 */
     internal fun resetForTesting() {
         breakers.clear()
@@ -367,6 +409,10 @@ class StockDataManager(
     /** 测试专用读数：指定数据源当前相位，供三态迁移断言 */
     internal fun sourcePhaseForTesting(apiName: String): SourcePhase =
         breakerFor(apiName).phaseForTesting()
+
+    /** 测试专用读数：指定数据源当前连续源级失败计数（阈值以下的变化只有计数能看出来） */
+    internal fun failuresForTesting(apiName: String): Int =
+        breakerFor(apiName).failuresForTesting()
     
     /**
      * 清除缓存

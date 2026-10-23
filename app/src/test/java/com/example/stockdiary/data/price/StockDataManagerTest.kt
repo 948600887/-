@@ -107,6 +107,39 @@ class StockDataManagerTest {
         assertEquals(ApiManager.API_SINA, first.first())
     }
 
+    // ---------- 批量整体 0 命中的源级判定 ----------
+
+    @Test
+    fun `批量整体0命中且批内含普通股票_计入一次源级失败`() {
+        EastmoneySkillApi.apiKey = ""
+        // 贵州茅台（普通 A 股，新浪理应支持）+ REIT + LOF：整批 0 命中只能是源级问题
+        manager.reportBatchTotalMiss(
+            ApiManager.API_SINA,
+            listOf("sh600519", "sh508085", "sz160719")
+        )
+        assertEquals(
+            "批里有普通股票却整批 0 命中，必须喂一次源级失败让熔断器看见",
+            1,
+            manager.failuresForTesting(ApiManager.API_SINA)
+        )
+    }
+
+    @Test
+    fun `批量整体0命中但整批都是场内基金_不计源级失败`() {
+        EastmoneySkillApi.apiKey = ""
+        // 全是 REIT/LOF/ETF：新浪本就不支持它们，0 命中是**正常行为**。
+        // 若这也计入源级，几轮后会把整源误禁，把流量全甩给腾讯（雪崩）。
+        manager.reportBatchTotalMiss(
+            ApiManager.API_SINA,
+            listOf("sh508085", "sz160719", "sh501225")
+        )
+        assertEquals(
+            "整批都是场内基金时 0 命中不能计入源级失败",
+            0,
+            manager.failuresForTesting(ApiManager.API_SINA)
+        )
+    }
+
     // ---------- 集成：符号级失败不熔禁 ----------
 
     @Test

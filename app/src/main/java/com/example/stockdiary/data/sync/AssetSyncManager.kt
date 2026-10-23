@@ -9,6 +9,7 @@ import android.content.Context
 import android.content.res.Configuration
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
+import com.example.stockdiary.data.price.ApiManager
 import com.example.stockdiary.data.price.StockDataManager
 import com.example.stockdiary.network.UnifiedPriceService
 import com.example.stockdiary.network.model.AssetPrice
@@ -156,24 +157,37 @@ object AssetSyncManager {
             val cb = object : ComponentCallbacks2 {
                 override fun onTrimMemory(level: Int) {
                     // 不同 level 含义差很多，措辞必须分级，不能把所有回调都叫「临死前通牒」——
-                    // 那样低级别（运行中内存偏低、切后台 UI 不可见）会被误判成快被杀，反而误导排查。
-                    // 常量定义见 android.content.ComponentCallbacks2：
-                    //   20 UI_HIDDEN：切后台（最频繁，纯正常事件）
-                    //   10 RUNNING_LOW / 15 RUNNING_MODERATE：运行中内存偏低，系统建议释放
-                    //   40 BACKGROUND 起：进程入后台，可能被回收
-                    //   60 RUNNING_CRITICAL：运行中内存吃紧，随时可能杀
-                    //   80 COMPLETE：进程即将被回收——这才是「最后通牒」
+                    // 那样低级别（切后台、进程入后台 LRU）会被误判成快被杀，反而误导排查。
+                    // 常量定义见 android.content.ComponentCallbacks2（数值是 API 定死的）：
+                    //   5  RUNNING_MODERATE      运行中内存偏低，系统建议释放
+                    //   10 RUNNING_LOW           运行中内存较低
+                    //   15 RUNNING_CRITICAL      运行中内存吃紧，随时可能杀 ← 这才是真压力
+                    //   20 UI_HIDDEN             切后台（最频繁，纯正常事件）
+                    //   40 BACKGROUND            进程进入后台 LRU 列表（正常事件，不是压力）
+                    //   60 MODERATE_BACKGROUND   后台且内存较紧
+                    //   80 COMPLETE              进程即将被回收——最后通牒
+                    //
+                    // ⚠️ 这里曾写成 `in TRIM_MEMORY_BACKGROUND..TRIM_MEMORY_RUNNING_CRITICAL`
+                    // （即 40..15）——**上界小于下界的 IntRange 是空区间**，恒为 false，
+                    // 于是 level=40 掉到 else 被叫成「内存压力通知」，把切后台误报成压力。
+                    // 现已改为逐个常量显式匹配，不再用区间。
                     val desc = when (level) {
                         ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN ->
                             "UI 不可见（切后台），正常事件"
-                        ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW,
                         ComponentCallbacks2.TRIM_MEMORY_RUNNING_MODERATE ->
                             "运行中内存偏低，系统建议释放资源"
-                        in ComponentCallbacks2.TRIM_MEMORY_BACKGROUND..ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL ->
-                            "后台运行，可能被系统回收"
+                        ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW ->
+                            "运行中内存较低，系统建议释放资源"
+                        ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL ->
+                            "运行中内存吃紧，随时可能被杀——真压力"
+                        ComponentCallbacks2.TRIM_MEMORY_BACKGROUND ->
+                            "进程进入后台 LRU 列表，正常事件（非内存压力）"
+                        // 60 = TRIM_MEMORY_MODERATE_BACKGROUND（API 34 才引入该常量，
+                        // 但编译环境的 android.jar 里取不到，故用数值 + 注释）
+                        60 -> "后台且内存较紧，可能被回收"
                         ComponentCallbacks2.TRIM_MEMORY_COMPLETE ->
                             "进程即将被回收——最后通牒"
-                        else -> "内存压力通知(level=$level)"
+                        else -> "onTrimMemory(level=$level)"
                     }
                     AppLogger.w("onTrimMemory — $desc", TAG)
                 }
@@ -453,6 +467,13 @@ object AssetSyncManager {
                 emptyMap()
             }
             AppLogger.i("批量预取 STOCK/场内基金 ${batchStockCodes.size} 个代码，命中 ${batchPriceMap.size} 个", TAG)
+            // 整体 0 命中且批里有普通股票：不是「这些代码此源不支持」，而是源在返回空报价。
+            // 真机日志坐实过：新浪 44 次请求全 41 字节、0 成功，却因为逐只被判成符号级
+            // （代码不在此源支持范围）而熔断器永不开，导致每轮每个标的白打一次新浪。
+            // 喂一次源级失败，让熔断器看见（阈值 5 次才禁，半开探测自动恢复）。
+            if (batchPriceMap.isEmpty()) {
+                stockManager.reportBatchTotalMiss(ApiManager.API_SINA, batchStockCodes)
+            }
 
             val jobs = orderedAssets.map { asset ->
                 async {

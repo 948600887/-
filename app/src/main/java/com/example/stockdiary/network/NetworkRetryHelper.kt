@@ -70,8 +70,14 @@ object NetworkRetryHelper {
                 true
             }
             is UnknownHostException -> {
-                AppLogger.w("无法解析域名，将重试", TAG)
-                true
+                // DNS 解析失败**不重试**：域名在几秒内不会突然变得可解析
+                // （用户没开代理、没换网络之前重试结果完全一样），而重试会把单次同步的
+                // 等待放大 maxRetries 倍——真机日志里币安主机被墙时，前三只加密资产
+                // 各等 20+ 秒、整轮开头 20 秒「已完成 0/240」就是这么来的。
+                // 恢复交给数据源级熔断器：失败计数 → 熔断冷却 → 半开探测自愈，
+                // 那条路径有 5 分钟冷却和真实请求试水，比在这里盲目重试更合适。
+                AppLogger.w("无法解析域名（主机不可达），不重试", TAG)
+                false
             }
             is IOException -> {
                 // 不是所有 IOException 都值得重试：

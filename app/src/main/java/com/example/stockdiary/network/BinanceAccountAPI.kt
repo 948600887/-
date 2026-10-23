@@ -191,7 +191,17 @@ object BinanceAccountAPI {
                 } else {
                     e
                 }
-                AppLogger.e("拉取币安账户失败: ${e::class.simpleName}", userFacing, "BinanceAccountAPI")
+                if (userFacing !== e) {
+                    // 连接类失败：堆栈全是 OkHttp 内部帧，对定位没有任何帮助，
+                    // 却会把日志刷成几十行（真机日志里见过完整栈）。异常类型已写进 message，够用了。
+                    AppLogger.e(
+                        "拉取币安账户失败: ${e::class.simpleName}（连接类，未记录堆栈）",
+                        tag = "BinanceAccountAPI"
+                    )
+                } else {
+                    // 其它异常（解析错、业务错）：堆栈有诊断价值，照旧带上
+                    AppLogger.e("拉取币安账户失败: ${e::class.simpleName}", e, "BinanceAccountAPI")
+                }
                 Result.failure(userFacing)
             }
         }

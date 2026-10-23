@@ -75,32 +75,36 @@ class StockDataManagerTest {
         assertFalse(isSymbolLevelFailure(RuntimeException()))
     }
 
-    // ---------- 候选链过滤（妙想 Key） ----------
+    // ---------- 候选链：全自动顺序（2026-10-23 去掉「行情数据源」设置，不再有用户偏好） ----------
 
     @Test
-    fun `妙想未配置 Key 且未显式选择_移出候选链`() {
+    fun `妙想未配置 Key_自动移出候选链_顺序为新浪腾讯`() {
         EastmoneySkillApi.apiKey = ""
-        val names = manager.candidateSourceNames(ApiManager.API_SINA)
+        val names = manager.candidateSourceNames()
         assertFalse("未配置 Key 的妙想不该白试", names.contains(ApiManager.API_SKILL))
-        assertTrue(names.contains(ApiManager.API_SINA))
-        assertTrue(names.contains(ApiManager.API_TENCENT))
+        assertEquals(listOf(ApiManager.API_SINA, ApiManager.API_TENCENT), names)
     }
 
     @Test
-    fun `妙想已配置 Key_留在候选链`() {
+    fun `妙想已配置 Key_自动置首_顺序为妙想新浪腾讯`() {
         EastmoneySkillApi.apiKey = "test-key"
-        val names = manager.candidateSourceNames(ApiManager.API_SINA)
-        assertTrue(names.contains(ApiManager.API_SKILL))
-        // 用户选新浪时新浪置首（selectedApi 优先于默认优先级）
-        assertEquals(ApiManager.API_SINA, names.first())
+        val names = manager.candidateSourceNames()
+        assertEquals(
+            listOf(ApiManager.API_SKILL, ApiManager.API_SINA, ApiManager.API_TENCENT),
+            names
+        )
     }
 
     @Test
-    fun `妙想未配置 Key 但用户显式选择_不移除且置首`() {
+    fun `候选链顺序稳定_不受任何偏好影响`() {
+        // 全自动：同样的环境连查两次结果必须一致。
+        // 从前顺序会被 SharedPreferences 里的用户偏好改变（设置页可选新浪/腾讯/妙想），
+        // 该设置已去除，这里钉死「顺序只取决于妙想 Key 是否配置」。
         EastmoneySkillApi.apiKey = ""
-        val names = manager.candidateSourceNames(ApiManager.API_SKILL)
-        assertTrue("用户显式选妙想不能静默移除", names.contains(ApiManager.API_SKILL))
-        assertEquals(ApiManager.API_SKILL, names.first())
+        val first = manager.candidateSourceNames()
+        val second = manager.candidateSourceNames()
+        assertEquals(first, second)
+        assertEquals(ApiManager.API_SINA, first.first())
     }
 
     // ---------- 集成：符号级失败不熔禁 ----------
@@ -117,7 +121,7 @@ class StockDataManagerTest {
 
         // 6 次远超阈值 5：若符号级被计入，早该熔禁了
         repeat(6) {
-            manager.getStockData("sh600000", forceRefresh = true, networkAvailable = true, preferredApi = ApiManager.API_SINA)
+            manager.getStockData("sh600000", forceRefresh = true, networkAvailable = true)
         }
 
         assertEquals(SourcePhase.CLOSED, manager.sourcePhaseForTesting(ApiManager.API_SINA))
@@ -138,7 +142,7 @@ class StockDataManagerTest {
             Result.failure(IOException("API请求频率过高，请稍后再试"))
 
         repeat(SourceCircuitBreaker.FAIL_THRESHOLD) {
-            manager.getStockData("sh600000", forceRefresh = true, networkAvailable = true, preferredApi = ApiManager.API_SINA)
+            manager.getStockData("sh600000", forceRefresh = true, networkAvailable = true)
         }
 
         // 累计 5 次源级失败 → 熔禁
@@ -171,7 +175,7 @@ class StockDataManagerTest {
         coEvery { TencentStockAPI.getStockData(any()) } returns Result.failure(IOException("腾讯也不通"))
 
         repeat(5) {
-            manager.getStockData("sh600000", forceRefresh = true, networkAvailable = true, preferredApi = ApiManager.API_SINA)
+            manager.getStockData("sh600000", forceRefresh = true, networkAvailable = true)
         }
 
         assertEquals(SourcePhase.OPEN, manager.sourcePhaseForTesting(ApiManager.API_SINA))

@@ -155,13 +155,13 @@ class SourceCircuitBreakerVerifyTest {
 
         // 单波 3 次（=并发度）：不熔禁，流量继续走新浪（只是每次都失败）
         repeat(3) {
-            manager.getStockData("sh600000", forceRefresh = true, networkAvailable = true, preferredApi = ApiManager.API_SINA)
+            manager.getStockData("sh600000", forceRefresh = true, networkAvailable = true)
         }
         assertEquals("单波3次不得熔禁（旧阈值3会误禁）", SourcePhase.CLOSED, manager.sourcePhaseForTesting(ApiManager.API_SINA))
 
         // 再 2 次累计到 5：熔禁
         repeat(2) {
-            manager.getStockData("sh600000", forceRefresh = true, networkAvailable = true, preferredApi = ApiManager.API_SINA)
+            manager.getStockData("sh600000", forceRefresh = true, networkAvailable = true)
         }
         assertEquals("累计5次源级失败必须熔禁", SourcePhase.OPEN, manager.sourcePhaseForTesting(ApiManager.API_SINA))
     }
@@ -193,7 +193,7 @@ class SourceCircuitBreakerVerifyTest {
             Result.failure(IOException("腾讯也不通"))
 
         repeat(5) {
-            manager.getStockData("sh600000", forceRefresh = true, networkAvailable = true, preferredApi = ApiManager.API_SINA)
+            manager.getStockData("sh600000", forceRefresh = true, networkAvailable = true)
         }
 
         assertEquals(

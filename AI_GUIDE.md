@@ -161,7 +161,8 @@ app/src/main/java/com/example/stockdiary/
 ## 4. 四条核心链路
 
 **① 行情同步**：`AssetSyncManager` 编排（有并发信号量 + 总预算看门狗）→ `UnifiedPriceService`
-→ 按类型分派：股票走 `StockDataManager`（新浪/腾讯，带 `SourceCircuitBreaker` 数据源级熔断）、
+→ 按类型分派：股票走 `StockDataManager`（**数据源全自动**：妙想Skill(配置了 API Key 才参与) > 新浪 > 腾讯，
+带 `SourceCircuitBreaker` 数据源级熔断，某个源连续失败会自动短期禁用并降级；「我的 → 行情数据源」手动选择入口已去除）、
 基金走 `FundAPI`、加密货币走 `BinanceAPI`（受 `BinanceHostGate` 主机级熔断保护）。
 
 **② 分红抓取**：`DividendRepository.prefetchDividends`（东财批量，分块并发）→ 逐条
@@ -214,6 +215,7 @@ app/src/main/java/com/example/stockdiary/
 11. **后台同步按资产类型分频，不再一刀切**（`5c7410b`）：判定集中在一个纯函数 `data/sync/SyncStrategy.kt` 的 `shouldAutoSyncType(type, inTradingHours, stockIntradaySync, cryptoAutoSync)`——股票/基金 = `stockIntradaySync || !inTradingHours`（**仅盘后/非交易时段刷**）、加密 = `cryptoAutoSync`（**默认关，只手动刷**）。两偏好在 `data/sync/PriceSyncPreferencesManager.kt`，默认均为 **false**；`PriceSyncWorker` 每轮据此过滤资产，全被过滤掉时跳过本轮但仍重排下次。要改同步时机先看这个函数，别直接改 `AssetSyncManager` 的时钟。
 12. **日历有两处专门修过的坑，别改回去**：① `CalendarViewModel` 对 assets 流按 `(symbol, balance, currency)` 签名做 `distinctUntilChanged`（`ee6054e`）——日历不依赖实时价，去掉它一次同步会重算日历 20+ 次；② 日期格子是**固定高度 + 三段固定槽位**（`41e71a9` / `b17fe07` / `cee874b`），贴底的「分」槽位收太紧会被 Surface 的 `clip` 切掉半截。动日历布局前先读这三笔注释。
 13. **以下死代码已删除，旧资料别再引用**（`f5b44f5`、`b47cee8`）：`AssetDao` 的 `getAssetsByAccount(Flow)` / `getTotalValueByCurrency` / `getAccountsByType` / `getAssetsPaged` / `deleteAssetsByType` 及其 Repository 转发、`Extensions.DividendData.isNewest()`、`DashboardComponent` 枚举及三处方法。若某份审查报告让你用它们，说明那份报告基于旧版本。
+14. **行情数据源没有手动切换入口了**（2026-10-23 应用户要求去除）：顺序**全自动** = 妙想Skill(仅配置了 API Key 时参与) > 新浪 > 腾讯，某个源连续失败由 `SourceCircuitBreaker` 自动短期禁用并降级。`ApiManager` 现在只保留三个源名字符串常量，**不再有 SharedPreferences 偏好读写**；`ApiSelectionDialog.kt` 已删除。设置页保留「**数据源状态**」入口（`DataSourceStatusDialog`）用来看每个源通不通、熔断状态。批量预取 `StockDataManager.getBatchStockDataThroughSina` 仍写死走新浪（只有新浪有批量接口，N 个代码 ≈ ⌈N/20⌉ 次请求），某个代码没被预取到时才走上面的自动链。**别再去加"让用户选数据源"的 UI**——那是被明确去掉的。
 
 ## 8. 测试怎么加
 

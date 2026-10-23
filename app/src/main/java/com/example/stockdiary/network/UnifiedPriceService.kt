@@ -92,12 +92,14 @@ object UnifiedPriceService {
          */
         batchResult: AssetPrice? = null,
         /**
-         * 本次同步开始时一次性算好的网络可用性 / 用户偏好数据源。传入后 [StockDataManager]
-         * 不再每个标的都去读 ConnectivityManager 与 SharedPreferences（O(n) 冗余系统调用，P4）。
-         * 为 null 时回落到原行为（各自实时读取）。
+         * 本次同步开始时一次性算好的网络可用性。传入后 [StockDataManager]
+         * 不再每个标的都去问 ConnectivityManager（O(n) 冗余系统调用，P4）。
+         * 为 null 时回落到原行为（实时读取）。
+         *
+         * 数据源顺序是全自动的（妙想Skill(配置了Key才参与) > 新浪 > 腾讯，失败由数据源级
+         * 熔断器自动降级），没有任何用户偏好参数——「我的 → 行情数据源」设置已去除。
          */
-        networkAvailable: Boolean? = null,
-        preferredApi: String? = null
+        networkAvailable: Boolean? = null
     ): Result<AssetPrice> = withContext(Dispatchers.IO) {
         val cacheKey = "${type.name}_$code"
 
@@ -122,7 +124,7 @@ object UnifiedPriceService {
 
         try {
             val result: Result<AssetPrice> = when (type) {
-                AssetType.STOCK -> getStockData(code, forceRefresh, networkAvailable, preferredApi)
+                AssetType.STOCK -> getStockData(code, forceRefresh, networkAvailable)
                 AssetType.FUND -> getFundPrice(code, forceRefresh).map { AssetPrice.Fund(it) }
                 AssetType.CRYPTO -> getCryptoPrice(code).map { AssetPrice.Crypto(it) }
                 else -> Result.failure(Exception("不支持的资产类型: $type"))
@@ -165,13 +167,12 @@ object UnifiedPriceService {
     private suspend fun getStockData(
         code: String,
         forceRefresh: Boolean,
-        networkAvailable: Boolean? = null,
-        preferredApi: String? = null
+        networkAvailable: Boolean? = null
     ): Result<AssetPrice> {
         val manager = stockDataManager
             ?: return Result.failure(IllegalStateException("行情门面未初始化（UnifiedPriceService.init 未调用）"))
         // StockDataManager 用 common.Result，门面对外是 kotlin.Result，这里做转换
-        return when (val result = manager.getStockData(code, forceRefresh, networkAvailable, preferredApi)) {
+        return when (val result = manager.getStockData(code, forceRefresh, networkAvailable)) {
             is com.example.stockdiary.common.Result.Success -> Result.success(AssetPrice.Stock(result.data))
             is com.example.stockdiary.common.Result.Error -> Result.failure(result.exception)
             is com.example.stockdiary.common.Result.Loading -> Result.failure(IllegalStateException("行情结果尚未加载完成"))

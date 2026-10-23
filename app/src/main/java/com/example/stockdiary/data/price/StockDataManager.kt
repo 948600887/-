@@ -105,44 +105,29 @@ class StockDataManager(
     /**
      * 获取当前数据源列表（根据用户选择排序，并过滤掉不可用的候选）
      */
-    private fun getCurrentDataSources(preferredApi: String? = null): List<Pair<String, StockDataSource>> {
-        return candidateSourceNames(preferredApi).map { apiName ->
+    private fun getCurrentDataSources(): List<Pair<String, StockDataSource>> {
+        return candidateSourceNames().map { apiName ->
             apiName to getDataSource(apiName)
         }
     }
 
     /**
-     * 候选数据源名（按用户偏好排序）。抽出来便于单测「妙想未配置 Key 的过滤」。
+     * 候选数据源名（**全自动**顺序，不读任何用户偏好）。
+     *
+     * 数据源选择已于 2026-10-23 改为全自动（应用户要求去掉「我的 → 行情数据源」设置）：
+     * 顺序固定为「妙想Skill(仅当配置了 API Key) > 新浪 > 腾讯」，某个源连续失败时由
+     * 数据源级熔断器自动短期禁用、自动降级到下一个，不需要用户插手。
      *
      * 过滤规则：妙想未配置 API Key 时移出候选链——否则每次刷新都白试一遍、失败还计入源级
      * 禁用计数（[EastmoneySkillApi] 对空 Key 直接返回「未配置东方财富 Skill API Key」）。
-     * **但用户显式选中妙想时不静默移除**：保留它，让失败沿正常路径暴露给用户（日志 + UI 有
-     * 明确提示），不偷偷把用户换到别的源。默认偏好是新浪（见 [ApiManager.getPriceApi]），
-     * 所以「选中妙想」可靠地等价于用户主动选过。
+     * 配置了 Key 就自动置首，同样不需要用户手动选。
+     *
+     * 抽出来便于单测（妙想 Key 的过滤 + 自动顺序）。
      */
-    internal fun candidateSourceNames(preferredApi: String? = null): List<String> {
-        val selectedApi = preferredApi ?: ApiManager.getPriceApi(context)
+    internal fun candidateSourceNames(): List<String> {
         val skillConfigured = EastmoneySkillApi.isApiKeyConfigured()
-
-        // 优先级：妙想Skill > 新浪 > 腾讯
-        val priorityList = listOf(
-            ApiManager.API_SKILL,
-            ApiManager.API_SINA,
-            ApiManager.API_TENCENT
-        )
-
-        val filtered = priorityList.filter { api ->
-            api != ApiManager.API_SKILL || skillConfigured || selectedApi == ApiManager.API_SKILL
-        }
-        if (!skillConfigured && selectedApi == ApiManager.API_SKILL) {
-            AppLogger.w(
-                "用户显式选择了妙想Skill但未配置 API Key，仍按用户选择尝试（会失败并提示，不静默换源）",
-                TAG
-            )
-        }
-
-        // 根据用户选择重新排序
-        return filtered.sortedByDescending { it == selectedApi }
+        return listOf(ApiManager.API_SKILL, ApiManager.API_SINA, ApiManager.API_TENCENT)
+            .filter { it != ApiManager.API_SKILL || skillConfigured }
     }
     
     /**
@@ -152,15 +137,11 @@ class StockDataManager(
      * @param networkAvailable 本次同步开始时一次性算好的网络可用性；非 null 时直接采信，
      *        不再每个标的都去问 ConnectivityManager（避免 O(n) 冗余 binder 调用，见 P4）。
      *        为 null 时回落到 [isNetworkAvailable] 实时判断。
-     * @param preferredApi 本次同步开始时一次性读好的用户偏好数据源；非 null 时直接采信，
-     *        不再每个标的都读 SharedPreferences（避免 O(n) 冗余磁盘读）。为 null 时回落到
-     *        [ApiManager.getPriceApi]。
      */
     suspend fun getStockData(
         symbol: String,
         forceRefresh: Boolean = false,
-        networkAvailable: Boolean? = null,
-        preferredApi: String? = null
+        networkAvailable: Boolean? = null
     ): Result<StockData> {
         // 1. 检查是否需要强制刷新
         if (!forceRefresh) {
@@ -209,7 +190,7 @@ class StockDataManager(
         
         // 5. 按优先级尝试各个数据源
         var lastError: Exception? = null
-        val currentDataSources = getCurrentDataSources(preferredApi)
+        val currentDataSources = getCurrentDataSources()
         
         for ((apiName, dataSource) in currentDataSources) {
             // 三态熔断闸门：CLOSED 放行；OPEN 冷却期跳过；冷却结束只放行一个探测（其余跳过）。

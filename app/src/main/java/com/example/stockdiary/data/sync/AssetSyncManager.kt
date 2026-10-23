@@ -9,7 +9,6 @@ import android.content.Context
 import android.content.res.Configuration
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
-import com.example.stockdiary.data.price.ApiManager
 import com.example.stockdiary.data.price.StockDataManager
 import com.example.stockdiary.network.UnifiedPriceService
 import com.example.stockdiary.network.model.AssetPrice
@@ -447,7 +446,6 @@ object AssetSyncManager {
             val batchStockCodes = orderedAssets.mapNotNull { batchStockCode(it) }.distinct()
             val stockManager = StockDataManager.getInstance(context)
             val networkAvailable = stockManager.isNetworkAvailableNow()
-            val preferredApi = ApiManager.getPriceApi(context)
             val batchPriceMap: Map<String, AssetPrice> = if (batchStockCodes.isNotEmpty()) {
                 UnifiedPriceService.prewarmStockPrices(batchStockCodes, forceRefresh, networkAvailable)
                     .getOrDefault(emptyMap())
@@ -486,8 +484,7 @@ object AssetSyncManager {
                             forceRefresh,
                             correctNames,
                             batchResult = batchPriceMap[asset.symbol],
-                            networkAvailable = networkAvailable,
-                            preferredApi = preferredApi
+                            networkAvailable = networkAvailable
                         )
                         } finally {
                             inFlightAssets.remove(label)
@@ -666,9 +663,7 @@ object AssetSyncManager {
         /** 批量预取回填的现成价；非 null 时 STOCK/场内基金分支直接采信，跳过逐标的网络请求（P3） */
         batchResult: AssetPrice? = null,
         /** 同步起点一次性算好的网络可用性（P4）：非 null 时不再逐标的读 ConnectivityManager */
-        networkAvailable: Boolean? = null,
-        /** 同步起点一次性读好的偏好数据源（P4）：非 null 时不再逐标的读 SharedPreferences */
-        preferredApi: String? = null
+        networkAvailable: Boolean? = null
     ) {
         val symbol = asset.symbol
 
@@ -723,8 +718,7 @@ object AssetSyncManager {
                             AssetType.STOCK,
                             forceRefresh = forceRefresh,
                             batchResult = batchResult,
-                            networkAvailable = networkAvailable,
-                            preferredApi = preferredApi
+                            networkAvailable = networkAvailable
                         )
                         result.onSuccess { price ->
                             when (price) {
@@ -778,8 +772,7 @@ object AssetSyncManager {
                         AssetType.STOCK,
                         forceRefresh = forceRefresh,
                         batchResult = batchResult,
-                        networkAvailable = networkAvailable,
-                        preferredApi = preferredApi
+                        networkAvailable = networkAvailable
                     )
 
                     result.onSuccess { price ->

@@ -1,6 +1,5 @@
 package com.example.stockdiary.ui.screens
 
-import com.example.stockdiary.data.price.ApiManager
 import com.example.stockdiary.data.sync.SyncStrategy
 import android.Manifest
 import android.content.pm.PackageManager
@@ -49,7 +48,6 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.stockdiary.data.sync.PriceSyncScheduler
 import com.example.stockdiary.di.AppContainer
-import com.example.stockdiary.ui.components.ApiSelectionDialog
 import com.example.stockdiary.ui.screens.settings.components.AboutDialog
 import com.example.stockdiary.ui.screens.settings.components.BinanceImportDialog
 import com.example.stockdiary.ui.screens.settings.components.ClearDataDialog
@@ -119,10 +117,8 @@ fun SettingsScreen(
     var showHoldingSnapshotDialog by remember { mutableStateOf(false) }
     var showFundSnapshotDialog by remember { mutableStateOf(false) }
     var showBinanceImportDialog by remember { mutableStateOf(false) }
-    var showApiSelectionDialog by remember { mutableStateOf(false) }
     var showLogViewerDialog by remember { mutableStateOf(false) }
     var showReminderTimePicker by remember { mutableStateOf(false) }
-    var currentPriceApi by remember { mutableStateOf(com.example.stockdiary.data.price.ApiManager.getPriceApi(context)) }
     /** 记录这次通知权限请求是哪个开关发起的，权限回调时按来源给出准确文案 */
     var pendingPermissionReason by remember { mutableStateOf<String?>(null) }
 
@@ -193,7 +189,6 @@ fun SettingsScreen(
         reminderEnabled,
         reminderHour,
         reminderMinute,
-        currentPriceApi,
         usdRate,
         usdRateUpdatedAt
     ) {
@@ -234,13 +229,15 @@ fun SettingsScreen(
                 ))
                 add(SettingsItemData(
                     icon = Icons.Default.SyncAlt,
-                    title = "行情数据源",
-                    subtitle = "当前: $currentPriceApi",
+                    title = "数据源状态",
+                    // 数据源已改为全自动：妙想Skill(配置了 API Key 才参与) > 新浪 > 腾讯，
+                    // 某个源连续失败由数据源级熔断器自动短期禁用并降级，不再提供手动切换
+                    // （原「行情数据源」选择入口已去除，见 ApiManager 注释）。
+                    // 这里保留体检入口：点进去可看每个源当前通不通、熔断状态。
+                    subtitle = "全自动选择，失败自动切换",
                     onClick = {
-                        // 先触发一次健康检查，再打开选择对话框：
-                        // 对话框内的「查看各数据源状态」直接复用这次的检测结果
                         viewModel.checkDataSourceHealth()
-                        showApiSelectionDialog = true
+                        showDataSourceDialog = true
                     }
                 ))
                 add(SettingsItemData(
@@ -415,22 +412,6 @@ fun SettingsScreen(
                 }
             }
         }
-    }
-
-    if (showApiSelectionDialog) {
-        ApiSelectionDialog(
-            onDismiss = { showApiSelectionDialog = false },
-            onConfirm = { selectedApi ->
-                currentPriceApi = selectedApi
-                showApiSelectionDialog = false
-            },
-            onViewStatus = {
-                // 二级入口：先确保拿到最新检测结果，再弹出数据源状态对话框。
-                // 两个对话框叠放，关闭状态对话框后仍回到数据源选择
-                viewModel.checkDataSourceHealth()
-                showDataSourceDialog = true
-            }
-        )
     }
 
     if (showThemeDialog) {

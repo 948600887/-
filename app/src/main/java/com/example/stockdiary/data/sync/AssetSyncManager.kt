@@ -24,6 +24,7 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
@@ -544,25 +545,26 @@ object AssetSyncManager {
                     }
                 }
             } finally {
-                // 无论正常收尾还是外部取消，都要把看门狗停掉，否则 coroutineScope 会一直等它空转
+                // 无论正常收尾还是外部取消，都要把看门狗停掉，否则 withHeartbeat 会一直等它空转
                 watchdog?.cancel()
+                // ===== 收尾 flush：把缓冲区里最后不足一批的落价意图写掉 =====
+                // 为什么必须放在这个 finally 里，而不是 withHeartbeat 之后：
+                // 取消（退后台 / VM 销毁）会让整个块直接抛 CancellationException，
+                // 正常收尾那句根本执行不到；而 SyncPriceWriter 的 KDoc 承诺
+                // 「同步被取消时也要调用，否则会丢价」——缓冲区里不足一批（最多 7 个）
+                // **已经抓到**的价格会白抓，且往往总是同一批标的，现价长期停在旧值。
+                // NonCancellable 保证清理写库不被取消打断；只吞写库异常，
+                // 取消信号本身交给外层继续正常传播。
+                withContext(NonCancellable) {
+                    try {
+                        priceWriter.flushAll()
+                    } catch (e: Exception) {
+                        // 收尾这批无法归属到单个标的（不像逐标的写库能记进那个资产的失败计数），
+                        // 所以只告警、不让整轮同步判失败——上面已成功的计数仍然有效。
+                        AppLogger.e("收尾批量落价失败，本轮最后一批价格未写入: ${e.message}", e, TAG)
+                    }
+                }
             }
-        }
-
-        // ===== 收尾 flush：把缓冲区里最后不足一批的落价意图写掉 =====
-        // 这一步不能省：SyncPriceWriter 只在攒满 PRICE_WRITE_BATCH_SIZE(8) 条时才写一批，
-        // 若收尾不 flush，每轮同步尾部最多 7 个已抓到的价格会被**静默丢弃**。
-        // 而处理顺序基本固定，被丢的往往总是同一批标的——它们的现价会长期停在旧值，
-        // 用户看到的是"刷了但某个持仓价格不动"，且日志里毫无痕迹。
-        try {
-            priceWriter.flushAll()
-        } catch (e: CancellationException) {
-            // 取消不吞（项目铁律）：退后台 / VM 销毁时要照旧取消，不能被收尾写库拖住
-            throw e
-        } catch (e: Exception) {
-            // 收尾这批无法归属到单个标的（不像逐标的写库能记进那个资产的失败计数），
-            // 所以只告警、不让整轮同步判失败——上面已成功的计数仍然有效。
-            AppLogger.e("收尾批量落价失败，本轮最后一批价格未写入: ${e.message}", e, TAG)
         }
 
         val networkErrorCount = errorTypes.count { it == SyncErrorType.NETWORK }

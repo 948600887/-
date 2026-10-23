@@ -23,7 +23,9 @@ import io.mockk.verify
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.setMain
@@ -388,5 +390,54 @@ class AssetSyncManagerTest {
             writes.map { it.symbol }.toSet()
         )
         assertTrue("价格应原样写入", writes.all { it.price == 1.5 })
+    }
+
+    /**
+     * 取消（退后台 / VM 销毁）时也必须 flush：已抓到但不足一批的价格不能白抓。
+     *
+     * SyncPriceWriter 的 KDoc 承诺「同步被取消时也要调用，否则会丢价」。收尾 flush
+     * 因此必须放在 finally 里并用 NonCancellable 包住——取消会让 withHeartbeat
+     * 整个块抛 CancellationException，放在块之后的正常收尾那句根本执行不到。
+     *
+     * 构造：第一个标的秒回（价格进缓冲区，2 < 批大小 8 不会触发中途 flush），
+     * 第二个挂在 gate 上把同步拖住，然后取消整个同步 job。
+     */
+    @Test
+    fun `取消时也flush_已抓到的价格不白抓`() = runBlocking {
+        coEvery { UnifiedPriceService.getPrice("010001", AssetType.FUND, any()) } coAnswers {
+            events += "got-010001"
+            Result.success(fundPrice("010001"))
+        }
+        val gate = CompletableDeferred<Unit>()
+        coEvery { UnifiedPriceService.getPrice("010002", AssetType.FUND, any()) } coAnswers {
+            gate.await()
+            Result.success(fundPrice("010002"))
+        }
+
+        val job = launch {
+            AssetSyncManager.syncAllAssets(
+                context, repository,
+                listOf(fundAsset("fund_010001"), fundAsset("fund_010002")), {},
+                forceRefresh = true
+            )
+        }
+
+        // 等第一个标的抓到，再留足时间让它的价格真正进到缓冲区
+        assertTrue("第一个标的应被抓取", awaitUntil { events.contains("got-010001") })
+        delay(300)
+
+        // 模拟退后台 / VM 销毁：取消整个同步
+        job.cancelAndJoin()
+
+        // 取消路径也必须把缓冲区里已抓到的那条写掉，否则它白抓了
+        val slot = slot<List<com.example.stockdiary.data.repository.PendingPriceWrite>>()
+        coVerify(atLeast = 1) { repository.updatePricesInTransaction(capture(slot)) }
+        assertTrue(
+            "取消后应把已抓到的 fund_010001 落库，实际=${slot.captured.map { it.symbol }}",
+            slot.captured.any { it.symbol == "fund_010001" }
+        )
+        // 注意：不要在本方法末尾调用 gate.complete(Unit) —— 它返回 Boolean，
+        // 会让整个测试方法的推断返回类型变成 Boolean，JUnit4 直接判为非法测试类。
+        // 挂在 gate 上的协程已随 job 取消而结束，无需补完。
     }
 }

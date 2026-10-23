@@ -549,6 +549,22 @@ object AssetSyncManager {
             }
         }
 
+        // ===== 收尾 flush：把缓冲区里最后不足一批的落价意图写掉 =====
+        // 这一步不能省：SyncPriceWriter 只在攒满 PRICE_WRITE_BATCH_SIZE(8) 条时才写一批，
+        // 若收尾不 flush，每轮同步尾部最多 7 个已抓到的价格会被**静默丢弃**。
+        // 而处理顺序基本固定，被丢的往往总是同一批标的——它们的现价会长期停在旧值，
+        // 用户看到的是"刷了但某个持仓价格不动"，且日志里毫无痕迹。
+        try {
+            priceWriter.flushAll()
+        } catch (e: CancellationException) {
+            // 取消不吞（项目铁律）：退后台 / VM 销毁时要照旧取消，不能被收尾写库拖住
+            throw e
+        } catch (e: Exception) {
+            // 收尾这批无法归属到单个标的（不像逐标的写库能记进那个资产的失败计数），
+            // 所以只告警、不让整轮同步判失败——上面已成功的计数仍然有效。
+            AppLogger.e("收尾批量落价失败，本轮最后一批价格未写入: ${e.message}", e, TAG)
+        }
+
         val networkErrorCount = errorTypes.count { it == SyncErrorType.NETWORK }
         val serverErrorCount = errorTypes.count { it == SyncErrorType.SERVER }
         val dataErrorCount = errorTypes.count { it == SyncErrorType.DATA }

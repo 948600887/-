@@ -17,6 +17,7 @@ import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.mockkObject
+import io.mockk.slot
 import io.mockk.unmockkAll
 import io.mockk.verify
 import kotlinx.coroutines.CompletableDeferred
@@ -348,5 +349,44 @@ class AssetSyncManagerTest {
         assertEquals(0, result.failedCount)
         assertTrue("熔断跳过不该产生可重试错误", !result.hasRetryableErrors)
         assertNull("熔断跳过不该计入任何错误类型（否则触发误导性通知）", result.dominantErrorType)
+    }
+
+    /**
+     * 收尾必须 flush：不足一批的落价意图也要写库。
+     *
+     * 背景：SyncPriceWriter 只在攒满 PRICE_WRITE_BATCH_SIZE(8) 条时才批量写一次。
+     * 若收尾不调用 flushAll，每轮同步尾部最多 7 个**已经抓到**的价格会被静默丢弃——
+     * 而标的处理顺序基本固定，被丢的往往总是同一批持仓，它们的现价会长期停在旧值，
+     * 用户看到「刷了但某个持仓价格不动」，日志里却毫无痕迹。
+     *
+     * 这里用 3 个标的（< 批大小 8）钉死：若少了收尾 flush，
+     * updatePricesInTransaction 一次都不会被调用，本测试直接失败。
+     */
+    @Test
+    fun `收尾flush_不足一批的价格也要落库`() = runBlocking {
+        val codes = listOf("010001", "010002", "010003")
+        codes.forEach { code ->
+            coEvery { UnifiedPriceService.getPrice(code, AssetType.FUND, any()) } coAnswers {
+                Result.success(fundPrice(code))
+            }
+        }
+
+        val result = AssetSyncManager.syncAllAssets(
+            context, repository, codes.map { fundAsset("fund_$it") }, {}, forceRefresh = true
+        )
+
+        assertEquals(3, result.successCount)
+
+        // 捕获批量落库的入参：必须被调用，且 3 条一条不少。
+        // 用集合而非有序列表断言：三个标的是并发抓取的，完成顺序不固定。
+        val slot = slot<List<com.example.stockdiary.data.repository.PendingPriceWrite>>()
+        coVerify { repository.updatePricesInTransaction(capture(slot)) }
+        val writes = slot.captured
+        assertEquals("不足一批的落价意图被丢弃了", 3, writes.size)
+        assertEquals(
+            setOf("fund_010001", "fund_010002", "fund_010003"),
+            writes.map { it.symbol }.toSet()
+        )
+        assertTrue("价格应原样写入", writes.all { it.price == 1.5 })
     }
 }

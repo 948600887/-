@@ -182,8 +182,8 @@ fun CalendarCard(
  * 16dp 槽位装不下「10sp + Compose 默认字体 padding」的实际字高；而当时
  * 「三段 + 抬升间距」恰好等于内容区（54dp）、底部零余量，超出的部分立刻被
  * Surface 的 clip 切掉——这就是用户看到的「分又被遮挡」。
- * 格子加高到 60dp 后内容区 58dp，三段 + 间距 = 18+18+2+18 = 56dp，
- * 底部留 2dp 余量，10sp 的字在 18dp 槽位里也放得下，两头都不切。
+ * 格子加高到 60dp 后内容区 58dp，三段 + 间距 = 18+18+1+18 = 55dp，
+ * 底部留 3dp 余量，10sp 的字在 18dp 槽位里也放得下，两头都不切。
  */
 private val CALENDAR_CELL_HEIGHT = 60.dp
 /** 三段固定「槽位」高度：日期 / 金额 / 分红标记各占一位，有无内容都占位，保证横向对齐。
@@ -193,9 +193,18 @@ private val CALENDAR_CELL_HEIGHT = 60.dp
 private val CALENDAR_SLOT_DATE = 18.dp
 private val CALENDAR_SLOT_VALUE = 18.dp
 private val CALENDAR_SLOT_DIVIDEND = 18.dp
-/** 金额槽与分红槽之间的间距：把「分」往上抬（用户要求「再高 2dp」）。
- *  放在分红槽之前、无条件渲染，所以有分/无分的格子仍对齐在同一水平线。 */
-private val DIVIDEND_LIFT = 2.dp
+/**
+ * 金额槽与分红槽之间的间距。
+ *
+ * 曾经是 2dp（用户当时要求「分再高 2dp」）。但那个间距加上两端文字各自的
+ * Compose 默认字体 padding 后，「分」与金额之间的**视觉**空隙有约 5~6dp，
+ * 用户 2026-10-23 反馈「分字上面的空格太大」，要求「减到 1 就行」。
+ *
+ * 放在分红槽之前、无条件渲染，所以有分/无分的格子仍对齐在同一水平线。
+ * 若以后再想抬高分就加大这个值，但**三段 + 间距不能超过内容区 58dp**，
+ * 否则底部零余量、10sp 的字一溢出就会被 clip 切尾（见 [CALENDAR_CELL_HEIGHT] 注释）。
+ */
+private val DIVIDEND_LIFT = 1.dp
 
 @Composable
 private fun CalendarDayCell(

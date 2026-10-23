@@ -116,7 +116,8 @@ class AssetDetailViewModel(private val container: AppContainer, private val asse
                             context = container.context,
                             repository = repository,
                             assets = listOf(currentAsset),
-                            onProgress = { }
+                            onProgress = { },
+                        syncTrigger = "资产详情页刷新"
                         )
                     } catch (e: CancellationException) {
                         throw e

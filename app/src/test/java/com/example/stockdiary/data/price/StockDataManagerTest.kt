@@ -107,6 +107,23 @@ class StockDataManagerTest {
         assertEquals(ApiManager.API_SINA, first.first())
     }
 
+    @Test
+    fun `源统计快照_reset后为空_计入后按源可见`() {
+        EastmoneySkillApi.apiKey = ""
+        // 快照是轮次末汇总的数据来源，必须能 reset（否则跨轮累积、汇总失真）
+        manager.resetSourceStats()
+        assertTrue("reset 后快照应为空", manager.sourceStatsSnapshot().isEmpty())
+
+        manager.reportBatchTotalMiss(ApiManager.API_SINA, listOf("sh600519"))
+
+        val stats = manager.sourceStatsSnapshot()
+        assertEquals(1, stats.size)
+        assertEquals(ApiManager.API_SINA, stats[0].source)
+        assertEquals(1, stats[0].sourceLevelFailure)
+        assertEquals(0, stats[0].success)
+        assertEquals(0, stats[0].symbolLevelFailure)
+    }
+
     // ---------- 批量整体 0 命中的源级判定 ----------
 
     @Test

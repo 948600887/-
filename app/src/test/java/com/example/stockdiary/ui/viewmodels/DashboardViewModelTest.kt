@@ -173,7 +173,7 @@ class DashboardViewModelTest {
         mockkObject(AssetSyncManager)
         try {
             coEvery {
-                AssetSyncManager.syncAllAssets(any(), any(), any(), any(), any(), any(), any())
+                AssetSyncManager.syncAllAssets(any(), any(), any(), any(), any(), any(), any(), any(), any())
             } returns SyncResult(successCount = 3, failedCount = 1, truncatedByTimeLimit = true)
 
             val vm = buildVm()
@@ -191,7 +191,7 @@ class DashboardViewModelTest {
         mockkObject(AssetSyncManager)
         try {
             coEvery {
-                AssetSyncManager.syncAllAssets(any(), any(), any(), any(), any(), any(), any())
+                AssetSyncManager.syncAllAssets(any(), any(), any(), any(), any(), any(), any(), any(), any())
             } returns SyncResult(successCount = 5, failedCount = 0, truncatedByTimeLimit = false)
 
             val vm = buildVm()

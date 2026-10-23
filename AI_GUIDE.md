@@ -111,7 +111,7 @@ git archive --format=zip --prefix=NewStockDiary/ -o NewStockDiary.zip HEAD   # �
 # 编译（改 Kotlin 后最快反馈，约 1~3 分钟）
 ./gradlew.bat compileDebugKotlin
 
-# 全量 JVM 单元测试（当前 969 个，约 2~4 分钟）
+# 全量 JVM 单元测试（当前 976 个，约 2~4 分钟）
 ./gradlew.bat testDebugUnitTest
 
 # 只跑某一个测试类

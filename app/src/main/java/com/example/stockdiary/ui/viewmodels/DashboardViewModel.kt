@@ -287,7 +287,8 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
                     assets = priceAssets,
                     // 实时进度：刷新要跑完上百个标的，只转圈用户无从判断是在干活还是卡死
                     onProgress = { _syncProgress.value = it },
-                    forceRefresh = true
+                    forceRefresh = true,
+                syncTrigger = "仪表盘刷新"
                 )
                 AppLogger.i(
                     "价格同步完成（成功 ${syncResult.successCount}，失败 ${syncResult.failedCount}）",

@@ -5,6 +5,9 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import androidx.core.content.FileProvider
+import com.example.stockdiary.data.price.PriceCacheManager
+import com.example.stockdiary.data.sync.AssetSyncManager
+import com.example.stockdiary.utils.ExchangeRateManager
 import java.io.File
 import kotlinx.coroutines.CancellationException
 
@@ -60,7 +63,12 @@ object LogDiagnostics {
         /** app.log 的磁盘路径，给用户看；拿不到则 null */
         val appLogPath: String?,
         /** 磁盘上一共有几份崩溃报告（界面显示可能只列了最近几份） */
-        val crashFileCount: Int
+        val crashFileCount: Int,
+        /**
+         * 设备状态快照（数据源健康度 / 汇率 / 价格缓存 / 最近一轮同步汇总）。
+         * 空串 = 没采集到，头部不显示该段。默认空串保既有调用方与单测不变。
+         */
+        val deviceState: String = ""
     )
 
     /**
@@ -122,8 +130,57 @@ object LogDiagnostics {
             crashes = crashes,
             appLog = appLog,
             appLogPath = logFile?.absolutePath,
-            crashFileCount = crashFiles.size
+            crashFileCount = crashFiles.size,
+            deviceState = collectDeviceState(context)
         )
+    }
+
+    /**
+     * 采集一份设备状态快照，拼进诊断报告头部。
+     *
+     * 为什么放在报告里而不是只在线程日志里：用户分享一份报告过来，第一秒就能看到
+     * 「哪个数据源是坏的、汇率多久没刷新、价格缓存还有多少、最近一轮同步成了多少」——
+     * 这四个问题覆盖了绝大多数"数据不对"的排查起点，不必先去几百行日志里 grep。
+     *
+     * 全部读进程内内存态（熔断器相位 / 汇率表 / 价格缓存 / 最近一轮汇总），
+     * 不碰数据库不碰网络；[collect] 本就在 IO 线程上，成本可忽略。
+     * **任何一项取不到都只跳过该项**，绝不因此让整份报告失败——快照是增强，不是关键路径。
+     */
+    private fun collectDeviceState(context: Context): String {
+        val lines = mutableListOf<String>()
+
+        runCatching {
+            val status = com.example.stockdiary.data.price.StockDataManager.getInstance(context)
+                .getDataSourceStatus()
+            if (status.isNotEmpty()) {
+                lines += "数据源: " + status.joinToString(" · ") { (name, ok) ->
+                    "$name=${if (ok) "正常" else "熔断中"}"
+                }
+            }
+        }
+
+        runCatching {
+            val at = ExchangeRateManager.getLastRefreshTimeMillis()
+            val atText = if (at > 0L) {
+                java.time.Instant.ofEpochMilli(at)
+                    .atZone(java.time.ZoneId.systemDefault())
+                    .toLocalDateTime().toString().replace('T', ' ')
+            } else {
+                "从未刷新（用静态默认值）"
+            }
+            lines += "汇率: USD=${ExchangeRateManager.getRate("USD")} · 上次刷新=$atText"
+        }
+
+        runCatching {
+            val stats = PriceCacheManager.getCacheStats()
+            lines += "价格缓存: 共${stats.totalCount}条 / 有效${stats.validCount}条"
+        }
+
+        runCatching {
+            AssetSyncManager.lastRoundSummaryForDiagnostics()?.let { lines += it }
+        }
+
+        return lines.joinToString("\n")
     }
 
     /**
@@ -165,6 +222,12 @@ object LogDiagnostics {
         appendLine("崩溃报告: ${report.crashFileCount} 份" + if (report.crashFileCount > 0) "（下面列出最近 ${report.crashes.size} 份）" else "")
         appendLine("运行日志: ${report.appLog?.let { "${it.lineCount} 行" } ?: "无"}")
         report.appLogPath?.let { appendLine("日志路径: $it") }
+        // 设备状态快照：排障第一秒就能看到「哪个源坏了、汇率多久没刷、最近一轮成了多少」，
+        // 不必先去几百行日志里 grep（见 [collectDeviceState]）
+        if (report.deviceState.isNotBlank()) {
+            appendLine("--- 设备状态快照 ---")
+            appendLine(report.deviceState)
+        }
     }
 
     private fun crashesSectionOf(report: Report): String? {

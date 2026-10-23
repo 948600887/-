@@ -263,7 +263,8 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
                     repository = repository,
                     assets = priceAssets,
                     onProgress = { progress -> _syncProgress.value = progress },
-                    forceRefresh = true
+                    forceRefresh = true,
+                syncTrigger = "持仓页刷新"
                 )
                 AppLogger.i(
                     "价格同步完成（成功 ${syncResult.successCount}，失败 ${syncResult.failedCount}），开始计算分红",
@@ -428,7 +429,8 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
                     repository = repository,
                     assets = assets,
                     onProgress = { },
-                    forceRefresh = true
+                    forceRefresh = true,
+                syncTrigger = "持仓页批量刷新"
                 )
                 // 批量同步同样可能被时间预算截断：勾选的标的只同步了一部分，
                 // 不提示的话用户会以为整批都更新了

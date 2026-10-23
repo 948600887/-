@@ -153,7 +153,7 @@ class PortfolioViewModelTest {
         mockkObject(AssetSyncManager)
         try {
             coEvery {
-                AssetSyncManager.syncAllAssets(any(), any(), any(), any(), any(), any(), any())
+                AssetSyncManager.syncAllAssets(any(), any(), any(), any(), any(), any(), any(), any(), any())
             } returns SyncResult(successCount = 2, failedCount = 0, truncatedByTimeLimit = true)
 
             val vm = buildVm()

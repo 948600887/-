@@ -22,6 +22,27 @@ import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CancellationException
 
 /**
+ * 单个数据源的进程内统计快照（供同步轮次末的结构化汇总打印）。
+ *
+ * 为什么需要：真机日志里要判断「新浪是不是全挂了」只能靠人肉 `grep -c` 数成功次数，
+ * 而这种源级健康度应该是日志的一等公民。三个计数分别对应
+ * [StockDataManager.getStockData] 里的三条出口：成功 / 源级失败 / 符号级失败。
+ */
+data class SourceStats(
+    val source: String,
+    val success: Int,
+    val sourceLevelFailure: Int,
+    val symbolLevelFailure: Int
+)
+
+/** 单个数据源的计数器（进程内，由 [StockDataManager.resetSourceStats] 清零） */
+private class SourceCounters {
+    val success = java.util.concurrent.atomic.AtomicInteger()
+    val sourceFailure = java.util.concurrent.atomic.AtomicInteger()
+    val symbolFailure = java.util.concurrent.atomic.AtomicInteger()
+}
+
+/**
  * 股票数据管理器 v2
  * 支持多种数据源：妙想Skill、新浪财经、腾讯财经
  * 妙想Skill作为默认优先数据源
@@ -44,6 +65,36 @@ class StockDataManager(
      */
     private fun breakerFor(apiName: String): SourceCircuitBreaker =
         breakers.computeIfAbsent(apiName) { SourceCircuitBreaker() }
+
+    /**
+     * 每个数据源的成功 / 源级失败 / 符号级失败计数（进程内）。
+     *
+     * 与熔断器的 [SourceCircuitBreaker.failuresForTesting] 不同：那边是「连续失败计数、
+     * 成功即清零」的**状态机输入**；这边是「本轮一共问成/问败多少」的**统计快照**，
+     * 只在同步轮次末打汇总用，不参与任何判定。故意分开，避免为了统计去污染状态机。
+     */
+    private val sourceCounters = ConcurrentHashMap<String, SourceCounters>()
+
+    private fun countersFor(apiName: String): SourceCounters =
+        sourceCounters.computeIfAbsent(apiName) { SourceCounters() }
+
+    /** 清零各源统计。由同步编排器在每轮开始时调用，保证汇总反映的是**本轮** */
+    fun resetSourceStats() {
+        sourceCounters.clear()
+    }
+
+    /** 各源统计快照（按源名排序，保证汇总行顺序稳定，方便逐轮对比） */
+    fun sourceStatsSnapshot(): List<SourceStats> =
+        sourceCounters.entries
+            .sortedBy { it.key }
+            .map { (name, c) ->
+                SourceStats(
+                    source = name,
+                    success = c.success.get(),
+                    sourceLevelFailure = c.sourceFailure.get(),
+                    symbolLevelFailure = c.symbolFailure.get()
+                )
+            }
 
     /**
      * 价格是否可用于"写缓存 + 认定成功"。
@@ -234,6 +285,7 @@ class StockDataManager(
                     PriceCacheManager.cachePrice(symbol, sinaData, apiName)
                     
                     breakerFor(apiName).onSuccess()
+                    countersFor(apiName).success.incrementAndGet()
                     AppLogger.d("使用${apiName}获取数据成功: ${stockData.name}", TAG)
                     return Result.success(stockData)                }
                 if (stockData != null) {
@@ -263,12 +315,14 @@ class StockDataManager(
             // 但这不是「源不健康」——把它计入会在几次后误禁整源、把流量全甩给单一源引发雪崩，
             // 正是本轮要修的问题。分类标准见 [isSymbolLevelFailure]。
             if (isSymbolLevelFailure(failure)) {
+                countersFor(apiName).symbolFailure.incrementAndGet()
                 AppLogger.w("$symbol 在 $apiName 无数据（代码不在此源支持范围），不计入数据源失败", TAG)
                 continue
             }
 
             // 源级失败（超时 / 连接失败 / 空返回 / 格式坏 / 无效价格）：喂给熔断器
             breakerFor(apiName).onFailure(System.currentTimeMillis())
+            countersFor(apiName).sourceFailure.incrementAndGet()
             AppLogger.w("${apiName}获取数据失败: ${failure.message}", TAG)
         }
         
@@ -399,6 +453,7 @@ class StockDataManager(
             TAG
         )
         breakerFor(sourceName).onFailure(System.currentTimeMillis())
+        countersFor(sourceName).sourceFailure.incrementAndGet()
     }
 
     /** 测试专用复位：清空各数据源熔断器状态，保证用例间隔离 */

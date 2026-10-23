@@ -10,6 +10,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Response
 import okhttp3.logging.HttpLoggingInterceptor
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.CancellationException
 
 /**
  * 共享网络客户端池。
@@ -76,17 +77,49 @@ object NetworkClient {
             )
 
         if (isDebug) {
-            val loggingInterceptor = HttpLoggingInterceptor { message ->
-                // 必须脱敏：BASIC 级别的 message 是整行请求（含 query），
-                // 币安账户接口的 signature 就在 query 里，不剥就是明文落盘
-                AppLogger.d(AppLogger.sanitizeForLog(message), "OkHttp")
-            }.apply {
-                level = HttpLoggingInterceptor.Level.BASIC
-            }
-            builder.addInterceptor(loggingInterceptor)
+            builder.addInterceptor(networkLogInterceptor)
         }
 
         builder.build()
+    }
+
+    /**
+     * 一行式网络日志（取代 [HttpLoggingInterceptor] 的 BASIC 级别）。
+     *
+     * 为什么换掉：BASIC 每个请求打两行（`--> GET url` 与 `<-- 200 OK url (70ms, 2455-byte body)`），
+     * 真机 5000 行诊断日志里 OkHttp 占 3091 行（62%），真正有用的信号全埋在噪音里，
+     * 每次排障都要先和它们搏斗。这里压缩成**一行响应日志**，行数直接减半。
+     *
+     * 同时把**非 2xx 提升到 WARN**：失败本该一眼看到，而不是和 200 成功混在同一级别里
+     * 让人数。异常路径也各记一行（只记类型，不记 message——OkHttp 的 message 含设备 IP/端口）。
+     *
+     * 脱敏口径与原实现一致：BASIC 的 message 是整行（含 query），币安账户接口的
+     * signature 就在 query 里，不剥就是明文落盘，所以每条都过 [AppLogger.sanitizeForLog]。
+     *
+     * 注意：必须原样返回 response / 重新抛异常，拦截器不能吞结果。
+     */
+    private val networkLogInterceptor = Interceptor { chain ->
+        val request = chain.request()
+        val startedAt = System.currentTimeMillis()
+        try {
+            val response = chain.proceed(request)
+            val ms = System.currentTimeMillis() - startedAt
+            val bytes = runCatching { response.body?.contentLength() }.getOrNull() ?: -1L
+            val line = "<-- ${response.code} ${request.method} ${request.url} (${ms}ms, ${bytes}B)"
+            val safe = AppLogger.sanitizeForLog(line)
+            if (response.isSuccessful) AppLogger.d(safe, "OkHttp") else AppLogger.w(safe, "OkHttp")
+            response
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            AppLogger.w(
+                AppLogger.sanitizeForLog(
+                    "!-- ${request.method} ${request.url} 失败: ${e::class.simpleName}"
+                ),
+                "OkHttp"
+            )
+            throw e
+        }
     }
 
     val defaultClient: OkHttpClient by lazy {

@@ -68,7 +68,8 @@ class PriceSyncWorker(
                 // 股票价格仍按自身 5min/60s TTL 自然刷新（见 UnifiedPriceService / PriceCacheManager）。
                 forceRefresh = false,
                 startTime = startTime,
-                timeLimitMs = WORKER_TIME_LIMIT_MS
+                timeLimitMs = WORKER_TIME_LIMIT_MS,
+            syncTrigger = "后台周期同步"
             )
 
             // 同步在循环内部已对时间上限进行检查并提前返回；此处作为安全网兜底

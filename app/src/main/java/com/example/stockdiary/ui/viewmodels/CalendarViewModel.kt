@@ -123,8 +123,9 @@ class CalendarViewModel(
         _uiState.update { state -> state.copy(monthlyExpense = expense) }
         viewModelScope.launch {
             try {
-                val current = dashboardPreferencesManager.loadPreferences()
-                dashboardPreferencesManager.savePreferences(current.copy(monthlyExpense = expense))
+                // 走 Manager 的原子「读-改-写」，只改月度生活费、其余字段原样保留，
+                // 避免用陈旧副本整体回写覆盖别的页面刚改的偏好。
+                dashboardPreferencesManager.updatePreferences { it.copy(monthlyExpense = expense) }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {

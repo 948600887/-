@@ -86,6 +86,15 @@ class DashboardViewModelTest {
         every { container.context } returns mockk(relaxed = true)
         // 非挂起函数用 every / 挂起函数用 coEvery
         every { prefsMgr.loadPreferences() } returns DashboardPreferences()
+        // 模拟 Manager 的真实契约：拉磁盘最新值 → 套用 mutate → 存盘 → 返回合并结果。
+        // prefsMgr 是 mock，其 updatePreferences 是桩、真实方法体不会执行，缺省返回值会是
+        // MockK 造的假对象，导致 _preferences 被污染。
+        every { prefsMgr.updatePreferences(any()) } answers {
+            val mutate = firstArg<(DashboardPreferences) -> DashboardPreferences>()
+            val updated = mutate(prefsMgr.loadPreferences())
+            prefsMgr.savePreferences(updated)
+            updated
+        }
         every { assetRepo.getAllAssets() } returns flowOf(emptyList())
         every { assetRepo.getAllSnapshots() } returns flowOf(emptyList())
         coEvery { assetRepo.getAllAccounts() } returns emptyList()

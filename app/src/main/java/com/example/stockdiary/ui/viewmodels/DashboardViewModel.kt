@@ -222,14 +222,15 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
                 hasLoadedIncome = true
 
                 // 存下来：下次进场先摆这个值，不用等这一轮算完。
-                // 关键修复（P0-3）：先拉一次磁盘最新偏好，再只覆盖两个缓存字段，
-                // 避免用构造期陈旧的偏好整体回写，覆盖用户在设置页刚改的开关。
-                val fresh = preferencesManager.loadPreferences()
-                _preferences.value = fresh.copy(
-                    annualDividendCache = result.totalAnnualIncome,
-                    annualDividendSymbols = assetsOnly.mapNotNull { it.symbol }.toSet()
-                )
-                preferencesManager.savePreferences(_preferences.value)
+                // 走 Manager 的原子「读-改-写」：只覆盖两个缓存字段，其余（含用户在设置页
+                // 刚改的开关、日历改的月度生活费等）原样保留，杜绝用陈旧副本整体回写覆盖。
+                val updated = preferencesManager.updatePreferences { prefs ->
+                    prefs.copy(
+                        annualDividendCache = result.totalAnnualIncome,
+                        annualDividendSymbols = assetsOnly.mapNotNull { it.symbol }.toSet()
+                    )
+                }
+                _preferences.value = updated
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {

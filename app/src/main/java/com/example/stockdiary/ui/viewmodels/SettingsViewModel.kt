@@ -341,6 +341,10 @@ class SettingsViewModel(
     fun saveDashboardPreferences(preferences: DashboardPreferences) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
+                // 这里整块存是安全的：入参 preferences 由 DashboardConfigSheet 在 Compose state 里
+                // 「累积 copy」构造（初始值取自本 VM 进场时磁盘最新加载的 _dashboardPreferences），
+                // 始终是一份**完整且最新**的偏好，不会漏掉别的页面设的字段（如月度生活费 / 收入缓存）。
+                // 因此与其他页面用 Manager.updatePreferences 只改单字段的写法不冲突。
                 dashboardPreferencesManager.savePreferences(preferences)
                 _dashboardPreferences.value = preferences
             } catch (e: CancellationException) {

@@ -13,6 +13,7 @@ import com.example.stockdiary.database.SnapshotDao
 import io.mockk.coEvery
 import io.mockk.every
 import io.mockk.mockk
+import io.mockk.slot
 import io.mockk.verify
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -94,6 +95,15 @@ class CalendarViewModelTest {
 
     private fun buildVm(): CalendarViewModel {
         every { prefsMgr.loadPreferences() } returns DashboardPreferences()
+        // 模拟 Manager 的真实契约：拉磁盘最新值 → 套用 mutate → 存盘 → 返回合并结果。
+        // 必须这么打桩：prefsMgr 是 mock，其 updatePreferences 是桩、真实方法体不会执行，
+        // 于是内部的 load/save 都不会发生；且缺省返回值是 MockK 造的假对象。
+        every { prefsMgr.updatePreferences(any()) } answers {
+            val mutate = firstArg<(DashboardPreferences) -> DashboardPreferences>()
+            val updated = mutate(prefsMgr.loadPreferences())
+            prefsMgr.savePreferences(updated)
+            updated
+        }
         every { assetRepo.getAllAssets() } returns flowOf(listOf(stockAsset))
         coEvery { snapshotDao.getAllSnapshotsSync() } returns emptyList()
         // 两个日历生成路径都会先调 preFetchDividends，必须显式打桩：
@@ -151,6 +161,30 @@ class CalendarViewModelTest {
             runCatching { verify { prefsMgr.savePreferences(any()) } }.isSuccess
         }
         verify { prefsMgr.savePreferences(any()) }
+    }
+
+    @Test
+    fun `更新月度生活费只改该字段不覆盖其他偏好`() = runBlocking {
+        val vm = buildVm()
+        waitUntil { vm.uiState.value.assets.isNotEmpty() }
+
+        // 模拟磁盘上已有别的页面设过的偏好（非默认值），验证月度生活费更新不会把它们冲掉。
+        // 必须放在 buildVm() 之后打桩：buildVm 内部同样会打桩 loadPreferences，后打的桩才生效。
+        every { prefsMgr.loadPreferences() } returns DashboardPreferences(
+            monthlyExpense = "5000",
+            showTotalAssets = true,   // 非默认：设置页开过「显示总资产」
+            defaultPeriod = "3M"      // 非默认：历史页选过「3月」
+        )
+        val slot = slot<DashboardPreferences>()
+        every { prefsMgr.savePreferences(capture(slot)) } returns Unit
+
+        vm.updateMonthlyExpense("9999")
+
+        waitUntil(timeoutMs = 2000) { slot.isCaptured }
+        assertEquals("9999", slot.captured.monthlyExpense)
+        // 其余字段必须原样保留——这正是「共享整块偏好互相踩踏」要锁的契约
+        assertTrue(slot.captured.showTotalAssets)
+        assertEquals("3M", slot.captured.defaultPeriod)
     }
 
     @Test

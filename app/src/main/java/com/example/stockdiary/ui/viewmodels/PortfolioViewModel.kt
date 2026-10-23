@@ -388,7 +388,8 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
     }
 
     /**
-     * 持久化偏好：先拉一次磁盘最新值，把要改的字段合并进去再整体回写，并同步内存副本。
+     * 持久化偏好：统一走 [com.example.stockdiary.data.prefs.DashboardPreferencesManager.updatePreferences]，
+     * 即「先拉磁盘最新值 → 只合并要改的字段 → 整体回写」，并同步内存副本。
      *
      * 必须的修复点：原先直接 `savePreferences(_preferences.value)` 把**构造期一次性加载、
      * 可能已过期**的内存副本整体回写，会覆盖别的页面刚写盘的值——最典型的就是
@@ -396,14 +397,12 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
      * 一旦持仓页（或任何持有一份陈旧偏好的页面）因为刷新/排序/恢复显示等无关操作触发保存，
      * 就会把 monthlyExpense 冲回旧值，表现为「改了但不保存」。
      *
-     * 这与 DashboardViewModel 的 P0-3 修复是同一类问题：所有页面共享一个
-     * DashboardPreferences 整块，任一页面用陈旧副本整体回写都会踩掉别的页面刚改的字段。
-     * 这里统一改成「先 load 再 merge 再 save」对齐 P0-3 的做法。
+     * 各页面共享同一块 DashboardPreferences，任一页面用陈旧副本整体回写都会踩掉别的页面刚改的字段。
+     * 现在统一收敛到 Manager 的原子「读-改-写」入口（Calendar / Dashboard 同样走这里），
+     * 从根上保证「只动我改的字段」，杜绝互相踩踏。
      */
     private fun persistPreferences(mutate: (DashboardPreferences) -> DashboardPreferences) {
-        val fresh = container.dashboardPreferencesManager.loadPreferences()
-        val updated = mutate(fresh)
-        container.dashboardPreferencesManager.savePreferences(updated)
+        val updated = container.dashboardPreferencesManager.updatePreferences(mutate)
         _preferences.value = updated
     }
 

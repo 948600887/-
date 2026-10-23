@@ -85,6 +85,16 @@ class PortfolioViewModelTest {
         every { container.dashboardPreferencesManager } returns prefsMgr
         every { container.context } returns mockk(relaxed = true)
         every { prefsMgr.loadPreferences() } returns initialPrefs
+        // 模拟 Manager 的真实契约：拉磁盘最新值 → 套用 mutate → 存盘 → 返回合并结果。
+        // 必须这么打桩：prefsMgr 是 mock，其 updatePreferences 是桩、真实方法体不会执行，
+        // 于是内部的 load/save 都不会发生；且缺省返回值是 MockK 造的假对象，
+        // 会让 vm.preferences 被赋成假对象（表现为「SortOrder 是个陌生实例」）。
+        every { prefsMgr.updatePreferences(any()) } answers {
+            val mutate = firstArg<(DashboardPreferences) -> DashboardPreferences>()
+            val updated = mutate(prefsMgr.loadPreferences())
+            prefsMgr.savePreferences(updated)
+            updated
+        }
         every { assetRepo.getAllAssets() } returns flowOf(emptyList())
         coEvery { assetRepo.getAllAccounts() } returns emptyList()
         coEvery { useCase.load(any(), any(), any(), any()) } returns DividendIncomeLoader.IncomeResult(

@@ -188,4 +188,22 @@ class DashboardPreferencesManager(context: Context) {
     fun resetToDefaults() {
         prefs.edit().clear().apply()
     }
+
+    /**
+     * 原子「读-改-写」偏好，并返回写盘后的完整副本。这是所有偏好写入的**统一入口**。
+     *
+     * 为什么需要它：各 ViewModel 各自持有一份 [DashboardPreferences] 内存副本，若直接用可能过期的
+     * 副本整体 [savePreferences]，就会把别的页面刚改的字段覆盖掉——最典型的就是日历 FIRE 算的
+     * 「月度生活费」被持仓页冲回旧值（表现为「改了但不保存」）。
+     *
+     * 本方法强制在写入前先 `loadPreferences()` 拉磁盘最新值，再只套用 [mutate] 里改的字段，
+     * 从而保证「只动我改的字段、其余原样保留」。所有写者都走这里，就能从根上消除
+     * 「共享整块偏好互相踩踏」这一类 bug，而不必每个 VM 各写一遍 reload+merge、漏一个就出事。
+     */
+    fun updatePreferences(mutate: (DashboardPreferences) -> DashboardPreferences): DashboardPreferences {
+        val fresh = loadPreferences()
+        val updated = mutate(fresh)
+        savePreferences(updated)
+        return updated
+    }
 }

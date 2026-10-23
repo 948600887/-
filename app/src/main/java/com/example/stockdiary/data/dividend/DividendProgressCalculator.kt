@@ -264,6 +264,11 @@ object DividendProgressCalculator {
     ): Double {
         val year = today.year
         val yearStart = "$year-01-01"
+        // 必须配上界：只写 >= yearStart 的话，「明年及以后」的除息记录也会被算进今年
+        // （字符串比较下 "2027-03-15" >= "2026-01-01" 为真），与本函数 KDoc 声明的
+        // 「除息日落在今年 1/1 ~ 12/31」口径不符；且那笔在跨年后会被重复计入两个年度。
+        // 典型触发场景是年末排定、次年初除息的分红——恰恰是上面注释说「最该显示」的那类。
+        val yearEnd = "$year-12-31"
         val daysInYear = Year.of(year).length()
 
         return assets.sumOf { asset ->
@@ -285,7 +290,7 @@ object DividendProgressCalculator {
                         // 今年已宣告（除息日 ≥ 今年 1/1，含已排定未到账）→ 这些记录实额 × 持仓
                         val thisYear = records.filter { record ->
                             val exDate = record.exDividendDate.take(10)
-                            exDate.length == 10 && exDate >= yearStart
+                            exDate.length == 10 && exDate >= yearStart && exDate <= yearEnd
                         }
                         if (thisYear.isNotEmpty()) {
                             thisYear.sumOf { record ->

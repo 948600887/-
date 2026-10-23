@@ -643,8 +643,14 @@ class DividendRepository private constructor(
         // 它们都在交易所挂牌、却不是股票也不是场外基金，分红/收益分配只在天天基金有，
         // 东财股票分红报告(RPT_SHAREBONUS_DET)与 Sina 都不覆盖。从前只把 isEtf 当门槛，
         // 导致 REIT 永远到不了基金分红源、静默显示 0 并被 7 天负缓存固化（见 sh508085）。
+        // LOF（16xxxx/18xxxx 深交所上市开放式基金）同样在交易所挂牌、分红/收益分配
+        // 只在天天基金有，东财股票分红表与 Sina 都不覆盖。classifyCode 把它们单列为
+        // CodeCategory.LOF（不是 EXCHANGE_FUND），只认 EXCHANGE_FUND 会让 LOF 掉到下面的
+        // 新浪兜底分支 → 恒为空 → 被 7 天负缓存固化，与上面 REIT 那次是同一个漏网。
+        val category = StockCodeManager.classifyCode(pureSymbol)
         val isExchangeFund = isEtf || (!StockCodeManager.hasFundPrefix(normalizedSymbol) &&
-            StockCodeManager.classifyCode(pureSymbol) == StockCodeManager.CodeCategory.EXCHANGE_FUND)
+            (category == StockCodeManager.CodeCategory.EXCHANGE_FUND ||
+                category == StockCodeManager.CodeCategory.LOF))
 
         // 「本轮有没有任何一个数据源应答过」。只要有一个应答，空结果就是有效结论
         // （该写负缓存）；一个都没应答说明是网络/限流问题，上抛让调用方什么都不写

@@ -281,7 +281,7 @@ fun StockAssetItem(
                         currentPrice != null ->
                             ExchangeRateManager.toCny(currentPrice, asset.currency).formatMoney(digits = pricePrecision)
                         StockCodeManager.isDelistedForSync(asset.symbol) -> "退市"
-                        // 币安主机级熔断期间（连不上 api.binance.com，见 BinanceHostGate）要给一个
+                        // 币安主机级熔断期间（连不上币安公开行情，见 BinanceHostGate）要给一个
                         // 区别于「价格待更新」的提示：前者是网络/主机问题，后者可能是数据源缺数据。
                         // 注意 isUnavailable 是普通 volatile 读、不可观察；列表在每轮同步结束后会重组，
                         // 届时标签会刷新——这个局限写进注释，别做成轮询。它是纯读、无副作用，

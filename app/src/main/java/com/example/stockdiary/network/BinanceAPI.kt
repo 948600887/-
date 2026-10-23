@@ -8,7 +8,8 @@ import org.json.JSONObject
 import kotlinx.coroutines.CancellationException
 
 object BinanceAPI {
-    private const val BASE_URL = "https://api.binance.com/api/v3"
+    // 公开行情走 data-api.binance.vision（不做地区封锁，与 api.binance.com 同套 /api/v3 路径）
+    private const val BASE_URL = "https://data-api.binance.vision/api/v3"
     private const val PRICE_URL = "$BASE_URL/ticker/price"
     private const val KLINE_URL = "$BASE_URL/klines"
     

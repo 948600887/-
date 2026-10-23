@@ -57,11 +57,11 @@ data class BinanceBalance(
  */
 object BinanceAccountAPI {
 
-    /** 账户查询接口。BASE_URL 复用 [APIEndpoints.Binance]，避免硬编码重复 */
+    /** 账户查询接口（签名，需 API Key）。必须走 api.binance.com——公开行情镜像不服务 /account */
     private const val ACCOUNT_URL = APIEndpoints.Binance.BASE_URL + "/account"
 
-    /** 批量最新价接口（公开免签）。用于导入时估算市值、按价值过滤零碎 */
-    private const val PRICE_URL = APIEndpoints.Binance.BASE_URL + APIEndpoints.Binance.TICKER
+    /** 批量最新价接口（公开免签）。走 data-api.binance.vision（不做地区封锁），用于导入时估算市值 */
+    private const val PRICE_URL = APIEndpoints.Binance.MARKET_DATA_BASE_URL + APIEndpoints.Binance.TICKER
 
     /**
      * 批量取价每批的交易对个数上限。
@@ -156,36 +156,29 @@ object BinanceAccountAPI {
                     )
 
                     if (!resp.isSuccessful) {
-                        // 451/403 = 地区封锁 / 访问被拒：主机可达但本用户用不了，等同「主机不可用」，
-                        // 喂给熔断器使其 OPEN 短路后续请求，并让 UI 统一显示「币安暂不可达」。
-                        // 其余 4xx/5xx 主机其实可达，仍走下方 2xx 的 onSuccess 复位计数口径。
-                        // （旧代码在 isSuccessful 检查前就调 onSuccess，把 451 当成功、熔断一解除
-                        // 又被 451 循环空转——与行情路径 UnifiedPriceService.getCryptoPrice 同款修复。）
-                        if (resp.code == 451 || resp.code == 403) {
-                            BinanceHostGate.onNetworkFailure(System.currentTimeMillis())
-                        }
-                        // 4xx 时币安会在 body 里给 {"code":-2015,"msg":"..."}，
-                        // 解析出来转成失败，别吞成"未知错误"——用户分不清是密钥错还是网络错
+                        // 451/403 = 地区封锁（api.binance.com 在部分地区直接回 451）。
+                        // ⚠️ 这里**不再喂熔断器**：公开行情已改走 data-api.binance.vision（不做地区
+                        // 封锁），熔断器现在只保护那台镜像主机。账户接口只能走 api.binance.com
+                        // （签名 /account 镜像不服务），封锁地区里账户必然失败——若把它的 451/连不上
+                        // 喂进同一个熔断器，就等于把能用的镜像行情也跟着熔断短路，等于白修。
+                        // 账户的失败直接透传给导入流程提示用户（下方 binanceError 解析 body 业务码）。
+                        // 其余 4xx/5xx 也直接失败返回，不碰熔断器。
                         return@withContext Result.failure(binanceError(body, resp.code))
                     }
 
-                    // 2xx：真正成功。复位熔断连续失败计数，并（若正处于半开探测）闭路。
-                    // ⚠️ 必须在 isSuccessful 检查之后才调用——否则 451 会被当成成功。
-                    BinanceHostGate.onSuccess()
+                    // 2xx：解析余额并返回。账户路径刻意不碰熔断器（理由见上方 451 注释）。
                     return@withContext Result.success(parseBalances(body))
                 }
             } catch (e: CancellationException) {
                 // 协程取消必须原样抛回，不能被 catch(Exception) 吞成失败结果
                 throw e
             } catch (e: Exception) {
-                // 网络级失败（连不上 / 超时 / 域名解析不了 / IO 错误）喂给主机级熔断器：
-                // 账户路径原本只返回 Result.failure、从没喂过 gate，导致连不上的时候行情
-                // 路径知道、资产路径不知道——UI 不会对「币安暂不可达」做统一展示，
-                // 也不会像行情那样在冷却期短路、自愈。现在与行情路径共用同一闸门。
-                // 注意：JSON 解析等非 IO 异常不应顶爆熔断——它们不是"主机不可达"。
-                if (e is IOException) {
-                    BinanceHostGate.onNetworkFailure(System.currentTimeMillis())
-                }
+                // 网络级失败（连不上 / 超时 / 域名解析不了 / IO 错误）：**不喂熔断器**。
+                // 账户接口只走 api.binance.com（签名 /account 镜像不服务），与公开行情镜像
+                // data-api.binance.vision 是两台可达性不同的主机——封锁地区账户必失败、而镜像
+                // 行情可达，一旦把账户失败喂进熔断器，就会把能用的镜像行情也熔断短路。导入是用户
+                // 手动触发、不在后台同步里反复重试，失败直接透传给导入流程提示即可。
+                // JSON 解析等非 IO 异常更不该顶爆熔断——它们不是"主机不可达"。
                 // 连接类失败（连不上 / 超时 / 域名解析不了）换成一句人话。
                 // OkHttp 的原始 message 形如 "failed to connect to api.binance.com/2001:… (port 443)
                 // from /2409:… (port 48944) after 10000ms"——既看不懂，又把设备 IP/端口

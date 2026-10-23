@@ -204,7 +204,7 @@ app/src/main/java/com/example/stockdiary/
 
 1. **Compose 版本必须严格对齐**：`compose-bom:2024.02.00` 与 `lifecycle 2.7.0` / `activity-compose 1.8.2` 绑死。随意升级会把 `compose-runtime` 拉高，导致启动即崩 `LocalLifecycleOwner not present`。见 `app/build.gradle.kts` 注释。
 2. **项目路径含非 ASCII 字符**：构建已统一加 `-Dfile.encoding=UTF-8`，别删（`app/build.gradle.kts` 的 `tasks.withType<Test>`）。
-3. **币安在中国大陆被地区封锁**：行情返 **HTTP 451**、账户常 `UnknownHostException`。**这是网络/合规限制，不是代码 Bug**，换币安自家域名同样 451。已用 `network/BinanceHostGate.kt`（三态断路器：CLOSED/OPEN/HALF_OPEN + 半开探测自愈）做主机级短路；**行情路径与账户/资产路径共用同一闸门**。
+3. **币安公开行情已绕开中国大陆地区封锁**：公开行情镜像 `data-api.binance.vision` 与 `api.binance.com` 同套 `/api/v3` 路径、**不做地区封锁**（实测 200 + lastPrice），故**行情/查价/市值估算无需代理即可联网**。但**签名 `/account` 导入仍只能走 `api.binance.com`**，封锁地区会 451 / `UnknownHostException`，仍需挂代理。`network/BinanceHostGate.kt`（三态：CLOSED/OPEN/HALF_OPEN + 半开探测自愈）**只保护公开行情镜像**；账户路径刻意不喂它——否则封锁地区账户失败会把能用的镜像行情一并熔断短路。
 4. **两套日期口径，不要混**：`收息进度` 按**除息日**；`日历页`按**发放日**（`DividendData.cashDateOrNull`）。日历用发放日是专门修"钱没到却显示分红"这个 bug 换的，**改回除息日会让它复活**。
 5. ~~`DashboardComponent` 枚举死代码~~ **已于 `b47cee8` 删除**（连同 `updateComponentVisibility` / `isComponentVisible` / `getVisibleComponents`）。开关现在只在 `DashboardPreferences` data class 一处，不再有两套实现。旧资料（含某些审查报告）若让你去改那个枚举——**忽略，它已不存在**。
 6. **场内基金/REIT（508xxx、500/501xxx、16xxxx）分红不在东财股票分红报告**（返回 9201 空），必须走天天基金源。见 `DividendRepository.fetchDividendData` 的 `isExchangeFund`。
@@ -242,7 +242,7 @@ app/src/main/java/com/example/stockdiary/
 |---|---|---|
 | 1 | **收息进度按除息日** | 原先分子按到账日、分母按除息日导致「已收 > 预计」。改后已收 ≤ 预计恒成立。**代价**：「今年已收」不再等同"钱真到账"。 |
 | 2 | **日历页仍按发放日** | 日历用发放日是专门修「钱没到却显示分红」这个 bug 换的，**改回除息日会让 bug 复活**。两套口径并存是有意为之。 |
-| 3 | **明确不做币安备用域名/重试** | 451 是按条款拒绝，换币安自家域名照样 451；串行重试把 20s 放大到 80s，是负优化。币安拿不到**只能挂代理**。 |
+| 3 | **公开行情改走 data-api.binance.vision 镜像（绕开地区封锁）；串行重试仍不做** | 451 是合规层拒绝、换 IP 无效；但币安**公开行情镜像** `data-api.binance.vision` 与 `api.binance.com` 同套路径、不做地区封锁，实测可稳定取价。故公开行情（ticker/24hr、ticker/price、旧 BinanceAPI）一律走镜像、**无需代理**。签名 `/account` 导入只能走 api.binance.com，封锁地区仍需代理。串行重试仍不做（20s→80s 是负优化）。⚠️ 账户路径**不再喂** BinanceHostGate——否则封锁地区账户失败会把能用的镜像行情也熔断短路。 |
 | 4 | **REIT 分红走天天基金** | 东财股票分红报告不含 REIT 收益分配（返 9201 空），此前静默显示 0 并被 7 天负缓存固化。 |
 
 ### 长期约定
@@ -252,7 +252,7 @@ app/src/main/java/com/example/stockdiary/
 
 ### 仍未解决 / 外部限制（别再试图"修复"）
 
-- **币安资产在中国大陆拿不到**：地区封锁（HTTP 451 + DNS 屏蔽），代码层面无解，唯一办法是挂代理。
+- **币安签名 `/account` 导入在中国大陆仍受地区封锁**：HTTP 451 + DNS 屏蔽，代码层面无解，唯一办法是挂代理。公开行情已改走 `data-api.binance.vision` 镜像绕开封锁，无需代理即可取价。
 - 代码里**没有** `DataManager.kt`：早期文档误称其为旧版全局状态容器，实际不存在；活跃行情层是 `StockDataManager`（多源 + 熔断），被 Repository 调用，是现行代码。无需为「消灭 DataManager」做重构。
 - `CODE_ARCHITECTURE.md` 部分过时，以实际代码与本手册为准。
 

@@ -28,8 +28,8 @@
 | 2026-10-21 | **日历页仍按发放日**（`DividendData.cashDateOrNull`），不跟随改除息日 | 日历用发放日是当初专门修「按除息日打「分」，用户看到"明明没到日期却显示分红了"」这个实测 bug 换来的，改回去 bug 会复活。**两套日期口径并存是有意为之，不是疏漏。** |
 | 2026-10-21 | 「预计年度收入」改**自然年口径**，与「今年预计」同源 | 让 Dashboard / Portfolio / Calendar 三个头条数字严格一致。唯一数据源抽成 `DividendProgressCalculator.naturalYearAnnualIncome`。**`dividendsBySymbol`(TTM) 不动**，股息率/FIRE 收入率不受影响。 |
 | 2026-10-21 | 自然年口径下**保留存款利息** | 用户拍板"保留利息"（如 10 万 × 3% = 3000 计入今年预计）。注意存款利息只进预计、不进已收。 |
-| 2026-10-21 | 币安**账户/资产路径**接入 `BinanceHostGate` | 原先只有行情路径接了熔断，账户路径从没喂过闸门 → "行情知道、资产不知道"、UI 提示不统一。现在两条路径**共用同一闸门**。 |
-| 2026-10-21 | **明确不做**币安备用域名 / 串行重试 | 451 是服务器按条款拒绝，换币安自家任何域名（含 `data-api.binance.vision`）同样 451；而串行重试在 `callTimeout=20s` 下把单请求放大到 80s，是**负优化**。 |
+| 2026-10-21 | 币安**账户/资产路径**曾接入 `BinanceHostGate`（2026-10-23 已解耦） | 原意让行情/账户共用同一闸门统一"币安暂不可达"提示；但 2026-10-23 公开行情改走 `data-api.binance.vision` 镜像后，账户（api.binance.com）与镜像可达性不同，共用闸门会让封锁地区账户失败把能用的镜像行情也熔断短路。**故账户路径不再喂闸门**，仅公开行情镜像路径（UnifiedPriceService / BinanceAccountAPI.getPrices）保留熔断保护。 |
+| 2026-10-21 | **明确不做**币安串行重试（"换币安自家域名"已修订） | 串行重试在 `callTimeout=20s` 下把单请求放大到 80s，是**负优化**。⚠️ 原「含 `data-api.binance.vision` 同样 451」**已不成立**：该公开行情镜像不做地区封锁，2026-10-23 已让公开行情改走它绕开封锁；仅签名 `/account` 仍受 451。 |
 | 2026-10-21 | REIT / 非 ETF 场内基金（508xxx、500/501xxx）分红**改走天天基金** | 东财 `RPT_SHAREBONUS_DET` 对这类标的返回 `code:9201 返回数据为空`，此前静默显示 0 并被 7 天负缓存固化。天天基金 `fundf10.eastmoney.com/fhsp_<code>.html` 实抓 200 且有完整数据。 |
 | 2026-10-21 | 历史页风险指标六项改 `Modifier.weight(1f)` 等宽 | 原先 `SpaceEvenly` + 宽度随内容变化 → 上下两行三列不对齐。 |
 | 2026-10-21 | 自定义仪表盘新增 4 个卡片开关（默认全 true） | 用户要「资产增值可以不用显示」，并授权扩展。面板现共 12 项：摘要组件 5 / 资产类别 5 / 收入组件 3 / 隐藏低价值币 2。默认 true 保证老用户升级不丢卡。 |
@@ -108,6 +108,7 @@
 | `d86d5b1` | 日历「分」消遮挡 + 收紧间隙 | 上一版把三段之和凑成正好等于内容区（底部零余量），而分红标记已从 8sp 提到 10sp、16dp 槽位装不下 → 又被 clip 切。**修法：格高 56→60（内容区 58，三段+间距=56 留 2dp 余量）、分红槽 16→18dp；对齐 `Center→TopCenter`**（原来字浮在槽位中间，与上方金额空出约 8dp，用户反馈"间隙太大"）。**教训：抬比分只能加间距或加高格子，绝不能把总和凑到等于内容区。** |
 | `1987f51` / `534e88d` | 修落价批量化引入的真 bug | `SyncPriceWriter` 收尾**从未调用 `flushAll()`** → 每轮同步尾部最多 7 个**已抓到**的价格被静默丢弃；标的处理顺序基本固定 ⇒ 被丢的总是同一批持仓，现价长期停在旧值、日志无痕。修法：flush 放进块内已有的 `finally` + `withContext(NonCancellable)`，一个插入点覆盖正常收尾与取消两条路径；加 2 条回归测试（不足一批也落库 / 取消时也落库）。 |
 | 本次 | **去掉「我的 → 行情数据源」，数据源全自动** | 用户发现该设置形同虚设：批量预取写死走新浪（只有新浪有批量接口），偏好只在兜底路径生效，新浪正常时选腾讯/妙想毫无效果。**已去除**：设置页入口改为「数据源状态」（保留体检）、删 `ApiSelectionDialog.kt`、`ApiManager` 去掉 SharedPreferences 读写只留常量。顺序**全自动** = 妙想Skill(仅配置了 API Key 时参与) > 新浪 > 腾讯，某源连续失败由 `SourceCircuitBreaker` 自动短期禁用并降级。 |
+| 本次 | **币安公开行情绕开地区封锁（data-api.binance.vision 镜像）** | 根因：用户换多个出口 IP 币安仍取不到价——`api.binance.com` 在部分地区回 451/DNS 屏蔽，这是**合规层**拒绝、**换 IP 无效**（与连通层失败不同）。币安**公开行情镜像** `data-api.binance.vision` 同套 `/api/v3` 路径、**不做地区封锁**，实测 200 + lastPrice。改动：公开行情（UnifiedPriceService.ticker/24hr、BinanceAccountAPI 批量 ticker/price、旧 BinanceAPI 对象、DataSourceHealthChecker ping）全部改走镜像；**签名 `/account` 导入仍走 api.binance.com**（镜像不服务）。**关键解耦**：账户路径不再喂 `BinanceHostGate`——否则封锁地区账户必失败会把「能用的镜像行情」一并熔断短路，等于白修；仅镜像行情路径保留熔断保护。重写 `BinanceAccountAPIGateTest` 钉死「账户不碰 gate、只有取价喂 gate」。测试仍 981 全绿。 |
 
 测试规模演进：925 → 931 → 933 → 943 → 945 → 956 → 969 → 971 → 973 → 975 → 976 → **981**（0 failures / 0 errors / 0 skipped）。
 
@@ -121,8 +122,7 @@
 |---|---|---|
 | **历史页（资产分析）点「1周/1月/3月/6月/1年/全部」图表不变** | **数据问题，非 bug**（已用诊断日志坐实） | 全链路(`HistoryPeriodSelector` → `HistoryViewModel.selectPeriod` → `filterSnapshots` → `AssetTrendChart` 的 `Crossfade`+`key(period)`)逻辑正确。真实原因：**用户快照少且全在最近**(诊断日志"快照8天")，各周期滤出同一批 → 图表当然不变。等快照攒过一周后再看。**别去改 `HistoryViewModel` 的 `rebuildState` 或图表的 `Crossfade`/`key`**——那是正确代码。若届时要改善体感，可考虑在周期按钮下加「N 个快照(起~止)」反馈行。 |
 
-- **币安资产在中国大陆拿不到**：HTTP **451**（地区合规拒绝）+ `UnknownHostException`（DNS 屏蔽）双层封锁。
-  **代码层面无解**，唯一办法是挂代理到允许地区的节点。App 已能优雅降级并给出明确中文提示。
+- **币安公开行情已绕开中国大陆地区封锁**：公开行情镜像 `data-api.binance.vision` 与 `api.binance.com` 同套 `/api/v3` 路径、**不做地区封锁**（实测 200 + lastPrice），所以**行情/查价/市值估算无需代理即可联网**。但**签名 `/account` 导入仍只能走 `api.binance.com`**，在封锁地区会 451 / `UnknownHostException`，仍只能挂代理导入持仓。App 对行情已能正常取价；账户导入失败会给出明确的「请检查网络或代理」中文提示。
 - **代码里没有 `DataManager.kt`**：早期架构文档（CODE_ARCHITECTURE.md）曾写「DataManager 旧版全局状态容器」，但仓库中**不存在**该文件（已核实）。当前行情抓取层是 `StockDataManager`（多源聚合 + `SourceCircuitBreaker` 数据源级熔断），它本身**被 Repository 调用**，是活跃代码而非历史遗留。**不要**按「消灭 DataManager」去做大规模重构——它不存在，`StockDataManager` 也无需大改。新增功能仍尽量走 Repository 边界。
 - **`CODE_ARCHITECTURE.md` 部分过时**：导航实际是 `ui/navigation/GoldVaultNavHost.kt`（不是 `StockDiaryNavHost.kt`）；`common/` 现在只有 `APIConfig.kt` 和 `Result.kt`。**以实际代码为准**。
 - **设备端网络不稳会放大问题**：诊断日志曾出现东财/新浪/天天基金多域名同时 DNS 失败、价格同步 0/102。这是当时的网络状况，不是逻辑 Bug。

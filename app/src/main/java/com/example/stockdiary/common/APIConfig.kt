@@ -22,7 +22,25 @@ object APIEndpoints {
 
     // ===== 币安 =====
     object Binance {
+        /**
+         * 签名账户接口（/account）专用主机：api.binance.com。
+         * 账户查询需要 API Key + 签名，且只有 api.binance.com 提供 /account，
+         * 公开行情镜像不服务该接口，所以**账户类请求必须留在这台主机**。
+         */
         const val BASE_URL = "https://api.binance.com/api/v3"
+        /**
+         * 公开行情主机：data-api.binance.vision。
+         *
+         * 币安的**公开**行情镜像，与 api.binance.com 同套 /api/v3 路径、同返回结构，
+         * 但**不做地区封锁**——api.binance.com 在部分地区直接回 451（Unavailable For
+         * Legal Reasons），用户无论换几个出口 IP 都拿不到价（451 是「主机可达但被拒绝」，
+         * 不是连不上，换 IP 无效）。
+         *
+         * 公开行情（ticker/24hr、ticker/price、klines）只读市场数据、无需密钥，一律走这个
+         * 镜像，彻底绕开地区封锁。实测：api.binance.com/ticker/24hr 在本机网络返回 502/不可达，
+         * 而 data-api.binance.vision/ticker/24hr?symbol=BTCUSDT 稳定返回 200 + lastPrice。
+         */
+        const val MARKET_DATA_BASE_URL = "https://data-api.binance.vision/api/v3"
         const val TICKER = "/ticker/price"
         const val EXCHANGE_INFO = "/exchangeInfo"
         const val KLINE = "/klines"

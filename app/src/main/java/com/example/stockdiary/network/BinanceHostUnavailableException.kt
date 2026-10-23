@@ -3,8 +3,8 @@ package com.example.stockdiary.network
 /**
  * 「币安主机当前不可达」——主机级熔断（见 [BinanceHostGate]）期间发出的信号。
  *
- * 用户所在网络连不上 api.binance.com 时，逐个加密货币标的重复试错没有意义
- * （换标的、换交易对都一样连不上），熔断器会在一段冷却期内直接短路请求。
+ * 用户所在网络连不上币安公开行情主机（data-api.binance.vision）时，逐个加密货币标的
+ * 重复试错没有意义（换标的、换交易对都一样连不上），熔断器会在一段冷却期内直接短路请求。
  * 这个异常就是那条短路路径的返回值。
  *
  * 调用方约定（照 [QuoteSuspendedException] 的跨层判断写法）：

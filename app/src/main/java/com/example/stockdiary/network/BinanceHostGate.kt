@@ -30,7 +30,7 @@ private data class GateState(
 )
 
 /**
- * 币安主机级熔断器（进程内状态，仅针对 api.binance.com）——标准三态断路器。
+ * 币安主机级熔断器（进程内状态，针对币安**公开行情**主机 data-api.binance.vision）——标准三态断路器。
  *
  * 治的场景：用户所在网络压根连不上币安（IPv6 ConnectException / SocketTimeoutException）。
  * 此时每轮同步会为每个加密货币标的各烧最多 20s callTimeout，且都计入 failedCount、

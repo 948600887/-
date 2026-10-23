@@ -132,17 +132,19 @@ object DataSourceHealthChecker {
     suspend fun checkBinanceAPI(): DataSourceHealth = withContext(Dispatchers.IO) {
         val startTime = System.currentTimeMillis()
         try {
+            // 公开行情走 data-api.binance.vision（不做地区封锁）；api.binance.com 在部分地区回 451，
+            // 用它做健康检查会误报「币安不可用」——其实价格是从镜像拿的。健康检查必须对准真实取价主机。
             val request = Request.Builder()
-                .url("https://api.binance.com/api/v3/ping")
+                .url("https://data-api.binance.vision/api/v3/ping")
                 .addHeader("User-Agent", "Mozilla/5.0")
                 .build()
-            
+
             client.newCall(request).execute().use { response ->
                 val latency = System.currentTimeMillis() - startTime
 
                 DataSourceHealth(
                     name = "Binance",
-                    url = "api.binance.com",
+                    url = "data-api.binance.vision",
                     isAvailable = response.isSuccessful,
                     latency = latency,
                     lastCheck = System.currentTimeMillis(),
@@ -154,7 +156,7 @@ object DataSourceHealthChecker {
         } catch (e: Exception) {
             DataSourceHealth(
                 name = "Binance",
-                url = "api.binance.com",
+                url = "data-api.binance.vision",
                 isAvailable = false,
                 latency = System.currentTimeMillis() - startTime,
                 lastCheck = System.currentTimeMillis(),

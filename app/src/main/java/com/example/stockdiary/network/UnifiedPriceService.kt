@@ -321,7 +321,8 @@ object UnifiedPriceService {
                 CryptoData(code = code.uppercase().trim(), name = code.uppercase().trim(), price = 1.0, change = null, changePercent = null)
             )
         }
-        val url = "${APIEndpoints.Binance.BASE_URL}/ticker/24hr?symbol=$pricedPair"
+        // 公开行情走 data-api.binance.vision（不做地区封锁）；api.binance.com 在部分地区回 451，换 IP 无效。
+        val url = "${APIEndpoints.Binance.MARKET_DATA_BASE_URL}/ticker/24hr?symbol=$pricedPair"
 
         // 主机级熔断闸门：币安连续网络级失败达阈值后，冷却期内直接短路、不发请求。
         // 主机压根连不上时，逐个标的各烧最多 20s 连接超时纯属浪费，且会计入
@@ -396,10 +397,11 @@ object UnifiedPriceService {
             }
             AppLogger.e("获取加密货币价格失败: $code", e, TAG)
             // 连接类失败（连不上/超时/域名解析不了）换成一句人话：OkHttp 原始 message
-            // 形如 "failed to connect to api.binance.com/2001:… after 10000ms"，
-            // 既看不懂又把设备 IP/端口抖给用户。币安国际站在部分网络/地区连不上是常态。
+            // 形如 "failed to connect to data-api.binance.vision/2001:… after 10000ms"，
+            // 既看不懂又把设备 IP/端口抖给用户。币安国际站在部分网络/地区连不上是常态
+            // （公开行情已改走 data-api.binance.vision 绕开地区封锁，这里兜的是镜像也不可达的极端情况）。
             val userFacing = if (e is ConnectException || e is SocketTimeoutException || e is UnknownHostException) {
-                Exception("连不上币安服务器，可能被网络或地区限制，请检查网络或代理后重试")
+                Exception("连不上币安行情服务器，可能被网络或地区限制，请检查网络或代理后重试")
             } else {
                 e
             }

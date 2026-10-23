@@ -28,8 +28,31 @@ class PriceSyncWorker(
     private val dateFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd")
     private val prefs by lazy { PriceSyncPreferencesManager.getInstance(applicationContext) }
 
+    /**
+     * 重排下一轮——但只在总开关仍然打开时。
+     *
+     * 原先三个终态分支都无条件 `scheduleSmartSync` 重新 `enqueueUniquePeriodicWork`，
+     * 于是「用户关开关时正好有一轮在途」的场景下：设置页的 `cancelUniqueWork` 只能取消
+     * **待执行**的那一轮，拦不住这个在途轮次；它跑完自己又注册了一份全新的周期任务，
+     * 表现为开关显示"已关闭"、后台同步却永久复活。这里补上总开关判断，链子到此为止。
+     */
+    private fun rescheduleIfEnabled() {
+        if (prefs.isAutoSyncEnabled()) {
+            PriceSyncScheduler.scheduleSmartSync(applicationContext, runImmediately = false)
+        } else {
+            AppLogger.i("自动同步总开关已关闭，不重排下一轮（避免后台同步自行复活）", "PriceSyncWorker")
+        }
+    }
+
     override suspend fun doWork(): Result {
         val startTime = System.currentTimeMillis()
+
+        // 总开关：用户关掉「自动刷新价格与分红」后本 Worker 必须停手。
+        // 原先只看分类型开关（盘中同步股票 / 自动同步加密），从不看总开关。
+        if (!prefs.isAutoSyncEnabled()) {
+            AppLogger.i("自动同步总开关已关闭，跳过本轮且不重排下一轮", "PriceSyncWorker")
+            return Result.success()
+        }
 
         return try {
             val repository = AssetRepository.getInstance(applicationContext)
@@ -52,7 +75,7 @@ class PriceSyncWorker(
                         "（交易时段=$inTradingHours, 盘中同步股票=$stockIntradaySync, 自动同步加密=$cryptoAutoSync）",
                     "PriceSyncWorker"
                 )
-                PriceSyncScheduler.scheduleSmartSync(applicationContext, runImmediately = false)
+                rescheduleIfEnabled()
                 return Result.success()
             }
 
@@ -110,7 +133,7 @@ class PriceSyncWorker(
                 notifyTodayDividends(applicationContext, assets)
                 // 跑完一轮后按「此时是否交易时段」重排下一次间隔（15分钟 ↔ 4小时自适应），
                 // 否则间隔永远是上次 App 启动那一刻算出的值，智能间隔形同虚设
-                PriceSyncScheduler.scheduleSmartSync(applicationContext, runImmediately = false)
+                rescheduleIfEnabled()
                 Result.success()
             } else {
                 handleFailure(result.dominantErrorType)
@@ -185,7 +208,7 @@ class PriceSyncWorker(
             }
             prefs.setConsecutiveFailureCount(0)
             // 终态失败也要续期下一轮，否则周期任务就此停摆
-            PriceSyncScheduler.scheduleSmartSync(applicationContext, runImmediately = false)
+            rescheduleIfEnabled()
             return Result.failure()
         }
 

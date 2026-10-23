@@ -152,7 +152,20 @@ object SinaStockAPI : StockAPI {
                         
                         val existingRequest = batchPendingRequests[batchKey]
                         if (existingRequest != null) {
-                            return@mapIndexed existingRequest.await().getOrElse { emptyMap() }
+                            // 复用别人的在飞请求：失败必须**照原样透出**并记进 lastBatchException。
+                            // 若像以前那样直接 getOrElse { emptyMap() } 把失败吞成空结果，这个批次的
+                            // 原始异常就丢了：下面 allResults.isEmpty() 分支因为拿不到批级异常，
+                            // 会退化成符号级文案「未获取到股票数据」→ 上层源级熔断器把真·源级故障
+                            // （超时 / 连接失败 / 403 限流）误判成「代码不支持」而**永不熔禁**——
+                            // 恰恰是本函数上方注释要修掉的「饿死」问题，而且在并发去重路径上
+                            // （手动刷新撞上后台 Worker）必然命中。
+                            val shared = existingRequest.await()
+                            shared.exceptionOrNull()?.let { err ->
+                                if (lastBatchException == null) {
+                                    lastBatchException = err as? Exception ?: Exception(err)
+                                }
+                            }
+                            return@mapIndexed shared.getOrElse { emptyMap() }
                         }
                         
                         val request = CompletableDeferred<Result<Map<String, SinaStockData>>>()
@@ -228,6 +241,15 @@ object SinaStockAPI : StockAPI {
                             partialResult
                         } finally {
                             batchPendingRequests.remove(batchKey)
+                            // 取消路径（以及任何异常提前退出）必须把 deferred 收尾：
+                            // CompletableDeferred 没有父 Job，**不会**随本协程取消而完成。
+                            // 不显式 cancel，其它作用域里已经 await() 它的协程会永久挂起
+                            // （典型：AssetSyncManager 看门狗超预算 cancel 了本轮，
+                            //   而后台 Worker 的同步正 await 同一个批次键 → 卡到 WorkManager 超时）。
+                            // 与 UnifiedPriceService 里的同一道保险对齐。
+                            if (!request.isCompleted) {
+                                request.cancel()
+                            }
                         }
                     } catch (e: CancellationException) {
                         throw e

@@ -177,17 +177,24 @@ fun CalendarCard(
 /**
  * 日历格子固定高度：行高不因内容多少而参差不齐。
  * 槽位高度按「字号 + Compose 默认字体 padding」给足，贴底的分红标记才不会被 clip 切尾。
+ *
+ * ⚠️ 56 → 60 的原因（2026-10-23 用户截图复现）：分红标记从 8sp 提到 10sp 后，
+ * 16dp 槽位装不下「10sp + Compose 默认字体 padding」的实际字高；而当时
+ * 「三段 + 抬升间距」恰好等于内容区（54dp）、底部零余量，超出的部分立刻被
+ * Surface 的 clip 切掉——这就是用户看到的「分又被遮挡」。
+ * 格子加高到 60dp 后内容区 58dp，三段 + 间距 = 18+18+2+18 = 56dp，
+ * 底部留 2dp 余量，10sp 的字在 18dp 槽位里也放得下，两头都不切。
  */
-private val CALENDAR_CELL_HEIGHT = 56.dp
+private val CALENDAR_CELL_HEIGHT = 60.dp
 /** 三段固定「槽位」高度：日期 / 金额 / 分红标记各占一位，有无内容都占位，保证横向对齐。
- *  金额升到 11sp 后同步把金额槽位加到 18dp；三段之和 18+18+16=52dp，
- *  仍小于格子扣除上下 1dp padding 后约 54dp 的内容区，底部保留约 2dp，分红字不会被 clip。
- *  分红槽前另有 DIVIDEND_LIFT = 2dp 的间距（用户要求「分」再高 2dp），
- *  三段 + 间距 = 54dp 恰好等于内容区；分红槽 16dp 仍比 10sp 的字高约 3dp，不会 clip 切尾。 */
+ *  字号分别为 日期 12sp / 金额 11sp / 分红 10sp。
+ *  分红槽 18dp 是专为「10sp + 默认字体 padding」留的余量——8sp 时代 16dp 够，
+ *  提到 10sp 后 16dp 会被 clip 切尾（见 [CALENDAR_CELL_HEIGHT] 注释）。 */
 private val CALENDAR_SLOT_DATE = 18.dp
 private val CALENDAR_SLOT_VALUE = 18.dp
-private val CALENDAR_SLOT_DIVIDEND = 16.dp
-/** 金额槽与分红槽之间的间距：把「分」再往上抬 2dp（放在分红槽之前、无条件渲染，保证各格仍对齐） */
+private val CALENDAR_SLOT_DIVIDEND = 18.dp
+/** 金额槽与分红槽之间的间距：把「分」往上抬（用户要求「再高 2dp」）。
+ *  放在分红槽之前、无条件渲染，所以有分/无分的格子仍对齐在同一水平线。 */
 private val DIVIDEND_LIFT = 2.dp
 
 @Composable
@@ -253,7 +260,13 @@ private fun CalendarDayCell(
             }
             // 把「分」往上抬 2dp（用户要求）。放在条件渲染之外，所以有分/无分的格子仍对齐。
             Spacer(modifier = Modifier.height(DIVIDEND_LIFT))
-            Box(modifier = Modifier.height(CALENDAR_SLOT_DIVIDEND), contentAlignment = Alignment.Center) {
+            // 贴顶对齐（不是 Center）：让「分」紧跟在金额下方。
+            // 用 Center 时字会浮在 18dp 槽位中间，与上面的金额之间空出约 8dp，
+            // 用户反馈「间隙太大」。固定槽位 + 无条件 Spacer 仍保证各格对齐。
+            Box(
+                modifier = Modifier.height(CALENDAR_SLOT_DIVIDEND),
+                contentAlignment = Alignment.TopCenter
+            ) {
                 if (hasDividend) {
                     Text(
                         text = "分",

@@ -31,8 +31,11 @@ import org.junit.Test
  *
  *  1. 网络级失败（连不上 / 域名解析不了）：**逐次 1:1 喂 [BinanceHostGate.onNetworkFailure]**，
  *     累计到 [BinanceHostGate.FAIL_THRESHOLD] 熔断（不是不喂，也不是一次喂多下）；
- *  2. 拿到 HTTP 响应（含 451 地区封锁、含整批 400）：**喂 [BinanceHostGate.onSuccess]**，
+ *  2. 拿到 HTTP 响应（**2xx 或 400/429/5xx 等非 451/403 的响应**）：**喂 [BinanceHostGate.onSuccess]**，
  *     连续失败计数清零——「主机可达」不因业务错误被误判成不可达；
+ *     ⚠️ **例外**：451/403 地区封锁 / 访问被拒——主机可达但本用户用不了，等同「主机不可用」，
+ *     必须喂 [BinanceHostGate.onNetworkFailure]（触发熔断短路），**不能**当成功清零
+ *     （旧实现把它当成功，导致地区封锁用户每轮同步都被 451 刷屏、熔断永远顶不上）；
  *  3. 非 IO 异常（JSON 解析失败）：**不记账**——它不是「主机不可达」，不该顶爆熔断；
  *  4. [CancellationException]：**原样抛回、不记账**——取消不是主机不可达。
  *
@@ -191,7 +194,7 @@ class BinanceAccountAPIGateTest {
         assertEquals(0, BinanceHostGate.consecutiveFailuresForTesting())
     }
 
-    // ---------- 契约 2：拿到 HTTP 响应即记账成功、计数清零 ----------
+    // ---------- 契约 2：拿到 HTTP 响应即记账成功、计数清零（451/403 除外） ----------
 
     @Test
     fun `getAccount 拿到响应即记账成功并清零计数`() = runBlocking {
@@ -213,11 +216,12 @@ class BinanceAccountAPIGateTest {
         assertEquals(Phase.CLOSED, BinanceHostGate.phaseForTesting())
     }
 
+    // ---------- 契约 2a：451/403 地区封锁必须触发熔断，不能当成功清零 ----------
+
     @Test
-    fun `getAccount 收到451地区封锁也算网络级成功`() = runBlocking {
+    fun `getAccount 收到451地区封锁应触发熔断而非当成功`() = runBlocking {
         failAccountTimes(4)
-        // 前置哨兵：先确认计数真被推到了 4。没有它，这条用例在「gate 漏接」时会变成
-        // 空转的绿灯（计数本来就是 0，怎么断言 0 都过）—— 变异测试暴露的正是这点
+        // 前置哨兵：先确认计数真被推到了 4。没有它，这条用例在「gate 漏接」时会空转绿灯
         assertEquals(4, BinanceHostGate.consecutiveFailuresForTesting())
 
         val result = BinanceAccountAPI.getAccount(
@@ -229,14 +233,18 @@ class BinanceAccountAPIGateTest {
             "451 要给可操作的地区提示，实际是：${result.exceptionOrNull()?.message}",
             result.exceptionOrNull()?.message?.contains("代理/VPN") == true
         )
-        assertEquals(
-            "451 是主机可达（被拒绝 ≠ 连不上），必须复位计数",
-            0,
-            BinanceHostGate.consecutiveFailuresForTesting()
-        )
-        // 真清零：再连 4 次仍不熔断
+        // 关键修复点：451 是「主机可达但本用户被地区封锁」——等同主机不可用，必须喂
+        // onNetworkFailure 触发熔断，而不是像旧代码那样当成功清零计数。
+        // 4 次前置失败 + 这次 451 = 5 次达阈值 → 熔断 OPEN、计数清零、blockCount+1。
+        assertEquals(Phase.OPEN, BinanceHostGate.phaseForTesting())
+        assertTrue("451 后应显示「币安暂不可达」", BinanceHostGate.isUnavailable())
+        assertEquals(1, BinanceHostGate.blockCountForTesting())
+        assertEquals(0, BinanceHostGate.consecutiveFailuresForTesting())
+
+        // 熔断后再来 4 次网络失败：冷却期内不顺延、不重复记 blockCount（仍只 1），相位保持 OPEN
         failAccountTimes(4)
-        assertEquals(Phase.CLOSED, BinanceHostGate.phaseForTesting())
+        assertEquals(Phase.OPEN, BinanceHostGate.phaseForTesting())
+        assertEquals(1, BinanceHostGate.blockCountForTesting())
     }
 
     // ---------- 契约 3：非 IO 异常不记账（不顶爆熔断） ----------

@@ -147,6 +147,16 @@ internal object BinanceHostGate {
     fun isUnavailable(): Boolean = state.get().phase != Phase.CLOSED
 
     /**
+     * 诊断用文案：当前币安主机可用性，供 [com.example.stockdiary.utils.LogDiagnostics]
+     * 头部快照一眼展示。不暴露内部相位细节（OPEN/HALF_OPEN 对用户在语义上都是「暂不可达」）。
+     */
+    fun statusText(): String = when (state.get().phase) {
+        Phase.CLOSED -> "正常"
+        Phase.OPEN -> "暂不可达(熔断中)"
+        Phase.HALF_OPEN -> "暂不可达(探测中)"
+    }
+
+    /**
      * 记录一次网络级成功。
      *
      * - HALF_OPEN（探测成功）→ CAS 回 CLOSED，计数 / blockedUntil 全清，[blockCount] 不涨

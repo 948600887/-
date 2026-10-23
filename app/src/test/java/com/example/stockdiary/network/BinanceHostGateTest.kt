@@ -229,4 +229,24 @@ class BinanceHostGateTest {
             BinanceHostGate.consecutiveFailuresForTesting() in 0 until BinanceHostGate.FAIL_THRESHOLD
         )
     }
+
+    // ---------- 诊断文案：statusText 三态映射 ----------
+
+    @Test
+    fun `statusText 三态映射正确_供诊断报告头部快照`() {
+        // CLOSED → 正常
+        assertEquals(Phase.CLOSED, BinanceHostGate.phaseForTesting())
+        assertEquals("正常", BinanceHostGate.statusText())
+
+        // OPEN → 暂不可达(熔断中)
+        tripOpen()
+        assertEquals(Phase.OPEN, BinanceHostGate.phaseForTesting())
+        assertTrue("熔断中", BinanceHostGate.statusText().contains("熔断中"))
+
+        // HALF_OPEN → 暂不可达(探测中)：冷却结束后首个探测进入半开
+        assertTrue(BinanceHostGate.tryAcquireProbe(afterCooldown))
+        assertEquals(Phase.HALF_OPEN, BinanceHostGate.phaseForTesting())
+        assertTrue("探测中", BinanceHostGate.statusText().contains("探测中"))
+        assertFalse("HALF_OPEN 也属暂不可达", BinanceHostGate.statusText().contains("正常"))
+    }
 }

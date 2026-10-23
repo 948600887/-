@@ -150,23 +150,28 @@ object BinanceAccountAPI {
                     .build()
 
                 val response = httpClient.newCall(request).execute()
-                // 主机能应答即视为网络级成功（含 451 地区封锁 / 4xx 业务错误）：
-                // 与行情路径（UnifiedPriceService.getCryptoPrice）统一口径，让主机级熔断器
-                // 复位连续失败计数——账户路径此前漏接 gate，连不上的时候行情路径知道、
-                // 资产路径不知道，UI 也不会对「币安暂不可达」做统一展示。真正的"连不上"
-                // 走下面 catch 的 onNetworkFailure。
-                BinanceHostGate.onSuccess()
                 response.use { resp ->
                     val body = resp.body?.string() ?: return@withContext Result.failure(
                         Exception("币安返回了空响应")
                     )
 
                     if (!resp.isSuccessful) {
+                        // 451/403 = 地区封锁 / 访问被拒：主机可达但本用户用不了，等同「主机不可用」，
+                        // 喂给熔断器使其 OPEN 短路后续请求，并让 UI 统一显示「币安暂不可达」。
+                        // 其余 4xx/5xx 主机其实可达，仍走下方 2xx 的 onSuccess 复位计数口径。
+                        // （旧代码在 isSuccessful 检查前就调 onSuccess，把 451 当成功、熔断一解除
+                        // 又被 451 循环空转——与行情路径 UnifiedPriceService.getCryptoPrice 同款修复。）
+                        if (resp.code == 451 || resp.code == 403) {
+                            BinanceHostGate.onNetworkFailure(System.currentTimeMillis())
+                        }
                         // 4xx 时币安会在 body 里给 {"code":-2015,"msg":"..."}，
                         // 解析出来转成失败，别吞成"未知错误"——用户分不清是密钥错还是网络错
                         return@withContext Result.failure(binanceError(body, resp.code))
                     }
 
+                    // 2xx：真正成功。复位熔断连续失败计数，并（若正处于半开探测）闭路。
+                    // ⚠️ 必须在 isSuccessful 检查之后才调用——否则 451 会被当成成功。
+                    BinanceHostGate.onSuccess()
                     return@withContext Result.success(parseBalances(body))
                 }
             } catch (e: CancellationException) {

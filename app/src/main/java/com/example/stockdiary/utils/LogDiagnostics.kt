@@ -6,6 +6,7 @@ import android.net.Uri
 import android.os.Build
 import androidx.core.content.FileProvider
 import com.example.stockdiary.data.price.PriceCacheManager
+import com.example.stockdiary.network.BinanceHostGate
 import com.example.stockdiary.data.sync.AssetSyncManager
 import com.example.stockdiary.utils.ExchangeRateManager
 import java.io.File
@@ -139,8 +140,10 @@ object LogDiagnostics {
      * 采集一份设备状态快照，拼进诊断报告头部。
      *
      * 为什么放在报告里而不是只在线程日志里：用户分享一份报告过来，第一秒就能看到
-     * 「哪个数据源是坏的、汇率多久没刷新、价格缓存还有多少、最近一轮同步成了多少」——
-     * 这四个问题覆盖了绝大多数"数据不对"的排查起点，不必先去几百行日志里 grep。
+     * 「哪个数据源是坏的、币安主机是否暂不可达（地区封锁/连不上）、汇率多久没刷新、
+     * 价格缓存还有多少、最近一轮同步成了多少」——这几个问题覆盖了绝大多数"数据不对"
+     * 的排查起点，不必先去几百行日志里 grep。币安那一行尤其关键：虚拟货币全空、全是
+     * 跳过(币安熔断)时，它是「这用户被地区封锁了」的第一答案。
      *
      * 全部读进程内内存态（熔断器相位 / 汇率表 / 价格缓存 / 最近一轮汇总），
      * 不碰数据库不碰网络；[collect] 本就在 IO 线程上，成本可忽略。
@@ -157,6 +160,11 @@ object LogDiagnostics {
                     "$name=${if (ok) "正常" else "熔断中"}"
                 }
             }
+        }
+
+        // 币安主机级熔断状态：地区封锁 / 连不上的用户，这一行是「虚拟货币为啥全空」的第一答案。
+        runCatching {
+            lines += "币安主机: ${BinanceHostGate.statusText()}"
         }
 
         runCatching {

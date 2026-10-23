@@ -10,6 +10,7 @@ import com.example.stockdiary.network.model.CryptoData
 import com.example.stockdiary.network.model.FundData
 import com.example.stockdiary.utils.AppLogger
 import kotlinx.coroutines.*
+import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.IOException
 import java.net.ConnectException
@@ -271,7 +272,15 @@ object UnifiedPriceService {
      * 早期这里只甩一句 `HTTP 451`，用户不知道该干嘛。同一套口径现在也告诉用户
      * "更换到允许地区的节点后重试"。
      */
-    private suspend fun getCryptoPrice(code: String): Result<CryptoData> = withContext(Dispatchers.IO) {
+    internal suspend fun getCryptoPrice(
+        code: String,
+        /**
+         * 取价用的 OkHttp 客户端。**默认走全局 [NetworkClient.binanceClient]**；
+         * 仅单测会传入带假 [okhttp3.Interceptor] 的客户端来驱动不同 HTTP 语义
+         * （2xx / 451 地区封锁 / 超时），避免真出网。生产调用一律用默认值。
+         */
+        client: OkHttpClient = NetworkClient.binanceClient
+    ): Result<CryptoData> = withContext(Dispatchers.IO) {
         // 理财/锁仓产品（LD 前缀）不是现货交易对，币安没有 LDXXXUSDT 这种市场。
         // 但 LD 代币与底层资产 1:1 可赎回，估值应剥掉 LD 用底层交易对查价——
         // 否则这些持仓的 currentPrice 永远为空，而导入时 purchasePrice = 0，
@@ -334,11 +343,7 @@ object UnifiedPriceService {
 
             val startTime = System.currentTimeMillis()
             // 与币安其他客户端一致：同主机、同连接池（绝对 URL 下 BaseUrlInterceptor 直通）
-            val response = NetworkClient.binanceClient.newCall(request).execute()
-            // 主机能应答即视为网络级成功：HTTP 451 这类按条款拒绝是主机可达、
-            // 不属于「连不上」，据此复位连续失败计数，避免偶发的应用层失败
-            // 把熔断器顶爆、把本可恢复的同步挡在门外。
-            BinanceHostGate.onSuccess()
+            val response = client.newCall(request).execute()
             response.use {
                 val duration = System.currentTimeMillis() - startTime
 
@@ -347,6 +352,15 @@ object UnifiedPriceService {
                 val body = it.body?.string() ?: return@withContext Result.failure(Exception("币安返回了空响应"))
 
                 if (!it.isSuccessful) {
+                    // 451/403 = 地区封锁 / 访问被拒：主机可达但本用户用不了，等同「主机不可用」，
+                    // 喂给熔断器使其 OPEN 短路后续请求，避免每个币都白打一次 451、还各计一次
+                    // 同步失败（旧代码在 isSuccessful 检查前就调 onSuccess，把 451 探活当成功，
+                    // 熔断一解除又被 451、循环空转——地区封锁用户每轮同步都被 451 刷屏）。
+                    // 其余 4xx/5xx（400 非法符号、429 限流、5xx 服务端错）主机其实可达，
+                    // 仍按旧口径在下方 2xx 分支复位计数，只是价格本轮失败。
+                    if (it.code == 451 || it.code == 403) {
+                        BinanceHostGate.onNetworkFailure(System.currentTimeMillis())
+                    }
                     // 带上币安的 code+msg，并按需补地区限制的中文可操作提示
                     return@withContext Result.failure(BinanceAccountAPI.binanceError(body, it.code))
                 }
@@ -354,6 +368,11 @@ object UnifiedPriceService {
                 if (!body.contains("lastPrice")) {
                     return@withContext Result.failure(Exception("响应格式错误"))
                 }
+
+                // 2xx：真正成功。复位熔断连续失败计数，并（若正处于半开探测）闭路。
+                // ⚠️ 必须在 isSuccessful 检查之后才调用——否则 451 会被当成成功、熔断永远
+                // 顶不上地区封锁，反而每轮被 451 刷屏（见上面的 451 分支说明）。
+                BinanceHostGate.onSuccess()
 
                 // 注意传的是原 code（如 LDBNB）而不是底层交易对：落库 key 必须是
                 // 原 symbol，价格才是底层币 1:1 的市价——不能把资产名/代码改成 BNBUSDT

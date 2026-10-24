@@ -12,6 +12,7 @@ import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Savings
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.state.ToggleableState
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.stockdiary.database.Asset
@@ -111,6 +112,15 @@ fun PortfolioOverviewCard(
  *
  * 分组依据是 symbol 形态（`fund_` 前缀 = 场外份额，`sh`/`sz`/`bj` = 场内），
  * 不是账户名——账户名是用户自己填的，两次导入填同一个名字就会混在一起。
+ *
+ * ## 批量选择态下的「整组勾选」
+ *
+ * [selectionMode] 为真时左侧出现一个**三态**勾选框（全选 / 部分选中 / 未选），
+ * 点它可以整组选中或取消。上次重复录入了 ~200 条加密资产，用户只能一条条点过去
+ * 删 —— 那正是这里加勾选框的原因。成员包含**收起状态下看不见的**那些，
+ * 与本头显示的「N 项」同源 —— 头上的数字就是勾下去的条数，不多不少。
+ *
+ * 勾选框是独立点击区，卡片本体仍然是展开/收起，两者互不干扰。
  */
 @Composable
 fun MarketHeaderCard(
@@ -119,7 +129,12 @@ fun MarketHeaderCard(
     totalValue: Double,
     isExpanded: Boolean,
     expandKey: String,
-    onToggleExpand: (String) -> Unit
+    onToggleExpand: (String) -> Unit,
+    selectionMode: Boolean = false,
+    /** 整组三态：组内全选=[ToggleableState.On]，部分选中=Indeterminate，全未选=Off */
+    selectionState: ToggleableState = ToggleableState.Off,
+    /** 整组勾选/取消；成员集合与勾选语义由调用方决定（见 PortfolioScreen.groupMembers） */
+    onToggleSelection: () -> Unit = {}
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -131,6 +146,13 @@ fun MarketHeaderCard(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
+            if (selectionMode) {
+                TriStateCheckbox(
+                    state = selectionState,
+                    onClick = onToggleSelection,
+                    modifier = Modifier.padding(end = 8.dp)
+                )
+            }
             Column {
                 Text(
                     label,
@@ -172,7 +194,12 @@ fun AccountHeaderCard(
     totalValue: Double,
     isExpanded: Boolean,
     expandKey: String,
-    onToggleExpand: (String) -> Unit
+    onToggleExpand: (String) -> Unit,
+    selectionMode: Boolean = false,
+    /** 整组三态，语义与 [MarketHeaderCard] 相同 */
+    selectionState: ToggleableState = ToggleableState.Off,
+    /** 整组勾选/取消 */
+    onToggleSelection: () -> Unit = {}
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -184,6 +211,14 @@ fun AccountHeaderCard(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
+            // 二级头的整组勾选：比如只想删掉某个券商账户下的全部标的
+            if (selectionMode) {
+                TriStateCheckbox(
+                    state = selectionState,
+                    onClick = onToggleSelection,
+                    modifier = Modifier.padding(end = 8.dp)
+                )
+            }
             // 账户名是可压缩的那一侧：券商导入的账户名可以很长（"华泰证券-融资融券账户"），
             // 以前这里没有 weight，Row 会先按它想要的最大宽度去量，结果把右侧金额挤出卡片。
             // 现在文本侧 weight(1f) 先让位给金额，截断也只截文字、不截数字。

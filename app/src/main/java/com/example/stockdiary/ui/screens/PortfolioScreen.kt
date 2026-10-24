@@ -22,6 +22,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.stockdiary.utils.AppLogger
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.state.ToggleableState
 import androidx.compose.ui.unit.dp
 import com.example.stockdiary.data.prefs.DashboardPreferences
 import com.example.stockdiary.data.prefs.SortOrder
@@ -332,6 +333,59 @@ fun PortfolioScreen(
         rows.mapNotNull { (it as? PortfolioRow.MarketHeader)?.expandKey }.toSet()
     }
 
+    /**
+     * 每个标题（一级市场头 / 二级账户头）名下的全部资产 id，用于「整组勾选」。
+     *
+     * ## 为什么不直接复用 [rows]
+     *
+     * [rows] 随展开态变化（收起的分组不产资产行），而成员集合必须**与展开无关**——
+     * 否则收起状态下点一级头的勾选框，只会选中零散几条，用户以为选了整组，
+     * 删除后才发现残了一半。这里的成员与该头显示的「N 项」同源，**所见即所选**。
+     *
+     * 成员取自 [sortedAssets] / [liabilities]（即应用「隐藏低价值加密」等显示开关
+     * 之后的集合）：被显示开关藏起来的资产本来也不在列表里，不该被整组勾选选中。
+     */
+    val groupMembers = remember(sortedAssets, liabilities) {
+        val map = LinkedHashMap<String, List<Long>>()
+        HoldingsMarket.displayOrder.forEach { market ->
+            val marketAssets = sortedAssets.filter { marketOf(it) == market }
+            if (marketAssets.isEmpty()) return@forEach
+            map["market:${market.name}"] = marketAssets.map { it.id }
+            marketAssets.groupBy { it.account }.forEach { (account, list) ->
+                map["account:${market.name}:$account"] = list.map { it.id }
+            }
+        }
+        if (liabilities.isNotEmpty()) map[LIABILITY_GROUP_KEY] = liabilities.map { it.id }
+        map
+    }
+
+    /**
+     * 整组勾选/取消：组内已全选 → 整组取消；否则 → 整组选中。
+     *
+     * 「部分选中」时按选中处理（补齐剩下的），与常见全选控件一致——用户点一下
+     * 的意图是「这个组我全要」，而不是「把已经勾的那些反选掉」。
+     */
+    val toggleGroupSelection: (String) -> Unit = { key ->
+        val ids = groupMembers[key].orEmpty()
+        if (ids.isNotEmpty()) {
+            selectedIds = if (ids.all { it in selectedIds }) selectedIds - ids else selectedIds + ids
+        }
+    }
+
+    /** 整组三态：全选 / 部分选中 / 全未选（用于标题上的三态勾选框） */
+    val groupSelectionState: (String) -> ToggleableState = { key ->
+        val ids = groupMembers[key].orEmpty()
+        if (ids.isEmpty()) {
+            ToggleableState.Off
+        } else {
+            when (ids.count { it in selectedIds }) {
+                0 -> ToggleableState.Off
+                ids.size -> ToggleableState.On
+                else -> ToggleableState.Indeterminate
+            }
+        }
+    }
+
     // 处在批量选择态时，返回键应当先退出选择态，而不是直接退出 App
     BackHandler(enabled = selectionMode) {
         selectionMode = false
@@ -592,7 +646,10 @@ fun PortfolioScreen(
                             totalValue = row.totalValue,
                             isExpanded = expandedAccounts.contains(row.expandKey),
                             expandKey = row.expandKey,
-                            onToggleExpand = toggleExpand
+                            onToggleExpand = toggleExpand,
+                            selectionMode = selectionMode,
+                            selectionState = groupSelectionState(row.expandKey),
+                            onToggleSelection = { toggleGroupSelection(row.expandKey) }
                         )
 
                         is PortfolioRow.AccountHeader -> AccountHeaderCard(
@@ -601,7 +658,10 @@ fun PortfolioScreen(
                             totalValue = row.totalValue,
                             isExpanded = expandedAccounts.contains(row.expandKey),
                             expandKey = row.expandKey,
-                            onToggleExpand = toggleExpand
+                            onToggleExpand = toggleExpand,
+                            selectionMode = selectionMode,
+                            selectionState = groupSelectionState(row.expandKey),
+                            onToggleSelection = { toggleGroupSelection(row.expandKey) }
                         )
 
                         is PortfolioRow.AssetRow -> {

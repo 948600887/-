@@ -264,16 +264,24 @@ class CalendarViewModel(
             }
 
             val symbols = assets.mapNotNull { it.symbol }
-            // 必须带时间预算：不传就是不设限，而这条路径会强制重抓全部标的的分红
-            // （refresh() 传 forceRefresh=true）。每个请求最坏 15s 读超时 ×3 次重试，
-            // 十几个场外基金足以把日历页拖到两分多钟且无法中止 —— 和「点刷新卡死」
-            // 是同一类病，只是没那么致命。超时后跳过的标的不会写缓存，之后按需抓取
-            // 还会补上，不丢数据
-            dividendRepository.preFetchDividends(
-                symbols = symbols,
-                forceRefresh = forceRefresh,
-                timeBudgetMs = SyncBudget.MANUAL_SYNC_TIME_LIMIT_MS
-            )
+            // 冷启动不强制重抓：先用宽口径批量读把库里有记录的标的预热进内存缓存
+            //（零网络、2 次 IO），只让「连过期数据都没有」的标的去联网。
+            //
+            // 从前是无条件 preFetchDividends(全部标的)。而 DividendRepository.cache
+            // 是进程内内存 Map、一重启就全丢，预取判据 forceRefresh || ttlExpired
+            // 于是对每个标的都成立；更要命的是 getDividendsBySymbol 里
+            // 「DB 有记录但 lastFetchedAt 超过 24h」会 return null 转去联网 ——
+            // 超过一天没同步，200 个标的全部重抓，本页在 isLoading 里转圈到预算耗尽
+            // （70s），而 generateCalendarData 是 suspend 且被 collect 直接调用，
+            // 转圈期间整条收集链都阻塞着。详见 primeDividendCache 的 KDoc。
+            val needFetch = dividendRepository.primeDividendCache(symbols, forceRefresh)
+            if (needFetch.isNotEmpty()) {
+                dividendRepository.preFetchDividends(
+                    symbols = needFetch,
+                    forceRefresh = forceRefresh,
+                    timeBudgetMs = SyncBudget.MANUAL_SYNC_TIME_LIMIT_MS
+                )
+            }
 
             val dividendDates = mutableSetOf<LocalDate>()
             val dividends = mutableListOf<Pair<String, List<DividendRecord>>>()
@@ -336,13 +344,18 @@ class CalendarViewModel(
 
             val today = LocalDate.now()
             val symbols = assets.mapNotNull { it.symbol }
-            // 同 generateAssetCalendarData：不带预算就是不设限，弱网下能把日历页
-            // 拖到几分钟且无法中止。超时跳过的标的不写缓存，按需抓取会补上
-            dividendRepository.preFetchDividends(
-                symbols = symbols,
-                forceRefresh = forceRefresh,
-                timeBudgetMs = SyncBudget.MANUAL_SYNC_TIME_LIMIT_MS
-            )
+            // 同 generateAssetCalendarData：冷启动先宽口径预热、只补抓缺失的标的，
+            // 不再无条件全量预取（那正是本页冷启动转圈几十秒的根因）。
+            // forceRefresh=true（用户主动刷新）时 primeDividendCache 直接放行全部，
+            // 走的仍是原来的全量重抓路径
+            val needFetch = dividendRepository.primeDividendCache(symbols, forceRefresh)
+            if (needFetch.isNotEmpty()) {
+                dividendRepository.preFetchDividends(
+                    symbols = needFetch,
+                    forceRefresh = forceRefresh,
+                    timeBudgetMs = SyncBudget.MANUAL_SYNC_TIME_LIMIT_MS
+                )
+            }
 
             val dividendDates = mutableSetOf<LocalDate>()
             val dividends = mutableListOf<Pair<String, List<DividendRecord>>>()

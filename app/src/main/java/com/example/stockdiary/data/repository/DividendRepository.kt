@@ -323,13 +323,20 @@ class DividendRepository private constructor(
      * - 无分红记录 + 超过 30 天 → null
      *
      * 内存缓存回填的时机也照抄逐标的版本：只有「24h 内抓过」与「空结果可复用」
-     * 两条路回填，30 天宽口径那条不回填（它本就该在下次抓取时被刷新）。
+     * 两条路回填，30 天宽口径那条不回填（它本就该在下次抓取时被刷新）——
+     * **除非调用方显式要 [primeCache]**，见下。
      *
+     * @param primeCache true = 把宽口径（24h~30 天）读到的记录也写进内存缓存。
+     *        用途只有一个：**进程刚重启、内存缓存全丢**时，让随后按 symbol 的
+     *        [getDividendsBySymbol] 命中内存而不再联网。此时把过期记录的
+     *        timestamp 记成 now，等价于「这一轮先认旧数据，权威刷新交给同步链路」。
+     *        默认 false，[DividendIncomeLoader] 等既有调用方行为完全不变。
      * @return symbol（已规范化）→ 记录；值为 null 表示「连过期数据都没有，该去抓」。
      *          **值可以是空列表**（表示抓过且确实没有分红），与 null 是两回事。
      */
     suspend fun getCachedAllowingStaleBatch(
-        symbols: List<String>
+        symbols: List<String>,
+        primeCache: Boolean = false
     ): Map<String, List<DividendRecord>?> = withContext(Dispatchers.IO) {
         if (symbols.isEmpty()) return@withContext emptyMap()
         val normalized = symbols.map { StockCodeManager.normalizeSymbol(it) }.distinct()
@@ -374,7 +381,15 @@ class DividendRepository private constructor(
                     cache[symbol] = CacheEntry(records, now, lastFullFetch = 0L)
                     out[symbol] = records
                 } else if (withinStaleCeiling) {
-                    // 宽口径：过期几天的记录照样用，但不回填内存缓存（下次抓取应能刷新它）
+                    // 宽口径：过期几天的记录照样用。默认不回填内存缓存（照抄逐标的版本）；
+                    // 调用方显式要预热时才回填，见 [primeCache] 参数说明
+                    if (primeCache) {
+                        cache[symbol] = CacheEntry(
+                            recordsFromDb(dbRecords),
+                            now,
+                            lastFullFetch = stamp ?: 0L
+                        )
+                    }
                     out[symbol] = recordsFromDb(dbRecords)
                 } else {
                     out[symbol] = null
@@ -401,6 +416,42 @@ class DividendRepository private constructor(
             }
         }
         out
+    }
+
+    /**
+     * 把库里有记录的标的预热进内存缓存，返回「仍然需要联网抓取」的 symbol 列表。
+     *
+     * ## 为什么需要它（日历页冷启动转圈的根因）
+     *
+     * [CalendarViewModel] 生成日历时无条件调一次 `preFetchDividends(全部标的)`。
+     * 而预取的判据是 `forceRefresh || ttlExpired`，其中 `cache` 是**进程内内存 Map**、
+     * 一重启就全丢 —— 于是每个标的都算 `ttlExpired`，全部进抓取队列。
+     * 更糟的是 [getDividendsBySymbol] 里「DB 有记录但 `lastFetchedAt` 超过
+     * [cacheTTL]（24h）」会 **return null 转去联网**：用户只要超过一天没同步，
+     * 200 个标的就得重抓一遍，日历页在 `isLoading` 里转圈到预算耗尽
+     * （`generateCalendarData` 是 suspend 且被 collect 直接调用，转圈期间整条链阻塞）。
+     *
+     * 修法：冷启动先用本方法做一次宽口径批量读（零网络、2 次 IO）把有库记录的标的
+     * 预热进内存缓存，只让「连过期数据都没有」的标的去联网。
+     *
+     * ## 取舍（明确记下）
+     *
+     * 预热会把过期数据的 timestamp 记成 now，意味着接下来 24h 内这些标的不会因
+     * 「有新公告」而重抓。这是**有意**的：冷启动先用旧数据把界面填上，远比转圈几十秒
+     * 好；权威刷新由 [AssetSyncManager] 的同步链路（forceRefresh）与用户手动刷新负责，
+     * 两条路都不经过这里。首页/持仓页的预计收入冷启动也早就是同一套宽口径语义
+     * （[getCachedAllowingStale] 的 [STALE_CEILING_MS] = 30 天）。
+     *
+     * @param forceRefresh true = 不预热、直接返回全部 symbol 让调用方全量重抓
+     * @return 仍需抓取的 symbol（**原始 symbol**，未规范化；[preFetchDividends]
+     *         内部会自己 normalize + distinct）
+     */
+    suspend fun primeDividendCache(symbols: List<String>, forceRefresh: Boolean): List<String> {
+        if (symbols.isEmpty()) return emptyList()
+        if (forceRefresh) return symbols
+        val cached = getCachedAllowingStaleBatch(symbols, primeCache = true)
+        return symbols.filter { cached[StockCodeManager.normalizeSymbol(it)] == null }
+            .distinct()
     }
 
     /** 预取分红时的并发上限：与 AssetSyncManager.MAX_CONCURRENT_SYNC 一致，别把接口打爆 */

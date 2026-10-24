@@ -57,8 +57,20 @@ object AssetSyncManager {
      * 降到 3 后峰值降到约 6MB。速度代价可接受：106 个标的约 36 批，
      * 每批 100~500ms；而且 [FundAPI] 已会在「缓存里已是今日净值」时
      * 跳过下载，同一天的第二刷及以后基本不下载，快得多。
+     *
+     * ## 2026-10-24 从 3 提到 6（只放总闸，不动基金专属闸）
+     *
+     * 真机诊断（goldvault_diagnostics_20261023_200928.txt）：240 个标的的全量同步
+     * 实测 38.6s / 61.0s，其中逐标的价格同步阶段就占 24~28s。240 个标的按 3 并发
+     * 要跑 80 批，是这段耗时的大头。
+     *
+     * 为什么提到 6 不会重蹈「闪退」：当初压到 3 是为了压**基金大文件**的峰值内存，
+     * 而现在真正管住大文件的是 [FUND_MAX_CONCURRENT_SYNC]（=2，与总闸叠加）。
+     * 也就是说同时下载的 0.5~2MB 文件**最多仍是 2 个**，峰值内存不变（≈4MB）；
+     * 多出来的 3 个名额只会被股票 / 加密行情这类**几十字节**的轻量请求占用。
+     * 网络侧由 [com.example.stockdiary.network.NetworkClient] 的 per-host 上限兜底。
      */
-    private const val MAX_CONCURRENT_SYNC = 3
+    private const val MAX_CONCURRENT_SYNC = 6
 
     /**
      * 手动刷新之间的进程内互斥。
@@ -119,8 +131,9 @@ object AssetSyncManager {
      * 把进程顶到被系统回收（静默闪退、零崩溃报告——本项目历史老毛病）。
      *
      * 与 [manualSyncMutex]、总 [Semaphore] 都是**叠加**关系：一个基金任务同时占
-     * 一个总信号量名额 + 一个基金专属名额。总并发仍是 3，但其中最多 2 个能是基金下载，
-     * 其余名额留给股票/加密，确保 2MB 大文件不会三个一起挤在内存里。
+     * 一个总信号量名额 + 一个基金专属名额。总并发提到 6 之后（见 [MAX_CONCURRENT_SYNC]），
+     * 这道闸就成了**唯一**压住峰值内存的那道：不管总闸开多大，同时在途的 2MB 大文件
+     * 最多 2 个，其余名额留给股票/加密的轻量请求。改总闸时这个 2 不要跟着动。
      */
     private const val FUND_MAX_CONCURRENT_SYNC = 2
     private val fundSemaphore = Semaphore(FUND_MAX_CONCURRENT_SYNC)
@@ -135,7 +148,8 @@ object AssetSyncManager {
      *
      * 取 8 而不是「整轮一个事务」：后者一旦进程中途被杀（看门狗截断 / 退后台取消 / LMK），
      * 本轮已经抓到的价格会全部丢失；分批在中途落盘，最坏只丢最后不足一批的那几个。
-     * 8 也是并发上限（3）的几倍，保证并发扇出时仍会攒够批、不会因为收不齐而退化成逐条写。
+     * 8 也大于并发上限 [MAX_CONCURRENT_SYNC]，保证并发扇出时仍会攒够批、
+     * 不会因为收不齐而退化成逐条写。
      */
     private const val PRICE_WRITE_BATCH_SIZE = 8
 

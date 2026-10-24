@@ -73,18 +73,30 @@ class AssetTrendChartTest {
 
     @Test
     fun `trendXLabelIndices稀疏时每份快照的日期都画`() {
-        // 4 个点间距 100px、标签宽 50px：互不重叠，全部保留
+        // 4 个点间距 100px、标签宽 50px：放得下，全部保留（不掺日历步长）
         val positions = listOf(0f, 100f, 200f, 300f)
         val widths = List(4) { 50f }
-        assertEquals(listOf(0, 1, 2, 3), trendXLabelIndices(positions, widths, minGap = 8f))
+        val dates = List(4) { LocalDate.of(2026, 10, 21).plusDays(it.toLong()) }
+        assertEquals(listOf(0, 1, 2, 3), trendXLabelIndices(dates, positions, widths, minGap = 8f))
+    }
+
+    @Test
+    fun `trendXLabelIndices一周八点全画`() {
+        // 1周视图：8 个点、跨度 7 天、屏够宽——逐日全画在各自的点上
+        val n = 8
+        val positions = List(n) { it * 100f }
+        val widths = List(n) { 50f }
+        val dates = List(n) { LocalDate.of(2026, 10, 17).plusDays(it.toLong()) }
+        assertEquals((0 until n).toList(), trendXLabelIndices(dates, positions, widths, minGap = 8f))
     }
 
     @Test
     fun `trendXLabelIndices密集时间隔不足的跳过但首末保留`() {
-        // 4 个点间距只有 10px、标签宽 50px：中间的必然重叠，只留首末
+        // 4 个点间距只有 10px、标签宽 50px：放不下，稀疏化后只留首末
         val positions = listOf(0f, 10f, 20f, 30f)
         val widths = List(4) { 50f }
-        val kept = trendXLabelIndices(positions, widths, minGap = 8f)
+        val dates = List(4) { LocalDate.of(2026, 10, 21).plusDays(it.toLong()) }
+        val kept = trendXLabelIndices(dates, positions, widths, minGap = 8f)
         assertTrue(kept.contains(0))
         assertTrue(kept.contains(3))
         assertTrue("中间的应被稀疏化", kept.size < 4)
@@ -92,23 +104,123 @@ class AssetTrendChartTest {
 
     @Test
     fun `trendXLabelIndices恰好贴边时保留`() {
-        // 首标签末端 25，中标签起端 33，间隔恰好 8 = minGap：>= 判定，保留（不重叠）
+        // 防重叠兜底：首标签末端 25，中标签起端 33，间隔恰好 8 = minGap：>= 判定，保留
         val positions = listOf(0f, 58f, 200f)
         val widths = List(3) { 50f }
-        assertEquals(listOf(0, 1, 2), trendXLabelIndices(positions, widths, minGap = 8f))
+        assertEquals(listOf(0, 1, 2), listOf(0, 1, 2).filterWithOverlapGuard(positions, widths, minGap = 8f))
     }
 
     @Test
     fun `trendXLabelIndices差一点贴边就跳过`() {
-        // 首标签末端 25，中标签起端 32，间隔 7 < minGap：跳过中间的
+        // 防重叠兜底：首标签末端 25，中标签起端 32，间隔 7 < minGap：跳过中间的
         val positions = listOf(0f, 57f, 200f)
         val widths = List(3) { 50f }
-        assertEquals(listOf(0, 2), trendXLabelIndices(positions, widths, minGap = 8f))
+        assertEquals(listOf(0, 2), listOf(0, 1, 2).filterWithOverlapGuard(positions, widths, minGap = 8f))
     }
 
     @Test
     fun `trendXLabelIndices空输入返回空`() {
-        assertEquals(emptyList<Int>(), trendXLabelIndices(emptyList(), emptyList(), minGap = 8f))
+        assertEquals(
+            emptyList<Int>(),
+            trendXLabelIndices(emptyList(), emptyList(), emptyList(), minGap = 8f)
+        )
+    }
+
+    // ===== 同花顺规则：按跨度选自然日历步长，而不是能塞多少塞多少 =====
+
+    /** 连续 days+1 天的日快照，第 i 个点距左边缘 i*spacingPx */
+    private fun dailyChart(
+        start: LocalDate,
+        days: Int,
+        spacingPx: Float = 10f,
+        labelWidth: Float = 50f
+    ): Triple<List<LocalDate>, List<Float>, List<Float>> {
+        val dates = (0..days).map { start.plusDays(it.toLong()) }
+        val positions = List(days + 1) { it * spacingPx }
+        val widths = List(days + 1) { labelWidth }
+        return Triple(dates, positions, widths)
+    }
+
+    @Test
+    fun `一个月跨度按周稀疏_日期落在数据点上`() {
+        // 10/01~10/31 逐日快照、点距 30px（一屏放不下 31 个）：每周留一个，
+        // 且必须落在真实有数据的日期上（10/01、10/08、10/15、10/22、10/29）
+        val (dates, positions, widths) = dailyChart(LocalDate.of(2026, 10, 1), days = 30, spacingPx = 30f)
+
+        val kept = trendXLabelIndices(dates, positions, widths, minGap = 8f)
+
+        val expectedDates = kept.map { dates[it] }
+        assertTrue("首个必须是 10/01", expectedDates.first() == LocalDate.of(2026, 10, 1))
+        assertTrue("末个必须是 10/31", expectedDates.last() == LocalDate.of(2026, 10, 31))
+        // 中间的按 7 天步长跳：10/08、10/15、10/22、10/29
+        assertEquals(
+            listOf(
+                LocalDate.of(2026, 10, 1), LocalDate.of(2026, 10, 8),
+                LocalDate.of(2026, 10, 15), LocalDate.of(2026, 10, 22),
+                LocalDate.of(2026, 10, 29), LocalDate.of(2026, 10, 31)
+            ),
+            expectedDates
+        )
+    }
+
+    @Test
+    fun `半年跨度按月初稀疏_同花顺口径`() {
+        // 2025-11-01 ~ 2026-05-01 逐日快照：同花顺截图就是只标 11-01、01-01、03-01、05-01。
+        // 步长 = ceil(181/30.44/预算)：预算 = 屏宽估的 6 - 2 = 4 → ceil(1.49) = 2 → 每 2 个月初
+        val (dates, positions, widths) = dailyChart(
+            LocalDate.of(2025, 11, 1), days = 181, spacingPx = 8f
+        )
+
+        val kept = trendXLabelIndices(dates, positions, widths, minGap = 8f)
+
+        val expectedDates = kept.map { dates[it] }
+        assertEquals(LocalDate.of(2025, 11, 1), expectedDates.first())
+        assertEquals(LocalDate.of(2026, 5, 1), expectedDates.last())
+        // 中间只许出现月初，且最多 MAX_X_LABELS 个
+        expectedDates.forEach { assertEquals(1, it.dayOfMonth) }
+        assertTrue("标签过多：${expectedDates.size}", expectedDates.size <= MAX_X_LABELS)
+    }
+
+    @Test
+    fun `一年跨度按季稀疏`() {
+        val (dates, positions, widths) = dailyChart(
+            LocalDate.of(2025, 10, 24), days = 364, spacingPx = 8f
+        )
+
+        val kept = trendXLabelIndices(dates, positions, widths, minGap = 8f)
+
+        val expectedDates = kept.map { dates[it] }
+        assertEquals(LocalDate.of(2025, 10, 24), expectedDates.first())
+        assertEquals(LocalDate.of(2026, 10, 23), expectedDates.last())
+        assertTrue("标签过多：${expectedDates.size}", expectedDates.size <= MAX_X_LABELS)
+        // 季初：2026-01-01、04-01、07-01、10-01 都应出现
+        listOf(
+            LocalDate.of(2026, 1, 1), LocalDate.of(2026, 4, 1),
+            LocalDate.of(2026, 7, 1), LocalDate.of(2026, 10, 1)
+        ).forEach { assertTrue("缺季初 $it", expectedDates.contains(it)) }
+    }
+
+    @Test
+    fun `缺口不糊弄_标签仍落在各自的数据点上`() {
+        // 10/15、10/17、10/19 三天有数据、点少且放得下：全部画，
+        // 每个标签都对应一个真实快照（不会画到没有数据的日期上）
+        val dates = listOf(
+            LocalDate.of(2026, 10, 15), LocalDate.of(2026, 10, 17), LocalDate.of(2026, 10, 19)
+        )
+        val positions = listOf(0f, 200f, 400f)
+        val widths = List(3) { 40f }
+        assertEquals(listOf(0, 1, 2), trendXLabelIndices(dates, positions, widths, minGap = 8f))
+    }
+
+    @Test
+    fun `日期全脏时退化成等距稀疏`() {
+        val dates = List(20) { null }
+        val positions = List(20) { it * 10f }
+        val widths = List(20) { 50f }
+        val kept = trendXLabelIndices(dates, positions, widths, minGap = 8f)
+        assertTrue(kept.contains(0))
+        assertTrue(kept.contains(19))
+        assertTrue("应稀疏化：${kept.size}", kept.size <= MAX_X_LABELS)
     }
 
     // ===== 按日期排布（不等宽缺口） =====

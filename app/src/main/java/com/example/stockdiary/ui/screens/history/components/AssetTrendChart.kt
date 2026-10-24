@@ -45,6 +45,7 @@ import com.example.stockdiary.utils.toLocalDate
 import com.example.stockdiary.utils.toProfitDisplay
 import java.time.temporal.ChronoUnit
 import kotlin.math.abs
+import kotlin.math.ceil
 
 /**
  * 折线图绘图区内边距（px）。手势映射与绘制必须共用，否则点按位置和画出来的点对不上。
@@ -57,6 +58,15 @@ private const val TREND_PADDING_TOP = 20f
 private const val TREND_PADDING_BOTTOM = 64f
 /** X 轴日期标签之间的最小间距（px），放不下就省略中间标签 */
 private const val TREND_LABEL_GAP = 8f
+/**
+ * X 轴日期标签之间的额外留白（px，除标签自身宽度外）。
+ * 只有「放得下」判定用得到：标签密到影响阅读时不出，而不是排到刚好不重叠。
+ */
+private const val TREND_LABEL_SPACING = 16f
+/** X 轴日期标签的挑选预算上限：再宽的屏也不多画（同花顺 6 个月只标 4 个月初） */
+internal const val MAX_X_LABELS = 6
+/** 稀疏化步长档位（天）：先小后大，取第一个能让标签数落进预算的 */
+private val DAY_STEP_LADDER = listOf(1L, 2L, 3L, 7L, 14L)
 
 /**
  * 按时间戳等距排布折线点的 x 坐标。
@@ -98,22 +108,89 @@ internal fun nearestPointIndex(x: Float, positions: List<Float>): Int {
 }
 
 /**
- * 为 X 轴日期标签挑选该画哪些快照的下标。
+ * 为 X 轴日期标签挑选该画哪些快照的下标。**同花顺规则：按可见跨度选自然日历步长**，
+ * 不是「能塞下多少就塞多少」——6 个月只标 4 个月初，一个月每周一个，绝不排满。
  *
- * 每份快照的日期都尽量标在**它自己的点上**：快照稀疏时全部可见——用户能直接看出
- * 哪些天有数据、缺口在哪（与跨缺口虚线段互相印证）；标签会互相重叠时跳过中间的、
- * 保留上一个，首末下标永远保留（最起码知道起止）。[labelWidths] 与 [positions] 同序同长。
+ * 每份快照的日期都尽量标在**它自己的点上**：缺口在哪用户直接看得出来
+ * （与跨缺口虚线段互相印证）。首末下标永远保留（最起码知道起止）。
+ *
+ * 稀疏档位（按首末快照的日期跨度）：
+ * - 跨度 ≤ 14 天：步长 1/2/3 天（一周视图逐日，全部画在各自的点上）
+ * - 跨度 ≤ 62 天：步长 7/14 天（一周一个 / 双周一个）
+ * - 更长：步长 N 个自然月，**锚定每月 1 号**（N 随跨度与屏宽涨，半年/一年/全部依次变疏）
+ *
+ * [labelWidths] 与 [positions] 同序同长；最后仍有一道像素级防重叠兜底（窄屏 /
+ * 标签异常宽时再削），保证物理上不叠字。
  */
 internal fun trendXLabelIndices(
+    dates: List<java.time.LocalDate?>,
     positions: List<Float>,
     labelWidths: List<Float>,
     minGap: Float
 ): List<Int> {
     if (positions.isEmpty()) return emptyList()
+    if (positions.size == 1) return listOf(0)
+    val n = positions.size
+
+    // 放得下就全画：一周 8 个点、稀疏缺口都走这条（不掺日历步长）
+    val widest = labelWidths.maxOrNull() ?: 0f
+    val availableWidth = (positions.last() - positions.first()).coerceAtLeast(0f)
+    val fitsAll = n <= ((availableWidth + minGap) / (widest + TREND_LABEL_SPACING)).toInt()
+    if (fitsAll) return (0 until n).toList()
+
+    val first = dates.firstOrNull { it != null }
+    val last = dates.lastOrNull { it != null }
+    if (first == null || last == null) {
+        // 日期全是脏数据：退化成等距稀疏，保住「有刻度、不叠字」
+        return thinEvenly(n)
+    }
+    val spanDays = ChronoUnit.DAYS.between(first, last)
+    // 首末各占一个名额，剩下的是步长挑选的预算；屏越窄预算越小
+    val budget = (((availableWidth + minGap) / (widest + TREND_LABEL_SPACING)).toInt())
+        .coerceIn(2, MAX_X_LABELS) - 2
+
+    val ticks: List<java.time.LocalDate> = if (spanDays <= 62) {
+        val step = DAY_STEP_LADDER.firstOrNull { spanDays / it <= budget } ?: DAY_STEP_LADDER.last()
+        generateSequence(first) { it.plusDays(step) }.takeWhile { !it.isAfter(last) }.toList()
+    } else {
+        // 月口径：锚定每月 1 号，步长按月数随跨度涨（半年起每 2 个月、一年起每 3 个月…）
+        val monthStep = maxOf(1, ceil(spanDays / 30.44 / budget.coerceAtLeast(1)).toInt())
+        val anchor = first.withDayOfMonth(1)
+        generateSequence(anchor) { it.plusMonths(monthStep.toLong()) }
+            .takeWhile { !it.isAfter(last) }
+            .toList()
+    }
+
+    // 每个 tick 取「日期不早于它的第一个快照」；tick 递增，cursor 单调前进即可
+    val kept = sortedSetOf(0, n - 1)
+    var cursor = 0
+    for (tick in ticks) {
+        while (cursor < n && dates[cursor]?.isBefore(tick) == true) cursor++
+        if (cursor < n) kept.add(cursor)
+    }
+    return kept.sorted().filterWithOverlapGuard(positions, labelWidths, minGap)
+}
+
+/** 日期全脏时的退化稀疏：等距挑，首末保留 */
+private fun thinEvenly(count: Int): List<Int> {
+    if (count <= 2) return (0 until count).toList()
+    val step = ceil(count / (MAX_X_LABELS - 2.0)).toInt().coerceAtLeast(1)
+    return (0 until count).filter { it % step == 0 || it == count - 1 }
+}
+
+/**
+ * 像素级防重叠兜底：与上一个已画标签间隔不足 [minGap] 就跳过中间的。
+ * 首末下标永远保留（最起码知道起止）。internal 供单测直接钉边界。
+ */
+internal fun List<Int>.filterWithOverlapGuard(
+    positions: List<Float>,
+    labelWidths: List<Float>,
+    minGap: Float
+): List<Int> {
     val kept = mutableListOf<Int>()
     var lastEnd = Float.NEGATIVE_INFINITY
-    for (index in positions.indices) {
-        val isEdge = index == 0 || index == positions.lastIndex
+    for (index in this) {
+        val isEdge = index == first() || index == last()
         val start = positions[index] - labelWidths[index] / 2f
         val end = positions[index] + labelWidths[index] / 2f
         // 首末必须画；中间的与上一个已画标签间隔不足 minGap 就跳过
@@ -213,6 +290,7 @@ private fun buildTrendChartGeometry(
         )
     }
     val labelIndices = trendXLabelIndices(
+        dates = dates,
         positions = positions,
         labelWidths = labelWidths,
         minGap = TREND_LABEL_GAP

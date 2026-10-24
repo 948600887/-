@@ -357,4 +357,28 @@ class SnapshotAnalyzerTest {
         )
         assertTrue(SnapshotAnalyzer.calculateMonthlyReturns(snapshots).isEmpty())
     }
+
+    @Test
+    fun `统计按日期排序_幽灵快照不靠后`() {
+        // 回填补出来的行：date 是 10-15，timestamp 却是 10-17 的。
+        // 只按 timestamp 排序会把它当成最新一期，首末取值全错
+        val phantom = AssetSnapshot(
+            date = "2026-10-15",
+            timestamp = "2026-10-17".toTimestamp(),
+            totalAssets = 100.0, totalLiabilities = 0.0, netAssets = 100.0
+        )
+        val snapshots = listOf(
+            phantom,
+            snapshot("2026-10-16", 110.0),
+            snapshot("2026-10-17", 121.0)
+        )
+
+        val stats = SnapshotAnalyzer.analyze(snapshots)!!
+
+        // 首期应是 10-15 的 100（幽灵行按它的 date 归位），末期 10-17 的 121，
+        // 覆盖 2 天 → 日均增值额 (121-100)/2 = 10.5
+        assertEquals(10.5, stats.avgDailyReturnAmount, 1e-6)
+        assertEquals(2, stats.coveredDays)
+        assertEquals(121.0, stats.maxValue, 1e-6)
+    }
 }

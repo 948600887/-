@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.example.stockdiary.data.calculator.MonthlyReturn
+import com.example.stockdiary.data.calculator.SNAPSHOT_ORDER
 import com.example.stockdiary.data.calculator.SnapshotAnalyzer
 import com.example.stockdiary.data.calculator.SnapshotStats
 import com.example.stockdiary.data.prefs.DashboardPreferencesManager
@@ -13,6 +14,7 @@ import com.example.stockdiary.database.AssetSnapshot
 import com.example.stockdiary.di.AppContainer
 import com.example.stockdiary.utils.AppLogger
 import com.example.stockdiary.utils.isDisplayEquivalentTo
+import com.example.stockdiary.utils.toLocalDate
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -66,7 +68,10 @@ class HistoryViewModel(
             assetRepository.getAllAssets(),
             assetRepository.getAllSnapshots()
         ) { assets, snapshots ->
-            assets to snapshots.sortedBy { it.timestamp }
+            // 排序口径必须是 date（用户可见），不能是创建时刻 timestamp：
+            // 回填补出来的幽灵快照 date 与 timestamp 错位，按 timestamp 排会把
+            // 10/15 的行扔到 10/16 后面，整页顺序全乱。详见 SNAPSHOT_ORDER 注释
+            assets to snapshots.sortedWith(SNAPSHOT_ORDER)
         }
             // 默认的 distinctUntilChanged 用 Pair/Asset 全字段 equals，而 Asset 含
             // lastSyncTime/lastUpdateTime——落价时它们必变，于是每次都判定"变了"并走一遍
@@ -189,25 +194,54 @@ class HistoryViewModel(
     }
 }
 
-private fun filterSnapshots(snapshots: List<AssetSnapshot>, period: String): List<AssetSnapshot> {
+/**
+ * 按周期过滤快照。窗口口径是 **date 字段**，不是创建时刻（timestamp）：
+ * 用户看到的 X 轴刻度、期间增值起止、日历全是 date，过滤必须与它一致。
+ * 按 timestamp 过滤会在两者错位时说谎——回填补出来的幽灵快照
+ * （date 是被补的那天、timestamp 是补的时刻）会让「1周」放出 10 天数据
+ * （2026-10-24 用户实测复现，快照 10/15、10/16 的 timestamp 晚到 10/17+）。
+ *
+ * date 解析不了的脏数据退回创建时刻比较，不静默丢弃。
+ *
+ * @param now 「今天」，可注入以便单测钉死窗口边界
+ */
+internal fun filterSnapshots(
+    snapshots: List<AssetSnapshot>,
+    period: String,
+    now: LocalDate = LocalDate.now()
+): List<AssetSnapshot> {
     if (snapshots.isEmpty()) return emptyList()
-    val now = LocalDate.now()
-    val startTime = when (period) {
-        "1W" -> now.minusDays(7).atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
-        "1M" -> now.minusMonths(1).atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
-        "3M" -> now.minusMonths(3).atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
-        "6M" -> now.minusMonths(6).atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
-        "1Y" -> now.minusYears(1).atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
-        "ALL" -> 0L
-        else -> now.minusMonths(1).atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
+    val startDate: LocalDate? = when (period) {
+        "1W" -> now.minusDays(7)
+        "1M" -> now.minusMonths(1)
+        "3M" -> now.minusMonths(3)
+        "6M" -> now.minusMonths(6)
+        "1Y" -> now.minusYears(1)
+        "ALL" -> null
+        else -> now.minusMonths(1)
     }
+    // date 是脏数据时退回创建时刻比较的窗口起点；ALL（startDate == null）走不到这条
+    val startTime = startDate?.atStartOfDay(ZoneId.systemDefault())?.toInstant()?.toEpochMilli() ?: 0L
     // 先过滤时间范围，再按日期去重保留最新一条（兼容历史脏数据）
     return snapshots
-        .filter { it.timestamp >= startTime }
+        .filter { snapshot ->
+            startDate == null || snapshot.isOnOrAfter(startDate, startTime)
+        }
         .sortedByDescending { it.timestamp }
         .distinctBy { it.date }
-        .sortedBy { it.timestamp }
+        // 最终顺序同样按 date（同日多份已去重，理论上只剩创建时刻做次序）
+        .sortedWith(SNAPSHOT_ORDER)
         // 最后踢掉开头「正资产为 0」的空快照（无资产时 App 自动补的），
         // 图表/统计/期间增值/月度收益全部从这里取数，一处剔除全页生效
         .let { SnapshotAnalyzer.dropLeadingEmptySnapshots(it) }
+}
+
+/** 快照是否落在 [startDate] 当天或之后；date 是脏数据时退回创建时刻判断 */
+private fun AssetSnapshot.isOnOrAfter(startDate: LocalDate, startTime: Long): Boolean {
+    val snapshotDate = date.toLocalDate()
+    return if (snapshotDate != null) {
+        !snapshotDate.isBefore(startDate)
+    } else {
+        timestamp >= startTime
+    }
 }

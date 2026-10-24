@@ -2,10 +2,34 @@ package com.example.stockdiary.data.calculator
 
 import com.example.stockdiary.database.AssetSnapshot
 import com.example.stockdiary.utils.toLocalDate
+import java.time.Instant
+import java.time.LocalDate
 import java.time.YearMonth
+import java.time.ZoneId
 import java.time.temporal.ChronoUnit
 import kotlin.math.pow
 import kotlin.math.sqrt
+
+/**
+ * 快照排序比较器：**日期优先**（date 字段），同日再按创建时刻（timestamp）。
+ *
+ * 为什么不能只按 timestamp：timestamp 是「这一行什么时候写进库的」，date 才是
+ * 「这一天账目」的口径，两者会错位——2026-10-18 之前的 fillMissingSnapshots
+ * 逐日回填补出来的快照，date 是被补的那天、timestamp 是补的时刻
+ * （用户库里就有这种行：选「1周」放出 10 天数据）。只按 timestamp 排序会把
+ * 10/15 的行排到 10/16 之后，图表连线回折、统计首末取错。
+ * 界面各处（X 轴刻度、期间增值起止、日历、资产总览）全是 date 口径，
+ * 排序必须与它一致。
+ *
+ * date 解析不了的脏数据不丢弃：退回用创建时刻推导的日期，仍参与排序。
+ */
+internal val SNAPSHOT_ORDER: Comparator<AssetSnapshot> =
+    compareBy({ it.effectiveEpochDay() }, { it.timestamp })
+
+/** 快照的排序用日期：date 解析失败时退回创建时刻推导的日期（脏数据不静默丢弃） */
+internal fun AssetSnapshot.effectiveEpochDay(): Long =
+    date.toLocalDate()?.toEpochDay()
+        ?: Instant.ofEpochMilli(timestamp).atZone(ZoneId.systemDefault()).toLocalDate().toEpochDay()
 
 /**
  * 历史页风险卡片统计。
@@ -61,13 +85,13 @@ object SnapshotAnalyzer {
      * 统计一段时间内的快照。
      *
      * 入参假定已按时间升序，但调用方不能全信（过滤/去重会重排），函数内自己
-     * `sortedBy { it.timestamp }` 一道。日期非法的快照直接跳过（兼容历史脏数据），
+     * `sortedWith(SNAPSHOT_ORDER)` 一道。日期非法的快照直接跳过（兼容历史脏数据），
      * 跳过之后不足 2 份返回 null。
      */
     fun analyze(snapshots: List<AssetSnapshot>): SnapshotStats? {
         // 解析日期与快照绑定在一起，避免同一个字符串解析两遍
         val valid = snapshots
-            .sortedBy { it.timestamp }
+            .sortedWith(SNAPSHOT_ORDER)
             .mapNotNull { snapshot -> snapshot.date.toLocalDate()?.let { date -> snapshot to date } }
         if (valid.size < 2) return null
 
@@ -162,7 +186,7 @@ object SnapshotAnalyzer {
     fun calculateMonthlyReturns(snapshots: List<AssetSnapshot>): List<MonthlyReturn> {
         if (snapshots.size < 2) return emptyList()
         val monthMap = linkedMapOf<YearMonth, AssetSnapshot>()
-        for (snapshot in snapshots.sortedBy { it.timestamp }) {
+        for (snapshot in snapshots.sortedWith(SNAPSHOT_ORDER)) {
             val date = snapshot.date.toLocalDate() ?: continue
             // 同月后者覆盖前者：每月保留最后一条
             monthMap[YearMonth.from(date)] = snapshot

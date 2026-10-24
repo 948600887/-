@@ -17,12 +17,14 @@ import com.example.stockdiary.database.perTenSharesToAmount
 import com.example.stockdiary.di.AppContainer
 import com.example.stockdiary.utils.AppLogger
 import com.example.stockdiary.utils.ExchangeRateManager
+import com.example.stockdiary.utils.totalValueCny
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -92,8 +94,11 @@ class CalendarViewModel(
 
     /**
      * 日历输出真正依赖的资产字段签名：symbol（取哪些分红）、balance（收支日历折算金额）、
-     * currency（外币换算）。**不含 currentPrice/lastSyncTime 等实时字段**——它们变了日历结果也不变，
-     * 故不应触发重算（见 init 里的 distinctUntilChanged）。
+     * currency（外币换算）。**不含 currentPrice/lastSyncTime 等实时字段**——它们变了不触发重算
+     * （见 init 里的 distinctUntilChanged）：一次全量刷新会让 Room 流重发 20+ 次，每轮重算都要
+     * 预热分红缓存，纯属浪费。代价是「今天」一格的实时净值以最后一次重算为准，价格抖动后可能
+     * 短暂落后于资产页；切 Tab / 切月 / 下拉刷新都会按最新价重算补齐（今日实时口径见
+     * [buildAssetCalendarMonth]）。
      */
     private fun calendarSignature(assets: List<Asset>): List<Triple<String?, Double, String>> =
         assets.map { Triple(it.symbol, it.balance, it.currency) }
@@ -232,16 +237,16 @@ class CalendarViewModel(
         forceRefresh: Boolean
     ): Result<CalendarResult> = try {
         Result.success(withContext(Dispatchers.IO) {
-            val data = mutableMapOf<LocalDate, Double>()
-            for (day in 1..month.lengthOfMonth()) {
-                data[month.atDay(day)] = 0.0
-            }
-
             if (assets.isEmpty()) {
-                return@withContext CalendarResult(data, emptySet(), emptyList())
+                return@withContext CalendarResult(
+                    buildAssetCalendarMonth(month, emptyMap(), liveNetAssetsToday = 0.0, today = LocalDate.now()),
+                    emptySet(),
+                    emptyList()
+                )
             }
 
             val today = LocalDate.now()
+            val viewingCurrentMonth = today.year == month.year && today.monthValue == month.monthValue
 
             // 只 parse 一次：筛当月和取日期用的是同一个 LocalDate。
             // 原先 filter 里 parse 一遍、下面的循环再 parse 一遍同一批字符串。
@@ -259,9 +264,27 @@ class CalendarViewModel(
                     null
                 }
             }
-            for ((date, netAssets) in monthSnapshots) {
-                data[date] = netAssets
+
+            // 「今天」这一格不读快照，按当前持仓实时算——与资产页/首页完全同口径
+            // （全部非负债资产 totalValueCny 合计 − 负债合计，正是两页「净资产」的算法）。
+            // 当日快照是过去某时刻按当时价格/汇率固化的值：存下之后汇率（6h TTL 回源）或
+            // 加密货币价（默认不自动同步）再动、或同步被时间预算截断而不存快照，资产页早已
+            // 换成新值，日历还挂着旧快照——用户实测同一天两页差 0.01 元，根因就在这里。
+            // 过去的日子仍用快照：历史记录的本职就是定格那一天。只看当月才算，翻旧月不白查全表。
+            val liveNetAssetsToday = if (viewingCurrentMonth) {
+                assetRepository.getAllAssets().first().let { current ->
+                    current.filter { !it.type.isLiability }.sumOf { it.totalValueCny } -
+                        current.filter { it.type.isLiability }.sumOf { it.totalValueCny }
+                }
+            } else {
+                0.0
             }
+            val data = buildAssetCalendarMonth(
+                month = month,
+                snapshotNetAssets = monthSnapshots.toMap(),
+                liveNetAssetsToday = liveNetAssetsToday,
+                today = today
+            )
 
             val symbols = assets.mapNotNull { it.symbol }
             // 冷启动不强制重抓：先用宽口径批量读把库里有记录的标的预热进内存缓存
@@ -426,4 +449,39 @@ class CalendarViewModel(
             ) as T
         }
     }
+}
+
+/**
+ * 资产日历单月格子数据：日期 → 当日净资产。纯函数，无 IO、无时钟（[today] 由调用方注入）。
+ *
+ * 口径：
+ * - **过去的日子**取当日快照——历史记录的本职就是定格那一天的值；
+ * - **今天**取 [liveNetAssetsToday]（实时净资产，与资产页/首页同公式：全部非负债资产
+ *   `totalValueCny` 合计 − 负债合计）。当日快照是过去某时刻按当时价格/汇率固化的值，
+ *   之后汇率（6h TTL 回源）或加密货币价（默认不自动同步）再动、或同步被时间预算截断
+ *   而不存快照，日历这天就会与资产页对不上——用户实测同一天两页差 0.01 元，根因就是
+ *   日历这天读的是旧快照而不是实时值。今天跟资产页保持一致，故实时值优先。
+ *
+ * [today] 不在 [month] 内（翻旧月/看未来月）时不发生覆盖，整月都是快照与 0；
+ * 无快照的日子保持 0.0（界面显示「暂无数据」）。
+ */
+internal fun buildAssetCalendarMonth(
+    month: YearMonth,
+    snapshotNetAssets: Map<LocalDate, Double>,
+    liveNetAssetsToday: Double,
+    today: LocalDate
+): Map<LocalDate, Double> {
+    val data = mutableMapOf<LocalDate, Double>()
+    for (day in 1..month.lengthOfMonth()) {
+        data[month.atDay(day)] = 0.0
+    }
+    snapshotNetAssets.forEach { (date, value) ->
+        if (date.year == month.year && date.monthValue == month.monthValue) {
+            data[date] = value
+        }
+    }
+    if (today.year == month.year && today.monthValue == month.monthValue) {
+        data[today] = liveNetAssetsToday
+    }
+    return data
 }

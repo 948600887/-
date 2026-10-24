@@ -8,6 +8,7 @@ import com.example.stockdiary.data.dividend.DividendIncomeUseCase
 import com.example.stockdiary.data.dividend.DividendRecord
 import com.example.stockdiary.data.repository.DividendRepository
 import com.example.stockdiary.database.Asset
+import com.example.stockdiary.database.AssetSnapshot
 import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.database.SnapshotDao
 import io.mockk.coEvery
@@ -27,9 +28,11 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Assume.assumeTrue
 import org.junit.BeforeClass
 import org.junit.Test
 import java.time.LocalDate
+import java.time.YearMonth
 
 /**
  * CalendarViewModel 单测。
@@ -93,7 +96,10 @@ class CalendarViewModelTest {
         return cond()
     }
 
-    private fun buildVm(): CalendarViewModel {
+    private fun buildVm(
+        assets: List<Asset> = listOf(stockAsset),
+        snapshots: List<AssetSnapshot> = emptyList()
+    ): CalendarViewModel {
         every { prefsMgr.loadPreferences() } returns DashboardPreferences()
         // 模拟 Manager 的真实契约：拉磁盘最新值 → 套用 mutate → 存盘 → 返回合并结果。
         // 必须这么打桩：prefsMgr 是 mock，其 updatePreferences 是桩、真实方法体不会执行，
@@ -104,8 +110,8 @@ class CalendarViewModelTest {
             prefsMgr.savePreferences(updated)
             updated
         }
-        every { assetRepo.getAllAssets() } returns flowOf(listOf(stockAsset))
-        coEvery { snapshotDao.getAllSnapshotsSync() } returns emptyList()
+        every { assetRepo.getAllAssets() } returns flowOf(assets)
+        coEvery { snapshotDao.getAllSnapshotsSync() } returns snapshots
         // 两个日历生成路径都会先调 preFetchDividends，必须显式打桩：
         // 只依赖 relaxed 会让它落到未初始化字段的真实实现上抛异常，日历生成整体失败
         coEvery { divRepo.preFetchDividends(any(), any(), any()) } returns Unit
@@ -261,5 +267,164 @@ class CalendarViewModelTest {
         // 再稳一手：若去重失效，价格那次会晚到凑成第 3 次，这里必须仍是 2
         Thread.sleep(400)
         assertEquals("价格抖动应被去重、只重算 2 次（首次 + 数量变化）", 2, regenCount.get())
+    }
+
+    // ---------- 「当日净资产」与资产页一致性（0.01 差异回归） ----------
+
+    @Test
+    fun `资产日历今天一格取实时净值_当日快照过期也不照抄`() = runBlocking {
+        val today = LocalDate.now()
+        // 复现用户反馈：当日快照是早先某一轮同步固化的旧值（旧价/旧汇率），
+        // 资产页早已按实时价汇总，同一天两页差 0.01 元
+        val staleSnapshot = AssetSnapshot(
+            date = today.toString(),
+            timestamp = 0L,
+            totalAssets = 12345.67,
+            totalLiabilities = 0.0,
+            netAssets = 12345.67
+        )
+        // 1000 股 × 12.34568 = 12345.68：实时值比旧快照高 1 分，正是那 0.01
+        val priced = stockAsset.copy(currentPrice = 12.34568)
+        coEvery { divRepo.getDividendsBySymbol(any(), any()) } returns emptyList()
+
+        val vm = buildVm(assets = listOf(priced), snapshots = listOf(staleSnapshot))
+        waitUntil { !vm.uiState.value.isLoading && vm.uiState.value.calendarData.isNotEmpty() }
+
+        // 「当日净资产」必须与资产页同口径（实时汇总），不得照抄过期快照
+        assertEquals(12345.68, vm.uiState.value.calendarData[today] ?: 0.0, 0.001)
+    }
+
+    @Test
+    fun `今天没有快照时也显示实时净值`() = runBlocking {
+        val today = LocalDate.now()
+        val priced = stockAsset.copy(currentPrice = 8.88) // 1000 股 × 8.88 = 8880
+        coEvery { divRepo.getDividendsBySymbol(any(), any()) } returns emptyList()
+
+        val vm = buildVm(assets = listOf(priced), snapshots = emptyList())
+        waitUntil { !vm.uiState.value.isLoading && vm.uiState.value.calendarData.isNotEmpty() }
+
+        // 当日还没存过快照（例如同步被截断不存）：今天这格也不能空着，
+        // 按实时净值显示，与资产页一致
+        assertEquals(8880.0, vm.uiState.value.calendarData[today] ?: 0.0, 0.001)
+    }
+
+    @Test
+    fun `过去日期仍取当日快照_只有今天走实时口径`() = runBlocking {
+        val today = LocalDate.now()
+        // 今天是 1 号时当月没有「过去的日子」可断言，跳过（纯函数用例已覆盖该口径）
+        assumeTrue(today.dayOfMonth > 1)
+        val yesterday = today.minusDays(1)
+        val priced = stockAsset.copy(currentPrice = 10.0) // 实时 1000 × 10 = 10000
+        coEvery { divRepo.getDividendsBySymbol(any(), any()) } returns emptyList()
+
+        val vm = buildVm(
+            assets = listOf(priced),
+            snapshots = listOf(
+                AssetSnapshot(
+                    date = yesterday.toString(),
+                    timestamp = 0L,
+                    totalAssets = 9999.99,
+                    totalLiabilities = 0.0,
+                    netAssets = 9999.99
+                ),
+                AssetSnapshot(
+                    date = today.toString(),
+                    timestamp = 0L,
+                    totalAssets = 8888.88,
+                    totalLiabilities = 0.0,
+                    netAssets = 8888.88
+                )
+            )
+        )
+        waitUntil { !vm.uiState.value.isLoading && vm.uiState.value.calendarData.isNotEmpty() }
+
+        // 昨天是历史记录：照抄当日快照，不被实时值覆盖
+        assertEquals(9999.99, vm.uiState.value.calendarData[yesterday] ?: 0.0, 1e-9)
+        // 今天：实时口径（10000）覆盖当日旧快照（8888.88）
+        assertEquals(10000.0, vm.uiState.value.calendarData[today] ?: 0.0, 0.001)
+    }
+
+    @Test
+    fun `翻到过去月份不发生实时覆盖_整月都是快照`() = runBlocking {
+        val thisMonth = YearMonth.now()
+        val lastMonth = thisMonth.minusMonths(1)
+        val dayInLastMonth = lastMonth.atDay(lastMonth.lengthOfMonth())
+        val priced = stockAsset.copy(currentPrice = 10.0)
+        coEvery { divRepo.getDividendsBySymbol(any(), any()) } returns emptyList()
+
+        val vm = buildVm(
+            assets = listOf(priced),
+            snapshots = listOf(
+                AssetSnapshot(
+                    date = dayInLastMonth.toString(),
+                    timestamp = 0L,
+                    totalAssets = 7777.77,
+                    totalLiabilities = 0.0,
+                    netAssets = 7777.77
+                )
+            )
+        )
+        waitUntil { !vm.uiState.value.isLoading && vm.uiState.value.calendarData.isNotEmpty() }
+        vm.selectMonth(lastMonth)
+        waitUntil { !vm.uiState.value.isLoading }
+
+        // 翻旧月：即使今天恰好也有快照，也不能把实时值写进上个月
+        assertEquals(7777.77, vm.uiState.value.calendarData[dayInLastMonth] ?: 0.0, 1e-9)
+        // 当月其余日子无快照 → 0（无数据）
+        assertEquals(0.0, vm.uiState.value.calendarData[lastMonth.atDay(1)] ?: -1.0, 1e-9)
+    }
+
+    // ---------- buildAssetCalendarMonth 纯函数 ----------
+
+    @Test
+    fun `纯函数_今天取实时值_过去日子取快照_无快照日子为零`() {
+        val month = YearMonth.of(2026, 10)
+        val today = month.atDay(20)
+        val result = buildAssetCalendarMonth(
+            month = month,
+            snapshotNetAssets = mapOf(
+                month.atDay(10) to 1000.0,
+                month.atDay(15) to 2000.0,
+                today to 9999.99 // 当日旧快照：必须被实时值覆盖
+            ),
+            liveNetAssetsToday = 12345.68,
+            today = today
+        )
+
+        assertEquals(31, result.size)
+        assertEquals(1000.0, result[month.atDay(10)]!!, 1e-9)
+        assertEquals(2000.0, result[month.atDay(15)]!!, 1e-9)
+        assertEquals(12345.68, result[today]!!, 1e-9) // 今天：实时优先
+        assertEquals(0.0, result[month.atDay(11)]!!, 1e-9) // 无快照 → 无数据
+    }
+
+    @Test
+    fun `纯函数_今天不在视图月内时不覆盖`() {
+        val month = YearMonth.of(2026, 9)
+        val today = YearMonth.of(2026, 10).atDay(3) // 看 9 月，今天是 10 月
+        val result = buildAssetCalendarMonth(
+            month = month,
+            snapshotNetAssets = mapOf(month.atDay(30) to 5000.0),
+            liveNetAssetsToday = 12345.68,
+            today = today
+        )
+        // 整月都是快照口径，实时值写不进来
+        assertEquals(5000.0, result[month.atDay(30)]!!, 1e-9)
+        assertEquals(30, result.size)
+    }
+
+    @Test
+    fun `纯函数_当月无任何快照时今天仍显示实时净值`() {
+        val month = YearMonth.of(2026, 2)
+        val today = month.atDay(28)
+        val result = buildAssetCalendarMonth(
+            month = month,
+            snapshotNetAssets = emptyMap(),
+            liveNetAssetsToday = 66.6,
+            today = today
+        )
+        assertEquals(28, result.size)
+        assertEquals(66.6, result[today]!!, 1e-9)
+        assertEquals(0.0, result[month.atDay(1)]!!, 1e-9)
     }
 }

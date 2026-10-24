@@ -8,6 +8,7 @@ import androidx.core.content.FileProvider
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetSnapshot
 import com.example.stockdiary.database.AssetType
+import com.example.stockdiary.database.Dividend
 import com.example.stockdiary.database.Transaction
 import com.example.stockdiary.database.TransactionType
 import com.example.stockdiary.utils.AppLogger
@@ -112,6 +113,44 @@ class DataExporter(private val context: Context) {
             throw e
         } catch (e: Exception) {
             AppLogger.e("导出资产到文本失败: ${e.message}", e, "DataExporter")
+            null
+        }
+    }
+
+    /**
+     * 导出分红明细（CSV）。
+     *
+     * 字段口径与界面一致：date 是除息日（决定有没有资格拿），payDate 是到账日
+     * （钱真正到账那天，通常晚 1~4 周）；两者都为空时到账日留空。金额按原币（元）导出，
+     * 不折算——分红本来就是本币计，强行折算反而失真。
+     */
+    fun exportDividendsToCSV(dividends: List<Dividend>): Uri? {
+        return try {
+            val fileName = "dividends_${System.currentTimeMillis().toFileTimestamp()}.csv"
+            val file = File(exportDir, fileName)
+
+            openCsvWriter(file).use { writer ->
+                writer.append("代码,名称,分红金额(元),除息日,到账日,是否手动添加\n")
+
+                if (dividends.isEmpty()) {
+                    writer.append("(暂无分红记录)\n")
+                } else {
+                    dividends.forEach { dividend ->
+                        writer.append("${escapeCsv(dividend.symbol)},")
+                        writer.append("${escapeCsv(dividend.name)},")
+                        writer.append("${dividend.amount.format(2)},")
+                        writer.append("${escapeCsv(dividend.date)},")
+                        writer.append("${escapeCsv(dividend.payDate ?: "")},")
+                        writer.append("${if (dividend.isManual) "是" else "否"}\n")
+                    }
+                }
+            }
+
+            getUriForFile(file)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            AppLogger.e("导出分红到CSV失败: ${e.message}", e, "DataExporter")
             null
         }
     }

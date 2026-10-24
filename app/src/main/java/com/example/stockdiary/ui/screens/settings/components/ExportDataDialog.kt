@@ -12,6 +12,7 @@ import androidx.compose.material.icons.filled.History
 // 只能用 deprecated 的 filled 版；等 BOM 升级后再换 Icons.AutoMirrored.Filled.ReceiptLong。
 import androidx.compose.material.icons.automirrored.filled.ReceiptLong
 import androidx.compose.material.icons.filled.TableChart
+import androidx.compose.material.icons.filled.Savings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
@@ -34,6 +35,7 @@ fun ExportDataDialog(
     onExportCsvSnapshots: () -> Unit,
     onExportCsvTransactions: () -> Unit,
     onExportCsvStatement: () -> Unit,
+    onExportCsvDividends: () -> Unit,
     onDismiss: () -> Unit
 ) {
     AlertDialog(
@@ -104,6 +106,18 @@ fun ExportDataDialog(
                     Icon(Icons.AutoMirrored.Filled.TextSnippet, contentDescription = null)
                     Spacer(modifier = Modifier.width(8.dp))
                     Text("导出综合对账单")
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                OutlinedButton(
+                    onClick = onExportCsvDividends,
+                    enabled = !isExporting,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(Icons.Filled.Savings, contentDescription = null)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("导出分红明细 (.csv)")
                 }
             }
         },

@@ -9,6 +9,7 @@ import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetDao
 import com.example.stockdiary.database.AssetSnapshot
 import com.example.stockdiary.database.AssetType
+import com.example.stockdiary.database.Dividend
 import com.example.stockdiary.database.StockDatabase
 import com.example.stockdiary.database.SnapshotDao
 import com.example.stockdiary.database.Transaction
@@ -436,6 +437,10 @@ class AssetRepository private constructor(
 
     /** 库里有没有任何资产。用于冷启动决定要不要排自动快照（清库后不排，导入资产后自然恢复） */
     suspend fun hasAnyAsset(): Boolean = assetDao.getAssetCount() > 0
+
+    /** 全部分红记录（含手动添加），按除息日倒序。供设置页「导出分红 CSV」一次性落盘 */
+    suspend fun getAllDividends(): List<Dividend> =
+        StockDatabase.getInstance(context).dividendDao().getAll()
 
     /**
      * 一次性修复：快照表同日多行去重（保留 timestamp 最大的一条）。

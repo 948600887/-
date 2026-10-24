@@ -141,10 +141,9 @@ fun HistoryScreen(
                         )
                         historyPeriodReturnCard(earliest = earliest, latest = latest)
 
-                        val statistics = uiState.statistics
-                        if (statistics != null) {
-                            historyRiskCard(stats = statistics)
-                        }
+                        // 快照不足（<2 份）时 statistics 为 null，风险卡片仍保留并提示「至少需要
+                        // 2 份历史快照」而非整块消失——否则用户会以为功能丢了。
+                        historyRiskCard(stats = uiState.statistics)
 
                         historyMonthlyReturnChart(monthlyReturns = uiState.monthlyReturns)
                         historyAssetDistribution(latest = latest)

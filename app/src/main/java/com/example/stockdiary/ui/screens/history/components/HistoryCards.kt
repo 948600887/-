@@ -201,23 +201,47 @@ fun LazyListScope.historyPeriodReturnCard(
     }
 }
 
-fun LazyListScope.historyRiskCard(stats: SnapshotStats) {
+fun LazyListScope.historyRiskCard(stats: SnapshotStats?) {
     item {
         SectionCard(title = "风险指标") {
+            val s = stats
+            if (s == null) {
+                // 快照不足（少于 2 份）时 SnapshotAnalyzer 返回 null。与其整块卡片消失让用户
+                // 误以为「没这个功能」，不如保留卡片、指标统一显示「—」并点明原因——
+                // 否则用户会以为数据丢了或 App 出 bug。
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text(
+                        text = "—",
+                        fontSize = 28.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = AppTheme.colors.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "至少需要 2 份历史快照才能计算风险指标",
+                        fontSize = 12.sp,
+                        color = AppTheme.colors.onSurfaceVariant
+                    )
+                }
+                return@SectionCard
+            }
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceEvenly
             ) {
                 // 最大回撤是「下跌」的度量，按国内惯例绿=跌，用 profitGreen 语义正确，勿改
-                RiskMetric(Modifier.weight(1f), "最大回撤", "${stats.maxDrawdown.format(2)}%", AppTheme.colors.profitGreen)
-                RiskMetric(Modifier.weight(1f), "年化波动率", "${stats.volatility.format(2)}%", AppTheme.colors.onSurface)
+                RiskMetric(Modifier.weight(1f), "最大回撤", "${s.maxDrawdown.format(2)}%", AppTheme.colors.profitGreen)
+                RiskMetric(Modifier.weight(1f), "年化波动率", "${s.volatility.format(2)}%", AppTheme.colors.onSurface)
                 // 首期净资产 ≤0 时增长率为 null，显示「—」：0.00% 会被读成零增长，
                 // 与旁边的正日均增值额自相矛盾（与期间增值卡同一处理）
                 RiskMetric(
                     Modifier.weight(1f),
                     "日均复合增长",
-                    stats.avgDailyReturnPercent?.let { "${it.format(2)}%" } ?: "—",
-                    stats.avgDailyReturnPercent?.profitColor() ?: AppTheme.colors.onSurfaceVariant
+                    s.avgDailyReturnPercent?.let { "${it.format(2)}%" } ?: "—",
+                    s.avgDailyReturnPercent?.profitColor() ?: AppTheme.colors.onSurfaceVariant
                 )
             }
             Spacer(modifier = Modifier.height(8.dp))
@@ -225,15 +249,15 @@ fun LazyListScope.historyRiskCard(stats: SnapshotStats) {
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceEvenly
             ) {
-                RiskMetric(Modifier.weight(1f), "日均增值额", stats.avgDailyReturnAmount.toProfitDisplay("¥"), stats.avgDailyReturnAmount.profitColor())
-                RiskMetric(Modifier.weight(1f), "最高净资产", "¥${stats.maxValue.format(0)}", AppTheme.colors.onSurface)
-                RiskMetric(Modifier.weight(1f), "最低净资产", "¥${stats.minValue.format(0)}", AppTheme.colors.onSurface)
+                RiskMetric(Modifier.weight(1f), "日均增值额", s.avgDailyReturnAmount.toProfitDisplay("¥"), s.avgDailyReturnAmount.profitColor())
+                RiskMetric(Modifier.weight(1f), "最高净资产", "¥${s.maxValue.format(0)}", AppTheme.colors.onSurface)
+                RiskMetric(Modifier.weight(1f), "最低净资产", "¥${s.minValue.format(0)}", AppTheme.colors.onSurface)
             }
             Spacer(modifier = Modifier.height(8.dp))
             // 快照有缺口时，日均/年化指标的分母是覆盖天数而非快照份数；
             // 这行小字让缺口自己说话，用户能判断数字可不可信
             Text(
-                text = "覆盖 ${stats.coveredDays} 天 · ${stats.totalSnapshots} 份快照",
+                text = "覆盖 ${s.coveredDays} 天 · ${s.totalSnapshots} 份快照",
                 style = MaterialTheme.typography.labelSmall,
                 color = AppTheme.colors.onSurfaceVariant
             )

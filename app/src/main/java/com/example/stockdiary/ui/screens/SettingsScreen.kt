@@ -28,6 +28,8 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
+import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.Text
 import androidx.compose.material3.TimePicker
 import androidx.compose.material3.rememberTimePickerState
@@ -155,7 +157,23 @@ fun SettingsScreen(
 
     LaunchedEffect(reminderError) {
         reminderError?.let { message ->
-            snackbarHostState.showSnackbar(message)
+            // 精确闹钟权限缺失的提示：SCHEDULE_EXACT_ALARM 无法用弹窗申请，
+            // 必须让用户手动去系统设置开启。给一个「去设置」动作直接跳转，
+            // 否则这行错误只是干巴巴的一句话，用户不知道下一步该做什么。
+            val isAlarmPermission = message.contains("精确闹钟权限")
+            val result = if (isAlarmPermission) {
+                snackbarHostState.showSnackbar(
+                    message = message,
+                    actionLabel = "去设置",
+                    duration = SnackbarDuration.Long
+                )
+            } else {
+                snackbarHostState.showSnackbar(message)
+                SnackbarResult.Dismissed
+            }
+            if (result == SnackbarResult.ActionPerformed) {
+                viewModel.openAlarmSettings()
+            }
             viewModel.clearReminderError()
         }
     }
@@ -459,6 +477,10 @@ fun SettingsScreen(
             },
             onExportCsvStatement = {
                 viewModel.exportData(context, SettingsViewModel.ExportType.CSV_STATEMENT)
+                showExportDialog = false
+            },
+            onExportCsvDividends = {
+                viewModel.exportData(context, SettingsViewModel.ExportType.CSV_DIVIDENDS)
                 showExportDialog = false
             },
             onDismiss = { showExportDialog = false }

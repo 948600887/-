@@ -199,7 +199,8 @@ class SettingsViewModel(
         CSV_ASSETS,
         CSV_SNAPSHOTS,
         CSV_TRANSACTIONS,
-        CSV_STATEMENT
+        CSV_STATEMENT,
+        CSV_DIVIDENDS
     }
 
     fun exportData(context: Context, type: ExportType) {
@@ -213,6 +214,7 @@ class SettingsViewModel(
                     ExportType.CSV_SNAPSHOTS -> dataExporter.exportSnapshotsToCSV(currentState.snapshots)
                     ExportType.CSV_TRANSACTIONS -> dataExporter.exportTransactionsToCSV(currentState.assets, currentState.transactions)
                     ExportType.CSV_STATEMENT -> dataExporter.exportStatementCSV(currentState.assets, currentState.transactions, currentState.snapshots)
+                    ExportType.CSV_DIVIDENDS -> dataExporter.exportDividendsToCSV(assetRepository.getAllDividends())
                 }
                 if (uri != null) {
                     withContext(Dispatchers.Main) {
@@ -222,6 +224,7 @@ class SettingsViewModel(
                             ExportType.CSV_SNAPSHOTS -> "历史快照"
                             ExportType.CSV_TRANSACTIONS -> "交易对账单"
                             ExportType.CSV_STATEMENT -> "综合对账单"
+                            ExportType.CSV_DIVIDENDS -> "分红明细"
                         }
                         val shareIntent = Intent(Intent.ACTION_SEND).apply {
                             setType(
@@ -246,6 +249,15 @@ class SettingsViewModel(
                 AppLogger.e("导出失败: ${e.message}", e, "SettingsVM")
                 _uiState.update { state -> state.copy(isExporting = false, exportResult = Result.failure(e)) }
             }
+        }
+    }
+
+    /** 跳转系统设置开启精确闹钟权限（SCHEDULE_EXACT_ALARM 无法用弹窗请求，只能手动开） */
+    fun openAlarmSettings() {
+        try {
+            NotificationHelper.openAlarmSettings(appContext)
+        } catch (e: Exception) {
+            AppLogger.e("打开闹钟设置失败: ${e.message}", e, "SettingsVM")
         }
     }
 

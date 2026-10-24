@@ -19,15 +19,15 @@ import com.example.stockdiary.utils.AppLogger
         StockBasic::class,
         FundNavCache::class
     ],
-    version = 16,
+    version = 17,
     // 必须开着：项目铁律是「迁移 SQL 取自 Room 自己导出的 JSON，不手敲」。
-    // 当前导出的 schema JSON 只有 1/2/3/4/16 —— **5~15.json 永久缺失**：
+    // 当前导出的 schema JSON 只有 1/2/3/4/16/17 —— **5~15.json 永久缺失**：
     // 那段时间 exportSchema 是关的，kapt 一次都没生成过，git 历史里也查无此文件
     // （`git log --all` 确认 5~15.json 从未被提交过），因此无法从仓库恢复。
     // 缺失不会让 App 崩溃——本库**不**靠 schema JSON 做运行时校验，而是靠手写、逐列对齐的
-    // 代码迁移（MIGRATION_1_2 … MIGRATION_15_16 全部存在，且无 fallbackToDestructiveMigration，
-    // 漏一条老用户升级就会崩）。真正的坑在**测试侧**：日后若引入 Room 的 MigrationTestHelper
-    // 做 schema 一致性校验，校验 4→16 会因为没有 5~15.json 基准而失败，届时须先 reconstruct
+    // 代码迁移（MIGRATION_1_2 … MIGRATION_16_17 全部存在，且无 fallbackToDestructiveMigration，
+    // 漏一条老用户升级就会崩）。真正的坑在**测试侧**：若引入 Room 的 MigrationTestHelper
+    // 做区间 schema 一致性校验，校验 4→17 会因为没有 5~15.json 基准而失败，届时须先 reconstruct
     // 那些版本（checkout 对应 tag 跑 kapt）或显式跳过该区间。
     exportSchema = true
 )
@@ -299,6 +299,81 @@ abstract class StockDatabase : RoomDatabase() {
         }
 
         /**
+         * 把 `transactions.quantity` 的声明类型从 INTEGER 对齐成 REAL。
+         *
+         * ## 背景
+         *
+         * `transactions` 是 v1 就存在的表，当时 `quantity` 声明为 INTEGER；而实体
+         * [Transaction.quantity] 从某个版本起是 `Double`，Room 导出的 16.json 里该列已是 REAL。
+         * 中间**从来没有**一条迁移做过这个类型转换，于是「v1 schema 里 INTEGER / v16 schema 里 REAL」
+         * 成为一个历史分歧。
+         *
+         * ## 为什么不改已有迁移，而是新增 16→17
+         *
+         * 16 的迁移链已经对外发布过（当前线上用户全部是 v16 全新安装），往回改 `MIGRATION_15_16`
+         * 或更早的迁移，会让「已升级过的库」与「未升级过的库」走到不同的分支，且无从区分。
+         * 新增一条末端迁移对已发布的链零侵入，且对 v1~v16 的任意起点都成立。
+         *
+         * ## 为什么值得修（虽然不影响运行）
+         *
+         * SQLite 是动态类型、只认 type affinity：INTEGER 亲和列里写入 100.5 照样存成 REAL，
+         * 读取走 `Cursor.getDouble` 也正常，所以**运行时不会错**。真正的代价在校验侧——
+         * Room 的 `runMigrationsAndValidate` / `MigrationTestHelper` 严格比对会因此失败，
+         * `tools/validate_migration.py` 也长期挂着一条 `transactions.quantity: type INTEGER != REAL`。
+         * 只要这条分歧在，任何「迁移链是否可信」的自动检查都没法全绿，等于把唯一的防线拆了。
+         *
+         * ## 做法
+         *
+         * SQLite 没有 `ALTER COLUMN TYPE`，标准做法是「建新表 → 复制 → 删旧表 → 改名」。
+         * 建表语句逐字取自 Room 导出的 17.json（不是手敲的）。
+         * `transactions` 没有索引、没有被别的表外键引用，所以只需搬表本身。
+         *
+         * 搬运语句刻意用**默认的 ABORT** 而不是 `INSERT OR IGNORE`：搬表迁移里埋一个
+         * 「静默跳过坏行」的开关是坏味道——数据少了却不报错，比崩掉危险得多。
+         * 见下方 migrate() 里的注释。
+         */
+        private val MIGRATION_16_17 = object : Migration(16, 17) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `transactions_new` (" +
+                        "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "`symbol` TEXT NOT NULL, " +
+                        "`name` TEXT NOT NULL, " +
+                        "`type` TEXT NOT NULL, " +
+                        "`quantity` REAL NOT NULL, " +
+                        "`price` REAL NOT NULL, " +
+                        "`date` TEXT NOT NULL, " +
+                        "`fee` REAL NOT NULL)"
+                )
+                // 显式写列名：两侧列序一致时 `SELECT *` 也能对上，但一旦将来有人给
+                // transactions 加列，隐式对齐会静默错位。CAST 是防御性的——INTEGER 亲和列里
+                // 本来就可能存着 REAL 值，显式转换保证搬过去的是 REAL。
+                //
+                // 用默认 ABORT 而不是 OR IGNORE：OR IGNORE 会把违反约束的行**悄悄跳过**，
+                // 搬完发现少了几行却没有任何异常——QA 实测构造一条 quantity=NULL 的脏行，
+                // 源表 3 行搬完只剩 2 行、id=2 被无声吞掉。当前 schema 下 notNull 自 v1 起
+                // 就存在，不可能触发，但这属于「搬表迁移埋着静默丢数据」的坏味道：将来谁给
+                // transactions 加个 UNIQUE 约束或可空列，就可能悄悄少数据且无人知晓。
+                // 用 ABORT 则问题直接崩在迁移里，由 Room 的事务整体回滚，
+                // 远好过静默丢（宁可升级失败、也不能让用户的数据凭空消失）。
+                db.execSQL(
+                    "INSERT INTO `transactions_new` " +
+                        "(`id`, `symbol`, `name`, `type`, `quantity`, `price`, `date`, `fee`) " +
+                        "SELECT `id`, `symbol`, `name`, `type`, " +
+                        "CAST(`quantity` AS REAL), `price`, `date`, `fee` " +
+                        "FROM `transactions`"
+                )
+                db.execSQL("DROP TABLE `transactions`")
+                db.execSQL("ALTER TABLE `transactions_new` RENAME TO `transactions`")
+                // 不搬 sqlite_sequence：DROP TABLE 会连带删掉本表的自增序号，之后
+                // SQLite 以「当前 MAX(id)+1」重新开始分配。没有表外键引用 transactions.id，
+                // 也没有任何代码依赖它的连续性，复用被删记录的 id 无后果；
+                // 而跨 SQLite 版本去操作 sqlite_sequence 反而更容易出岔子。
+                AppLogger.d("transactions.quantity 类型对齐 REAL 迁移完成", "StockDatabase")
+            }
+        }
+
+        /**
          * 全部手写迁移，按版本升序。抽成方法既给 `getInstance` 用（避免重复罗列），
          * 也让 Room 的 `MigrationTestHelper` 测试能直接拿到同一份迁移数组做端到端校验。
          */
@@ -318,7 +393,8 @@ abstract class StockDatabase : RoomDatabase() {
             MIGRATION_12_13,
             MIGRATION_13_14,
             MIGRATION_14_15,
-            MIGRATION_15_16
+            MIGRATION_15_16,
+            MIGRATION_16_17
         )
 
         @JvmStatic

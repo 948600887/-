@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
-# One-off validator: parse migration SQL from StockDatabase.kt, apply to a v1-built
-# sqlite db (from 1.json), and assert the resulting schema matches 16.json exactly.
+# Offline migration validator (no device needed): parse migration SQL from StockDatabase.kt,
+# apply it to a v1-built in-memory sqlite db (from 1.json), and assert the resulting schema
+# matches the current exported schema JSON (TARGET_VERSION, e.g. 17.json) exactly.
+#
+# 这是唯一能在无设备环境下跑的迁移校验，属于防线的一部分：
+# androidTest 的 MigrationTest 需要真机/模拟器，而本脚本只需要 python3。
+# 目标版本随 StockDatabase.version 一起升，改版本时记得同步 TARGET_VERSION。
 import json, re, sqlite3, sys
 
 ROOT = "app/schemas/com.example.stockdiary.database.StockDatabase"
+# 必须与 StockDatabase 的 @Database(version = ...) 保持一致
+TARGET_VERSION = 17
 
 def load_schema(v):
     return json.load(open(f"{ROOT}/{v}.json"))
@@ -92,10 +99,10 @@ def apply_migrations(conn, stmts):
                 cur.execute(part)
     conn.commit()
 
-def validate(conn, sch16):
+def validate(conn, target):
     cur = conn.cursor()
     errors = []
-    for e in sch16['database']['entities']:
+    for e in target['database']['entities']:
         t = e['tableName']
         # table exists?
         cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (t,))
@@ -149,20 +156,20 @@ def validate(conn, sch16):
 
 def main():
     sch1 = load_schema(1)
-    sch16 = load_schema(16)
+    target = load_schema(TARGET_VERSION)
     conn = sqlite3.connect(':memory:')
     build_v1(conn, sch1)
     stmts = extract_execsql("app/src/main/java/com/example/stockdiary/database/StockDatabase.kt")
     print(f"Extracted {len(stmts)} execSQL statements")
     apply_migrations(conn, stmts)
-    errors = validate(conn, sch16)
+    errors = validate(conn, target)
     conn.close()
     if errors:
         print("VALIDATION FAILED:")
         for e in errors:
             print("  -", e)
         sys.exit(1)
-    print("VALIDATION PASSED: v1 -> v16 schema matches 16.json exactly")
+    print(f"VALIDATION PASSED: v1 -> v{TARGET_VERSION} schema matches {TARGET_VERSION}.json exactly")
 
 if __name__ == '__main__':
     main()

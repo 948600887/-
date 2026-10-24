@@ -83,7 +83,7 @@ class DividendIncomeLoader(
             if (allHit && cachedRecords.isNotEmpty()) {
                 val currentHash = computeDataHash(cachedRecords, assets)
                 val today = LocalDate.now().format(DATE_FORMATTER)
-                val cached = incomeCache?.loadCached()
+                val cached = incomeCache?.loadCached(scopeKey(assets))
                 // 同日 + 底层数据未变 → 直接复用缓存的 IncomeResult，彻底消掉同日抖动
                 if (cached != null && cached.dataHash == currentHash && cached.date == today) {
                     AppLogger.d("同日且底层分红数据未变，复用缓存的预计收入（不重算）", tag)
@@ -163,7 +163,12 @@ class DividendIncomeLoader(
 
         // 落盘：仅当注入了缓存层。date=今天、dataHash=本次 records + 持仓的哈希，
         // 下次同日且底层输入（分红记录/持仓）不变时即可短路复用，杀掉同日抖动
-        incomeCache?.save(result, computeDataHash(recordsBySymbol, assets), LocalDate.now().format(DATE_FORMATTER))
+        incomeCache?.save(
+            result,
+            computeDataHash(recordsBySymbol, assets),
+            LocalDate.now().format(DATE_FORMATTER),
+            scopeKey(assets)
+        )
 
         result
     }
@@ -182,7 +187,7 @@ class DividendIncomeLoader(
         tag: String
     ): IncomeResult {
         val result = buildResult(assets, recordsBySymbol)
-        incomeCache?.save(result, dataHash, date)
+        incomeCache?.save(result, dataHash, date, scopeKey(assets))
         AppLogger.d("冷启动零请求重算预计收入并落盘（date=$date）", tag)
         return result
     }
@@ -228,6 +233,24 @@ class DividendIncomeLoader(
      *
      * 拼接前排序保证确定性，输出仍是稳定字符串。
      */
+    /**
+     * 「口径标识」：本次计算**覆盖哪些标的**的指纹，用于给持久化缓存分片。
+     *
+     * 与 [computeDataHash] 分工不同：后者是「底层数据有没有变」（变了就该重算），
+     * 这里是「这次算的是哪一批标的」（不同批的结果本来就不一样，不能互相覆盖）。
+     *
+     * 不分片的后果（已实测）：三页传入的资产集合口径互不相同（首页=全量非负债、
+     * 持仓页=按显示开关与隐藏小额过滤后的子集、日历页=只含股票/基金/存款），
+     * dataHash 自然也不同，却共用同一把缓存键 —— 后算的覆盖先算的，先算的那页
+     * 下次进来必然哈希不匹配而重算。冷启动表现为同一份分红被连算 2~3 遍。
+     *
+     * 只取 symbol 集合（去重 + 排序保证确定性）：预计收入的计算范围由「有哪些标的」
+     * 决定，持仓数量的变化由 [computeDataHash] 负责判重，这里不重复计入。
+     */
+    private fun scopeKey(assets: List<Asset>): String =
+        assets.mapNotNull { it.symbol }.distinct().sorted()
+            .joinToString(",").hashCode().toString(36)
+
     private fun computeDataHash(
         recordsBySymbol: Map<String, List<DividendRecord>>,
         assets: List<Asset>

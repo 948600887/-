@@ -77,6 +77,40 @@ class DividendIncomeCacheVerifyTest {
         return DividendIncomeCache(context)
     }
 
+    /**
+     * 落盘的缓存键（排除分片索引键）。
+     *
+     * 分片改造后每次 save 会额外写一份「分片索引」，所以不能再假设 SP 里只有一条记录。
+     */
+    private fun cacheKeys(prefs: FakePrefs): List<String> =
+        prefs.values.keys.filter { it.startsWith("income_cache_v1_") }
+
+    /**
+     * 分片的核心目的：不同口径的缓存互不覆盖。
+     *
+     * 改造前所有口径共用一把键，首页/持仓页/日历页依次计算时后算的会把先算的冲掉，
+     * 于是冷启动同一份数据被算 2~3 遍。这里坐实「按口径各存一片、各自读回自己的」。
+     */
+    @Test
+    fun `不同口径各存一片_互不覆盖`() {
+        val prefs = FakePrefs()
+        val cache = cacheWith(prefs)
+
+        cache.save(result(total = 10.0, perSymbol = mapOf("a" to 1.0)), "hash-A", "2026-10-20", "scope-A")
+        cache.save(result(total = 20.0, perSymbol = mapOf("b" to 2.0)), "hash-B", "2026-10-20", "scope-B")
+
+        assertEquals("两个口径应各占一片", 2, cacheKeys(prefs).size)
+
+        val a = cache.loadCached("scope-A")!!
+        val b = cache.loadCached("scope-B")!!
+        assertEquals("hash-A", a.dataHash)
+        assertEquals(10.0, a.totalAnnualIncome, 0.0)
+        assertEquals(1.0, a.dividendsBySymbol["a"]!!, 0.0)
+        assertEquals("hash-B", b.dataHash)
+        assertEquals(20.0, b.totalAnnualIncome, 0.0)
+        assertNull("A 不应读到 B 的 symbol", a.dividendsBySymbol["b"])
+    }
+
     private fun result(
         total: Double,
         perSymbol: Map<String, Double>,
@@ -170,7 +204,7 @@ class DividendIncomeCacheVerifyTest {
         val cache = cacheWith(prefs)
         // 先正常落盘一份，再把原始串篡改成损坏 JSON（不硬编码 key，取落盘的那一条）
         cache.save(result(total = 50.0, perSymbol = mapOf("sh600519" to 5.0)), "h", "2026-10-20")
-        val key = prefs.values.keys.single()
+        val key = cacheKeys(prefs).single()
         prefs.values[key] = "{ 这不是合法 JSON"
 
         assertNull("损坏 JSON 必须降级为 null（宁可重算，不能把脏数据当真）", cache.loadCached())
@@ -180,7 +214,8 @@ class DividendIncomeCacheVerifyTest {
     fun `SP 中 JSON 缺字段时降级为默认值且不崩`() {
         val prefs = FakePrefs()
         val cache = cacheWith(prefs)
-        prefs.values["income_cache_v1"] = """{"date":"2026-10-20"}"""
+        // 分片后键名带口径后缀；不传口径即默认片 income_cache_v1_default
+        prefs.values["income_cache_v1_default"] = """{"date":"2026-10-20"}"""
 
         val loaded = cache.loadCached()
         assertNotNull("合法 JSON 缺字段应降级解析，而不是整体判 null", loaded)
@@ -199,9 +234,9 @@ class DividendIncomeCacheVerifyTest {
             perSymbol = mapOf("sh600519" to 5.0, "sh000001" to 3.0, "fund_000300" to 7.0)
         )
         cache.save(r, "h1", "2026-10-20")
-        val first = prefs.values.values.single()
+        val first = prefs.values[cacheKeys(prefs).single()]
         cache.save(r, "h1", "2026-10-20")
-        val second = prefs.values.values.single()
+        val second = prefs.values[cacheKeys(prefs).single()]
         assertEquals("Map 按 key 排序后写入，相同内容必须序列化出相同字符串", first, second)
     }
 
@@ -235,7 +270,7 @@ class DividendIncomeCacheVerifyTest {
         val results = mutableListOf<DividendIncomeLoader.IncomeResult>()
         val hashes = mutableListOf<String>()
         val dates = mutableListOf<String>()
-        every { cache.save(any(), any(), any()) } answers {
+        every { cache.save(any(), any(), any(), any()) } answers {
             results.add(arg(0) as DividendIncomeLoader.IncomeResult)
             hashes.add(arg(1) as String)
             dates.add(arg(2) as String)
@@ -251,7 +286,7 @@ class DividendIncomeCacheVerifyTest {
         coEvery { repository.getDividendsBySymbol("sh600519", false, any()) } returns listOf(record(today, "5.0"))
 
         val (results, hashes, dates) = captureSave()
-        every { cache.loadCached() } returns null andThen DividendIncomeCache.CachedIncome(
+        every { cache.loadCached(any()) } returns null andThen DividendIncomeCache.CachedIncome(
             date = today,
             dataHash = "与当前记录不同的哈希", // 同日但底层数据判定为「变了」
             dividendsBySymbol = mapOf("sh600519" to 99.0),
@@ -267,7 +302,7 @@ class DividendIncomeCacheVerifyTest {
         assertEquals(50.0, second.totalAnnualIncome, 1e-6)
         coVerify(exactly = 2) { repository.prefetchDividends(any(), any()) }
         coVerify(exactly = 2) { repository.getDividendsBySymbol("sh600519", false, any()) }
-        coVerify(exactly = 2) { cache.save(any(), any(), any()) }
+        coVerify(exactly = 2) { cache.save(any(), any(), any(), any()) }
         assertEquals(2, hashes.size)
         assertEquals(today, dates[0])
     }
@@ -281,7 +316,7 @@ class DividendIncomeCacheVerifyTest {
 
         val (_, hashes, _) = captureSave()
         var loadCount = 0
-        every { cache.loadCached() } answers {
+        every { cache.loadCached(any()) } answers {
             when (loadCount++) {
                 0 -> null
                 // 昨天落盘的缓存，哈希与当前完全一致 —— 跨日照样不许复用
@@ -300,7 +335,7 @@ class DividendIncomeCacheVerifyTest {
 
         // 两次都重算（TTM 滑窗随日期漂移是预期行为，不许被缓存吃掉）
         coVerify(exactly = 2) { repository.prefetchDividends(any(), any()) }
-        coVerify(exactly = 2) { cache.save(any(), any(), any()) }
+        coVerify(exactly = 2) { cache.save(any(), any(), any(), any()) }
         assertEquals(50.0, first.totalAnnualIncome, 1e-6)
         assertEquals(50.0, second.totalAnnualIncome, 1e-6)
     }
@@ -314,11 +349,11 @@ class DividendIncomeCacheVerifyTest {
         coEvery { repository.getDividendsBySymbol("sh600519", true, any()) } returns listOf(record(today, "5.0"))
 
         val (_, hashes, _) = captureSave()
-        every { cache.loadCached() } returns null
+        every { cache.loadCached(any()) } returns null
         // 第一次（非强制）先抓一次并落盘，拿到与当前记录匹配的哈希
         cachedLoader.loadIncome(assets)
         // 之后持久化缓存里是一份「今天 + 哈希一致 + total=999」的旧值
-        every { cache.loadCached() } returns DividendIncomeCache.CachedIncome(
+        every { cache.loadCached(any()) } returns DividendIncomeCache.CachedIncome(
             date = today,
             dataHash = hashes[0],
             dividendsBySymbol = mapOf("sh600519" to 5.0),
@@ -334,7 +369,7 @@ class DividendIncomeCacheVerifyTest {
         // 强制刷新整条短路都被跳过：getCachedAllowingStale 只在第一次非强制调用时读过一次
         coVerify(exactly = 1) { repository.getCachedAllowingStale(any()) }
         // 强制刷新照常落盘（刷新缓存，供下次同日复用）
-        coVerify(exactly = 2) { cache.save(any(), any(), any()) }
+        coVerify(exactly = 2) { cache.save(any(), any(), any(), any()) }
     }
 
     @Test
@@ -345,9 +380,9 @@ class DividendIncomeCacheVerifyTest {
         coEvery { repository.getDividendsBySymbol("sh600519", false, any()) } returns listOf(record(today, "5.0"))
 
         val (_, hashes, _) = captureSave()
-        every { cache.loadCached() } returns null
+        every { cache.loadCached(any()) } returns null
         cachedLoader.loadIncome(assets) // 第一次：落盘，哈希 = 当前记录的哈希
-        every { cache.loadCached() } returns DividendIncomeCache.CachedIncome(
+        every { cache.loadCached(any()) } returns DividendIncomeCache.CachedIncome(
             date = today,
             dataHash = hashes[0], // 同日 + 哈希一致
             dividendsBySymbol = mapOf("sh600519" to 5.0),
@@ -382,9 +417,9 @@ class DividendIncomeCacheVerifyTest {
         coEvery { repository.getDividendsBySymbol("sh600519", false, any()) } returns listOf(record(today, "5.0"))
 
         val (_, hashes, _) = captureSave()
-        every { cache.loadCached() } returns null
+        every { cache.loadCached(any()) } returns null
         cachedLoader.loadIncome(assets)
-        every { cache.loadCached() } returns DividendIncomeCache.CachedIncome(
+        every { cache.loadCached(any()) } returns DividendIncomeCache.CachedIncome(
             date = today,
             dataHash = hashes[0],
             dividendsBySymbol = mapOf("sh600519" to 5.0),
@@ -410,7 +445,7 @@ class DividendIncomeCacheVerifyTest {
         coEvery { repository.getDividendsBySymbol("sh600519", false, any()) } returns listOf(record(today, "5.0"))
 
         val (_, _, _) = captureSave()
-        every { cache.loadCached() } returns null andThen DividendIncomeCache.CachedIncome(
+        every { cache.loadCached(any()) } returns null andThen DividendIncomeCache.CachedIncome(
             date = today,
             dataHash = "第一次落盘的哈希", // 与 "5.00" 算出的哈希不同（字符串形态敏感）
             dividendsBySymbol = mapOf("sh600519" to 5.0),
@@ -455,14 +490,14 @@ class DividendIncomeCacheVerifyTest {
         coEvery { repository.prefetchDividends(any(), any()) } returns emptyMap()
         coEvery { repository.getDividendsBySymbol("sh600519", false, any()) } returns listOf(record(today, "5.0"))
 
-        every { cache.loadCached() } returns DividendIncomeCache.CachedIncome(
+        every { cache.loadCached(any()) } returns DividendIncomeCache.CachedIncome(
             date = today, // 同日：只有哈希对不上
             dataHash = "旧格式哈希_只有分红记录段_没有持仓指纹",
             dividendsBySymbol = mapOf("sh600519" to 5.0),
             totalAnnualIncome = 999.0, // 旧缓存里的值（哪怕是脏的也不许复用）
             hasDividendData = true
         )
-        every { cache.save(any(), any(), any()) } just runs
+        every { cache.save(any(), any(), any(), any()) } just runs
 
         val result = cachedLoader.loadIncome(assets)
 
@@ -471,6 +506,6 @@ class DividendIncomeCacheVerifyTest {
         coVerify(exactly = 1) { repository.prefetchDividends(any(), any()) }
         coVerify(exactly = 1) { repository.getDividendsBySymbol("sh600519", false, any()) }
         // 重算后照常落盘（新格式哈希），下次同日即可命中
-        coVerify(exactly = 1) { cache.save(any(), any(), any()) }
+        coVerify(exactly = 1) { cache.save(any(), any(), any(), any()) }
     }
 }

@@ -192,14 +192,14 @@ class DividendIncomeLoaderTest {
         val savedResults = mutableListOf<DividendIncomeLoader.IncomeResult>()
         val savedHashes = mutableListOf<String>()
         val savedDates = mutableListOf<String>()
-        every { cache.save(any(), any(), any()) } answers {
+        every { cache.save(any(), any(), any(), any()) } answers {
             savedResults.add(arg(0) as DividendIncomeLoader.IncomeResult)
             savedHashes.add(arg(1) as String)
             savedDates.add(arg(2) as String)
         }
         // 第一次无缓存 → 正常抓取落盘；第二次返回第一次落盘的内容（哈希/日期一致）→ 复用
         var loadCount = 0
-        every { cache.loadCached() } answers {
+        every { cache.loadCached(any()) } answers {
             when (loadCount++) {
                 0 -> null
                 else -> DividendIncomeCache.CachedIncome(
@@ -222,7 +222,7 @@ class DividendIncomeLoaderTest {
         coVerify(exactly = 1) { repository.getDividendsBySymbol("sh600519", false, any()) }
         coVerify(exactly = 1) { repository.getDividendsBySymbol("sh000001", false, any()) }
         // 落盘只在第一次发生（复用那次走缓存分支、不save）
-        coVerify(exactly = 1) { cache.save(any(), any(), any()) }
+        coVerify(exactly = 1) { cache.save(any(), any(), any(), any()) }
     }
 
     /**
@@ -242,14 +242,14 @@ class DividendIncomeLoaderTest {
         val savedResults = mutableListOf<DividendIncomeLoader.IncomeResult>()
         val savedHashes = mutableListOf<String>()
         val savedDates = mutableListOf<String>()
-        every { cache.save(any(), any(), any()) } answers {
+        every { cache.save(any(), any(), any(), any()) } answers {
             savedResults.add(arg(0) as DividendIncomeLoader.IncomeResult)
             savedHashes.add(arg(1) as String)
             savedDates.add(arg(2) as String)
         }
         // 第二次 loadCached 返回「旧哈希」缓存（对应 5.0），迫使重算
         var loadCount = 0
-        every { cache.loadCached() } answers {
+        every { cache.loadCached(any()) } answers {
             when (loadCount++) {
                 0 -> null
                 else -> DividendIncomeCache.CachedIncome(
@@ -272,7 +272,7 @@ class DividendIncomeLoaderTest {
         // 两次都走了抓取（prefetch 各一次）并都落盘
         coVerify(exactly = 2) { repository.prefetchDividends(any(), any()) }
         coVerify(exactly = 2) { repository.getDividendsBySymbol("sh600519", false, any()) }
-        coVerify(exactly = 2) { cache.save(any(), any(), any()) }
+        coVerify(exactly = 2) { cache.save(any(), any(), any(), any()) }
     }
 
     /**
@@ -289,14 +289,14 @@ class DividendIncomeLoaderTest {
         val savedResults = mutableListOf<DividendIncomeLoader.IncomeResult>()
         val savedHashes = mutableListOf<String>()
         val savedDates = mutableListOf<String>()
-        every { cache.save(any(), any(), any()) } answers {
+        every { cache.save(any(), any(), any(), any()) } answers {
             savedResults.add(arg(0) as DividendIncomeLoader.IncomeResult)
             savedHashes.add(arg(1) as String)
             savedDates.add(arg(2) as String)
         }
         // 缓存的 date 是 2000-01-01（跨日），但哈希一致 → 仍应重算
         var loadCount = 0
-        every { cache.loadCached() } answers {
+        every { cache.loadCached(any()) } answers {
             when (loadCount++) {
                 0 -> null
                 else -> DividendIncomeCache.CachedIncome(
@@ -315,7 +315,7 @@ class DividendIncomeLoaderTest {
         // 两次都走抓取（跨日不复用），各自重算
         coVerify(exactly = 2) { repository.prefetchDividends(any(), any()) }
         coVerify(exactly = 2) { repository.getDividendsBySymbol("sh600519", false, any()) }
-        coVerify(exactly = 2) { cache.save(any(), any(), any()) }
+        coVerify(exactly = 2) { cache.save(any(), any(), any(), any()) }
         // 两次结果一致（同一份数据），但都是重算得到的，而非复用旧缓存
         assertEquals(first.totalAnnualIncome, second.totalAnnualIncome, 1e-9)
     }
@@ -330,9 +330,9 @@ class DividendIncomeLoaderTest {
         coEvery { repository.prefetchDividends(any(), any()) } returns emptyMap()
         coEvery { repository.getDividendsBySymbol("sh600519", true, any()) } returns listOf(record(today, "5.0"))
 
-        every { cache.save(any(), any(), any()) } just runs
+        every { cache.save(any(), any(), any(), any()) } just runs
         // 即使有一份「完全匹配今天 + 哈希」的缓存，forceRefresh 也应无视
-        every { cache.loadCached() } returns income(today, 999.0, mapOf("sh600519" to 99.0))
+        every { cache.loadCached(any()) } returns income(today, 999.0, mapOf("sh600519" to 99.0))
 
         val result = cachedLoader.loadIncome(assets, forceRefresh = true)
 
@@ -342,7 +342,7 @@ class DividendIncomeLoaderTest {
         coVerify(exactly = 1) { repository.getDividendsBySymbol("sh600519", true, any()) }
         // 强制刷新不会去读 getCachedAllowingStale（短路路径被 forceRefresh 跳过）
         coVerify(exactly = 0) { repository.getCachedAllowingStale(any()) }
-        coVerify(exactly = 1) { cache.save(any(), any(), any()) }
+        coVerify(exactly = 1) { cache.save(any(), any(), any(), any()) }
     }
 
     /** 捕获落盘的 (result, dataHash, date) 三段，用于构造「与首次计算匹配」的假缓存 */
@@ -351,7 +351,7 @@ class DividendIncomeLoaderTest {
         val results = mutableListOf<DividendIncomeLoader.IncomeResult>()
         val hashes = mutableListOf<String>()
         val dates = mutableListOf<String>()
-        every { cache.save(any(), any(), any()) } answers {
+        every { cache.save(any(), any(), any(), any()) } answers {
             results.add(arg(0) as DividendIncomeLoader.IncomeResult)
             hashes.add(arg(1) as String)
             dates.add(arg(2) as String)
@@ -374,7 +374,7 @@ class DividendIncomeLoaderTest {
 
         val (results, hashes, dates) = captureSave()
         var loadCount = 0
-        every { cache.loadCached() } answers {
+        every { cache.loadCached(any()) } answers {
             when (loadCount++) {
                 0 -> null
                 // 第二次返回「用旧持仓(100)算出的哈希」的缓存；当前持仓已变 200 → 哈希不同 → 重算
@@ -396,7 +396,7 @@ class DividendIncomeLoaderTest {
         // 两次都走了抓取（哈希因持仓而不同）+ 都落盘
         coVerify(exactly = 2) { repository.prefetchDividends(any(), any()) }
         coVerify(exactly = 2) { repository.getDividendsBySymbol("sh600519", false, any()) }
-        coVerify(exactly = 2) { cache.save(any(), any(), any()) }
+        coVerify(exactly = 2) { cache.save(any(), any(), any(), any()) }
     }
 
     /**
@@ -414,7 +414,7 @@ class DividendIncomeLoaderTest {
 
         val (results, hashes, dates) = captureSave()
         var loadCount = 0
-        every { cache.loadCached() } answers {
+        every { cache.loadCached(any()) } answers {
             when (loadCount++) {
                 0 -> null
                 else -> DividendIncomeCache.CachedIncome(
@@ -432,7 +432,7 @@ class DividendIncomeLoaderTest {
 
         coVerify(exactly = 2) { repository.prefetchDividends(any(), any()) }
         coVerify(exactly = 2) { repository.getDividendsBySymbol("sh600519", false, any()) }
-        coVerify(exactly = 2) { cache.save(any(), any(), any()) }
+        coVerify(exactly = 2) { cache.save(any(), any(), any(), any()) }
     }
 
     /**
@@ -449,7 +449,7 @@ class DividendIncomeLoaderTest {
 
         val (_, hashes, _) = captureSave()
         var loadCount = 0
-        every { cache.loadCached() } answers {
+        every { cache.loadCached(any()) } answers {
             when (loadCount++) {
                 0 -> null
                 // 全不变 → 第二次哈希与首次一致，缓存 date 也是今天 → 复用

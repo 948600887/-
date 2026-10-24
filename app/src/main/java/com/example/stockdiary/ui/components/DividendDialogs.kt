@@ -12,6 +12,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import com.example.stockdiary.ui.dialogs.sanitizeDecimalInput
 import com.example.stockdiary.ui.theme.*
+import kotlinx.coroutines.CancellationException
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -75,6 +76,11 @@ fun DividendDetailDialog(
                 container.dividendRepository.getDbDividendsBySymbol(symbol)
             }
             records = result.sortedByDescending { it.date }
+        } catch (e: CancellationException) {
+            // 必须第一个 catch：对话框被关掉时这个协程会被取消，吞掉取消会让
+            // 下面 finally 里的 isLoading=false 照写一个已废弃的组合树状态，
+            // 且取消信号不再向上传播（项目铁律：取消不吞）。
+            throw e
         } catch (e: Exception) {
             AppLogger.e("加载分红详情失败: ${e.message}", e, "DividendDetail")
             loadError = "加载失败"

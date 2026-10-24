@@ -18,6 +18,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -212,8 +213,10 @@ fun MonthlyCashFlowCard(
     progress: DividendProgressCalculator.Progress,
     modifier: Modifier = Modifier
 ) {
-    // 选中的月份：默认当前月，点柱子可切换，用于下方明细行与柱图高亮
-    var selectedMonth by remember { mutableStateOf(LocalDate.now().monthValue) }
+    // 选中的月份：默认当前月，点柱子可切换，用于下方明细行与柱图高亮。
+    // 用 mutableIntStateOf 而非 mutableStateOf<Int>：后者每次读写都要装箱拆箱，
+    // 点柱子时这块会连着下方明细一起重组， Int 态能省掉这笔无效分配（lint: AutoboxingStateCreation）。
+    var selectedMonth by remember { mutableIntStateOf(LocalDate.now().monthValue) }
 
     Card(
         modifier = modifier.fillMaxWidth(),

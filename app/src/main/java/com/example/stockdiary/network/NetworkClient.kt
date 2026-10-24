@@ -8,7 +8,6 @@ import okhttp3.Dispatcher
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
 import okhttp3.Response
-import okhttp3.logging.HttpLoggingInterceptor
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CancellationException
 
@@ -84,7 +83,7 @@ object NetworkClient {
     }
 
     /**
-     * 一行式网络日志（取代 [HttpLoggingInterceptor] 的 BASIC 级别）。
+     * 一行式网络日志（取代 okhttp logging-interceptor 的 BASIC 级别）。
      *
      * 为什么换掉：BASIC 每个请求打两行（`--> GET url` 与 `<-- 200 OK url (70ms, 2455-byte body)`），
      * 真机 5000 行诊断日志里 OkHttp 占 3091 行（62%），真正有用的信号全埋在噪音里，

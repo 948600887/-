@@ -119,17 +119,18 @@ dependencies {
     implementation("com.squareup.retrofit2:retrofit:2.9.0")
     implementation("com.squareup.retrofit2:converter-gson:2.9.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
-    implementation("com.squareup.okhttp3:logging-interceptor:4.12.0")
 
-    // Coil
-    implementation("io.coil-kt:coil-compose:2.6.0")
+    // coroutines 版本显式钉到 1.7.3：原先靠 firebase-bom 间接钉在 1.7.3（该版本本机缓存齐全）。
+    // 删掉 firebase 后，compose-runtime 1.6.1 把 coroutines-android 解析到 1.7.1，
+    // 而 1.7.1 不在本机缓存、且只在 Maven Central（本机网络拉不下来）——构建直接失败。
+    // 钉 1.7.3 同时与 kotlinx-coroutines-test:1.7.3 同线，避免测试/主 classpath 版本漂移。
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
+    // 不带 logging-interceptor：NetworkClient 用一行式自定义拦截器替代了它的 BASIC 级
+    // （见 NetworkClient.networkLogInterceptor 的 KDoc：行数减半 + 非 2xx 提升 WARN），
+    // 该依赖只在其 KDoc 里被提及，从未实例化。
 
     // Jetpack Charts
     implementation("androidx.compose.foundation:foundation:1.6.0")
-
-    // Firebase
-    implementation(platform("com.google.firebase:firebase-bom:32.8.0"))
-    implementation("com.google.firebase:firebase-messaging")
 
     // Other
     implementation("androidx.core:core-ktx:1.13.0")

@@ -245,7 +245,11 @@ open class HoldingSnapshotViewModel(
         }
     }
 
-    /** 确认导入：按 symbol 覆盖数量、其余新建。未变的不写库。 */
+    /**
+     * 确认导入：按 symbol 覆盖数量、其余新建。未变的不写库。
+     *
+     * 基金E账户来源落库后会**自动**再跑一次行情同步（见 [syncPrices] 的分来源说明）。
+     */
     fun commit() {
         val preview = _uiState.value.preview ?: return
         if (_uiState.value.step == Step.COMMITTING) return
@@ -266,17 +270,32 @@ open class HoldingSnapshotViewModel(
             updateState { state -> state.copy(step = Step.COMMITTING, error = null) }
             val result = service.commit(preview, _uiState.value.account)
             updateState { state -> state.copy(step = Step.RESULT, result = result) }
+            // 基金E账户：落库后自动补一次行情同步，把文件里滞后的净值更新到最新
+            // （截图来源**不**自动，原因见 syncPrices 注释，别顺手统一）。
+            // 同步本身带 try/catch 且失败不回滚，已落库的持仓不受影响。
+            if (source == Source.FUND_EXPORT) syncPrices()
         }
     }
 
     /**
-     * 同步行情，把刚导入的持仓市值填上。
+     * 同步行情：把刚导入的持仓市值填上（截图）或更新到最新（基金E账户）。
      *
-     * ## 为什么必须由用户点，而不是导入后自动跑
+     * ## 为什么两个来源的触发方式不同（别顺手统一）
      *
-     * 截图里**没有价格**，参考单价刻意留 0（给个假数字会凭空造出市值），
-     * 所以导入完市值是空的，得等一次行情同步。但这件事不能替用户决定：
-     * 他点「导入 14 条」时预期的是写一次库，不是发起一次网络请求。
+     * - **截图 [Source.STOCK_SNAPSHOT]**：截图里**没有价格**，参考单价刻意留 0
+     *   （给个假数字会凭空造出市值），所以导入完市值是空的，得等一次行情同步。
+     *   但这件事不能替用户决定：他点「导入 14 条」时预期的是写一次库，
+     *   不是发起一次网络请求。**保持手动**。
+     *
+     * - **基金E账户 [Source.FUND_EXPORT]**：xlsx 里**自带净值**，落库时已写进
+     *   currentPrice，市值当场就能显示。所以这里自动同步不是为了「填上空白」，
+     *   而是把净值从**文件的导出日期**更新到最新 —— 场外净值日更，而导出文件
+     *   通常滞后 1~2 个交易日（本次实测：文件 10/21，刷新可拿到 10/23）。
+     *   自动跑的理由：① 导入基金持仓时的合理预期就是「持仓 + 最新市值」；
+     *   ② 轻量源每只约 2.5KB、92 只合计 ~230KB，代价极小；
+     *   ③ 即便同步失败，市值也已按文件净值显示着，不会白屏 —— 失败无后果。
+     *
+     * 手动按钮两个来源都保留：自动同步失败后可用它重试。
      *
      * ## 为什么只同步本次涉及的代码
      *

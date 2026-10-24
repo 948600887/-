@@ -134,6 +134,9 @@ fun DashboardScreen(
                 // 统一结果反馈：成功/失败都报数，用户才知道这一轮到底刷到了什么
                 append("刷新完成：成功 ${result.successCount}")
                 if (result.failedCount > 0) append("，失败 ${result.failedCount}")
+                // 跳过必须报：只说「成功 107」的话，用户不知道还有上百个加密货币
+                // 因行情源不可达（熔断）压根没更新，会以为刷新没生效而反复去点
+                append(result.skippedHint)
             }
             snackbarHostState.showSnackbar(msg)
             viewModel.clearSyncResult()

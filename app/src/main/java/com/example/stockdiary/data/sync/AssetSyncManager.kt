@@ -660,7 +660,8 @@ object AssetSyncManager {
             dataErrorCount = dataErrorCount,
             unknownErrorCount = unknownErrorCount,
             dominantErrorType = dominantErrorType,
-            truncatedByTimeLimit = truncated.get()
+            truncatedByTimeLimit = truncated.get(),
+            skippedByReason = skipReasons.mapValues { it.value.get() }
         ).also {
             AppLogger.i(
                 "价格同步结束 [轮次#$roundId]：成功 ${it.successCount}，失败 ${it.failedCount}，" +
@@ -1038,10 +1039,39 @@ data class SyncResult(
     val unknownErrorCount: Int = 0,
     val dominantErrorType: SyncErrorType? = null,
     /** 是否因接近后台任务时间上限而提前结束（仍有未同步的资产） */
-    val truncatedByTimeLimit: Boolean = false
+    val truncatedByTimeLimit: Boolean = false,
+    /**
+     * 本轮各类「跳过」的计数（键为原因，如「币安熔断」→ 130、「退市」→ 1）。
+     *
+     * 必须带回给 UI：只报「成功 107」的话，用户看不到还有 130 个加密货币因行情源
+     * 不可达压根没更新（诊断日志里的典型一轮：成功 107 / 跳过 131（币安熔断 130）），
+     * 会以为刷新成功却没生效、于是反复去点刷新——每点一次又白等一轮。
+     */
+    val skippedByReason: Map<String, Int> = emptyMap()
 ) {
     val hasRetryableErrors: Boolean
         get() = networkErrorCount > 0 || serverErrorCount > 0 || unknownErrorCount > 0
+
+    /**
+     * 把 [skippedByReason] 渲染成给用户看的一句补充（供刷新结果提示拼接）。
+     *
+     * 只对「用户会困惑」的两类说话：
+     * - 行情源不可达（币安熔断）：这些标的价格**压根没更新**，不说明的话用户会以为
+     *   刷新成功却没生效；
+     * - 退市/停牌/不可交易：这些本来就没有新价，说明一下免得被当成失败。
+     *
+     * 其余原因（如「非行情类型」）用户不关心，不占用提示篇幅。
+     */
+    val skippedHint: String
+        get() {
+            if (skippedByReason.isEmpty()) return ""
+            val gated = skippedByReason["币安熔断"] ?: 0
+            val others = skippedByReason.filterKeys { it != "币安熔断" }.values.sum()
+            return buildString {
+                if (gated > 0) append("；$gated 个加密货币行情源不可达，本次未更新")
+                if (others > 0) append("；$others 个无需更新（退市/停牌等）")
+            }
+        }
 }
 
 /**

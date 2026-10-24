@@ -1044,14 +1044,22 @@ class DividendRepository private constructor(
                         }
                         if (shouldFetch) {
                             async {
-                                if (deadline > 0L && System.currentTimeMillis() > deadline) {
-                                    AppLogger.w(
-                                        "分红预取达到时间预算，跳过 $symbol（留待按需抓取）",
-                                        "DividendRepository"
-                                    )
-                                    return@async
-                                }
+                                // 预算检查必须放在「拿到信号量之后」，不能放在 async 开头：
+                                // 上面 N 个 async 是**一次性全部 launch** 的，若在 withPermit 之前检查，
+                                // 它们全都在 t≈0 落空、之后在信号量上排队恢复时早已错过检查点，
+                                // 预算形同虚设。真机日志坐实过这个坑：手动刷新 70s 预算里
+                                // 预取子预算明明只有 28s（SyncBudget.prefetchPhaseBudget），
+                                // 实测却跑了 50.3s（轮次#3 19:53:45→19:54:35），
+                                // 把价格同步的时间挤掉大半。价格同步那一侧同样的问题早已修掉
+                                // （见 AssetSyncManager 中 withPermit 内的 SyncBudget.isExceeded）。
                                 semaphore.withPermit {
+                                    if (deadline > 0L && System.currentTimeMillis() > deadline) {
+                                        AppLogger.w(
+                                            "分红预取达到时间预算，跳过 $symbol（留待按需抓取）",
+                                            "DividendRepository"
+                                        )
+                                        return@withPermit
+                                    }
                                     checkedCount.incrementAndGet()
                                     getDividendsBySymbol(symbol, forceRefresh, batchResults)
                                 }

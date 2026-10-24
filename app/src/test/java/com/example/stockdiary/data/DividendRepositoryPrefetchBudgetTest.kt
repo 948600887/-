@@ -7,6 +7,9 @@ import io.mockk.coVerify
 import io.mockk.mockk
 import io.mockk.spyk
 import io.mockk.unmockkAll
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertTrue
@@ -64,6 +67,49 @@ class DividendRepositoryPrefetchBudgetTest {
         }
         // 抓取是桩，什么都不该写进缓存
         assertTrue(repository.getCacheStats()["size"] == 0)
+    }
+
+    /**
+     * 预算必须在**拿到信号量之后**判定，不能在 async 刚启动就判。
+     *
+     * 这是真机踩出来的坑：N 个 async 是一次性全部 launch 的，若在 `withPermit` 之前
+     * 判预算，它们全在 t≈0 落空、之后排队恢复时早已错过检查点，预算形同虚设。
+     * 实测手动刷新给的预取子预算是 28s（70s × 2/5，见 [SyncBudget.prefetchPhaseBudget]），
+     * 真机上却跑了 50.3s（诊断日志轮次#3：19:53:45 → 19:54:35），把价格同步的时间
+     * 挤掉大半。价格同步那一侧同样的坑早已修掉，这里是预取侧的对齐。
+     *
+     * 测法刻意不靠 sleep 赌时序，而是用闸门把时序钉死：
+     * 抓取一律阻塞在 [gate] 上 → 只有最先拿到信号量的那批（上限 8）能进入抓取，
+     * 其余全在信号量上排队；等预算耗尽后再放闸，排队的代码此刻才拿到名额。
+     * 修复前它们早在 t≈0 就通过了检查，会被**全部放行**；修复后会在拿到名额时被拦下。
+     */
+    @Test
+    fun `预算在排队期间耗尽_排队中的代码必须被拦下_而不是全部放行`() = runBlocking {
+        val gate = CompletableDeferred<Unit>()
+        val fetchedCount = java.util.concurrent.atomic.AtomicInteger(0)
+        coEvery { repository.getDividendsBySymbol(any(), any(), any()) } coAnswers {
+            fetchedCount.incrementAndGet()
+            gate.await() // 卡住不放，逼后面的代码在信号量上排队
+            emptyList()
+        }
+
+        // 60 个代码远多于预取并发上限（8）：绝大多数必然处于「排队中」状态
+        val manySymbols = (1..60).map { "fund_01%04d".format(it) }
+        val job = launch {
+            repository.preFetchDividends(manySymbols, forceRefresh = true, timeBudgetMs = 150L)
+        }
+
+        // 等第一批真的进入抓取（说明其余已在排队），再让 150ms 预算在这期间耗尽
+        while (fetchedCount.get() == 0) delay(5)
+        delay(400)
+        gate.complete(Unit)
+        job.join()
+
+        val fetched = fetchedCount.get()
+        assertTrue(
+            "预算耗尽后排队中的代码必须被跳过；修复前会被全部放行（60 个），实际抓取 $fetched 个",
+            fetched < manySymbols.size / 2
+        )
     }
 
     @Test

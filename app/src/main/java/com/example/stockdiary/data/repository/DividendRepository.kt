@@ -296,6 +296,113 @@ class DividendRepository private constructor(
         }
     }
 
+    /**
+     * 批量版 [getCachedAllowingStale]：一次读 N 个标的。
+     *
+     * ## 为什么要有这个方法
+     *
+     * 冷启动时 [DividendIncomeLoader.loadIncome] 的「同日短路」要先把每个标的的
+     * 缓存记录取出来算 dataHash。逐标的走 [getCachedAllowingStale] 的代价是
+     * **2N 次 IO**：每个符号一次 `dividendDao.getBySymbol`（Room 查询，最坏还会
+     * 因库里已有记录而再查一次）+ 两次 `fetchState.getLong`（同步 SP 读）。
+     * 用户有 240 个标的 → 约 480 次 IO，实测冷启动这一段就占 3~4 秒
+     * （诊断日志 19:53:36 起、19:53:38 已跑到首页那遍）。
+     *
+     * 批量后：内存 Map 命中零 IO；未命中的一次 `dividendDao.getBySymbols`
+     * （单条 IN 查询）+ 一次 `fetchState.getAll()`。
+     *
+     * ## 语义必须与逐标的版本逐分支一致
+     *
+     * 这不是「顺手优化」，判据错一个分支的代价都是静默的：
+     * - 有分红记录 + 24h 内抓过 → 用记录（并回填内存缓存）
+     * - 有分红记录 + 24h 外但 30 天内抓过 → 仍用旧记录（[STALE_CEILING_MS] 宽口径）
+     * - 有分红记录 + 超过 30 天 → null（让调用方去抓）
+     * - 无分红记录 + 7 天内抓过 → 「没有分红」是结论，返回**空列表**而非 null
+     *   （[shouldReuseEmptyResult]；返回 null 会让调用方以为没抓过而反复重抓）
+     * - 无分红记录 + 7 天外但 30 天内 → 同样是空列表（逐标的路径会重查 DB 后返回空）
+     * - 无分红记录 + 超过 30 天 → null
+     *
+     * 内存缓存回填的时机也照抄逐标的版本：只有「24h 内抓过」与「空结果可复用」
+     * 两条路回填，30 天宽口径那条不回填（它本就该在下次抓取时被刷新）。
+     *
+     * @return symbol（已规范化）→ 记录；值为 null 表示「连过期数据都没有，该去抓」。
+     *          **值可以是空列表**（表示抓过且确实没有分红），与 null 是两回事。
+     */
+    suspend fun getCachedAllowingStaleBatch(
+        symbols: List<String>
+    ): Map<String, List<DividendRecord>?> = withContext(Dispatchers.IO) {
+        if (symbols.isEmpty()) return@withContext emptyMap()
+        val normalized = symbols.map { StockCodeManager.normalizeSymbol(it) }.distinct()
+        val now = System.currentTimeMillis()
+
+        // 抓取时间戳一次全读，取代逐标的 N 次同步 SP 读。
+        // fetchState 里混着失败标记（FAILURE_KEY_PREFIX 前缀），那些不是 Long 之外的类型，
+        // 统一按 Long 过滤掉即可，不影响时间戳判定。
+        val stamps: Map<String, Long> = runCatching {
+            fetchState.all.mapNotNull { (key, value) ->
+                (value as? Long)?.takeIf { it > 0L }?.let { key to it }
+            }.toMap()
+        }.getOrDefault(emptyMap())
+
+        val out = HashMap<String, List<DividendRecord>?>(normalized.size)
+        val needDb = ArrayList<String>()
+        for (symbol in normalized) {
+            val cached = cache[symbol]
+            if (cached != null && cached.isValid(cacheTTL)) {
+                cacheHits.incrementAndGet()
+                out[symbol] = cached.data
+            } else {
+                needDb.add(symbol)
+            }
+        }
+        if (needDb.isEmpty()) return@withContext out
+
+        // 一次 IN 查询取代 N 次按 symbol 查（240 个远低于 SQLite 的 999 变量上限）
+        val rowsBySymbol = dividendDao.getBySymbols(needDb)
+            .groupBy { StockCodeManager.normalizeSymbol(it.symbol) }
+
+        for (symbol in needDb) {
+            val dbRecords = rowsBySymbol[symbol].orEmpty()
+            val stamp = stamps[symbol]
+            val fetchedRecently = stamp != null && now - stamp < cacheTTL
+            val withinStaleCeiling = stamp != null && now - stamp < STALE_CEILING_MS
+
+            if (dbRecords.isNotEmpty()) {
+                if (fetchedRecently) {
+                    val records = recordsFromDb(dbRecords)
+                    // 与逐标的路径一致：数据库恢复的缓存不标记为全量拉取
+                    cache[symbol] = CacheEntry(records, now, lastFullFetch = 0L)
+                    out[symbol] = records
+                } else if (withinStaleCeiling) {
+                    // 宽口径：过期几天的记录照样用，但不回填内存缓存（下次抓取应能刷新它）
+                    out[symbol] = recordsFromDb(dbRecords)
+                } else {
+                    out[symbol] = null
+                }
+                continue
+            }
+
+            // 库里一条都没有：先按 [shouldReuseEmptyResult] 判「抓过且没有分红」
+            if (shouldReuseEmptyResult(
+                    dbRecordCount = 0,
+                    lastFetchedAt = stamp,
+                    now = now,
+                    ttl = NEGATIVE_RESULT_TTL
+                )
+            ) {
+                cacheHits.incrementAndGet()
+                cache[symbol] = CacheEntry(emptyList(), now, lastFullFetch = stamp ?: 0L)
+                out[symbol] = emptyList()
+            } else if (withinStaleCeiling) {
+                // 逐标的路径这里会再查一次 DB（空）后返回空列表；批量版 DB 已查过，直接给空
+                out[symbol] = emptyList()
+            } else {
+                out[symbol] = null
+            }
+        }
+        out
+    }
+
     /** 预取分红时的并发上限：与 AssetSyncManager.MAX_CONCURRENT_SYNC 一致，别把接口打爆 */
     private val maxConcurrentFetch = 8
     

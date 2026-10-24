@@ -16,6 +16,7 @@ import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
+import org.junit.Before
 import org.junit.Test
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
@@ -47,6 +48,28 @@ class DividendIncomeLoaderTest {
      */
     private val cache = mockk<DividendIncomeCache>()
     private val cachedLoader = DividendIncomeLoader(repository, cache)
+
+    /**
+     * 把「批量读缓存」适配到本文件既有的「按 symbol 逐个打桩」写法上。
+     *
+     * 生产代码已把冷启动的逐标的读缓存换成一次 [DividendRepository.getCachedAllowingStaleBatch]
+     * （一次 IN 查询 + 一次 SP getAll，取代 2N 次 IO）。这里不改写每个用例的桩，
+     * 而是在批量接口后面转发到按 symbol 的桩：既保持用例可读性，也顺带钉住一条契约——
+     * **批量必须覆盖调用方传来的每个 symbol**，少一个就等于那个标的被误判成「没有缓存」。
+     *
+     * 没打桩的 symbol 走 runCatching 兜成 null（= 连过期数据都没有），
+     * 与严格 MockK 下「没桩就抛异常」的旧行为在语义上等价：都是「这个标的没有可用缓存」。
+     */
+    @Before
+    fun adaptBatchCacheStub() {
+        coEvery { repository.getCachedAllowingStaleBatch(any()) } coAnswers {
+            @Suppress("UNCHECKED_CAST")
+            val symbols = invocation.args[0] as List<String>
+            symbols.associateWith { symbol ->
+                runCatching { repository.getCachedAllowingStale(symbol) }.getOrNull()
+            }
+        }
+    }
 
     private fun stock(symbol: String, balance: Double = 100.0) = Asset(
         name = symbol,

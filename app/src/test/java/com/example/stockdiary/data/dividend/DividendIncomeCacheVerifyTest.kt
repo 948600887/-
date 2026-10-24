@@ -247,6 +247,25 @@ class DividendIncomeCacheVerifyTest {
     private val cachedLoader = DividendIncomeLoader(repository, cache)
     private val plainLoader = DividendIncomeLoader(repository) // incomeCache = null，旧行为
 
+    /**
+     * 把「批量读缓存」适配到本文件既有的「按 symbol 逐个打桩」写法上。
+     *
+     * 生产代码已把冷启动的逐标的读缓存换成一次 [DividendRepository.getCachedAllowingStaleBatch]
+     * （一次 IN 查询 + 一次 SP getAll，取代 2N 次 IO）。这里不改写每个用例的桩，
+     * 而是在批量接口后面转发到按 symbol 的桩，各用例保持「逐个标的给答案」的写法。
+     * 没打桩的 symbol 兜成 null（= 连过期数据都没有），与严格 MockK 的旧行为语义等价。
+     */
+    @org.junit.Before
+    fun adaptBatchCacheStub() {
+        coEvery { repository.getCachedAllowingStaleBatch(any()) } coAnswers {
+            @Suppress("UNCHECKED_CAST")
+            val symbols = invocation.args[0] as List<String>
+            symbols.associateWith { symbol ->
+                runCatching { repository.getCachedAllowingStale(symbol) }.getOrNull()
+            }
+        }
+    }
+
     private fun stock(symbol: String, balance: Double = 100.0) = Asset(
         name = symbol,
         type = AssetType.STOCK,

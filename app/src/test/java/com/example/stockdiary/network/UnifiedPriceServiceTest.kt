@@ -160,4 +160,64 @@ class UnifiedPriceServiceTest {
         assertTrue("连续 451 达阈值后应显示「币安暂不可达」", BinanceHostGate.isUnavailable())
         assertEquals(1, BinanceHostGate.blockCountForTesting())
     }
+
+    // ---------- 候选交易对重试（WBETH 修复的核心契约） ----------
+
+    /**
+     * 主候选 400（非法符号）、兜底候选 200 命中：模拟 WBETH 的真实场景——
+     * WBETH 被误判成已是交易对，主候选 `WBETH` 在币安回 400，必须自动落到
+     * 兜底 `WBETHUSDT` 取到价。
+     *
+     * 钉死这条：2026-10-24 真机日志里 WBETH 连续多轮同步都失败（币安 -1121 Invalid symbol），
+     * 根因就是没有这道兜底。修复后它应成功且只多花一个请求（不会让正常币也重试）。
+     */
+    private class TickerWbethRetryInterceptor : Interceptor {
+        override fun intercept(chain: Interceptor.Chain): Response {
+            val symbol = chain.request().url.queryParameter("symbol") ?: ""
+            return if (symbol == "WBETHUSDT") {
+                // 兜底候选命中：返回合法 200
+                val body = """{"lastPrice":"2700.00","priceChange":"10.00",""" +
+                    """"priceChangePercent":"0.37","highPrice":"2800.00",""" +
+                    """"lowPrice":"2600.00","volume":"50.0"}"""
+                Response.Builder()
+                    .request(chain.request())
+                    .protocol(Protocol.HTTP_1_1)
+                    .code(200)
+                    .message("OK")
+                    .body(body.toResponseBody("application/json".toMediaType()))
+                    .build()
+            } else {
+                // 主候选（WBETH 等）非法符号：400，触发重试
+                val body = """{"code":-1121,"msg":"Invalid symbol"}"""
+                Response.Builder()
+                    .request(chain.request())
+                    .protocol(Protocol.HTTP_1_1)
+                    .code(400)
+                    .message("Bad Request")
+                    .body(body.toResponseBody("application/json".toMediaType()))
+                    .build()
+            }
+        }
+    }
+
+    @Test
+    fun `getCryptoPrice WBETH主候选400兜底WBETHUSDT200命中`() = runBlocking {
+        val result = UnifiedPriceService.getCryptoPrice("WBETH", client = fakeClient(TickerWbethRetryInterceptor()))
+        assertTrue("主候选 400 后必须落到 WBETHUSDT 取到价", result.isSuccess)
+        assertEquals(2700.0, result.getOrNull()!!.price, 1e-9)
+        // 兜底命中是真正的 2xx 成功：连续失败计数清零（不被 400 误判成网络失败）
+        assertEquals(0, BinanceHostGate.consecutiveFailuresForTesting())
+        assertEquals(Phase.CLOSED, BinanceHostGate.phaseForTesting())
+    }
+
+    @Test
+    fun `getCryptoPrice 用户填错符号两个候选都400仍真实失败`() = runBlocking {
+        // SHIB2USDT 是错误符号（真实是 SHIBUSDT）：primary=SHIB2USDT、fallback=SHIB2USDTUSDT
+        // 都非法。两个都 400 时不能误以为成功，必须如实失败，让用户自己改对代码。
+        val result = UnifiedPriceService.getCryptoPrice("SHIB2USDT", client = fakeClient(Ticker400Interceptor()))
+        assertTrue("填错的符号无法猜对，必须失败", result.isFailure)
+        // 400 是主机可达的正常业务错误：不喂 onNetworkFailure，计数保持 0
+        assertEquals(0, BinanceHostGate.consecutiveFailuresForTesting())
+        assertEquals(Phase.CLOSED, BinanceHostGate.phaseForTesting())
+    }
 }

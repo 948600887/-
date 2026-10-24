@@ -117,6 +117,42 @@ class BinanceAPITest {
         assertEquals("LDLTCUSDT", BinanceAPI.cryptoTradingPairFor("LDLTC"))
     }
 
+    // ---------- 候选交易对（WBETH 类「ticker 以报价币名结尾」兜底） ----------
+
+    /**
+     * [cryptoSymbolCandidates] 是 WBETH 修复的核心：ticker 自身以报价币名结尾的币，
+     * 单靠前/后缀猜不出真实交易对，必须列出「原映射 + 裸码USDT 兜底」让币安当裁判。
+     */
+    @Test
+    fun `普通币候选列表_已是交易对也带USDT兜底但不浪费请求`() {
+        assertEquals(listOf("BTCUSDT"), BinanceAPI.cryptoSymbolCandidates("BTC"))
+        assertEquals(listOf("LDOUSDT"), BinanceAPI.cryptoSymbolCandidates("LDO"))
+        // ETHBTC 以报价币 BTC 结尾，cryptoTradingPairFor 原样返回；这里按 WBETH 修复的
+        // 统一规则也补一个 ETHBTCUSDT 兜底。但「不浪费请求」在网络层成立：ETHBTC 主候选
+        // 一查即 200 成功，兜底候选永远轮不到发起请求（只有主 400 时才尝试兜底）。
+        assertEquals(listOf("ETHBTC", "ETHBTCUSDT"), BinanceAPI.cryptoSymbolCandidates("ETHBTC"))
+    }
+
+    @Test
+    fun `WBETH 补裸码USDT兜底_修复误判成已是交易对`() {
+        // WBETH 以 ETH 结尾会被 cryptoTradingPairFor 误判成已是交易对、原样返回 WBETH；
+        // 这里必须多出 WBETHUSDT 兜底，让主候选 400 时落到真实对。
+        assertEquals(listOf("WBETH", "WBETHUSDT"), BinanceAPI.cryptoSymbolCandidates("WBETH"))
+    }
+
+    @Test
+    fun `用户填错的符号两个候选都非法_如实失败`() {
+        // SHIB2USDT 是错误符号（真实是 SHIBUSDT）。primary=SHIB2USDT，fallback=SHIB2USDTUSDT，
+        // 两个币安都回 400——App 无法猜出正确对，仍应判失败（不能误以为成功）。
+        assertEquals(listOf("SHIB2USDT", "SHIB2USDTUSDT"), BinanceAPI.cryptoSymbolCandidates("SHIB2USDT"))
+    }
+
+    @Test
+    fun `稳定币与空串无候选`() {
+        assertEquals(emptyList<String>(), BinanceAPI.cryptoSymbolCandidates("USDT"))
+        assertEquals(emptyList<String>(), BinanceAPI.cryptoSymbolCandidates(""))
+    }
+
     // ---------- 底层交易对（LD 1:1 计价） ----------
 
     /**

@@ -281,25 +281,32 @@ object UnifiedPriceService {
          */
         client: OkHttpClient = NetworkClient.binanceClient
     ): Result<CryptoData> = withContext(Dispatchers.IO) {
-        // 理财/锁仓产品（LD 前缀）不是现货交易对，币安没有 LDXXXUSDT 这种市场。
-        // 但 LD 代币与底层资产 1:1 可赎回，估值应剥掉 LD 用底层交易对查价——
-        // 否则这些持仓的 currentPrice 永远为空，而导入时 purchasePrice = 0，
-        // totalValue 恒为 0，总资产会少算整整一块（见 BinanceAPI.earnUnderlyingPair）。
-        // 剥不掉底层的（稳定币壳 LDUSDT 等）才按「无行情」跳过，不计同步失败。
-        var pair: String? = null
-        if (BinanceAPI.isEarnProduct(code)) {
-            pair = BinanceAPI.earnUnderlyingPair(code)
-            if (pair == null) {
-                // 底层仍是稳定币（如 LDUSDT）：没有现货交易对，但锚定 1 美元，
+        val codeNorm = code.uppercase().trim()
+
+        // 稳定币锚定 1 美元，币安上没有 XXXUSDT 自我交易对，查价必然空——直接按 1.0 计
+        if (codeNorm in BINANCE_STABLECOINS) {
+            AppLogger.d("稳定币 $code 按 1.0 美元计，跳过查价", TAG)
+            return@withContext Result.success(
+                CryptoData(code = codeNorm, name = codeNorm, price = 1.0, change = null, changePercent = null)
+            )
+        }
+
+        // 候选交易对：先按既有映射算出（多数情况正确），再补一个「裸码 + USDT」兜底，
+        // 解决 WBETH 这类 ticker 以报价币名结尾、被误判成已是交易对导致永远 400 的问题
+        // （详见 [BinanceAPI.cryptoSymbolCandidates]）。LD 理财/锁仓仍走底层 1:1 计价。
+        val candidates: List<String> = if (BinanceAPI.isEarnProduct(code)) {
+            val underlying = BinanceAPI.earnUnderlyingPair(code)
+            if (underlying == null) {
+                // 底层仍是稳定币壳（如 LDUSDT）：没有现货交易对，但锚定 1 美元，
                 // 与现货稳定币同口径按 1.0 计，而不是当成「无行情」跳过——
                 // 否则存量 LDUSDT 的 currentPrice 永远留着导入前的 0，市值恒为 0
                 // （用户看到的「USDT 价格默认为 0」正是这个）。earnUnderlyingPair
                 // 返回 null 当且仅当剥掉 LD 后底层是稳定币，所以这里判一次集合即可。
-                val underlying = code.trim().uppercase().removePrefix("LD")
-                if (underlying in BINANCE_STABLECOINS) {
+                val stripped = codeNorm.removePrefix("LD")
+                if (stripped in BINANCE_STABLECOINS) {
                     AppLogger.d("理财/锁仓稳定币 $code 按 1.0 美元计", TAG)
                     return@withContext Result.success(
-                        CryptoData(code = code.uppercase().trim(), name = code.uppercase().trim(), price = 1.0, change = null, changePercent = null)
+                        CryptoData(code = codeNorm, name = codeNorm, price = 1.0, change = null, changePercent = null)
                     )
                 }
                 AppLogger.d("理财/锁仓产品 $code 无底层交易对，跳过查价", TAG)
@@ -307,22 +314,16 @@ object UnifiedPriceService {
                     NonTradableAssetException("$code 是币安理财/锁仓产品，没有现货行情")
                 )
             }
-            AppLogger.d("理财/锁仓产品 $code 按底层 $pair 1:1 计价", TAG)
+            AppLogger.d("理财/锁仓产品 $code 按底层 $underlying 1:1 计价", TAG)
+            listOf(underlying)
         } else {
-            pair = BinanceAPI.cryptoTradingPairFor(code)
+            BinanceAPI.cryptoSymbolCandidates(code)
         }
-        // 稳定币锚定 1 美元，币安上没有 XXXUSDT 自我交易对，查价必然空——直接按 1.0 计
-        // （pair 为 null 即稳定币）。非 USDT 报价的交易对（ADABTC / ETHBTC）其 lastPrice
-        // 是「以报价币计」，不能直接当美元，统一转成基础资产的 USDT 对按美元估值（见 P2）。
-        val pricedPair = pair?.let { BinanceAPI.toUsdtPair(it) }
-        if (pricedPair == null) {
-            AppLogger.d("稳定币 $code 按 1.0 美元计，跳过查价", TAG)
-            return@withContext Result.success(
-                CryptoData(code = code.uppercase().trim(), name = code.uppercase().trim(), price = 1.0, change = null, changePercent = null)
-            )
+
+        if (candidates.isEmpty()) {
+            AppLogger.d("无可用交易对（无法归一化的符号）：$code，跳过查价", TAG)
+            return@withContext Result.failure(NonTradableAssetException("$code 没有可用的现货行情"))
         }
-        // 公开行情走 data-api.binance.vision（不做地区封锁）；api.binance.com 在部分地区回 451，换 IP 无效。
-        val url = "${APIEndpoints.Binance.MARKET_DATA_BASE_URL}/ticker/24hr?symbol=$pricedPair"
 
         // 主机级熔断闸门：币安连续网络级失败达阈值后，冷却期内直接短路、不发请求。
         // 主机压根连不上时，逐个标的各烧最多 20s 连接超时纯属浪费，且会计入
@@ -336,77 +337,104 @@ object UnifiedPriceService {
             )
         }
 
-        try {
-            val request = Request.Builder()
-                .url(url)
-                .addHeader("User-Agent", "Mozilla/5.0")
-                .build()
+        // 顺序尝试候选交易对：正常币首个候选即命中（零额外请求）；WBETH 这类首候选 400 时
+        // 才落到「裸码 + USDT」兜底。仅 400（非法符号）重试，451/403/429/5xx 与网络异常不重试。
+        var lastFailure: Throwable? = null
+        for (rawPair in candidates) {
+            val pricedPair = BinanceAPI.toUsdtPair(rawPair)
+            if (pricedPair == null) {
+                // 兜底裸码本身是个稳定币（理论上走不到，上面已拦截），按 1.0 计
+                AppLogger.d("稳定币 $rawPair 按 1.0 美元计", TAG)
+                return@withContext Result.success(
+                    CryptoData(code = codeNorm, name = codeNorm, price = 1.0, change = null, changePercent = null)
+                )
+            }
 
-            val startTime = System.currentTimeMillis()
-            // 与币安其他客户端一致：同主机、同连接池（绝对 URL 下 BaseUrlInterceptor 直通）
-            val response = client.newCall(request).execute()
-            response.use {
-                val duration = System.currentTimeMillis() - startTime
+            // 公开行情走 data-api.binance.vision（不做地区封锁）；api.binance.com 在部分地区回 451，换 IP 无效。
+            val url = "${APIEndpoints.Binance.MARKET_DATA_BASE_URL}/ticker/24hr?symbol=$pricedPair"
 
-                AppLogger.api("GET /ticker/24hr (symbol=$pair)", it.message, duration, TAG)
+            try {
+                val request = Request.Builder()
+                    .url(url)
+                    .addHeader("User-Agent", "Mozilla/5.0")
+                    .build()
 
-                val body = it.body?.string() ?: return@withContext Result.failure(Exception("币安返回了空响应"))
+                val startTime = System.currentTimeMillis()
+                // 与币安其他客户端一致：同主机、同连接池（绝对 URL 下 BaseUrlInterceptor 直通）
+                val response = client.newCall(request).execute()
+                response.use {
+                    val duration = System.currentTimeMillis() - startTime
 
-                if (!it.isSuccessful) {
-                    // 451/403 = 地区封锁 / 访问被拒：主机可达但本用户用不了，等同「主机不可用」，
-                    // 喂给熔断器使其 OPEN 短路后续请求，避免每个币都白打一次 451、还各计一次
-                    // 同步失败（旧代码在 isSuccessful 检查前就调 onSuccess，把 451 探活当成功，
-                    // 熔断一解除又被 451、循环空转——地区封锁用户每轮同步都被 451 刷屏）。
-                    // 其余 4xx/5xx（400 非法符号、429 限流、5xx 服务端错）主机其实可达，
-                    // 仍按旧口径在下方 2xx 分支复位计数，只是价格本轮失败。
-                    if (it.code == 451 || it.code == 403) {
-                        BinanceHostGate.onNetworkFailure(System.currentTimeMillis())
+                    AppLogger.api("GET /ticker/24hr (symbol=$rawPair)", it.message, duration, TAG)
+
+                    val body = it.body?.string() ?: return@withContext Result.failure(Exception("币安返回了空响应"))
+
+                    if (!it.isSuccessful) {
+                        // 451/403 = 地区封锁 / 访问被拒：主机可达但本用户用不了，等同「主机不可用」，
+                        // 喂给熔断器使其 OPEN 短路后续请求，避免每个币都白打一次 451、还各计一次
+                        // 同步失败（旧代码在 isSuccessful 检查前就调 onSuccess，把 451 探活当成功，
+                        // 熔断一解除又被 451、循环空转——地区封锁用户每轮同步都被 451 刷屏）。
+                        if (it.code == 451 || it.code == 403) {
+                            BinanceHostGate.onNetworkFailure(System.currentTimeMillis())
+                            return@withContext Result.failure(BinanceAccountAPI.binanceError(body, it.code))
+                        }
+                        // 400 非法符号：候选还有下一个就试，否则判失败（主机其实可达，
+                        // 按旧口径不喂熔断，价格本轮失败，详见上面 451 分支说明）。
+                        if (it.code == 400 && rawPair != candidates.last()) {
+                            AppLogger.d("币安 400 非法符号 $pricedPair，尝试下一个候选交易对", TAG)
+                            lastFailure = BinanceAccountAPI.binanceError(body, it.code)
+                            return@use
+                        }
+                        return@withContext Result.failure(BinanceAccountAPI.binanceError(body, it.code))
                     }
-                    // 带上币安的 code+msg，并按需补地区限制的中文可操作提示
-                    return@withContext Result.failure(BinanceAccountAPI.binanceError(body, it.code))
+
+                    if (!body.contains("lastPrice")) {
+                        return@withContext Result.failure(Exception("响应格式错误"))
+                    }
+
+                    // 2xx：真正成功。复位熔断连续失败计数，并（若正处于半开探测）闭路。
+                    // ⚠️ 必须在 isSuccessful 检查之后才调用——否则 451 会被当成成功、熔断永远
+                    // 顶不上地区封锁，反而每轮被 451 刷屏（见上面的 451 分支说明）。
+                    BinanceHostGate.onSuccess()
+
+                    // 注意传的是原 code（如 LDBNB）而不是底层交易对：落库 key 必须是
+                    // 原 symbol，价格才是底层币 1:1 的市价——不能把资产名/代码改成 BNBUSDT
+                    val cryptoData = parseBinanceCrypto(code, body)
+
+                    return@withContext if (cryptoData != null) {
+                        Result.success(cryptoData)
+                    } else {
+                        Result.failure(Exception("解析加密货币数据失败"))
+                    }
                 }
-
-                if (!body.contains("lastPrice")) {
-                    return@withContext Result.failure(Exception("响应格式错误"))
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // 网络级失败（连不上 / 超时 / 域名解析失败 / IO 错误）喂给主机级熔断器：
+                // 主机不可达时每轮同步会为每个加密货币各烧最多 20s，全计失败还触发
+                // 「同步多次失败」通知；连续达阈值后冷却期内直接短路（见 BinanceHostGate）。
+                // CancellationException 已在上面重抛，不会被误计成失败。
+                // 网络异常对所有候选都一样，不再试后续候选。
+                if (e is ConnectException || e is SocketTimeoutException || e is UnknownHostException || e is IOException) {
+                    BinanceHostGate.onNetworkFailure(System.currentTimeMillis())
                 }
-
-                // 2xx：真正成功。复位熔断连续失败计数，并（若正处于半开探测）闭路。
-                // ⚠️ 必须在 isSuccessful 检查之后才调用——否则 451 会被当成成功、熔断永远
-                // 顶不上地区封锁，反而每轮被 451 刷屏（见上面的 451 分支说明）。
-                BinanceHostGate.onSuccess()
-
-                // 注意传的是原 code（如 LDBNB）而不是底层交易对：落库 key 必须是
-                // 原 symbol，价格才是底层币 1:1 的市价——不能把资产名/代码改成 BNBUSDT
-                val cryptoData = parseBinanceCrypto(code, body)
-
-                return@withContext if (cryptoData != null) {
-                    Result.success(cryptoData)
+                AppLogger.e("获取加密货币价格失败: $code", e, TAG)
+                // 连接类失败（连不上/超时/域名解析不了）换成一句人话：OkHttp 原始 message
+                // 形如 "failed to connect to data-api.binance.vision/2001:… after 10000ms"，
+                // 既看不懂又把设备 IP/端口抖给用户。币安国际站在部分网络/地区连不上是常态
+                // （公开行情已改走 data-api.binance.vision 绕开地区封锁，这里兜的是镜像也不可达的极端情况）。
+                val userFacing = if (e is ConnectException || e is SocketTimeoutException || e is UnknownHostException) {
+                    Exception("连不上币安行情服务器，可能被网络或地区限制，请检查网络或代理后重试")
                 } else {
-                    Result.failure(Exception("解析加密货币数据失败"))
+                    e
                 }
+                return@withContext Result.failure(userFacing)
             }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            // 网络级失败（连不上 / 超时 / 域名解析失败 / IO 错误）喂给主机级熔断器：
-            // 主机不可达时每轮同步会为每个加密货币各烧最多 20s，全计失败还触发
-            // 「同步多次失败」通知；连续达阈值后冷却期内直接短路（见 BinanceHostGate）。
-            // CancellationException 已在上面重抛，不会被误计成失败。
-            if (e is ConnectException || e is SocketTimeoutException || e is UnknownHostException || e is IOException) {
-                BinanceHostGate.onNetworkFailure(System.currentTimeMillis())
-            }
-            AppLogger.e("获取加密货币价格失败: $code", e, TAG)
-            // 连接类失败（连不上/超时/域名解析不了）换成一句人话：OkHttp 原始 message
-            // 形如 "failed to connect to data-api.binance.vision/2001:… after 10000ms"，
-            // 既看不懂又把设备 IP/端口抖给用户。币安国际站在部分网络/地区连不上是常态
-            // （公开行情已改走 data-api.binance.vision 绕开地区封锁，这里兜的是镜像也不可达的极端情况）。
-            val userFacing = if (e is ConnectException || e is SocketTimeoutException || e is UnknownHostException) {
-                Exception("连不上币安行情服务器，可能被网络或地区限制，请检查网络或代理后重试")
-            } else {
-                e
-            }
-            Result.failure(userFacing)
         }
+
+        // 所有候选都因 400 失败（如用户填错的符号 SHIB2USDT → SHIB2USDTUSDT）：真实失败，
+        // 用户必须自己改对 symbol，App 无法猜出正确交易对。
+        Result.failure(lastFailure ?: Exception("所有候选交易对均查询失败: $code"))
     }
     
     private fun parseBinanceCrypto(code: String, response: String): CryptoData? {

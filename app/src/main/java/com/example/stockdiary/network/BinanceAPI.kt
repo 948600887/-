@@ -147,6 +147,42 @@ object BinanceAPI {
     }
 
     /**
+     * 生成加密货币查价的**候选交易对列表**（按优先级），供
+     * [com.example.stockdiary.network.UnifiedPriceService.getCryptoPrice] 顺序尝试。
+     *
+     * ## 为什么需要候选列表（而不是只靠 [cryptoTradingPairFor]）
+     *
+     * [cryptoTradingPairFor] 用「以报价币结尾」判断交易对，但有些基础资产自身的 ticker
+     * 恰好以报价币名结尾（如 `WBETH` 以 `ETH` 结尾），会被误判成「已是交易对」、原样返回
+     * `WBETH`；接着 [toUsdtPair] 还会把尾部的 `ETH` 剥掉补成 `WBUSDT`——两个都是币安上
+     * 不存在的对（真实对是 `WBETHUSDT`）。单靠前/后缀**无法**区分「WBETH 是裸基础资产」和
+     * 「ETHBTC 是真实交易对」，这点币安自己说得准。
+     *
+     * 故这里列出候选：先按既有逻辑算出的交易对（绝大多数情况正确、零额外请求），
+     * 再补一个「裸码 + USDT」兜底。getCryptoPrice 顺序尝试，**只在币安回 400（非法符号）**
+     * 时才落到下一个候选，命中即返回；其余错误（451 地区封锁 / 429 限流 / 5xx）不重试。
+     *
+     * 例：
+     * - `BTC`       → primary `BTCUSDT`，fallback `BTCUSDT`（相同，去重）→ 单候选，无浪费；
+     * - `WBETH`     → primary `WBETH`，fallback `WBETHUSDT`
+     *                → 主候选 400 时落兜底，命中真实对；
+     * - `SHIB2USDT`（用户填错的符号）→ primary `SHIB2USDT`，fallback `SHIB2USDTUSDT`
+     *                → 两个都 400，仍是真实失败（用户必须自己改对符号，App 无法猜出 SHIB）。
+     *
+     * @return 候选交易对（裸基础资产或已是交易对形态）；稳定币 / 空串返回空列表
+     *   （调用方按「无行情」处理，不在此补 USDT——稳定币没有 XXXUSDT 自我交易对）
+     */
+    internal fun cryptoSymbolCandidates(symbol: String): List<String> {
+        val primary = cryptoTradingPairFor(symbol) ?: return emptyList()
+        val fallback = "${symbol.uppercase().trim()}USDT"
+        return if (primary.equals(fallback, ignoreCase = true)) {
+            listOf(primary)
+        } else {
+            listOf(primary, fallback)
+        }
+    }
+
+    /**
      * 判断 symbol 是不是币安**理财/锁仓（Simple Earn / Locked Staking）产品**。
      *
      * 币安给这类持仓的代码是 `LD` + 底层资产名（`LDBNB` / `LDPOL` / `LDLTC` / `LDPAXG`…），

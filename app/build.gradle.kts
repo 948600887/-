@@ -33,6 +33,20 @@ android {
             buildConfigField("String", "API_KEY", "\"demo\"")
             buildConfigField("String", "EASTMONEY_SKILL_API_KEY", "\"\"")
         }
+
+        // 瘦身：只打某个 ABI 的原生库，用 `-PabiFilter=arm64-v8a` 触发。
+        // 不传 = 出通用包（四个 ABI 全带，模拟器/换机都能装）。
+        //
+        // 为什么要这个开关：MLKit 中文 OCR（券商截图导入持仓）的
+        // libmlkit_google_ocr_pipeline.so 单 ABI 就要 6.8~11.6MB，
+        // 通用包里四个 ABI 加起来 41MB —— 而真机只会用到自己那一个。
+        // 2026-10-24 实测：通用 debug 包 71.9MB，arm64-only 约 31MB。
+        val abiFilter = (project.findProperty("abiFilter") as String?)?.takeIf { it.isNotBlank() }
+        ndk {
+            if (abiFilter != null) {
+                abiFilters += abiFilter
+            }
+        }
     }
 
     buildTypes {

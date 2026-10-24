@@ -248,9 +248,16 @@ class CalendarViewModel(
             val today = LocalDate.now()
             val viewingCurrentMonth = today.year == month.year && today.monthValue == month.monthValue
 
-            // 只 parse 一次：筛当月和取日期用的是同一个 LocalDate。
-            // 原先 filter 里 parse 一遍、下面的循环再 parse 一遍同一批字符串。
-            val monthSnapshots = snapshotDao.getAllSnapshotsSync().mapNotNull { snapshot ->
+            // 只查"显示月 1 号 00:00（系统默认时区）"起的快照，而不是把整张 asset_snapshots
+            // 表都 load 进内存再按月筛：老用户积攒几百天每日快照时整表读取纯属浪费 IO，
+            // 且月与月之间互不影响。下方仍按 date 精确归到当月，多查到的"当月之后"的行会被丢弃。
+            // 用系统默认时区把"当月 1 号 00:00"换算成 epoch millis（与快照 timestamp 同一口径）。
+            val monthStartMillis = month.atDay(1)
+                .atStartOfDay()
+                .atZone(java.time.ZoneId.systemDefault())
+                .toInstant()
+                .toEpochMilli()
+            val monthSnapshots = snapshotDao.getSnapshotsSinceSync(monthStartMillis).mapNotNull { snapshot ->
                 val date = try {
                     LocalDate.parse(snapshot.date)
                 } catch (e: CancellationException) {

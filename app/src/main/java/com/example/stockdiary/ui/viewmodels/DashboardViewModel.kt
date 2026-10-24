@@ -72,7 +72,14 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
     // 「资产增值」卡片的基准数据：净资产要和本月/今年之前的快照对比
     val snapshots: StateFlow<List<AssetSnapshot>> = repository.getAllSnapshots()
         .map { it.sortedBy { snapshot -> snapshot.date } }
-        .distinctUntilChanged()
+        // 同 assets 流的做法：快照表每次写入（尤其"同日覆盖"会换新 id/timestamp，
+        // 但 date+netAssets 不变）都会让 Room 重发整表；而"资产增值"卡片只消费 date 与
+        // netAssets 两列，按显示相关字段去重，避免与价格/汇率无关的写库触发多余重算与重组。
+        .distinctUntilChanged { old, new ->
+            old.size == new.size && old.zip(new).all { (a, b) ->
+                a.date == b.date && a.netAssets == b.netAssets
+            }
+        }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     private val _preferences = MutableStateFlow(preferencesManager.loadPreferences())

@@ -10,6 +10,11 @@ interface SnapshotDao {
     
     @Query("SELECT * FROM asset_snapshots WHERE timestamp >= :startTime ORDER BY timestamp ASC")
     fun getSnapshotsSince(startTime: Long): Flow<List<AssetSnapshot>>
+
+    // 同步版：日历按"显示月"查询用。只拉当月起（含当月）的快照，而不是把整张
+    // asset_snapshots 表都 load 进内存再按月筛——老用户积攒几百天每日快照时整表读取纯属浪费。
+    @Query("SELECT * FROM asset_snapshots WHERE timestamp >= :startTime ORDER BY timestamp ASC")
+    suspend fun getSnapshotsSinceSync(startTime: Long): List<AssetSnapshot>
     
     @Query("SELECT * FROM asset_snapshots ORDER BY timestamp DESC LIMIT :limit")
     fun getRecentSnapshots(limit: Int): Flow<List<AssetSnapshot>>

@@ -12,6 +12,7 @@ import com.example.stockdiary.database.AssetSnapshot
 import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.database.SnapshotDao
 import io.mockk.coEvery
+import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.slot
@@ -111,7 +112,8 @@ class CalendarViewModelTest {
             updated
         }
         every { assetRepo.getAllAssets() } returns flowOf(assets)
-        coEvery { snapshotDao.getAllSnapshotsSync() } returns snapshots
+        // E3：日历改用按月查询 getSnapshotsSinceSync，不再整表读取 asset_snapshots
+        coEvery { snapshotDao.getSnapshotsSinceSync(any()) } returns snapshots
         // 两个日历生成路径都会先调 preFetchDividends，必须显式打桩：
         // 只依赖 relaxed 会让它落到未初始化字段的真实实现上抛异常，日历生成整体失败
         coEvery { divRepo.preFetchDividends(any(), any(), any()) } returns Unit
@@ -256,7 +258,7 @@ class CalendarViewModelTest {
             listOf(stockAsset.copy(currentPrice = 99.0)),  // 仅变实时价 → 不重算
             listOf(stockAsset.copy(balance = 2000.0))       // 变数量 → 重算
         )
-        coEvery { snapshotDao.getAllSnapshotsSync() } returns emptyList()
+        coEvery { snapshotDao.getSnapshotsSinceSync(any()) } returns emptyList()
         coEvery { divRepo.preFetchDividends(any(), any(), any()) } returns Unit
 
         val vm = CalendarViewModel(assetRepo, divRepo, snapshotDao, prefsMgr, useCase)
@@ -368,6 +370,9 @@ class CalendarViewModelTest {
         vm.selectMonth(lastMonth)
         waitUntil { !vm.uiState.value.isLoading }
 
+        // E3 回归锁：翻月触发的日历生成必须走按月查询 getSnapshotsSinceSync，
+        // 而不是把整张 asset_snapshots 表都拉进来（老用户几百天快照时纯属浪费）
+        coVerify { snapshotDao.getSnapshotsSinceSync(any()) }
         // 翻旧月：即使今天恰好也有快照，也不能把实时值写进上个月
         assertEquals(7777.77, vm.uiState.value.calendarData[dayInLastMonth] ?: 0.0, 1e-9)
         // 当月其余日子无快照 → 0（无数据）

@@ -37,9 +37,19 @@ object AssetGrowthCalculator {
     ): Growth {
         if (snapshots.isEmpty()) return EMPTY
 
+        // 容错：today 必须是合法的 yyyy-MM-dd，否则下方的 take(7)/take(4) 截取会拼出
+        // 无意义的基准（如 "abc-01"），导致 monthDelta/yearDelta 静默算错却看不出来。
+        // 脏日期时退回"今天"的真实值，保证基准可比较。
+        val safeToday = try {
+            LocalDate.parse(today, DATE_FORMAT)
+            today
+        } catch (_: Exception) {
+            LocalDate.now().format(DATE_FORMAT)
+        }
+
         // 快照日期是 yyyy-MM-dd，字典序即时间序，直接字符串比较即可
-        val monthStart = today.take(7) + "-01"
-        val yearStart = today.take(4) + "-01-01"
+        val monthStart = safeToday.take(7) + "-01"
+        val yearStart = safeToday.take(4) + "-01-01"
 
         val monthBase = snapshots.filter { it.date < monthStart }.maxByOrNull { it.date }
         val yearBase = snapshots.filter { it.date < yearStart }.maxByOrNull { it.date }

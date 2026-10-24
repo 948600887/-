@@ -52,7 +52,20 @@ abstract class StockDatabase : RoomDatabase() {
 
         private val MIGRATION_2_3 = object : Migration(2, 3) {
             override fun migrate(db: SupportSQLiteDatabase) {
-                db.execSQL("ALTER TABLE stock_basic ADD COLUMN isETF INTEGER DEFAULT 0")
+                // 历史上 stock_basic 在 v2 之前就存在（1.json 里没有，但 2_3 已经在 ALTER 它），
+                // 可早期迁移链里**从未建过这张表**——所有 1~15 迁移里没有任何 CREATE stock_basic，
+                // 导致 v1 用户升级到 v3 时在 `ALTER TABLE stock_basic` 这一步直接崩（no such table）。
+                // 这里用最终 schema 的「基础列（去掉后续 ALTER 才加的 isETF）」补建，IF NOT EXISTS
+                // 保证已经在 v2/v3 真机上升级过的用户不会重复建表，也不会与 2_3 原 ALTER 冲突。
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `stock_basic` (" +
+                        "`code` TEXT NOT NULL, " +
+                        "`name` TEXT NOT NULL, " +
+                        "`market` TEXT NOT NULL, " +
+                        "`listDate` TEXT, " +
+                        "PRIMARY KEY(`code`))"
+                )
+                db.execSQL("ALTER TABLE stock_basic ADD COLUMN isETF INTEGER NOT NULL DEFAULT 0")
             }
         }
 
@@ -64,6 +77,27 @@ abstract class StockDatabase : RoomDatabase() {
 
         private val MIGRATION_4_5 = object : Migration(4, 5) {
             override fun migrate(db: SupportSQLiteDatabase) {
+                // assets 表在早期迁移链里从未被 CREATE（v1/v4 的 schema JSON 里都没有它，
+                // 可 4_5 已经在给它建索引、8_9 还要往里 INSERT），老用户升级必崩于 no such table。
+                // 用最终 schema 的「基础列（去掉 14_15 才加的 millionCopiesIncome）」补建，
+                // 后续 4_5 索引 / 7_8 无改动 / 8_9 写入 / 14_15 补列 全部顺势成立。
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `assets` (" +
+                        "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "`name` TEXT NOT NULL, " +
+                        "`type` TEXT NOT NULL, " +
+                        "`symbol` TEXT, " +
+                        "`account` TEXT NOT NULL, " +
+                        "`balance` REAL NOT NULL, " +
+                        "`purchasePrice` REAL NOT NULL, " +
+                        "`currentPrice` REAL, " +
+                        "`currency` TEXT NOT NULL, " +
+                        "`lastSyncTime` INTEGER NOT NULL, " +
+                        "`lastUpdateTime` INTEGER NOT NULL, " +
+                        "`notes` TEXT, " +
+                        "`interestRate` REAL, " +
+                        "`dueDate` TEXT)"
+                )
                 db.execSQL("CREATE INDEX IF NOT EXISTS index_assets_symbol ON assets(symbol)")
                 db.execSQL("CREATE INDEX IF NOT EXISTS index_assets_type ON assets(type)")
                 db.execSQL("CREATE INDEX IF NOT EXISTS index_assets_account ON assets(account)")
@@ -73,10 +107,37 @@ abstract class StockDatabase : RoomDatabase() {
 
         private val MIGRATION_5_6 = object : Migration(5, 6) {
             override fun migrate(db: SupportSQLiteDatabase) {
-                db.execSQL("CREATE INDEX IF NOT EXISTS index_snapshots_date ON asset_snapshots(date)")
-                db.execSQL("CREATE INDEX IF NOT EXISTS index_snapshots_timestamp ON asset_snapshots(timestamp)")
-                db.execSQL("CREATE INDEX IF NOT EXISTS index_snapshot_details_snapshotId ON asset_snapshot_details(snapshotId)")
-                db.execSQL("CREATE INDEX IF NOT EXISTS index_snapshot_details_assetId ON asset_snapshot_details(assetId)")
+                // 同上：asset_snapshots / asset_snapshot_details 在早期迁移链里从未被 CREATE，
+                // 可 5_6 已经在建索引、7_8 还要 ALTER 加列。补建基础列（去掉 7_8 才加的列），
+                // 后续 5_6 索引 / 7_8 补列 全部顺势成立。
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `asset_snapshots` (" +
+                        "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "`timestamp` INTEGER NOT NULL, " +
+                        "`date` TEXT NOT NULL, " +
+                        "`totalAssets` REAL NOT NULL, " +
+                        "`totalLiabilities` REAL NOT NULL, " +
+                        "`netAssets` REAL NOT NULL, " +
+                        "`stockValue` REAL NOT NULL, " +
+                        "`fundValue` REAL NOT NULL, " +
+                        "`cryptoValue` REAL NOT NULL, " +
+                        "`bankDepositValue` REAL NOT NULL)"
+                )
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `asset_snapshot_details` (" +
+                        "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "`snapshotId` INTEGER NOT NULL, " +
+                        "`assetId` INTEGER NOT NULL, " +
+                        "`assetName` TEXT NOT NULL, " +
+                        "`assetType` TEXT NOT NULL, " +
+                        "`balance` REAL NOT NULL, " +
+                        "`price` REAL NOT NULL, " +
+                        "`totalValue` REAL NOT NULL)"
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_asset_snapshots_date ON asset_snapshots(date)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_asset_snapshots_timestamp ON asset_snapshots(timestamp)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_asset_snapshot_details_snapshotId ON asset_snapshot_details(snapshotId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_asset_snapshot_details_assetId ON asset_snapshot_details(assetId)")
             }
         }
 
@@ -88,16 +149,16 @@ abstract class StockDatabase : RoomDatabase() {
 
         private val MIGRATION_7_8 = object : Migration(7, 8) {
             override fun migrate(db: SupportSQLiteDatabase) {
-                db.execSQL("ALTER TABLE asset_snapshots ADD COLUMN totalCost REAL DEFAULT 0.0")
-                db.execSQL("ALTER TABLE asset_snapshots ADD COLUMN totalProfit REAL DEFAULT 0.0")
-                db.execSQL("ALTER TABLE asset_snapshots ADD COLUMN yieldRate REAL DEFAULT 0.0")
-                db.execSQL("ALTER TABLE asset_snapshots ADD COLUMN stockCost REAL DEFAULT 0.0")
-                db.execSQL("ALTER TABLE asset_snapshots ADD COLUMN fundCost REAL DEFAULT 0.0")
-                db.execSQL("ALTER TABLE asset_snapshots ADD COLUMN cryptoCost REAL DEFAULT 0.0")
-                db.execSQL("ALTER TABLE asset_snapshots ADD COLUMN bankDepositCost REAL DEFAULT 0.0")
-                db.execSQL("ALTER TABLE asset_snapshot_details ADD COLUMN cost REAL DEFAULT 0.0")
-                db.execSQL("ALTER TABLE asset_snapshot_details ADD COLUMN profit REAL DEFAULT 0.0")
-                db.execSQL("ALTER TABLE asset_snapshot_details ADD COLUMN yieldRate REAL DEFAULT 0.0")
+                db.execSQL("ALTER TABLE asset_snapshots ADD COLUMN totalCost REAL NOT NULL DEFAULT 0.0")
+                db.execSQL("ALTER TABLE asset_snapshots ADD COLUMN totalProfit REAL NOT NULL DEFAULT 0.0")
+                db.execSQL("ALTER TABLE asset_snapshots ADD COLUMN yieldRate REAL NOT NULL DEFAULT 0.0")
+                db.execSQL("ALTER TABLE asset_snapshots ADD COLUMN stockCost REAL NOT NULL DEFAULT 0.0")
+                db.execSQL("ALTER TABLE asset_snapshots ADD COLUMN fundCost REAL NOT NULL DEFAULT 0.0")
+                db.execSQL("ALTER TABLE asset_snapshots ADD COLUMN cryptoCost REAL NOT NULL DEFAULT 0.0")
+                db.execSQL("ALTER TABLE asset_snapshots ADD COLUMN bankDepositCost REAL NOT NULL DEFAULT 0.0")
+                db.execSQL("ALTER TABLE asset_snapshot_details ADD COLUMN cost REAL NOT NULL DEFAULT 0.0")
+                db.execSQL("ALTER TABLE asset_snapshot_details ADD COLUMN profit REAL NOT NULL DEFAULT 0.0")
+                db.execSQL("ALTER TABLE asset_snapshot_details ADD COLUMN yieldRate REAL NOT NULL DEFAULT 0.0")
             }
         }
 
@@ -237,6 +298,29 @@ abstract class StockDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * 全部手写迁移，按版本升序。抽成方法既给 `getInstance` 用（避免重复罗列），
+         * 也让 Room 的 `MigrationTestHelper` 测试能直接拿到同一份迁移数组做端到端校验。
+         */
+        @JvmStatic
+        fun allMigrations(): Array<Migration> = arrayOf(
+            MIGRATION_1_2,
+            MIGRATION_2_3,
+            MIGRATION_3_4,
+            MIGRATION_4_5,
+            MIGRATION_5_6,
+            MIGRATION_6_7,
+            MIGRATION_7_8,
+            MIGRATION_8_9,
+            MIGRATION_9_10,
+            MIGRATION_10_11,
+            MIGRATION_11_12,
+            MIGRATION_12_13,
+            MIGRATION_13_14,
+            MIGRATION_14_15,
+            MIGRATION_15_16
+        )
+
         @JvmStatic
         fun getInstance(context: Context): StockDatabase {
             return INSTANCE ?: synchronized(this) {
@@ -245,23 +329,7 @@ abstract class StockDatabase : RoomDatabase() {
                     StockDatabase::class.java,
                     "stock_diary_db"
                 )
-                    .addMigrations(
-                        MIGRATION_1_2,
-                        MIGRATION_2_3,
-                        MIGRATION_3_4,
-                        MIGRATION_4_5,
-                        MIGRATION_5_6,
-                        MIGRATION_6_7,
-                        MIGRATION_7_8,
-                        MIGRATION_8_9,
-                        MIGRATION_9_10,
-                        MIGRATION_10_11,
-                        MIGRATION_11_12,
-                        MIGRATION_12_13,
-                        MIGRATION_13_14,
-                        MIGRATION_14_15,
-                        MIGRATION_15_16
-                    )
+                    .addMigrations(*allMigrations())
                     .build()
                     .also { INSTANCE = it }
             }

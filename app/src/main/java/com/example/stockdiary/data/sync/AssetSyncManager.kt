@@ -12,6 +12,7 @@ import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.data.price.ApiManager
 import com.example.stockdiary.data.price.SourceStats
 import com.example.stockdiary.data.price.StockDataManager
+import com.example.stockdiary.network.FundAPI
 import com.example.stockdiary.network.UnifiedPriceService
 import com.example.stockdiary.network.model.AssetPrice
 import com.example.stockdiary.utils.AppLogger
@@ -65,9 +66,9 @@ object AssetSyncManager {
      * 要跑 80 批，是这段耗时的大头。
      *
      * 为什么提到 6 不会重蹈「闪退」：当初压到 3 是为了压**基金大文件**的峰值内存，
-     * 而现在真正管住大文件的是 [FUND_MAX_CONCURRENT_SYNC]（=2，与总闸叠加）。
-     * 也就是说同时下载的 0.5~2MB 文件**最多仍是 2 个**，峰值内存不变（≈4MB）；
-     * 多出来的 3 个名额只会被股票 / 加密行情这类**几十字节**的轻量请求占用。
+     * 而现在真正管住大文件的是基金专属闸的**回退档** [FUND_MAX_CONCURRENT_LEGACY]
+     * （=2，与总闸叠加）。也就是说同时下载的 0.5~2MB 文件**最多仍是 2 个**，
+     * 峰值内存不变；多出来的名额只会被股票 / 加密行情这类**几十字节**的轻量请求占用。
      * 网络侧由 [com.example.stockdiary.network.NetworkClient] 的 per-host 上限兜底。
      */
     private const val MAX_CONCURRENT_SYNC = 6
@@ -124,19 +125,45 @@ object AssetSyncManager {
     @Volatile private var activeManualSyncJob: Job? = null
 
     /**
-     * 场外基金下载的专属并发上限。
+     * 场外基金下载的专属并发上限 —— **按数据源分两档**。
      *
-     * 场外基金走天天基金 `pingzhongdata/{code}.js`，每只响应 0.5~2MB（完整历史净值）。
-     * 这道闸把**同时在途的大文件数**压到最多 [FUND_MAX_CONCURRENT_SYNC] 只，避免峰值内存
-     * 把进程顶到被系统回收（静默闪退、零崩溃报告——本项目历史老毛病）。
+     * ## 为什么要分档（本段是 2026-10-24 修正的过时前提）
      *
-     * 与 [manualSyncMutex]、总 [Semaphore] 都是**叠加**关系：一个基金任务同时占
-     * 一个总信号量名额 + 一个基金专属名额。总并发提到 6 之后（见 [MAX_CONCURRENT_SYNC]），
-     * 这道闸就成了**唯一**压住峰值内存的那道：不管总闸开多大，同时在途的 2MB 大文件
-     * 最多 2 个，其余名额留给股票/加密的轻量请求。改总闸时这个 2 不要跟着动。
+     * 从前这里只有一个 `=2`，理由是「场外基金走 `pingzhongdata/{code}.js`，每只
+     * 0.5~2MB」。这个前提**已经不成立**：[com.example.stockdiary.network.FundAPI]
+     * 首选源早已换成 `fundmobapi.../FundMNBasicInformation`，**约 2.5KB**（且带基金
+     * 名称），`pingzhongdata` 降级为**回退源**（仅轻量源拿不到数据时才用）。
+     *
+     * 也就是说：正常路径下每只只有 2.5KB，却仍被当成 2MB 大文件压成 2 路串行——
+     * 92 只场外基金要跑 46 批，白白慢一倍。故按源分档：
+     *
+     * - [FUND_MAX_CONCURRENT_LIGHTWEIGHT] = 4：轻量源。4 路 × 2.5KB = 10KB，
+     *   内存上毫无压力。
+     * - [FUND_MAX_CONCURRENT_LEGACY] = 2：回退源（0.5~2MB 完整历史净值）。**保持
+     *   原来的 2 不动**，它就是为压这个大文件而设的。
+     *
+     * ## 为什么轻量档不直接开到 6（与总闸齐平）
+     *
+     * 分档靠的是**下载前预检** [FundAPI.isLightweightSourceDisabled]，存在一种竞态：
+     * 预检时轻量源还活着，真正请求时它刚好熔断、本次回退到 legacy。此时这 4 个名额
+     * 会同时装 4 个大文件 ≈ 8MB。对照历史实测：3 并发 ≈ 6MB 安全通过，8 并发 ≈ 16MB
+     * 被 LMK 静默击毙（「点刷新闪退、零崩溃报告」）。8MB 贴近安全档且远低于击毙档，
+     * 可接受；开到 6 则是 12MB，越过安全区太远，不冒这个险。
+     *
+     * ## 叠加关系
+     *
+     * 与 [manualSyncMutex]、总 [Semaphore] 都是**叠加**的：一个基金任务同时占一个
+     * 总信号量名额 + 一个基金专属名额。改总闸时这两个数不要跟着动。
      */
-    private const val FUND_MAX_CONCURRENT_SYNC = 2
-    private val fundSemaphore = Semaphore(FUND_MAX_CONCURRENT_SYNC)
+    private const val FUND_MAX_CONCURRENT_LIGHTWEIGHT = 4
+
+    private const val FUND_MAX_CONCURRENT_LEGACY = 2
+
+    /** 轻量源专用闸（2.5KB/只）。正常路径走这条。 */
+    private val fundLightSemaphore = Semaphore(FUND_MAX_CONCURRENT_LIGHTWEIGHT)
+
+    /** 回退源专用闸（0.5~2MB/只）。只在轻量源熔断/拿不到数据时走这条。 */
+    private val fundLegacySemaphore = Semaphore(FUND_MAX_CONCURRENT_LEGACY)
 
     /**
      * 价格**批量落库**的批大小。
@@ -881,11 +908,20 @@ object AssetSyncManager {
                     } else {
                         // 场外基金：使用基金API（天天基金），传纯数字代码。
                         // forceRefresh 强制为 false：场外净值是**日更**的，同一天再刷也拿不到
-                        // 更新的数；传 true 会绕过 FundAPI 的 5 分钟缓存 + 今日净值闸，每次手动
-                        // 刷新都把 0.5~2MB 历史文件重新下载一遍，正是「点刷新偶发闪退」的残因。
+                        // 更新的数；传 true 会绕过 FundAPI 的 5 分钟缓存 + 今日净值闸，让每个
+                        // 代码每次手动刷新都真的发一次请求，正是「点刷新偶发闪退」的残因。
                         // 改 false 让两道缓存都生效，只在该代码当日还没缓存时才真去下载。
-                        // 额外的 fundSemaphore 再压一道在途大文件数（见对象级注释）。
-                        fundSemaphore.withPermit {
+                        //
+                        // 专属闸**按源选**：轻量源（约 2.5KB）走宽档提速，轻量源已熔断、
+                        // 本次会回退到 legacy（0.5~2MB）时收紧回 2 压峰值内存。
+                        // 判据是下载前的预检，存在「预检后刚好熔断」的竞态，后果已在
+                        // FUND_MAX_CONCURRENT_LIGHTWEIGHT 的注释里论证过（最坏 8MB，可控）。
+                        val fundGate = if (FundAPI.isLightweightSourceDisabled()) {
+                            fundLegacySemaphore
+                        } else {
+                            fundLightSemaphore
+                        }
+                        fundGate.withPermit {
                             val fundResult = UnifiedPriceService.getPrice(
                                 pureCode,
                                 AssetType.FUND,

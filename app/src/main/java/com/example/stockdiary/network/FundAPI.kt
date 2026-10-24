@@ -109,7 +109,13 @@ object FundAPI {
     @Volatile
     private var lightweightSourceDisabled = false
 
-    /** 轻量源是否已被熔断（单测用）。 */
+    /**
+     * 轻量源是否已被熔断。
+     *
+     * 两个用途：① 单测断言熔断状态；② **生产**——[com.example.stockdiary.data.sync.AssetSyncManager]
+     * 靠它在下载前判断本次会走哪个源，据此选宽/窄并发闸（见那边的
+     * `FUND_MAX_CONCURRENT_LIGHTWEIGHT` / `_LEGACY` 注释）。改语义或可见性前先看那边的依赖。
+     */
     internal fun isLightweightSourceDisabled(): Boolean = lightweightSourceDisabled
 
     /** 轻量源当前连续失败次数（单测用）。 */

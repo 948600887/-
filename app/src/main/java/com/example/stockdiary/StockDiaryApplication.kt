@@ -106,7 +106,17 @@ class StockDiaryApplication : Application() {
     private fun scheduleAutoPriceSync() {
         try {
             if (container.priceSyncPreferencesManager.isAutoSyncEnabled()) {
-                PriceSyncScheduler.scheduleDailySync(this)
+                // runImmediately=false：只把周期任务挂上，**不在冷启动时立刻跑一轮**。
+                //
+                // 原先走 scheduleDailySync()（默认 runImmediately=true → initialDelay=0），
+                // 于是每次打开 App 都立刻跑一轮全量同步。组合一大（实测 240 个标的，一轮
+                // 38~61 秒），这一轮正好压在用户刚进 App 的时刻——界面上的数字在几十秒里
+                // 陆续跳变，主观感受就是「每次进来都要重新加载一遍，还很慢」。
+                // 周期任务本来就会按 15 分钟（盘中）/4 小时续期，不必抢在启动这一刻。
+                //
+                // 用户在设置里**打开开关**的那一下仍然立即执行（SettingsScreen 走
+                // scheduleDailySync()），那才是「我刚开，想马上看到效果」的时机。
+                PriceSyncScheduler.scheduleSmartSync(this, runImmediately = false)
             }
         } catch (e: CancellationException) {
             throw e

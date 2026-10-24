@@ -37,6 +37,21 @@ class FundDividendApiService {
         private const val RATE_LIMIT_BACKOFF_MS = 60_000L
 
         /**
+         * 进程级「主机不可达」退避窗口（毫秒时间戳）。
+         *
+         * DNS 解析失败（UnknownHostException）是**确定性**故障：同一主机的后续请求必然
+         * 同样失败，重试纯属浪费。而本函数失败后还会用 Jsoup 对**同一个 URL** 再抓一遍，
+         * 于是网络不通时每只基金要等满两个超时——实测 240 个资产的组合里，场外基金分红
+         * 抓取把整轮同步拖到 40~60 秒，结果还全是失败。撞到一次就整段时间短路跳过，
+         * 把无效等待从「标的数 × 2 个超时」压到「一次」。
+         */
+        @Volatile
+        internal var hostUnreachableUntil: Long = 0L
+
+        /** 主机不可达后的退避时长（60 秒）：够覆盖一次网络切换恢复，又不至于长时间拒绝重试。 */
+        private const val HOST_UNREACHABLE_BACKOFF_MS = 60_000L
+
+        /**
          * 本轮是否撞过天天基金限流（514/429）。
          *
          * 与 [rateLimitedUntil]（进程级退避窗口，撞了就别再打）分开：
@@ -68,6 +83,12 @@ class FundDividendApiService {
         if (System.currentTimeMillis() < rateLimitedUntil) {
             AppLogger.w("天天基金限流退避中，跳过 $fundCode 本次抓取", TAG)
             return@withContext Result.failure(Exception("天天基金限流退避中，跳过"))
+        }
+        // 主机不可达退避：DNS 都解析不了时，后续每只基金都会走同样的失败路径，
+        // 不短路就是「标的数 × 2 个超时」的纯等待
+        if (System.currentTimeMillis() < hostUnreachableUntil) {
+            AppLogger.w("天天基金主机不可达退避中，跳过 $fundCode 本次抓取", TAG)
+            return@withContext Result.failure(Exception("天天基金主机不可达退避中，跳过"))
         }
 
         val url = FHSP_URL.replace("{code}", fundCode)
@@ -122,6 +143,13 @@ class FundDividendApiService {
             throw e
         } catch (e: Exception) {
             AppLogger.w("OkHttp 获取天天基金分红失败: ${e.message}", TAG)
+            // DNS 解析失败是确定性故障：下面 Jsoup 打的是同一个主机、必然同样失败，
+            // 再补一遍等于让每只基金都白等第二个超时。设退避窗口并直接失败。
+            if (isHostUnreachable(e)) {
+                hostUnreachableUntil = System.currentTimeMillis() + HOST_UNREACHABLE_BACKOFF_MS
+                AppLogger.w("天天基金主机不可达（DNS 解析失败），本轮退避 60s，不再用 Jsoup 兜底", TAG)
+                return@withContext Result.failure(e)
+            }
         }
 
         // 第二次尝试：使用 Jsoup 直接连接作为备用
@@ -358,3 +386,24 @@ class FundDividendApiService {
  */
 internal fun isRealDividendPage(html: String): Boolean =
     html.contains("权益登记日") || html.contains("暂无分红信息")
+
+/**
+ * 判断异常是不是「主机不可达」（DNS 解析失败）。
+ *
+ * 只看 UnknownHostException：它是**确定性**故障（同一个域名解析不了，重试也解析不了），
+ * 值得整轮退避。超时/连接重置这类**偶发**故障不在此列——它们下一只可能就成了，
+ * 整轮短路会白白牺牲正常的标的，所以刻意不收。
+ *
+ * OkHttp 会把真实原因包在 IOException 的 cause 链里，故要沿 cause 找一层。
+ * 与 isRealDividendPage 一样放文件级，便于 JVM 单测。
+ */
+internal fun isHostUnreachable(e: Throwable): Boolean {
+    var cur: Throwable? = e
+    var depth = 0
+    while (cur != null && depth < 5) {
+        if (cur is java.net.UnknownHostException) return true
+        cur = cur.cause
+        depth++
+    }
+    return false
+}

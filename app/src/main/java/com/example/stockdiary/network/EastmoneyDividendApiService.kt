@@ -22,6 +22,19 @@ import kotlinx.coroutines.CancellationException
 class EastmoneyDividendApiService(private val context: Context) {
     
     internal var client: OkHttpClient = NetworkClient.fundClient
+
+    /**
+     * 进程级「主机不可达」退避窗口（毫秒时间戳）：datacenter-web.eastmoney.com 的 DNS
+     * 解析失败是确定性故障，批量接口撞到之后回退成逐只重试，每只都会再等满一个超时
+     * 然后同样失败——实测整轮同步因此被拖到 40~60 秒，结果全是失败。
+     *
+     * 与天天基金（fundf10，见 FundDividendApiService.hostUnreachableUntil）**分开记**：
+     * 两个域名虽同属东财，但可能只有一个不通，共用窗口会误伤还能用的那个。
+     */
+    @Volatile
+    internal var hostUnreachableUntil: Long = 0L
+
+    private val hostUnreachableBackoffMs = 60_000L
     
     suspend fun getDividendHistory(stockCode: String): Result<List<DividendData>> {
         val code = StockCodeManager.extractDigits(stockCode)
@@ -53,6 +66,11 @@ class EastmoneyDividendApiService(private val context: Context) {
     
     private suspend fun fetchBySecurityCode(securityCode: String, refererCode: String): Result<List<DividendData>> {
         return withContext(Dispatchers.IO) {
+            // 主机不可达退避：DNS 都解析不了时，逐只重试只会让每只都白等一个超时
+            if (System.currentTimeMillis() < hostUnreachableUntil) {
+                AppLogger.w("东财主机不可达退避中，跳过 $securityCode 本次抓取", "EastmoneyDividend")
+                return@withContext Result.failure(Exception("东财主机不可达退避中，跳过"))
+            }
             try {
                 val allDividendList = mutableListOf<DividendData>()
                 var currentPage = 1
@@ -124,6 +142,12 @@ class EastmoneyDividendApiService(private val context: Context) {
                 throw e
             } catch (e: Exception) {
                 AppLogger.e("获取分红数据失败: ${e.message}", e, "EastmoneyDividend")
+                // DNS 解析失败是确定性故障：本轮后续标的必然同样失败，整段时间内短路跳过，
+                // 把「标的数 × 一个超时」的纯等待压成一次
+                if (isHostUnreachable(e)) {
+                    hostUnreachableUntil = System.currentTimeMillis() + hostUnreachableBackoffMs
+                    AppLogger.w("东财主机不可达（DNS 解析失败），本轮退避 60s", "EastmoneyDividend")
+                }
                 Result.failure(e)
             }
         }
@@ -176,6 +200,11 @@ class EastmoneyDividendApiService(private val context: Context) {
     suspend fun getDividendHistoryBySecurityCodes(securityCodes: List<String>): Result<List<DividendData>> {
         if (securityCodes.isEmpty()) return Result.success(emptyList())
         return withContext(Dispatchers.IO) {
+            // 批量是本轮第一个打的东财请求：它若已因主机不可达退避，整批直接跳过
+            if (System.currentTimeMillis() < hostUnreachableUntil) {
+                AppLogger.w("东财主机不可达退避中，跳过批量抓取", "EastmoneyDividendBatch")
+                return@withContext Result.failure(Exception("东财主机不可达退避中，跳过"))
+            }
             try {
                 val allDividendList = mutableListOf<DividendData>()
                 var currentPage = 1
@@ -250,6 +279,12 @@ class EastmoneyDividendApiService(private val context: Context) {
                 throw e
             } catch (e: Exception) {
                 AppLogger.e("批量获取分红数据失败: ${e.message}", e, "EastmoneyDividendBatch")
+                // 批量失败后调用方会回退成逐只重试。DNS 不可达时那批重试必然全部同样失败，
+                // 先设上退避窗口，让逐只在入口就短路，整轮只付出一次超时代价
+                if (isHostUnreachable(e)) {
+                    hostUnreachableUntil = System.currentTimeMillis() + hostUnreachableBackoffMs
+                    AppLogger.w("东财主机不可达（DNS 解析失败），本轮退避 60s，逐只回退将直接跳过", "EastmoneyDividendBatch")
+                }
                 Result.failure(e)
             }
         }

@@ -83,6 +83,16 @@ class SnapshotAlignmentTest {
         purchasePrice = 0.0
     )
 
+    private fun cryptoAsset(id: Long, symbol: String, balance: Double) = Asset(
+        id = id,
+        name = "库里名",
+        type = AssetType.CRYPTO,
+        symbol = symbol,
+        account = "老账户",
+        balance = balance,
+        purchasePrice = 0.0
+    )
+
     private fun align(
         rows: List<RawHolding>,
         existing: List<Asset> = emptyList(),
@@ -175,6 +185,24 @@ class SnapshotAlignmentTest {
             existing = listOf(asset(1L, "sh600000", 100.001))
         )
         assertEquals(ItemStatus.UPDATE, beyondTolerance[0].status)
+    }
+
+    @Test
+    fun 加密货币第10位变动判为覆盖_浮点噪声仍判未变() {
+        // 加密币数量常见 10 位小数：旧容差 1e-6 会把 1e-10 级真实变动吞成「未变」而跳过更新。
+        // 库里 0.1234567890、快照 0.1234567891（差 1e-10）——必须用 1e-12 的加密专用容差判为 UPDATE
+        val changed = align(
+            rows = listOf(raw("BTCUSDT", 0.1234567891)),
+            existing = listOf(cryptoAsset(1L, "BTCUSDT", 0.1234567890))
+        )
+        assertEquals(ItemStatus.UPDATE, changed[0].status)
+
+        // 表示误差级别（1e-15）必须仍判未变，否则每次同步都误判为变动
+        val noise = align(
+            rows = listOf(raw("BTCUSDT", 0.1234567890)),
+            existing = listOf(cryptoAsset(1L, "BTCUSDT", 0.123456789000001))
+        )
+        assertEquals(ItemStatus.UNCHANGED, noise[0].status)
     }
 
     @Test

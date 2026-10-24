@@ -16,7 +16,8 @@ import kotlin.math.abs
  * 1. 按归一化代码分组（快照侧是 [StockCodeManager.normalizeSymbol] 后的带前缀形态，
  *    币安侧是 `<基础资产>USDT` 交易对）；
  * 2. 同代码多行合并，数量求和；
- * 3. 与库存匹配，按 1e-6 浮点容差判定 NEW / UPDATE / UNCHANGED（快照侧多一个 CONFLICT）；
+ * 3. 与库存匹配，按浮点容差判定 NEW / UPDATE / UNCHANGED：普通资产 1e-6、加密货币 1e-12
+ *    （见 [QUANTITY_TOLERANCE_CRYPTO]，避免第 10 位变动被吞）（快照侧多一个 CONFLICT）；
  * 4. commit 时 NEW 组装 [Asset] 批量 insert、UPDATE 走
  *    [SnapshotAssetWriter.updateBalance]、UNCHANGED 计数跳过。
  *
@@ -50,8 +51,15 @@ import kotlin.math.abs
  */
 object SnapshotAlignment {
 
-    /** 数量比较容差：持仓数量来自 OCR 文本 / 接口字符串，挡住 1e-9 级浮点表示误差 */
+    /** 数量比较容差（非加密货币）：持仓数量来自 OCR 文本 / 接口字符串，挡住 1e-9 级浮点表示误差 */
     private const val QUANTITY_TOLERANCE = 1e-6
+
+    /**
+     * 加密货币数量常见到 10 位小数，真实变动可小到 1e-10。容差必须远小于它，否则第 10 位的
+     * 变动会被判成「未变」而跳过更新——这正是「导入后持仓没更新」的隐形丢数据来源。
+     * 1e-12 远小于 1e-10 的真实变动，又远大于 Double 浮点噪声（~1e-16），不会误判为变动。
+     */
+    private const val QUANTITY_TOLERANCE_CRYPTO = 1e-12
 
     /**
      * 对齐状态。
@@ -352,9 +360,11 @@ object SnapshotAlignment {
         }
     }
 
-    /** 库里命中数量合计与快照数量是否一致（1e-6 容差） */
-    private fun quantityMatches(matched: List<Asset>, quantity: Double): Boolean =
-        abs(matched.sumOf { it.balance } - quantity) < QUANTITY_TOLERANCE
+    /** 库里命中数量合计与快照数量是否一致。加密货币用更小的容差，避免第 10 位变动被吞掉 */
+    private fun quantityMatches(matched: List<Asset>, quantity: Double): Boolean {
+        val tolerance = if (matched.any { it.type == AssetType.CRYPTO }) QUANTITY_TOLERANCE_CRYPTO else QUANTITY_TOLERANCE
+        return abs(matched.sumOf { it.balance } - quantity) < tolerance
+    }
 }
 
 /**

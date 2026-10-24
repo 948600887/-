@@ -72,7 +72,8 @@ fun List<Asset>.isDisplayEquivalentTo(other: List<Asset>): Boolean {
 private val decimalFormatCache = ThreadLocal<MutableMap<Int, DecimalFormat>>()
 
 /** digits 的合法上限：再高的精度本 App 用不到，挡住异常输入也避免建出超长 pattern */
-private const val MAX_FORMAT_DIGITS = 9
+// 加密货币数量/价格常见到 10 位小数，必须留足；给到 12 留点余量，避免 CRYPTO_DECIMALS 上调时被截断
+private const val MAX_FORMAT_DIGITS = 12
 
 private fun decimalFormatter(digits: Int): DecimalFormat {
     // 不用 ThreadLocal.withInitial：那是 Java 8 API，低版本 Android 上要靠脱糖才有，
@@ -125,13 +126,45 @@ fun Double.formatMoney(symbol: String = "¥", digits: Int = MONEY_DIGITS): Strin
 /** 金额的小数位（[formatMoney] 的默认精度）：全 App 金额一律 2 位，不要再写死别的 */
 const val MONEY_DIGITS = 2
 
-/** 报价精度：基金与 ETF 显示到厘（3 位），其余显示到分（2 位）。
+/** 加密货币小数位上限：币安等现货的数量/价格常见到 10 位小数（如 0.1234567890）。
+ * 少于这个数会被舍成 0 或 0.12，甚至被导入的变更判定当成「无变化」而跳过更新。
+ * 所有加密货币精度都由这个常量驱动——将来要改成 12 位只动这一行。 */
+const val CRYPTO_DECIMALS = 10
+
+/** 报价精度：加密货币给足 [CRYPTO_DECIMALS] 位（低价山寨币可能是 0.0000000001 量级，按 2 位会显示成 ¥0.00），
+ * 基金与 ETF 显示到厘（3 位），其余显示到分（2 位）。
  *
  * 原先 AssetCards / PortfolioSearch 各写了一遍同样的判定，AdjustPositionDialog 又硬编成
  * 恒 3 位——同一只股票在列表显示 12.34、在加减仓弹窗显示 12.340。这里单点定义，三处共用。
  */
 fun pricePrecisionFor(type: AssetType, symbol: String?): Int =
-    if (type == AssetType.FUND || StockCodeManager.isETF(symbol)) 3 else 2
+    when {
+        type == AssetType.CRYPTO -> CRYPTO_DECIMALS
+        type == AssetType.FUND || StockCodeManager.isETF(symbol) -> 3
+        else -> 2
+    }
+
+/**
+ * 持仓数量（份额）小数位：加密货币按 [CRYPTO_DECIMALS]（交易所现货数量常见 6~10 位小数），
+ * 股票整数（股），其余 2 位（基金/ETF 等）。与 [pricePrecisionFor] 同理，单点定义避免各页漂移。
+ */
+fun quantityPrecisionFor(type: AssetType, symbol: String?): Int =
+    when {
+        type == AssetType.CRYPTO -> CRYPTO_DECIMALS
+        type == AssetType.STOCK -> 0
+        else -> 2
+    }
+
+/**
+ * 最多保留 [digits] 位小数、去掉末尾多余的 0（和小数点）。
+ * 用于加密货币等「数值跨度大、小数位多」的场景：BTC 价 67000.12 不会显示成 67000.1200000000，
+ * 低价山寨币 0.0000000001 也保得住有效位。小数分隔符跟随系统（zh 为 '.'），故两个都 trim。
+ */
+fun Double.formatTrim(digits: Int): String {
+    val s = format(digits)
+    val sep = DecimalFormatSymbols.getInstance().decimalSeparator
+    return s.trimEnd('0').trimEnd(sep)
+}
 
 /** 币种符号：原币价格没有符号时会被当成人民币读（USD 报价显示成 67000 而不是 $67000） */
 fun currencySymbol(currency: String?): String = when (currency?.uppercase()) {

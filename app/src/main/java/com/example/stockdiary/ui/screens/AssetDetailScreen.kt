@@ -31,6 +31,8 @@ import com.example.stockdiary.utils.ExchangeRateManager
 import com.example.stockdiary.utils.StockCodeManager
 import com.example.stockdiary.utils.format
 import com.example.stockdiary.utils.formatMoney
+import com.example.stockdiary.utils.CRYPTO_DECIMALS
+import com.example.stockdiary.utils.formatTrim
 import com.example.stockdiary.utils.pricePrecisionFor
 import com.example.stockdiary.utils.shareUnitWord
 import com.example.stockdiary.utils.toRelativeTime
@@ -182,7 +184,12 @@ fun AssetDetailScreen(
                             }
                             Spacer(modifier = Modifier.height(12.dp))
                             DetailRow("账户", a.account)
-                            DetailRow("持仓", "${a.balance.format(if (a.type == AssetType.STOCK) 0 else 2)}${if (a.type == AssetType.STOCK) "股" else "份"}")
+                            val holdingText = when {
+                                a.type == AssetType.STOCK -> a.balance.format(0)
+                                a.type == AssetType.CRYPTO -> a.balance.formatTrim(CRYPTO_DECIMALS)
+                                else -> a.balance.format(2)
+                            }
+                            DetailRow("持仓", "$holdingText${if (a.type == AssetType.STOCK) "股" else "份"}")
                             // 价格/市值都带 ¥ 符号，那就必须是人民币口径：
                             // 原币价格要按资产币种折算，不能直接套 ¥
                             a.currentPrice?.let { price ->
@@ -190,8 +197,11 @@ fun AssetDetailScreen(
                                 // 以前这里内联写了一遍，三处各写一份必然漂移
                                 DetailRow(
                                     "当前价",
-                                    ExchangeRateManager.toCny(price, a.currency)
-                                        .formatMoney(digits = pricePrecisionFor(a.type, a.symbol)) + syncStamp(a.lastSyncTime)
+                                    (if (a.type == AssetType.CRYPTO)
+                                        "¥" + ExchangeRateManager.toCny(price, a.currency).formatTrim(CRYPTO_DECIMALS)
+                                    else
+                                        ExchangeRateManager.toCny(price, a.currency)
+                                            .formatMoney(digits = pricePrecisionFor(a.type, a.symbol))) + syncStamp(a.lastSyncTime)
                                 )
                             }
                             DetailRow("当前市值", a.totalValueCny.formatMoney())

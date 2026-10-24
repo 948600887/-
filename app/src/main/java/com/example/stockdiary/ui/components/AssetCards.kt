@@ -21,6 +21,8 @@ import com.example.stockdiary.utils.ExchangeRateManager
 import com.example.stockdiary.utils.StockCodeManager
 import com.example.stockdiary.utils.format
 import com.example.stockdiary.utils.formatMoney
+import com.example.stockdiary.utils.CRYPTO_DECIMALS
+import com.example.stockdiary.utils.formatTrim
 import com.example.stockdiary.utils.pricePrecisionFor
 import com.example.stockdiary.utils.totalValueCny
 
@@ -263,9 +265,12 @@ fun StockAssetItem(
                         Text(it, style = MaterialTheme.typography.bodySmall, color = AppTheme.colors.onSurfaceVariant)
                         Text("•", style = MaterialTheme.typography.bodySmall, color = AppTheme.colors.onSurfaceVariant)
                     }
-                    // 负债没有「持仓数量」的概念，balance 就是欠多少钱
+                    // 负债没有「持仓数量」的概念，balance 就是欠多少钱。
+                    // 加密货币数量常见 6~10 位小数（如 0.1234567890），必须给足位数，否则会被舍成 0 或 0.12
                     Text(
-                        if (isLiability) "负债" else "${asset.balance.format(0)}$unitLabel",
+                        if (isLiability) "负债"
+                        else if (asset.type == AssetType.CRYPTO) "${asset.balance.formatTrim(CRYPTO_DECIMALS)}$unitLabel"
+                        else "${asset.balance.format(0)}$unitLabel",
                         style = MaterialTheme.typography.bodySmall, color = AppTheme.colors.onSurfaceVariant
                     )
                 }
@@ -279,7 +284,10 @@ fun StockAssetItem(
                         // 不过这道换算直接套 ¥，USD 加密货币会把 $67,000 显示成 ¥67,000
                         // （真实约 ¥48 万）——与详情页 AssetDetailScreen:180 同一口径
                         currentPrice != null ->
-                            ExchangeRateManager.toCny(currentPrice, asset.currency).formatMoney(digits = pricePrecision)
+                            if (asset.type == AssetType.CRYPTO)
+                                "¥" + ExchangeRateManager.toCny(currentPrice, asset.currency).formatTrim(CRYPTO_DECIMALS)
+                            else
+                                ExchangeRateManager.toCny(currentPrice, asset.currency).formatMoney(digits = pricePrecision)
                         StockCodeManager.isDelistedForSync(asset.symbol) -> "退市"
                         // 币安主机级熔断期间（连不上币安公开行情，见 BinanceHostGate）要给一个
                         // 区别于「价格待更新」的提示：前者是网络/主机问题，后者可能是数据源缺数据。

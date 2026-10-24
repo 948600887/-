@@ -14,6 +14,8 @@ import com.example.stockdiary.database.TransactionType
 import com.example.stockdiary.utils.AppLogger
 import com.example.stockdiary.utils.ExchangeRateManager
 import com.example.stockdiary.utils.format
+import com.example.stockdiary.utils.pricePrecisionFor
+import com.example.stockdiary.utils.quantityPrecisionFor
 import com.example.stockdiary.utils.sumTotalValueCny
 import com.example.stockdiary.utils.toFileTimestamp
 import com.example.stockdiary.utils.totalValueCny
@@ -321,7 +323,7 @@ class DataExporter(private val context: Context) {
                         typeAssets.forEach { asset ->
                             writer.append("    - ${asset.name}\n")
                             writer.append("      代码: ${asset.symbol ?: "-"}\n")
-                            writer.append("      数量: ${asset.balance.format(2)}\n")
+                            writer.append("      数量: ${asset.balance.format(quantityPrecisionFor(type, asset.symbol))}\n")
                             writer.append("      当前价值: ${asset.currency} ${asset.totalValue.format(2)} (¥${asset.totalValueCny.format(2)})\n")
                             if (asset.currency != "CNY") {
                                 writer.append("      汇率: ${ExchangeRateManager.getRate(asset.currency).format(4)}\n")
@@ -364,9 +366,9 @@ class DataExporter(private val context: Context) {
             escapeCsv(asset.type.displayName),
             escapeCsv(asset.symbol ?: ""),
             escapeCsv(asset.account),
-            asset.balance.format(2),
-            asset.purchasePrice.format(2),
-            (asset.currentPrice ?: asset.purchasePrice).format(2),
+            asset.balance.format(quantityPrecisionFor(asset.type, asset.symbol)),
+            asset.purchasePrice.format(pricePrecisionFor(asset.type, asset.symbol)),
+            (asset.currentPrice ?: asset.purchasePrice).format(pricePrecisionFor(asset.type, asset.symbol)),
             asset.totalValue.format(2),
             asset.totalValueCny.format(2),
             escapeCsv(asset.currency),

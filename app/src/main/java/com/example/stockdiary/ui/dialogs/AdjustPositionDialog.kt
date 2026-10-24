@@ -26,6 +26,8 @@ import com.example.stockdiary.utils.ExchangeRateManager
 import com.example.stockdiary.utils.currencySymbol
 import com.example.stockdiary.utils.format
 import com.example.stockdiary.utils.formatMoney
+import com.example.stockdiary.utils.CRYPTO_DECIMALS
+import com.example.stockdiary.utils.formatTrim
 import com.example.stockdiary.utils.pricePrecisionFor
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -125,7 +127,9 @@ fun AdjustPositionDialog(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.SpaceBetween
                             ) {
-                                DialogInfoItem("持有", "${asset.balance.format(0)}")
+                                val holdingText = if (asset.type == AssetType.CRYPTO)
+                                    asset.balance.formatTrim(CRYPTO_DECIMALS) else asset.balance.format(0)
+                                DialogInfoItem("持有", holdingText)
                                 // 现价两处修正：
                                 // 1. 精度原来恒写 3 位，而持仓页是「基金/ETF 3 位、其余 2 位」——
                                 //    同一只股票在列表显示 12.34、在这里显示 12.340。现在共用
@@ -137,8 +141,11 @@ fun AdjustPositionDialog(
                                 val isCny = asset.currency.equals("CNY", ignoreCase = true)
                                 DialogInfoItem(
                                     label = if (isCny) "现价" else "现价(${currencySymbol(asset.currency)}折¥)",
-                                    value = ExchangeRateManager.toCny(refPrice, asset.currency)
-                                        .formatMoney(digits = pricePrecisionFor(asset.type, asset.symbol))
+                                    value = if (asset.type == AssetType.CRYPTO)
+                                        "¥" + ExchangeRateManager.toCny(refPrice, asset.currency).formatTrim(CRYPTO_DECIMALS)
+                                    else
+                                        ExchangeRateManager.toCny(refPrice, asset.currency)
+                                            .formatMoney(digits = pricePrecisionFor(asset.type, asset.symbol))
                                 )
                             }
                         }

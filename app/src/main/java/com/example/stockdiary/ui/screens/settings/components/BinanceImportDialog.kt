@@ -64,7 +64,9 @@ import com.example.stockdiary.ui.dialogs.sanitizeDecimalInput
 import com.example.stockdiary.ui.theme.AppTheme
 import com.example.stockdiary.ui.viewmodels.BinanceImportViewModel
 import com.example.stockdiary.network.BinanceAPI
+import com.example.stockdiary.utils.CRYPTO_DECIMALS
 import com.example.stockdiary.utils.format
+import com.example.stockdiary.utils.formatTrim
 
 /**
  * 同步币安资产全屏 Dialog：填密钥 → 拉取 → 预览核对 → 完成。
@@ -425,7 +427,7 @@ private fun BinancePreviewItemRow(
     val (statusText, statusColor) = when (item.status) {
         BinanceImportService.ItemStatus.NEW -> "新增" to AppTheme.colors.profitGreen
         BinanceImportService.ItemStatus.UPDATE ->
-            "覆盖 ${item.existing?.balance?.format(2) ?: 0.0.format(2)} → ${item.quantity.format(2)}" to
+            "覆盖 ${item.existing?.balance?.formatTrim(CRYPTO_DECIMALS) ?: 0.0.formatTrim(CRYPTO_DECIMALS)} → ${item.quantity.formatTrim(CRYPTO_DECIMALS)}" to
                 MaterialTheme.colorScheme.tertiary
         BinanceImportService.ItemStatus.UNCHANGED -> "未变" to MaterialTheme.colorScheme.onSurfaceVariant
     }
@@ -471,7 +473,7 @@ private fun BinancePreviewItemRow(
                 )
             }
             Column(horizontalAlignment = Alignment.End) {
-                Text(item.quantity.format(4), fontWeight = FontWeight.Bold)
+                Text(item.quantity.formatTrim(CRYPTO_DECIMALS), fontWeight = FontWeight.Bold)
                 Text(
                     valueCny?.let { "≈ ¥${it.format(2)}" } ?: "市值 —",
                     style = MaterialTheme.typography.bodySmall,

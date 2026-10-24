@@ -108,10 +108,22 @@ git archive --format=zip --prefix=NewStockDiary/ -o NewStockDiary.zip HEAD   # �
 ## 2. 命令速查
 
 ```bash
+# 提交前一把梭（推荐）：编译 + 编 androidTest + 离线迁移校验 + 全量单测
+bash tools/check_gate.sh
+
 # 编译（改 Kotlin 后最快反馈，约 1~3 分钟）
 ./gradlew.bat compileDebugKotlin
 
-# 全量 JVM 单元测试（当前 981 个，约 2~4 分钟）
+# 编译 androidTest 源码（**不需要真机/模拟器**，约 30~40 秒）
+# 必须跑：历史上门禁只跑单测，androidTest 长期无人看管，
+# DashboardScreenTest.kt 编译失败 19 处无人察觉，还把整个 androidTest 模块
+# （含 MigrationTest）拖得跑不起来。详见 tools/check_gate.sh 顶部注释。
+./gradlew.bat compileDebugAndroidTestKotlin
+
+# 离线迁移校验（不需要设备，纯 python + sqlite）
+python tools/validate_migration.py
+
+# 全量 JVM 单元测试（当前 1036 个，约 2~4 分钟）
 ./gradlew.bat testDebugUnitTest
 
 # 只跑某一个测试类

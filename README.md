@@ -30,7 +30,7 @@
 ./gradlew assembleDebug          # macOS / Linux
 gradlew.bat assembleDebug        # Windows
 
-# 跑 JVM 单元测试（当前 956 个，全绿）
+# 跑 JVM 单元测试（当前 1036 个，全绿）
 ./gradlew testDebugUnitTest
 gradlew.bat testDebugUnitTest
 ```
@@ -84,5 +84,5 @@ app/src/main/java/com/example/stockdiary/
 
 1. **先读 `AI_GUIDE.md`**（最新、路径均已核实），再看 `docs/PROJECT_MEMORY.md`（别推翻既有决策）。
 2. 然后看 `app/src`，从 `MainActivity` → `GoldVaultNavHost` → 各 `Screen` / `ViewModel` / `Repository` 顺下来。
-3. 改完请跑 `gradlew.bat testDebugUnitTest`，保证 **956 个**测试不回归；新增逻辑请配套单测（网络路径可用注入假 `OkHttpClient` 的方式测试，仓库已有先例）。
+3. 改完请跑 `gradlew.bat testDebugUnitTest`，保证 **1036 个**测试不回归；新增逻辑请配套单测（网络路径可用注入假 `OkHttpClient` 的方式测试，仓库已有先例）。
 4. 改动做完默认直接 commit + push，但**按主题分批**，且 push 前必须编译 + 全量测试通过。

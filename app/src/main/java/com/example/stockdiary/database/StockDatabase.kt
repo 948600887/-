@@ -365,10 +365,13 @@ abstract class StockDatabase : RoomDatabase() {
                 )
                 db.execSQL("DROP TABLE `transactions`")
                 db.execSQL("ALTER TABLE `transactions_new` RENAME TO `transactions`")
-                // 不搬 sqlite_sequence：DROP TABLE 会连带删掉本表的自增序号，之后
-                // SQLite 以「当前 MAX(id)+1」重新开始分配。没有表外键引用 transactions.id，
-                // 也没有任何代码依赖它的连续性，复用被删记录的 id 无后果；
-                // 而跨 SQLite 版本去操作 sqlite_sequence 反而更容易出岔子。
+                // 不搬 sqlite_sequence：DROP TABLE 会连带删掉本表在 sqlite_sequence 里的那一行，
+                // 之后 AUTOINCREMENT 重新建一条、初值取「本表当前最大 id」——本例与 MAX(id)+1
+                // 数值相同，但机制上是 sqlite_sequence 重建，不是 AUTOINCREMENT 失效。
+                // 唯一后果是「删过的 id 可能被复用」：17.json 里 transactions 的
+                // foreignKeys / indices 均为空（全库 7 张表都没有外键），也没有任何代码
+                // 依赖它的连续性，故无影响（QA 实测「删末行再迁移」ids=[1,2,3,4,5] 无冲突）。
+                // 而跨 SQLite 版本去搬运 sqlite_sequence 反而更容易出岔子。
                 AppLogger.d("transactions.quantity 类型对齐 REAL 迁移完成", "StockDatabase")
             }
         }

@@ -32,6 +32,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -41,9 +42,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.material3.SnackbarHost
@@ -72,6 +76,18 @@ fun CalendarScreen(
     val container = LocalAppContainer.current
     val viewModel: CalendarViewModel = viewModel(factory = CalendarViewModel.Factory(container))
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+
+    // 回前台保鲜检查：App 进程被 Doze 冻结时，VM 里的午夜重算协程会被推迟到解锁后才跑，
+    // 这里在回前台的一刻补查「日历是否还是按昨天生成的」，过期立即重算。
+    // 否则用户零点后切回日历页，25 号那格还是「暂无数据」、总览停在昨天的值。
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) viewModel.onScreenResumed()
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     val assets = uiState.assets
     val calendarData = uiState.calendarData

@@ -20,6 +20,7 @@ import com.example.stockdiary.utils.ExchangeRateManager
 import com.example.stockdiary.utils.totalValueCny
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -27,8 +28,10 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.time.Duration
 import java.time.LocalDate
 import java.time.YearMonth
 
@@ -56,6 +59,16 @@ class CalendarViewModel(
 
     private val _uiState = MutableStateFlow(UiState())
     val uiState: StateFlow<UiState> = _uiState.asStateFlow()
+
+    /**
+     * 日历数据最近一次成功生成时所处的「今天」。
+     *
+     * 日历的「今天」格是**生成那一刻**固化的（[buildAssetCalendarMonth] 只在生成时把
+     * 实时净值写进 today 格），进程跨天存活时它就过期了：昨天的格挂着旧实时值、
+     * 今天这格永远是 0（「暂无数据」），本月总览也停在昨天的值。午夜翻日协程与
+     * [onScreenResumed] 都靠它判断要不要重算。
+     */
+    private var generatedOnDate: LocalDate? = null
 
     /**
      * 天天基金限流提示（非阻塞）：本轮手动刷新撞过 514/429 时置位，
@@ -89,6 +102,33 @@ class CalendarViewModel(
                     generateCalendarData(assets)
                     loadDividendIncome(assets)
                 }
+        }
+
+        // 跨午夜自动重算。日历的「今天」格与本月总览都以生成那一刻为准，而资产签名去重
+        // （上方 distinctUntilChanged）保证纯价格变动不触发重算——于是 App 进程跨天存活时
+        // （用户晚上挂着 App 到零点后）没有任何东西会重画日历：新的一天那格永远是 0
+        // 「暂无数据」、总览停在昨天的值（2026-10-25 零点后用户实测：25 号无金额、
+        // 总览 ¥197773.49 比首页 ¥197827.41 少 53.92，根因即此）。每晚零点过 1 秒重算一次，
+        // 代价可忽略（一次本地查询 + 一次实时净资产求和，无网络）。
+        viewModelScope.launch {
+            while (isActive) {
+                val now = java.time.LocalDateTime.now()
+                val nextMidnight = LocalDate.now().plusDays(1).atStartOfDay()
+                delay(Duration.between(now, nextMidnight).toMillis() + 1000)
+                if (generatedOnDate == LocalDate.now()) continue
+                generateCalendarData(_uiState.value.assets)
+            }
+        }
+    }
+
+    /**
+     * 界面回到前台时的保鲜检查：进程在后台被冻结（Doze）时，上面的午夜协程可能被推迟
+     * 到解锁后才跑。回前台这一刻补查「生成日是否还是今天」，过期就立即重算，
+     * 保证用户切回日历页看到的第一眼就是新一天的数。
+     */
+    fun onScreenResumed() {
+        if (generatedOnDate != null && generatedOnDate != LocalDate.now()) {
+            viewModelScope.launch { generateCalendarData(_uiState.value.assets) }
         }
     }
 
@@ -207,6 +247,8 @@ class CalendarViewModel(
             return
         }
         result.onSuccess { calendarResult ->
+            // 生成成功才更新「保鲜日期」：失败的生成不算数，下次回前台还要重试
+            generatedOnDate = LocalDate.now()
             // 用 update{} 原子读-改-写：不能直接拿上面读到的 currentState 去 copy，
             // 期间 loadDividendIncome 等协程可能已经写过 uiState，那会把它们的更新整体冲掉
             _uiState.update { state -> state.copy(

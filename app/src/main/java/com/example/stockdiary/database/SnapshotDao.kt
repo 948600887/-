@@ -14,8 +14,20 @@ interface SnapshotDao {
     @Query("SELECT * FROM asset_snapshots ORDER BY timestamp DESC LIMIT :limit")
     fun getRecentSnapshots(limit: Int): Flow<List<AssetSnapshot>>
     
-    @Query("SELECT * FROM asset_snapshots WHERE date = :date LIMIT 1")
+    // ORDER BY timestamp DESC：万一同日多行的存量行没被 repairDuplicateSnapshots 清掉
+    // （比如首次启动时修复失败了），读取侧也确定拿到最后写入的那条，而不是碰运气
+    @Query("SELECT * FROM asset_snapshots WHERE date = :date ORDER BY timestamp DESC LIMIT 1")
     suspend fun getSnapshotByDate(date: String): AssetSnapshot?
+
+    /**
+     * 删掉某一天的全部快照行。
+     *
+     * 不能用 getSnapshotByDate + deleteSnapshot 组合：那条查询无 ORDER BY 且 LIMIT 1，
+     * 同日多行时只删得掉一条，剩下的行会一直在库里（date/timestamp 错位的历史数据
+     * 就可能造成同日多行）。createSnapshot 的「同日覆盖」语义必须删全量才成立。
+     */
+    @Query("DELETE FROM asset_snapshots WHERE date = :date")
+    suspend fun deleteSnapshotsByDate(date: String)
     
     @Query("SELECT * FROM asset_snapshots ORDER BY timestamp DESC LIMIT 1")
     suspend fun getLatestSnapshot(): AssetSnapshot?

@@ -48,14 +48,6 @@ object SnapshotScheduler {
         AppLogger.i("每日自动快照已取消", "SnapshotScheduler")
     }
 
-    fun runNow(context: Context) {
-        val request = OneTimeWorkRequestBuilder<SnapshotWorker>()
-            .build()
-        
-        WorkManager.getInstance(context).enqueue(request)
-        AppLogger.i("立即执行快照", "SnapshotScheduler")
-    }
-
     private fun calculateInitialDelay(): Long {
         val now = System.currentTimeMillis()
         val targetHour = 15

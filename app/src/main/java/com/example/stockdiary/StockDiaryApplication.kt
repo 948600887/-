@@ -82,6 +82,10 @@ class StockDiaryApplication : Application() {
             // bj400xxx：符号形态不统一会让同一只退市股被判成两条、分红/交易流水按
             // symbol 关联对不上，归一后与 normalizeSymbol 规范形态对齐
             repairDelistedSymbolForms()
+            // 一次性清理同日多行快照（旧版回填 + 只删一条的 createSnapshot 遗留）。
+            // createSnapshot 已改为按 date 删全量防止再生产，但存量行不清，历史页
+            // 「选1周却显示十天」那类幽灵行还会继续污染图表与统计
+            repairDuplicateSnapshots()
             // 崩溃日志的磁盘裁剪挪到启动阶段：崩溃现场多一次目录遍历与排序，
             // 在 OOM/StackOverflow 时只会火上浇油。
             GlobalExceptionHandler.pruneCrashFiles()
@@ -95,6 +99,13 @@ class StockDiaryApplication : Application() {
 
     private suspend fun scheduleDailySnapshot() {
         try {
+            // 空库不排每日快照：Worker 侧虽有同样的空组合守卫，但没必要为一个
+            // 空组合每天唤醒设备跑一轮库查询。用户导入资产后的下一次冷启动
+            // 会自然补上调度（hasAnyAsset 变 true），不需要 SharedPreferences 标记。
+            if (!container.assetRepository.hasAnyAsset()) {
+                AppLogger.i("资产为空，跳过每日快照调度", "StockDiaryApplication")
+                return
+            }
             SnapshotScheduler.scheduleDailySnapshot(this)
         } catch (e: CancellationException) {
             throw e
@@ -173,6 +184,26 @@ class StockDiaryApplication : Application() {
             throw e
         } catch (e: Exception) {
             AppLogger.e("修复老三板 symbol 形态失败: ${e.message}", e, "StockDiaryApplication")
+        }
+    }
+
+    /**
+     * 一次性清理快照表同日多行（保留 timestamp 最大的一条）。
+     *
+     * 见 [com.example.stockdiary.data.repository.AssetRepository.repairDuplicateSnapshots]：
+     * SharedPreferences 守卫保证每个安装只跑一次，失败静默降级（下次启动可重试），
+     * 绝不因为修复失败而拖垮启动。
+     */
+    private suspend fun repairDuplicateSnapshots() {
+        try {
+            val deleted = container.assetRepository.repairDuplicateSnapshots()
+            if (deleted > 0) {
+                AppLogger.i("清理同日重复快照 $deleted 行", "StockDiaryApplication")
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            AppLogger.e("清理同日重复快照失败: ${e.message}", e, "StockDiaryApplication")
         }
     }
 

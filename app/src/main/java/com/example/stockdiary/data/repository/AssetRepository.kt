@@ -13,6 +13,7 @@ import com.example.stockdiary.database.StockDatabase
 import com.example.stockdiary.database.SnapshotDao
 import com.example.stockdiary.database.Transaction
 import com.example.stockdiary.database.TransactionType
+import com.example.stockdiary.data.sync.planSnapshotDedup
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import java.time.LocalDate
@@ -403,14 +404,22 @@ class AssetRepository private constructor(
     }
 
     /**
-     * 创建快照。如果指定日期已存在快照，则先删除旧快照再插入新快照，
+     * 创建快照。如果指定日期已存在快照，则先删除**全部**同日旧行再插入新快照，
      * 确保同一天只有一条记录，避免图表上出现多个重叠点。
+     *
+     * 空组合（一个持仓都没有）返回 null 且不落库：净资产 0 的「空快照」不是真实
+     * 数据点，落在序列开头会被 dropLeadingEmptySnapshots 砍掉，落在**中段**
+     * （清库后重建数据的场景）会把最大回撤打成 100%、月度收益做出假暴跌。
      */
     suspend fun createSnapshot(date: String): AssetSnapshot? {
         return try {
             StockDatabase.getInstance(context).withTransaction {
-                snapshotDao.getSnapshotByDate(date)?.let { snapshotDao.deleteSnapshot(it) }
+                snapshotDao.deleteSnapshotsByDate(date)
                 val assets = assetDao.getAllAssets().first()
+                if (assets.none { !it.type.isLiability }) {
+                    AppLogger.i("无持仓，不创建快照（避免 0 值空快照污染统计）: $date", "AssetRepository")
+                    return@withTransaction null
+                }
                 val previousSnapshot = snapshotDao.getLatestSnapshot()
                 val snapshot = AssetSnapshot.fromAssets(assets, date, previousSnapshot)
                 val snapshotId = snapshotDao.insertSnapshot(snapshot)
@@ -422,6 +431,56 @@ class AssetRepository private constructor(
         } catch (e: Exception) {
             AppLogger.e("Failed to create snapshot: ${e.message}", e)
             null
+        }
+    }
+
+    /** 库里有没有任何资产。用于冷启动决定要不要排自动快照（清库后不排，导入资产后自然恢复） */
+    suspend fun hasAnyAsset(): Boolean = assetDao.getAssetCount() > 0
+
+    /**
+     * 一次性修复：快照表同日多行去重（保留 timestamp 最大的一条）。
+     *
+     * 历史成因：2026-10-18 前的 fillMissingSnapshots 逐日回填补快照（date 写被补的
+     * 那天、timestamp 写补的时刻），叠加 getSnapshotByDate 无 ORDER BY 只删一条，
+     * 用户库里可能存在同 date 多行。createSnapshot 已改为按 date 删全量防止再生产，
+     * 存量行在这里清掉。
+     *
+     * SharedPreferences 守卫保证每个安装只跑一次；失败不标记已完成，下次启动重试
+     * （与 repairDelistedSymbolForms 同模式，绝不因修复失败拖垮启动）。
+     *
+     * @return 删掉的行数；无需修复或已修复过返回 0
+     */
+    suspend fun repairDuplicateSnapshots(): Int {
+        val prefs = context.getSharedPreferences(REPAIR_PREFS, Context.MODE_PRIVATE)
+        if (prefs.getBoolean(KEY_DUP_SNAPSHOT_REPAIR_DONE, false)) return 0
+        return try {
+            val all = snapshotDao.getAllSnapshotsSync()
+            val duplicateIds = planSnapshotDedup(all)
+            if (duplicateIds.isEmpty()) {
+                prefs.edit().putBoolean(KEY_DUP_SNAPSHOT_REPAIR_DONE, true).apply()
+                return 0
+            }
+            val byId = all.associateBy { it.id }
+            var deleted = 0
+            StockDatabase.getInstance(context).withTransaction {
+                duplicateIds.forEach { id ->
+                    byId[id]?.let {
+                        snapshotDao.deleteSnapshot(it)
+                        deleted++
+                    }
+                }
+            }
+            AppLogger.i(
+                "快照同日多行去重完成：删除 $deleted 行，涉及 ${duplicateIds.size} 个日期",
+                "AssetRepository"
+            )
+            prefs.edit().putBoolean(KEY_DUP_SNAPSHOT_REPAIR_DONE, true).apply()
+            deleted
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            AppLogger.e("快照同日多行去重失败: ${e.message}", e, "AssetRepository")
+            0
         }
     }
 
@@ -625,6 +684,9 @@ class AssetRepository private constructor(
 
         /** 标记「老三板 symbol 形态归一」已执行过的 key，保证每个安装只跑一次 */
         private const val KEY_DELISTED_SYMBOL_REPAIR_DONE = "delisted_symbol_repair_done"
+
+        /** 标记「快照同日多行去重」已执行过的 key，保证每个安装只跑一次 */
+        private const val KEY_DUP_SNAPSHOT_REPAIR_DONE = "dup_snapshot_repair_done"
 
         fun getInstance(context: Context): AssetRepository {
             return instance ?: synchronized(this) {

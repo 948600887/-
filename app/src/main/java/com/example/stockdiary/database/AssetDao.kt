@@ -32,6 +32,10 @@ interface AssetDao {
     
     @Query("SELECT DISTINCT account FROM assets")
     suspend fun getAllAccounts(): List<String>
+
+    /** 资产总数。冷启动用它决定要不要排自动快照（清库后为 0，不排） */
+    @Query("SELECT COUNT(*) FROM assets")
+    suspend fun getAssetCount(): Int
     
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertAsset(asset: Asset): Long

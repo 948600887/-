@@ -48,6 +48,24 @@ class SettingsViewModel(
     private val priceSyncPreferencesManager: PriceSyncPreferencesManager
 ) : ViewModel() {
 
+    /**
+     * 设置页状态机。
+     *
+     * 原为「UiState(10 字段) + 9 个附加流」混用：数据类列表/导出/删除/体检走 UiState，
+     * 而价格同步与每日提醒的 8 个快照字段各自为政（开关 ×4、上次同步时间、提醒开关、
+     * 时/分、提醒错误），写入点散落在 setReminderEnabled / setReminderTime /
+     * setAutoPriceSyncEnabled / refreshPriceSyncState 等处；UI 同层 collect 十条流，
+     * 一次 refreshPriceSyncState 要连发八次、整页重组八遍。
+     *
+     * 合流判断：
+     * - 8 个同步/提醒快照字段并入本 UiState——它们同属「持久化设置的内存镜像」，
+     *   由 [refreshPriceSyncState] 整组刷新、由设置页同一个 remember 块整组消费，
+     *   合起来后一次刷新只发射一次（原来八次）；
+     * - [dashboardPreferences] **刻意保留独立流**：它是跨页面共享的整块偏好
+     *   （日历写月度生活费、仪表盘/持仓写分红缓存），与 Dashboard/Portfolio 两个 VM
+     *   保持同样的「preferences 独立流」先例；且它的写入路径（config sheet 整块提交）
+     *   与 UiState 其余字段（一次性动作驱动）语义不同，混在一起只会让「谁改了什么」更难读。
+     */
     data class UiState(
         val assets: List<Asset> = emptyList(),
         val snapshots: List<AssetSnapshot> = emptyList(),
@@ -58,70 +76,67 @@ class SettingsViewModel(
         val dataSourceHealth: List<DataSourceHealth>? = null,
         val exportResult: Result<String>? = null,
         val deleteResult: Result<Unit>? = null,
-        val errorMessage: String? = null
+        val errorMessage: String? = null,
+        // ---- 价格同步快照：与 PriceSyncPreferencesManager 磁盘值一一对应 ----
+        val autoPriceSyncEnabled: Boolean = false,
+        val lastPriceSyncTime: Long = 0L,
+        /** 盘中是否也自动刷股票/场内基金。关=仅盘后刷(默认) */
+        val stockIntradaySyncEnabled: Boolean = false,
+        /** 是否自动刷虚拟货币。关=只手动刷(默认) */
+        val cryptoAutoSyncEnabled: Boolean = false,
+        // ---- 每日提醒快照：与 NotificationHelper 内部状态一一对应 ----
+        val reminderEnabled: Boolean = false,
+        val reminderHour: Int = 8,
+        val reminderMinute: Int = 0,
+        /** 提醒是否真的排上了（无精确闹钟权限时会失败，需要给用户可见反馈） */
+        val reminderError: String? = null
     )
 
-    private val _uiState = MutableStateFlow(UiState())
+    private val _uiState = MutableStateFlow(
+        UiState(
+            autoPriceSyncEnabled = priceSyncPreferencesManager.isAutoSyncEnabled(),
+            lastPriceSyncTime = priceSyncPreferencesManager.getLastSyncTimeMillis(),
+            stockIntradaySyncEnabled = priceSyncPreferencesManager.isStockIntradaySyncEnabled(),
+            cryptoAutoSyncEnabled = priceSyncPreferencesManager.isCryptoAutoSyncEnabled(),
+            reminderEnabled = NotificationHelper.isReminderEnabled(appContext),
+            reminderHour = NotificationHelper.getReminderTime(appContext).first,
+            reminderMinute = NotificationHelper.getReminderTime(appContext).second
+        )
+    )
     val uiState: StateFlow<UiState> = _uiState.asStateFlow()
 
+    /**
+     * 自定义仪表盘偏好。保留独立流的理由见 [UiState] KDoc：跨页面共享的整块偏好，
+     * 写入路径与 UiState 其余字段不同。
+     */
     private val _dashboardPreferences = MutableStateFlow(dashboardPreferencesManager.loadPreferences())
     val dashboardPreferences: StateFlow<DashboardPreferences> = _dashboardPreferences.asStateFlow()
-
-    private val _autoPriceSyncEnabled = MutableStateFlow(priceSyncPreferencesManager.isAutoSyncEnabled())
-    val autoPriceSyncEnabled: StateFlow<Boolean> = _autoPriceSyncEnabled.asStateFlow()
-
-    private val _lastPriceSyncTime = MutableStateFlow(priceSyncPreferencesManager.getLastSyncTimeMillis())
-    val lastPriceSyncTime: StateFlow<Long> = _lastPriceSyncTime.asStateFlow()
-
-    private val _stockIntradaySyncEnabled = MutableStateFlow(priceSyncPreferencesManager.isStockIntradaySyncEnabled())
-    val stockIntradaySyncEnabled: StateFlow<Boolean> = _stockIntradaySyncEnabled.asStateFlow()
-
-    private val _cryptoAutoSyncEnabled = MutableStateFlow(priceSyncPreferencesManager.isCryptoAutoSyncEnabled())
-    val cryptoAutoSyncEnabled: StateFlow<Boolean> = _cryptoAutoSyncEnabled.asStateFlow()
-
-    /**
-     * 每日提醒状态。
-     *
-     * 之前 [NotificationHelper.setDailyReminder] 全项目只有 BootReceiver 一个调用点，
-     * 而 BootReceiver 生效的前提是 isReminderEnabled() 为真 —— 但没有任何 UI 能把开关打开，
-     * 于是整条链路（含 BootReceiver、REMINDER 通知渠道、 ~150 行提醒代码）永远走不到。
-     * 这里把开关状态暴露给设置页，闭环。
-     */
-    private val _reminderEnabled = MutableStateFlow(NotificationHelper.isReminderEnabled(appContext))
-    val reminderEnabled: StateFlow<Boolean> = _reminderEnabled.asStateFlow()
-
-    private val initialReminderTime = NotificationHelper.getReminderTime(appContext)
-    private val _reminderHour = MutableStateFlow(initialReminderTime.first)
-    val reminderHour: StateFlow<Int> = _reminderHour.asStateFlow()
-
-    private val _reminderMinute = MutableStateFlow(initialReminderTime.second)
-    val reminderMinute: StateFlow<Int> = _reminderMinute.asStateFlow()
-
-    /** 提醒是否真的排上了（无精确闹钟权限时会失败，需要给用户可见反馈） */
-    private val _reminderError = MutableStateFlow<String?>(null)
-    val reminderError: StateFlow<String?> = _reminderError.asStateFlow()
 
     fun setReminderEnabled(enabled: Boolean) {
         viewModelScope.launch {
             try {
-                _reminderError.value = null
+                _uiState.update { it.copy(reminderError = null) }
                 val ok = if (enabled) {
-                    NotificationHelper.setDailyReminder(appContext, _reminderHour.value, _reminderMinute.value)
+                    NotificationHelper.setDailyReminder(appContext, _uiState.value.reminderHour, _uiState.value.reminderMinute)
                 } else {
                     NotificationHelper.cancelReminder(appContext)
                     true
                 }
                 if (ok) {
-                    _reminderEnabled.value = NotificationHelper.isReminderEnabled(appContext)
+                    _uiState.update { it.copy(reminderEnabled = NotificationHelper.isReminderEnabled(appContext)) }
                 } else {
-                    _reminderEnabled.value = false
-                    _reminderError.value = "无法设置提醒：系统未提供精确闹钟权限，请在系统闹钟设置中允许"
+                    _uiState.update {
+                        it.copy(
+                            reminderEnabled = false,
+                            reminderError = "无法设置提醒：系统未提供精确闹钟权限，请在系统闹钟设置中允许"
+                        )
+                    }
                 }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 AppLogger.e("设置每日提醒失败: ${e.message}", e, "SettingsVM")
-                _reminderError.value = "设置提醒失败: ${e.message}"
+                _uiState.update { it.copy(reminderError = "设置提醒失败: ${e.message}") }
             }
         }
     }
@@ -129,28 +144,32 @@ class SettingsViewModel(
     fun setReminderTime(hour: Int, minute: Int) {
         viewModelScope.launch {
             try {
-                _reminderError.value = null
-                _reminderHour.value = hour
-                _reminderMinute.value = minute
+                _uiState.update {
+                    it.copy(reminderError = null, reminderHour = hour, reminderMinute = minute)
+                }
                 // 开关打开时改时间要立刻重排，否则要等到第二天闹钟触发后才用新时间
-                if (_reminderEnabled.value) {
+                if (_uiState.value.reminderEnabled) {
                     val ok = NotificationHelper.setDailyReminder(appContext, hour, minute)
                     if (!ok) {
-                        _reminderEnabled.value = false
-                        _reminderError.value = "无法更新提醒时间：缺少精确闹钟权限"
+                        _uiState.update {
+                            it.copy(
+                                reminderEnabled = false,
+                                reminderError = "无法更新提醒时间：缺少精确闹钟权限"
+                            )
+                        }
                     }
                 }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 AppLogger.e("设置提醒时间失败: ${e.message}", e, "SettingsVM")
-                _reminderError.value = "设置提醒时间失败: ${e.message}"
+                _uiState.update { it.copy(reminderError = "设置提醒时间失败: ${e.message}") }
             }
         }
     }
 
     fun clearReminderError() {
-        _reminderError.value = null
+        _uiState.update { it.copy(reminderError = null) }
     }
 
     init {
@@ -357,15 +376,46 @@ class SettingsViewModel(
         _uiState.update { state -> state.copy(errorMessage = null) }
     }
 
+    /**
+     * 保存「自定义仪表盘」偏好。
+     *
+     * ## 铁律：必须走原子「读-改-写」，禁止整块回写
+     *
+     * 原先直接 `savePreferences(preferences)` 把 sheet 累积的完整副本整块落盘。
+     * 该副本的初值取自本 VM **构造期**加载的 [_dashboardPreferences]——用户在设置页
+     * 停留期间，日历页可能改了月度生活费、仪表盘/持仓刷新可能更新年度分红缓存，
+     * 整块回写会把这些字段冲回旧值（MEMORY.md 记录过同类事故：持仓页用陈旧副本
+     * 整体回写踩掉日历的月度生活费）。因此改走 Manager 的
+     * [DashboardPreferencesManager.updatePreferences]：先拉磁盘最新值，只把
+     * DashboardConfigSheet 负责的显示/排序字段合并上去，其余字段
+     * （月度生活费 / 年度分红缓存 / 分组展开态）以 fresh 为准原样保留。
+     */
     fun saveDashboardPreferences(preferences: DashboardPreferences) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                // 这里整块存是安全的：入参 preferences 由 DashboardConfigSheet 在 Compose state 里
-                // 「累积 copy」构造（初始值取自本 VM 进场时磁盘最新加载的 _dashboardPreferences），
-                // 始终是一份**完整且最新**的偏好，不会漏掉别的页面设的字段（如月度生活费 / 收入缓存）。
-                // 因此与其他页面用 Manager.updatePreferences 只改单字段的写法不冲突。
-                dashboardPreferencesManager.savePreferences(preferences)
-                _dashboardPreferences.value = preferences
+                val updated = dashboardPreferencesManager.updatePreferences { fresh ->
+                    fresh.copy(
+                        showTotalAssets = preferences.showTotalAssets,
+                        showNetAssets = preferences.showNetAssets,
+                        showProfit = preferences.showProfit,
+                        showDistribution = preferences.showDistribution,
+                        showAssetGrowth = preferences.showAssetGrowth,
+                        showDividendProgress = preferences.showDividendProgress,
+                        showNextPayout = preferences.showNextPayout,
+                        showMonthlyCashFlow = preferences.showMonthlyCashFlow,
+                        showBankDeposits = preferences.showBankDeposits,
+                        showStocks = preferences.showStocks,
+                        showFunds = preferences.showFunds,
+                        showCrypto = preferences.showCrypto,
+                        showLiabilities = preferences.showLiabilities,
+                        hideLowValueCrypto = preferences.hideLowValueCrypto,
+                        lowValueThresholdCny = preferences.lowValueThresholdCny,
+                        hideUnknownPriceCrypto = preferences.hideUnknownPriceCrypto,
+                        sortOrder = preferences.sortOrder,
+                        defaultPeriod = preferences.defaultPeriod
+                    )
+                }
+                _dashboardPreferences.value = updated
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -381,7 +431,7 @@ class SettingsViewModel(
                 if (!enabled) {
                     priceSyncPreferencesManager.setConsecutiveFailureCount(0)
                 }
-                _autoPriceSyncEnabled.value = enabled
+                _uiState.update { it.copy(autoPriceSyncEnabled = enabled) }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -395,7 +445,7 @@ class SettingsViewModel(
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 priceSyncPreferencesManager.setStockIntradaySyncEnabled(enabled)
-                _stockIntradaySyncEnabled.value = enabled
+                _uiState.update { it.copy(stockIntradaySyncEnabled = enabled) }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -409,7 +459,7 @@ class SettingsViewModel(
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 priceSyncPreferencesManager.setCryptoAutoSyncEnabled(enabled)
-                _cryptoAutoSyncEnabled.value = enabled
+                _uiState.update { it.copy(cryptoAutoSyncEnabled = enabled) }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -424,17 +474,24 @@ class SettingsViewModel(
      * StateFlow 初值只在 ViewModel 创建时读一次：别处（后台任务、系统设置、
      * 清除数据）改过磁盘后，内存里的值就过期了。进入设置页或清除数据后调用，
      * 保证界面显示的是真实值。
+     *
+     * 八个字段已在同一 UiState 里，整组刷新合并为**一次** update：原先八条流各写一次，
+     * UI 要连收八个状态、整页重组八遍（设置页的 remember 块同时 key 着其中七个值）。
      */
     fun refreshPriceSyncState() {
         viewModelScope.launch(Dispatchers.IO) {
-            _autoPriceSyncEnabled.value = priceSyncPreferencesManager.isAutoSyncEnabled()
-            _lastPriceSyncTime.value = priceSyncPreferencesManager.getLastSyncTimeMillis()
-            _stockIntradaySyncEnabled.value = priceSyncPreferencesManager.isStockIntradaySyncEnabled()
-            _cryptoAutoSyncEnabled.value = priceSyncPreferencesManager.isCryptoAutoSyncEnabled()
-            _reminderEnabled.value = NotificationHelper.isReminderEnabled(appContext)
             val reminderTime = NotificationHelper.getReminderTime(appContext)
-            _reminderHour.value = reminderTime.first
-            _reminderMinute.value = reminderTime.second
+            _uiState.update { state ->
+                state.copy(
+                    autoPriceSyncEnabled = priceSyncPreferencesManager.isAutoSyncEnabled(),
+                    lastPriceSyncTime = priceSyncPreferencesManager.getLastSyncTimeMillis(),
+                    stockIntradaySyncEnabled = priceSyncPreferencesManager.isStockIntradaySyncEnabled(),
+                    cryptoAutoSyncEnabled = priceSyncPreferencesManager.isCryptoAutoSyncEnabled(),
+                    reminderEnabled = NotificationHelper.isReminderEnabled(appContext),
+                    reminderHour = reminderTime.first,
+                    reminderMinute = reminderTime.second
+                )
+            }
         }
     }
 

@@ -91,15 +91,19 @@ fun SettingsScreen(
     }
     val viewModel: SettingsViewModel = viewModel(factory = SettingsViewModel.factory(container))
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    // 仪表盘偏好保留独立流（跨页面共享的整块偏好，写入路径与 UiState 不同，见 VM KDoc）
     val dashboardPrefs by viewModel.dashboardPreferences.collectAsStateWithLifecycle()
-    val autoPriceSyncEnabled by viewModel.autoPriceSyncEnabled.collectAsStateWithLifecycle()
-    val lastPriceSyncTime by viewModel.lastPriceSyncTime.collectAsStateWithLifecycle()
-    val stockIntradaySyncEnabled by viewModel.stockIntradaySyncEnabled.collectAsStateWithLifecycle()
-    val cryptoAutoSyncEnabled by viewModel.cryptoAutoSyncEnabled.collectAsStateWithLifecycle()
-    val reminderEnabled by viewModel.reminderEnabled.collectAsStateWithLifecycle()
-    val reminderHour by viewModel.reminderHour.collectAsStateWithLifecycle()
-    val reminderMinute by viewModel.reminderMinute.collectAsStateWithLifecycle()
-    val reminderError by viewModel.reminderError.collectAsStateWithLifecycle()
+    // 价格同步与每日提醒的 8 个快照字段已合入 uiState（同 Dashboard/Portfolio 模式）：
+    // 原来十条流各自 collect，一次 refreshPriceSyncState 连发八次、整页重组八遍；
+    // 现在按原变量名从 uiState 取别名，页面主体逻辑不动。
+    val autoPriceSyncEnabled = uiState.autoPriceSyncEnabled
+    val lastPriceSyncTime = uiState.lastPriceSyncTime
+    val stockIntradaySyncEnabled = uiState.stockIntradaySyncEnabled
+    val cryptoAutoSyncEnabled = uiState.cryptoAutoSyncEnabled
+    val reminderEnabled = uiState.reminderEnabled
+    val reminderHour = uiState.reminderHour
+    val reminderMinute = uiState.reminderMinute
+    val reminderError = uiState.reminderError
     val currentTheme = rememberThemeMode()
 
     // 当前生效的美元汇率与上次刷新时间。汇率刷新会改变全 App 的 CNY 折算

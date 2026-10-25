@@ -168,6 +168,6 @@ class SettingsViewModelTest {
     @Test
     fun `clearReminderError 清空错误状态且不抛异常`() = runBlocking {
         vm.clearReminderError()
-        assertNull(vm.reminderError.value)
+        assertNull(vm.uiState.value.reminderError)
     }
 }

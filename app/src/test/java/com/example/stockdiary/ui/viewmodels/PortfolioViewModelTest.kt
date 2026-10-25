@@ -111,11 +111,18 @@ class PortfolioViewModelTest {
     @Test
     fun `loadDividendIncome 汇总年化分红收入并结束加载态`() = runBlocking {
         val vm = buildVm()
-        vm.loadDividendIncome(listOf(stockAsset))
-        // 连 dividendLoading 一起等：它在 finally 里复位，比收入赋值晚一步
-        waitUntil { vm.estimatedAnnualDividend.value == 888.0 && !vm.dividendLoading.value }
-        assertEquals(888.0, vm.estimatedAnnualDividend.value, 0.001)
-        assertFalse(vm.dividendLoading.value)
+        // uiState 是 stateIn(WhileSubscribed) 派生流，无订阅者时 .value 恒为初始态，
+        // 必须先起收集（见 UiStateCollectExt）
+        val (trackJob, latest) = vm.uiState.trackIn(this)
+        try {
+            vm.loadDividendIncome(listOf(stockAsset))
+            // 连 dividendLoading 一起等：它在 finally 里复位，比收入赋值晚一步
+            waitUntil { latest().estimatedAnnualDividend == 888.0 && !latest().dividendLoading }
+            assertEquals(888.0, latest().estimatedAnnualDividend, 0.001)
+            assertFalse(latest().dividendLoading)
+        } finally {
+            trackJob.cancel()
+        }
     }
 
     @Test
@@ -167,10 +174,15 @@ class PortfolioViewModelTest {
             } returns SyncResult(successCount = 2, failedCount = 0, truncatedByTimeLimit = true)
 
             val vm = buildVm()
-            vm.refresh()
-            waitUntil { !vm.isRefreshing.value }
+            val (trackJob, latest) = vm.uiState.trackIn(this)
+            try {
+                vm.refresh()
+                waitUntil { !latest().isRefreshing }
 
-            assertEquals("同步超时，已保留上次数据", vm.errorMessage.value)
+                assertEquals("同步超时，已保留上次数据", latest().errorMessage)
+            } finally {
+                trackJob.cancel()
+            }
         } finally {
             unmockkAll()
         }

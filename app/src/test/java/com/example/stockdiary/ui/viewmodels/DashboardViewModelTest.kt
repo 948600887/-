@@ -112,21 +112,34 @@ class DashboardViewModelTest {
     @Test
     fun `loadDividendIncome 汇总年化收入与每日预估并结束加载态`() = runBlocking {
         val vm = buildVm()
-        vm.loadDividendIncome(listOf(stockAsset))
-        // 必须连 dividendLoading 一起等：它在 finally 里复位，比收入赋值晚一步
-        waitUntil { vm.realAnnualIncome.value == 1234.5 && !vm.dividendLoading.value }
-        assertEquals(1234.5, vm.realAnnualIncome.value, 0.001)
-        assertEquals(1234.5 / 365.0, vm.estimatedDailyDividend.value, 1e-6)
-        assertFalse(vm.dividendLoading.value)
+        // uiState 是 stateIn(WhileSubscribed) 派生流，无订阅者时 .value 恒为初始态，
+        // 必须先起收集（见 UiStateCollectExt）
+        val (trackJob, latest) = vm.uiState.trackIn(this)
+        try {
+            vm.loadDividendIncome(listOf(stockAsset))
+            // 必须连 dividendLoading 一起等：它在 finally 里复位，比收入赋值晚一步
+            waitUntil { latest().realAnnualIncome == 1234.5 && !latest().dividendLoading }
+            assertEquals(1234.5, latest().realAnnualIncome, 0.001)
+            assertEquals(1234.5 / 365.0, latest().estimatedDailyDividend, 1e-6)
+            assertFalse(latest().dividendLoading)
+        } finally {
+            trackJob.cancel()
+        }
     }
 
     @Test
     fun `loadDividendIncome 空资产列表直接返回不报错`() = runBlocking {
         val vm = buildVm()
-        vm.loadDividendIncome(emptyList())
-        Thread.sleep(100)
-        assertEquals(0.0, vm.realAnnualIncome.value, 0.001)
-        assertFalse(vm.dividendLoading.value)
+        val (trackJob, latest) = vm.uiState.trackIn(this)
+        try {
+            vm.loadDividendIncome(emptyList())
+            Thread.sleep(100)
+            // 直接返回：收入保持 0、加载态不置位（订阅后验证，而非碰巧读到初始值）
+            assertEquals(0.0, latest().realAnnualIncome, 0.001)
+            assertFalse(latest().dividendLoading)
+        } finally {
+            trackJob.cancel()
+        }
     }
 
     @Test
@@ -186,10 +199,15 @@ class DashboardViewModelTest {
             } returns SyncResult(successCount = 3, failedCount = 1, truncatedByTimeLimit = true)
 
             val vm = buildVm()
-            vm.refresh()
-            waitUntil { !vm.isRefreshing.value }
+            val (trackJob, latest) = vm.uiState.trackIn(this)
+            try {
+                vm.refresh()
+                waitUntil { !latest().isRefreshing }
 
-            assertEquals("同步超时，已保留上次数据", vm.errorMessage.value)
+                assertEquals("同步超时，已保留上次数据", latest().errorMessage)
+            } finally {
+                trackJob.cancel()
+            }
         } finally {
             unmockkAll()
         }
@@ -204,10 +222,15 @@ class DashboardViewModelTest {
             } returns SyncResult(successCount = 5, failedCount = 0, truncatedByTimeLimit = false)
 
             val vm = buildVm()
-            vm.refresh()
-            waitUntil { !vm.isRefreshing.value }
+            val (trackJob, latest) = vm.uiState.trackIn(this)
+            try {
+                vm.refresh()
+                waitUntil { !latest().isRefreshing }
 
-            assertEquals(null, vm.errorMessage.value)
+                assertEquals(null, latest().errorMessage)
+            } finally {
+                trackJob.cancel()
+            }
         } finally {
             unmockkAll()
         }

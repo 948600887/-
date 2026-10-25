@@ -137,15 +137,18 @@ fun PortfolioScreen(
     modifier: Modifier = Modifier,
     onNavigateToAssetDetail: (Long) -> Unit = {}
 ) {
-    val assets by viewModel.assets.collectAsStateWithLifecycle()
-    val isRefreshing by viewModel.isRefreshing.collectAsStateWithLifecycle()
-    val syncProgress by viewModel.syncProgress.collectAsStateWithLifecycle()
-    val syncResult by viewModel.syncResult.collectAsStateWithLifecycle()
-    val estimatedAnnualDividend by viewModel.estimatedAnnualDividend.collectAsStateWithLifecycle()
-    val dividendLoading by viewModel.dividendLoading.collectAsStateWithLifecycle()
-    val incomeCalculationStatus by viewModel.incomeCalculationStatus.collectAsStateWithLifecycle()
-    val errorMessage by viewModel.errorMessage.collectAsStateWithLifecycle()
-    val dividendWarning by viewModel.dividendWarning.collectAsStateWithLifecycle()
+    // 刷新/分红加载整组状态合并进 uiState 一条流（见 PortfolioViewModel.PortfolioUiState）；
+    // existingAccounts / preferences / expandedGroups 与刷新状态机无关，保持独立流
+    val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val assets = uiState.assets
+    val isRefreshing = uiState.isRefreshing
+    val syncProgress = uiState.syncProgress
+    val syncResult = uiState.syncResult
+    val estimatedAnnualDividend = uiState.estimatedAnnualDividend
+    val dividendLoading = uiState.dividendLoading
+    val incomeCalculationStatus = uiState.incomeCalculationStatus
+    val errorMessage = uiState.errorMessage
+    val dividendWarning = uiState.dividendWarning
     val existingAccounts by viewModel.existingAccounts.collectAsStateWithLifecycle()
     val preferences by viewModel.preferences.collectAsStateWithLifecycle()
 

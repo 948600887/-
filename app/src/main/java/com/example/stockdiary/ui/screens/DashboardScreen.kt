@@ -36,18 +36,21 @@ fun DashboardScreen(
     modifier: Modifier = Modifier,
     onNavigateToPortfolio: () -> Unit = {}
 ) {
-    val assets by viewModel.assets.collectAsStateWithLifecycle()
+    // 刷新/收入计算整组状态合并进 uiState 一条流（见 DashboardViewModel.DashboardUiState）；
+    // preferences / existingAccounts 与刷新状态机无关，保持独立流
+    val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val assets = uiState.assets
+    val isRefreshing = uiState.isRefreshing
+    val syncProgress = uiState.syncProgress
+    val syncResult = uiState.syncResult
+    val dividendLoading = uiState.dividendLoading
+    val realAnnualIncome = uiState.realAnnualIncome
+    val incomeCalculationStatus = uiState.incomeCalculationStatus
+    val dividendProgress = uiState.dividendProgress
+    val errorMessage = uiState.errorMessage
+    val dividendWarning = uiState.dividendWarning
     val preferences by viewModel.preferences.collectAsStateWithLifecycle()
-    val isRefreshing by viewModel.isRefreshing.collectAsStateWithLifecycle()
-    val syncProgress by viewModel.syncProgress.collectAsStateWithLifecycle()
-    val syncResult by viewModel.syncResult.collectAsStateWithLifecycle()
-    val dividendLoading by viewModel.dividendLoading.collectAsStateWithLifecycle()
-    val realAnnualIncome by viewModel.realAnnualIncome.collectAsStateWithLifecycle()
-    val incomeCalculationStatus by viewModel.incomeCalculationStatus.collectAsStateWithLifecycle()
     val existingAccounts by viewModel.existingAccounts.collectAsStateWithLifecycle()
-    val dividendProgress by viewModel.dividendProgress.collectAsStateWithLifecycle()
-    val errorMessage by viewModel.errorMessage.collectAsStateWithLifecycle()
-    val dividendWarning by viewModel.dividendWarning.collectAsStateWithLifecycle()
 
     // rememberSaveable：旋屏/配置变更后对话框不会凭空消失
     var showAddDialog by rememberSaveable { mutableStateOf(false) }
@@ -79,7 +82,7 @@ fun DashboardScreen(
     val totalLiabilities = remember(liabilities) { liabilities.sumTotalValueCny() }
     val netAssets = totalAssets - totalLiabilities
 
-    val snapshots by viewModel.snapshots.collectAsStateWithLifecycle()
+    val snapshots = uiState.snapshots
     val growth = remember(snapshots, netAssets) {
         AssetGrowthCalculator.fromSnapshots(snapshots = snapshots, currentNetAssets = netAssets)
     }

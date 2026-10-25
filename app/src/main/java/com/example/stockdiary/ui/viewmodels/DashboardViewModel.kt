@@ -25,6 +25,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
@@ -55,8 +56,12 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
             throwable,
             "DashboardVM"
         )
-        _errorMessage.value = "刷新没能完成：${throwable.message ?: "未知错误"}"
-        _isRefreshing.value = false
+        _uiState.update {
+            it.copy(
+                errorMessage = "刷新没能完成：${throwable.message ?: "未知错误"}",
+                isRefreshing = false
+            )
+        }
     }
 
     private val repository = container.assetRepository
@@ -64,19 +69,48 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
     private val incomeUseCase = container.dividendIncomeUseCase
     private val dividendRepository = DividendRepository.getInstance(container.context)
 
-    val assets: StateFlow<List<Asset>> = repository.getAllAssets()
-        // Room 每次写库都会重发整表；而落价往往只改 lastSyncTime/lastUpdateTime，
-        // 界面其实不用重画。不去重 = 一次同步上百次整屏重组。
-        // 口径见 Extensions.isDisplayEquivalentTo（含 currentPrice，故现价/市值照常刷新）
+    /**
+     * 仪表盘状态机：一次「刷新 / 收入计算」先后推进哪些字段，全在这里。
+     *
+     * 此前是 11 个各自为政的 MutableStateFlow（刷新态、进度、结果、日预计分红、
+     * loading、年收入、状态文案、错误、限流提示、收息进度、有无利息数据），
+     * 写入点散落在 loadDividendIncome / refresh / 异常 handler 里；UI 同层
+     * collect 十三条流，合并后少十二次订阅，且「刷新到底改了什么」一处可答。
+     *
+     * 不并进来的两个：[preferences]（回前台 reload 语义独立）、
+     * [existingAccounts]（增删资产时才动，与刷新无关）。
+     */
+    data class DashboardUiState(
+        val assets: List<Asset> = emptyList(),
+        val snapshots: List<AssetSnapshot> = emptyList(),
+        val isRefreshing: Boolean = false,
+        val syncResult: SyncResult? = null,
+        val syncProgress: SyncProgress? = null,
+        val estimatedDailyDividend: Double = 0.0,
+        val dividendLoading: Boolean = false,
+        val realAnnualIncome: Double = 0.0,
+        val incomeCalculationStatus: String? = null,
+        val errorMessage: String? = null,
+        val dividendWarning: String? = null,
+        val dividendProgress: DividendProgressCalculator.Progress = DividendProgressCalculator.EMPTY,
+        val hasInterestData: Boolean = false,
+    )
+
+    private val _uiState = MutableStateFlow(DashboardUiState())
+
+    // Room 每次写库都会重发整表；而落价往往只改 lastSyncTime/lastUpdateTime，
+    // 界面其实不用重画。不去重 = 一次同步上百次整屏重组。
+    // 口径见 Extensions.isDisplayEquivalentTo（含 currentPrice，故现价/市值照常刷新）
+    private val assetsFlow: StateFlow<List<Asset>> = repository.getAllAssets()
         .distinctUntilChanged { a, b -> a.isDisplayEquivalentTo(b) }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    // 「资产增值」卡片的基准数据：净资产要和本月/今年之前的快照对比
-    val snapshots: StateFlow<List<AssetSnapshot>> = repository.getAllSnapshots()
+    // 「资产增值」卡片的基准数据：净资产要和本月/今年之前的快照对比。
+    // 快照表每次写入（尤其"同日覆盖"会换新 id/timestamp，但 date+netAssets 不变）
+    // 都会让 Room 重发整表；而卡片只消费 date 与 netAssets 两列，按显示相关字段去重，
+    // 避免与价格/汇率无关的写库触发多余重算与重组。
+    private val snapshotsFlow: StateFlow<List<AssetSnapshot>> = repository.getAllSnapshots()
         .map { it.sortedBy { snapshot -> snapshot.date } }
-        // 同 assets 流的做法：快照表每次写入（尤其"同日覆盖"会换新 id/timestamp，
-        // 但 date+netAssets 不变）都会让 Room 重发整表；而"资产增值"卡片只消费 date 与
-        // netAssets 两列，按显示相关字段去重，避免与价格/汇率无关的写库触发多余重算与重组。
         .distinctUntilChanged { old, new ->
             old.size == new.size && old.zip(new).all { (a, b) ->
                 a.date == b.date && a.netAssets == b.netAssets
@@ -84,50 +118,12 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
+    val uiState: StateFlow<DashboardUiState> = combine(assetsFlow, snapshotsFlow, _uiState) { assets, snapshots, state ->
+        state.copy(assets = assets, snapshots = snapshots)
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), DashboardUiState())
+
     private val _preferences = MutableStateFlow(preferencesManager.loadPreferences())
     val preferences: StateFlow<com.example.stockdiary.data.prefs.DashboardPreferences> = _preferences.asStateFlow()
-
-    private val _isRefreshing = MutableStateFlow(false)
-    val isRefreshing: StateFlow<Boolean> = _isRefreshing.asStateFlow()
-
-    private val _syncResult = MutableStateFlow<SyncResult?>(null)
-    val syncResult: StateFlow<SyncResult?> = _syncResult.asStateFlow()
-
-    private val _syncProgress = MutableStateFlow<SyncProgress?>(null)
-    val syncProgress: StateFlow<SyncProgress?> = _syncProgress.asStateFlow()
-
-
-    private val _estimatedDailyDividend = MutableStateFlow(0.0)
-    val estimatedDailyDividend: StateFlow<Double> = _estimatedDailyDividend.asStateFlow()
-
-    private val _dividendLoading = MutableStateFlow(false)
-    val dividendLoading: StateFlow<Boolean> = _dividendLoading.asStateFlow()
-
-    private val _realAnnualIncome = MutableStateFlow(0.0)
-    val realAnnualIncome: StateFlow<Double> = _realAnnualIncome.asStateFlow()
-
-    private val _incomeCalculationStatus = MutableStateFlow<String?>(null)
-    val incomeCalculationStatus: StateFlow<String?> = _incomeCalculationStatus.asStateFlow()
-
-    // 刷新兜底异常的 user-facing 出口：handler 只能记日志，用户需要看到「刷新没成功」
-    private val _errorMessage = MutableStateFlow<String?>(null)
-    val errorMessage: StateFlow<String?> = _errorMessage.asStateFlow()
-
-    /**
-     * 天天基金限流提示（非阻塞）：本轮手动刷新撞过 514/429 时置位，
-     * 由界面对应的 LaunchedEffect 弹 Snackbar 后调 [clearDividendWarning] 清空。
-     * 与 [_errorMessage] 分开，避免和「同步失败」混淆——限流只是「部分分红没抓全」，
-     * 不代表刷新失败。
-     */
-    private val _dividendWarning = MutableStateFlow<String?>(null)
-    val dividendWarning: StateFlow<String?> = _dividendWarning.asStateFlow()
-
-    // 收息进度：今年已收 / 今年预计 / 月度现金流 / 下一笔除息（分子分母同为自然年口径，且一律按除息日）
-    private val _dividendProgress = MutableStateFlow(DividendProgressCalculator.EMPTY)
-    val dividendProgress: StateFlow<DividendProgressCalculator.Progress> = _dividendProgress.asStateFlow()
-
-    private val _hasInterestData = MutableStateFlow(false)
-    val hasInterestData: StateFlow<Boolean> = _hasInterestData.asStateFlow()
 
     private val _existingAccounts = MutableStateFlow<List<String>>(emptyList())
     val existingAccounts: StateFlow<List<String>> = _existingAccounts.asStateFlow()
@@ -196,15 +192,21 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
 
         viewModelScope.launch {
             if (hasCached) {
-                _realAnnualIncome.value = lastValue
-                _estimatedDailyDividend.value = lastValue / 365
-                _incomeCalculationStatus.value = null
+                _uiState.update {
+                    it.copy(
+                        realAnnualIncome = lastValue,
+                        estimatedDailyDividend = lastValue / 365,
+                        incomeCalculationStatus = null
+                    )
+                }
             }
             // 已有可显示的值时不转圈；只有真没值可显示时才转
-            if (!hasLoadedIncome && !hasCached) _dividendLoading.value = true
+            if (!hasLoadedIncome && !hasCached) _uiState.update { it.copy(dividendLoading = true) }
             try {
                 val bankDeposits = assetsOnly.filter { it.type == AssetType.BANK_DEPOSIT }
-                _hasInterestData.value = bankDeposits.any { (it.interestRate ?: 0.0) > 0 }
+                _uiState.update {
+                    it.copy(hasInterestData = bankDeposits.any { d -> (d.interestRate ?: 0.0) > 0 })
+                }
 
                 // cacheOnly：冷启动只读缓存，TTL 过期也照用（30 天硬上限）。
                 // 连过期数据都没有时内部会自己走抓取流程，所以首次安装仍然有数可显示
@@ -214,19 +216,22 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
                     tag = "DashboardVM",
                     cacheOnly = true
                 )
-                _realAnnualIncome.value = result.totalAnnualIncome
-                _estimatedDailyDividend.value = result.totalAnnualIncome / 365
-                _dividendProgress.value = withContext(Dispatchers.Default) {
-                    DividendProgressCalculator.calculate(
-                        assets = assetsOnly,
-                        recordsBySymbol = result.recordsBySymbol
+                _uiState.update { state ->
+                    state.copy(
+                        realAnnualIncome = result.totalAnnualIncome,
+                        estimatedDailyDividend = result.totalAnnualIncome / 365,
+                        dividendProgress = withContext(Dispatchers.Default) {
+                            DividendProgressCalculator.calculate(
+                                assets = assetsOnly,
+                                recordsBySymbol = result.recordsBySymbol
+                            )
+                        },
+                        incomeCalculationStatus = when {
+                            result.totalAnnualIncome == 0.0 && !result.hasDividendData && !state.hasInterestData -> "暂无分红/利息数据"
+                            result.totalAnnualIncome == 0.0 && assetsOnly.none { it.type == AssetType.STOCK || it.type == AssetType.FUND } -> "暂无计息资产"
+                            else -> null
+                        }
                     )
-                }
-
-                _incomeCalculationStatus.value = when {
-                    result.totalAnnualIncome == 0.0 && !result.hasDividendData && !_hasInterestData.value -> "暂无分红/利息数据"
-                    result.totalAnnualIncome == 0.0 && assetsOnly.none { it.type == AssetType.STOCK || it.type == AssetType.FUND } -> "暂无计息资产"
-                    else -> null
                 }
                 hasLoadedIncome = true
 
@@ -246,12 +251,16 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
                 AppLogger.e("计算收入失败: ${e.message}", e, "DashboardVM")
                 // 已经摆出来的旧值别抹成 0
                 if (!hasCached) {
-                    _realAnnualIncome.value = 0.0
-                    _estimatedDailyDividend.value = 0.0
-                    _incomeCalculationStatus.value = "计算失败"
+                    _uiState.update {
+                        it.copy(
+                            realAnnualIncome = 0.0,
+                            estimatedDailyDividend = 0.0,
+                            incomeCalculationStatus = "计算失败"
+                        )
+                    }
                 }
             } finally {
-                _dividendLoading.value = false
+                _uiState.update { it.copy(dividendLoading = false) }
             }
         }
     }
@@ -277,15 +286,13 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
      */
     fun refresh() {
         viewModelScope.launch(refreshExceptionHandler) {
-            _isRefreshing.value = true
-            _errorMessage.value = null
-            _syncResult.value = null
+            _uiState.update { it.copy(isRefreshing = true, errorMessage = null, syncResult = null) }
 
             // 两个范围，别混（详见方法 KDoc）：
             // - priceAssets 用于同步，只含有行情的类型；
             // - assetsOnly 用于收入计算，必须含银行存款，否则漏掉利息收入。
-            val priceAssets = assets.value.filter { it.type in AssetType.getPriceSyncedTypes() }
-            val assetsOnly = assets.value.filter { !it.type.isLiability }
+            val priceAssets = uiState.value.assets.filter { it.type in AssetType.getPriceSyncedTypes() }
+            val assetsOnly = uiState.value.assets.filter { !it.type.isLiability }
 
             // 两个阶段分开收尾，理由见下面两处 finally 的注释
             var syncResult: SyncResult? = null
@@ -296,7 +303,7 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
                     repository = repository,
                     assets = priceAssets,
                     // 实时进度：刷新要跑完上百个标的，只转圈用户无从判断是在干活还是卡死
-                    onProgress = { _syncProgress.value = it },
+                    onProgress = { progress -> _uiState.update { it.copy(syncProgress = progress) } },
                     forceRefresh = true,
                 syncTrigger = "仪表盘刷新"
                 )
@@ -318,17 +325,17 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
                 // 取消（退后台 onStop / VM 销毁）时 rethrow 会跳过下面第二阶段的 finally，
                 // _isRefreshing 会永远停在 true、后续刷新全被挡死、界面一直转圈——
                 // 这里补一次复位，保证取消路径刷新态也能收起（铁律：取消照旧重抛，不做吞）
-                _isRefreshing.value = false
+                _uiState.update { it.copy(isRefreshing = false) }
                 throw e
             } catch (e: Exception) {
-                // 不捕获的话 _isRefreshing 永远停在 true，后续刷新全被挡死、界面一直转圈
+                // 不捕获的话 isRefreshing 永远停在 true，后续刷新全被挡死、界面一直转圈
                 AppLogger.w("同步失败: ${e.message}", "DashboardVM")
                 // 静默是最糟的反馈：用户点了刷新，转圈停下，什么也没发生
                 syncError = e.message ?: "未知错误"
             } finally {
                 // 价格同步这一段结束就把进度清掉：后面的收入计算是另一件事。
                 // 不清的话标题会一直挂着「10 / 10」而转圈还在继续，看着像卡死
-                _syncProgress.value = null
+                _uiState.update { it.copy(syncProgress = null) }
             }
 
             try {
@@ -336,54 +343,63 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
                 // 用户刚刷新过行情，需要的是最新分红，不是缓存里的旧值。
                 // 传 assetsOnly（含银行存款）而不是 priceAssets，否则漏掉利息收入。
                 val result = incomeUseCase.load(assetsOnly, forceRefresh = false, tag = "DashboardVM")
-                _realAnnualIncome.value = result.totalAnnualIncome
-                _estimatedDailyDividend.value = result.totalAnnualIncome / 365
-                _dividendProgress.value = withContext(Dispatchers.Default) {
-                    DividendProgressCalculator.calculate(
-                        assets = assetsOnly,
-                        recordsBySymbol = result.recordsBySymbol
+                _uiState.update { state ->
+                    state.copy(
+                        realAnnualIncome = result.totalAnnualIncome,
+                        estimatedDailyDividend = result.totalAnnualIncome / 365,
+                        dividendProgress = withContext(Dispatchers.Default) {
+                            DividendProgressCalculator.calculate(
+                                assets = assetsOnly,
+                                recordsBySymbol = result.recordsBySymbol
+                            )
+                        },
+                        incomeCalculationStatus = null
                     )
                 }
-                _incomeCalculationStatus.value = null
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 AppLogger.e("加载分红收入失败: ${e.message}", e, "DashboardViewModel")
-                _incomeCalculationStatus.value = "加载分红收入失败: ${e.localizedMessage ?: e.message}"
+                _uiState.update {
+                    it.copy(incomeCalculationStatus = "加载分红收入失败: ${e.localizedMessage ?: e.message}")
+                }
             } finally {
                 // 结果反馈统一放到最后：转圈停下与提示出现应当同时发生。
                 // 原先同步一结束就置 _syncResult，Snackbar 弹「刷新完成」时转圈还在
                 // 为收入计算而转，用户会看到「已完成」的提示和一个仍在转的按钮，自相矛盾
-                if (_errorMessage.value == null) {
-                    when {
-                        syncError != null -> _errorMessage.value = "刷新失败：$syncError"
-                        // 时间预算兜底：超时不抛错，但要让用户知道「这次没跑完」，
-                        // 看到的是保留的上次数据，而不是转圈到天荒地老
-                        syncResult?.truncatedByTimeLimit == true ->
-                            _errorMessage.value = "同步超时，已保留上次数据"
-                    }
+                _uiState.update { state ->
+                    if (state.errorMessage == null) {
+                        state.copy(errorMessage = when {
+                            syncError != null -> "刷新失败：$syncError"
+                            // 时间预算兜底：超时不抛错，但要让用户知道「这次没跑完」，
+                            // 看到的是保留的上次数据，而不是转圈到天荒地老
+                            syncResult?.truncatedByTimeLimit == true ->
+                                "同步超时，已保留上次数据"
+                            else -> null
+                        })
+                    } else state
                 }
                 // 手动刷新撞过天天基金限流（514/429）→ 提示「部分场外基金分红没抓全」（非阻塞）
                 if (dividendRepository.consumeOtcRateLimitWarning()) {
-                    _dividendWarning.value = "今日部分场外基金分红因天天基金限流未能抓取完整，可稍后手动重试"
+                    _uiState.update {
+                        it.copy(dividendWarning = "今日部分场外基金分红因天天基金限流未能抓取完整，可稍后手动重试")
+                    }
                 }
-                _syncResult.value = syncResult
-                _isRefreshing.value = false
+                _uiState.update { it.copy(syncResult = syncResult, isRefreshing = false) }
             }
         }
     }
 
     fun clearSyncResult() {
-        _syncResult.value = null
-        _syncProgress.value = null
+        _uiState.update { it.copy(syncResult = null, syncProgress = null) }
     }
 
     fun clearError() {
-        _errorMessage.value = null
+        _uiState.update { it.copy(errorMessage = null) }
     }
 
     fun clearDividendWarning() {
-        _dividendWarning.value = null
+        _uiState.update { it.copy(dividendWarning = null) }
     }
 
     suspend fun addAsset(asset: Asset) {

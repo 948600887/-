@@ -8,12 +8,16 @@ import com.example.stockdiary.data.repository.AssetRepository
 import com.example.stockdiary.data.importer.BinanceCredentialsManager
 import com.example.stockdiary.data.importer.BinanceImportService
 import com.example.stockdiary.data.importer.filterDustByValue
+import com.example.stockdiary.data.importer.mergeEarnIntoBalances
 import com.example.stockdiary.data.importer.priceKeyFor
+import com.example.stockdiary.data.sync.AssetSyncManager
 import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.di.AppContainer
 import com.example.stockdiary.network.BinanceAccountAPI
+import com.example.stockdiary.network.BinanceBalance
 import com.example.stockdiary.utils.AppLogger
 import com.example.stockdiary.utils.ExchangeRateManager
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
@@ -149,25 +153,42 @@ open class BinanceImportViewModel(
             // 拉到了再存密钥：见方法注释
             credentialsManager.save(current.apiKey, current.apiSecret)
 
-            // 批量取公开价，用于按人民币市值过滤零碎。
-            // 交易对列表从余额生成（稳定币无需查价）；取价失败降级为空 map
-            // → priceOf 全 null → 一个都滤不掉、全量导入，绝不阻断导入
-            val pairs = balances.mapNotNull { priceKeyFor(it.asset) }.distinct()
-
-            // 汇率刷新（estimatedValueCny → USD 汇率折算，先确保汇率新鲜）与批量取价
-            // 是两条互不依赖的网络请求，并发执行省掉一次串行往返。
-            // 汇率刷新失败也无所谓（ExchangeRateManager.refresh 内部已吞异常、沿用当前汇率，
-            // 返回 false 而非抛），绝不影响导入本身，故无需 try/catch。
-            val priceMap = coroutineScope {
-                val refreshDeferred = async(Dispatchers.IO) { ExchangeRateManager.refresh() }
+            // 理财持仓单拉：官方对账单证实钱可能在 Earn 里而不在现货余额里，只导现货会少算。
+            // 失败（含 API Key 未开通权限）内部降级为空列表，绝不中断导入。
+            //
+            // 汇率强制刷新、批量取价、理财持仓三条互不依赖，并发执行省掉两次串行往返。
+            // 汇率用 force=true：默认走 6 小时 TTL，实测 00:04 那次导入就沿用了 19:01 抓的
+            // 6.6702（比真实价低约 6%），导入是用户主动触发的低频动作，值得多打这一次请求。
+            val spotPriceMap: Map<String, Double>
+            val mergedBalances: List<BinanceBalance>
+            coroutineScope {
+                val refreshDeferred = async(Dispatchers.IO) { ExchangeRateManager.refresh(force = true) }
+                val earnDeferred = async(Dispatchers.IO) {
+                    BinanceAccountAPI.getEarnPositions(current.apiKey, current.apiSecret)
+                }
+                val pairs = balances.mapNotNull { priceKeyFor(it.asset) }.distinct()
                 val pricesDeferred = async(Dispatchers.IO) { BinanceAccountAPI.getPrices(pairs) }
                 refreshDeferred.await()
-                pricesDeferred.await()
+                val earn = earnDeferred.await()
+                spotPriceMap = pricesDeferred.await()
+                mergedBalances = mergeEarnIntoBalances(balances, earn)
+            }
+
+            // 理财独有的资产在上面那批取价时还不知道，补一次小额批量请求（通常个位数）。
+            // 补不到价也不阻断：估不出价的资产按「保留」处理，市值等行情同步再补。
+            val missingPairs = mergedBalances
+                .mapNotNull { priceKeyFor(it.asset) }
+                .distinct()
+                .filterNot { spotPriceMap.containsKey(it) }
+            val priceMap = if (missingPairs.isEmpty()) {
+                spotPriceMap
+            } else {
+                spotPriceMap + BinanceAccountAPI.getPrices(missingPairs)
             }
             val priceOf: (String) -> Double? = { priceMap[it] }
 
             // 按市值过滤零碎（阈值用户可设，默认 ¥10）；估不出价的一律保留
-            val (kept, filteredCount) = filterDustByValue(balances, priceOf, current.minValueCny)
+            val (kept, filteredCount) = filterDustByValue(mergedBalances, priceOf, current.minValueCny)
 
             // 只取库里已有的加密货币资产来对齐：导入只可能命中这一类
             val existing = repository.getAssetsByTypes(listOf(AssetType.CRYPTO))
@@ -235,6 +256,42 @@ open class BinanceImportViewModel(
             updateState { state -> state.copy(step = Step.COMMITTING, error = null) }
             val result = service.commit(preview, _uiState.value.account, _uiState.value.prices)
             updateState { state -> state.copy(step = Step.RESULT, result = result) }
+            // 落库成功后自动补一轮行情：预填价只覆盖拉取时取到价的标的，
+            // 冷门币/新币（取不到价）与核对期间变动的价格靠这轮补齐，
+            // 用户不必再手动点「同步行情」。失败只记日志——结果页已经显示了成功落库。
+            syncImportedPrices(preview)
+        }
+    }
+
+    /**
+     * 导入后补一轮行情同步。
+     *
+     * 只同步**这次导入的加密资产**（按 symbol 回查，避免对几百个标的全量刷新）；
+     * 失败一律吞掉记日志：落库已成功，同步失败不该把结果页打回预览。
+     */
+    private suspend fun syncImportedPrices(preview: BinanceImportService.Preview) {
+        try {
+            val imported = withContext(Dispatchers.IO) {
+                repository.getAssetsBySymbols(preview.items.map { it.symbol })
+                    .filter { it.type == AssetType.CRYPTO }
+            }
+            if (imported.isEmpty()) return
+            val result = AssetSyncManager.syncAllAssets(
+                context = context,
+                repository = repository,
+                assets = imported,
+                onProgress = { /* 结果页不展示进度：这轮是后台补价，用户看到的是「导入成功」 */ },
+                forceRefresh = false,
+                syncTrigger = "币安导入保存"
+            )
+            AppLogger.i(
+                "币安导入后行情同步：成功 ${result.successCount}，失败 ${result.failedCount}",
+                "BinanceImportVM"
+            )
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            AppLogger.e("币安导入后行情同步失败: ${e.message}", e, "BinanceImportVM")
         }
     }
 

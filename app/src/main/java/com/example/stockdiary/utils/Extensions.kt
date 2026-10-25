@@ -1,5 +1,6 @@
 package com.example.stockdiary.utils
 
+import com.example.stockdiary.common.DateFormats
 import com.example.stockdiary.data.dividend.DividendData
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
@@ -15,7 +16,6 @@ import java.time.LocalDateTime
 import java.time.ZoneId
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
-import java.util.concurrent.ConcurrentHashMap
 
 // ========== 资产列表去重（给 Room 全表 Flow 用） ==========
 
@@ -198,21 +198,13 @@ fun Double.profitColor(): Color =
     if (this >= 0) AppTheme.colors.lossRed else AppTheme.colors.profitGreen
 
 /**
- * 按 pattern 缓存的 [DateTimeFormatter]。
- *
- * `DateTimeFormatter.ofPattern()` 每次都要重新解析 pattern 并建一整套解析/格式化字段，
- * 而 `toDateString` / `toLocalDate` / `formatDateLabel` 都是被逐行、逐格调用的
- * （日历 42 格、图表每个刻度标签、成交额每行解析一次）—— pattern 却是固定的那两三个。
- * DateTimeFormatter 本身不可变、线程安全，缓存下来可以随便复用。
+ * 日期 pattern 缓存已统一收到 [DateFormats]（common 包）：那里是全 App 口径源，
+ * `ofPattern` 即缓存入口。此处不再自建第二份缓存。
  */
-private val dateTimeFormatters = ConcurrentHashMap<String, DateTimeFormatter>()
-
-private fun patternFormatter(pattern: String): DateTimeFormatter =
-    dateTimeFormatters.getOrPut(pattern) { DateTimeFormatter.ofPattern(pattern) }
 
 fun Long.toFileTimestamp(): String =
     ZonedDateTime.ofInstant(Instant.ofEpochMilli(this), ZoneId.systemDefault()).toLocalDateTime()
-        .format(patternFormatter("yyyyMMdd_HHmmss"))
+        .format(DateFormats.FILE_TIMESTAMP_FORMATTER)
 
 fun Int.toKMB(): String = when {
     this >= 1_000_000_000 -> "${(this / 1_000_000_000.0).format(1)}B"
@@ -230,28 +222,28 @@ fun Double.toKMB(): String = when {
 
 // ========== 日期格式化 ==========
 
-fun Long.toDateString(format: String = "yyyy-MM-dd"): String {
+fun Long.toDateString(format: String = DateFormats.ISO_DATE): String {
     return try {
         ZonedDateTime.ofInstant(Instant.ofEpochMilli(this), ZoneId.systemDefault()).toLocalDateTime()
-            .format(patternFormatter(format))
+            .format(DateFormats.ofPattern(format))
     } catch (e: Exception) {
         ""
     }
 }
 
-fun Long.toDisplayDate(): String = toDateString("yyyy-MM-dd")
-fun Long.toDisplayTime(): String = toDateString("HH:mm")
-fun Long.toDisplayDateTime(): String = toDateString("yyyy-MM-dd HH:mm")
+fun Long.toDisplayDate(): String = toDateString(DateFormats.ISO_DATE)
+fun Long.toDisplayTime(): String = toDateString(DateFormats.TIME_ONLY)
+fun Long.toDisplayDateTime(): String = toDateString(DateFormats.DISPLAY_DATETIME)
 
-fun String.toLocalDate(format: String = "yyyy-MM-dd"): LocalDate? {
+fun String.toLocalDate(format: String = DateFormats.ISO_DATE): LocalDate? {
     return try {
-        LocalDate.parse(this, patternFormatter(format))
+        LocalDate.parse(this, DateFormats.ofPattern(format))
     } catch (e: Exception) {
         null
     }
 }
 
-fun String.toTimestamp(format: String = "yyyy-MM-dd"): Long {
+fun String.toTimestamp(format: String = DateFormats.ISO_DATE): Long {
     return toLocalDate(format)?.atStartOfDay(ZoneId.systemDefault())?.toInstant()?.toEpochMilli() ?: 0L
 }
 
@@ -337,7 +329,7 @@ fun Double.isZero(): Boolean = this == 0.0
 /** 将 yyyy-MM-dd 日期简化为 M/d */
 fun String.formatDateLabel(): String {
     return try {
-        val date = LocalDate.parse(this, patternFormatter("yyyy-MM-dd"))
+        val date = LocalDate.parse(this, DateFormats.ISO_DATE_FORMATTER)
         "${date.monthValue}/${date.dayOfMonth}"
     } catch (e: Exception) { this }
 }

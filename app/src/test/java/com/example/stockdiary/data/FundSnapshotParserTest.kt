@@ -56,6 +56,34 @@ class FundSnapshotParserTest {
         assertEquals("2026年10月08日", r.dataDate)
     }
 
+    @Test
+    fun 数据日期是脏月份时不当成数据日期() {
+        // 「2026年13月45日」形态合法但日历不存在：OCR 脏数据不能当数据日期展示
+        // （与分红除息日同一个坑，见 DividendDateValidator）。持仓照常解析
+        val r = FundSnapshotParser.parse(
+            listOf("数据日期：2026年13月45日 筛选") + listOf(
+                "中银如意宝货币A (004502)",
+                "持有份额 参考净值 资产情况",
+                "10,025.31 1.0000 10,025.31"
+            )
+        )
+        assertNull(r.dataDate)
+        assertEquals(1, r.holdings.size)
+        assertNull(r.holdings[0].navDate)
+    }
+
+    @Test
+    fun 数据日期脏行不占位_后面的真日期仍能认出来() {
+        val r = FundSnapshotParser.parse(
+            listOf("数据日期：2026年13月45日 筛选", "数据日期：2026年10月08日 筛选") + listOf(
+                "中银如意宝货币A (004502)",
+                "持有份额 参考净值 资产情况",
+                "10,025.31 1.0000 10,025.31"
+            )
+        )
+        assertEquals("2026年10月08日", r.dataDate)
+    }
+
     // ---------- 坑一：括号全角半角混用 ----------
 
     @Test

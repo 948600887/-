@@ -247,6 +247,30 @@ class FundEStatementParserTest {
         assertNull(FundEStatementParser.normalizeDate(""))
     }
 
+    @Test
+    fun 形态合法但日历不存在的日期判脏() {
+        // 「2026-13-45」月越界、「2026-02-30」日历不存在：OCR/CSV 脏数据
+        // 归一后也不能当净值日期展示（与分红除息日同一个坑，见 DividendDateValidator）
+        assertNull(FundEStatementParser.normalizeDate("2026-13-45"))
+        assertNull(FundEStatementParser.normalizeDate("2026/13/45"))
+        assertNull(FundEStatementParser.normalizeDate("2026年13月45日"))
+        assertNull(FundEStatementParser.normalizeDate("2026-02-30"))
+        assertNull(FundEStatementParser.normalizeDate("2026-00-10"))
+    }
+
+    @Test
+    fun 净值日期是脏月份时_持仓照常解析但没有净值日期() {
+        val r = FundEStatementParser.parse(
+            table(row("1.0", "004502", "中银如意宝货币A", "10025.31", navDate = "2026-13-45"))
+        )
+        // 持仓本身没问题：照常解析，只是这一行没有可信的净值日期
+        assertEquals(1, r.holdings.size)
+        assertNull(r.holdings[0].navDate)
+        // 整份数据唯一的日期是脏的 → 没有数据日期，且不报问题打扰用户
+        assertNull(r.navDate)
+        assertTrue(r.problems.isEmpty())
+    }
+
     // ---------- 异常输入 ----------
 
     @Test

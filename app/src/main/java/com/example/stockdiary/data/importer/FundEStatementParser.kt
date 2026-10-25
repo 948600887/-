@@ -1,5 +1,6 @@
 package com.example.stockdiary.data.importer
 
+import com.example.stockdiary.data.dividend.DividendDateValidator
 import com.example.stockdiary.utils.ExchangeRateManager
 
 /**
@@ -193,6 +194,9 @@ object FundEStatementParser {
     internal fun normalizeDate(text: String): String? {
         val match = DATE_REGEX.find(text.trim()) ?: return null
         val (year, month, day) = match.destructured
-        return "%04d-%02d-%02d".format(year.toInt(), month.toInt(), day.toInt())
+        val normalized = "%04d-%02d-%02d".format(year.toInt(), month.toInt(), day.toInt())
+        // 形态归位后还要过真实日历校验：「2026-13-45」这种 OCR/CSV 脏数据形态合法但
+        // 日历上不存在，放过去界面就显示一个假日期（与分红除息日同一个坑，见 DividendDateValidator）
+        return normalized.takeIf { DividendDateValidator.normalizeOrNull(it) != null }
     }
 }

@@ -203,6 +203,37 @@ class HoldingSnapshotParserTest {
     }
 
     @Test
+    fun 数据日期是脏月份时不当成数据日期() {
+        // 「2026-13-45」形态合法但日历不存在：OCR 脏数据不能当数据日期展示
+        // （与分红除息日同一个坑，见 DividendDateValidator）。持仓照常解析
+        val r = HoldingSnapshotParser.parse(
+            listOf("一码通持有查询", "数据日期 2026-13-45", "名称/代码 持有数量 其中冻结数量") +
+                listOf("黄金LOF 262", "160719")
+        )
+        assertNull(r.dataDate)
+        assertEquals(1, r.holdings.size)
+    }
+
+    @Test
+    fun 数据日期脏行不占位_后面的真日期仍能认出来() {
+        val r = HoldingSnapshotParser.parse(
+            listOf("数据日期 2026-13-45", "数据日期 2026-10-09", "名称/代码 持有数量 其中冻结数量") +
+                listOf("黄金LOF 262", "160719")
+        )
+        assertEquals("2026-10-09", r.dataDate)
+    }
+
+    @Test
+    fun 乱码输入不炸() {
+        // 编码异常（GBK 文本被按 UTF-8 解出乱码）不能让解析器抛异常：
+        // 认不出来的行忽略或进 incomplete，但绝不能崩在导入第一步
+        val r = HoldingSnapshotParser.parse(
+            listOf("é��è¯­", "数据日期 é��", "黄金LOF é��", "160719")
+        )
+        assertTrue(r.holdings.isEmpty())
+    }
+
+    @Test
     fun 冻结列的横杠不会被当成数量() {
         // 真实一行是「名称 | 持有数量 | 其中冻结数量」，还原后三者常在同行：
         // "黄金LOF 262 -"。末位那个 "-" 是冻结列，不能把 262 冲掉也不能让它自己变数量

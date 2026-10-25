@@ -1,5 +1,7 @@
 package com.example.stockdiary.data.importer
 
+import com.example.stockdiary.data.dividend.DividendDateValidator
+
 /**
  * 「中国结算 · 一码通持有查询」持仓截图解析器（纯函数，可直接 JVM 单测）。
  *
@@ -139,7 +141,12 @@ object HoldingSnapshotParser {
             if (line.isBlank()) return@forEachIndexed
 
             if (dataDate == null) {
-                DATA_DATE_REGEX.find(line)?.let { dataDate = it.value }
+                // 形态合法还要日历真实：OCR 脏数据「2026-13-45」不能当数据日期展示
+                // （与分红除息日同一个坑，见 DividendDateValidator）。不合法就不占位，
+                // 后面行里再出现真日期时仍有机会被认出来。
+                DATA_DATE_REGEX.find(line)?.let { m ->
+                    if (DividendDateValidator.normalizeOrNull(m.value) != null) dataDate = m.value
+                }
             }
 
             val symbol = extractSymbol(line)

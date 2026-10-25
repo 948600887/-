@@ -73,12 +73,15 @@ fun AssetDonutChart(
             startAngle += sweepAngle
         }
 
-        // 中心文字
+        // 中心文字：显示快照里权威的净资产口径「总资产」(latest.totalAssets)，
+        // 与仪表盘一致；而非仅正值合计 total。当用户有负余额加密货币（借币/欠币）时，
+        // total 会漏掉这部分负债、低估总资产，必须用快照原始 totalAssets。
+        // 弧线比例仍按 total（正值合计）绘制，仅中心数字改用权威值。
         drawContext.canvas.nativeCanvas.drawText(
             "总资产", center.x, center.y - 4f, labelPaint
         )
         drawContext.canvas.nativeCanvas.drawText(
-            "¥${total.format(0)}", center.x, center.y + 18f, valuePaint
+            "¥${latest.totalAssets.format(0)}", center.x, center.y + 18f, valuePaint
         )
     }
 }

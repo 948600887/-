@@ -23,36 +23,6 @@ data class StockData(
     val isUp: Boolean get() = (change ?: 0.0) > 0
     val isDown: Boolean get() = (change ?: 0.0) < 0
     val isFlat: Boolean get() = (change ?: 0.0) == 0.0
-    
-    companion object {
-        fun fromSina(code: String, data: String): StockData? {
-            val parts = data.split("=").getOrNull(1)?.trim()?.removePrefix("\"")?.removeSuffix("\";")?.split(",")
-                ?: return null
-            
-            return try {
-                StockData(
-                    code = code,
-                    name = parts.getOrNull(0) ?: "",
-                    price = parts.getOrNull(3)?.toDoubleOrNull() ?: 0.0,
-                    yesterdayClose = parts.getOrNull(2)?.toDoubleOrNull(),
-                    open = parts.getOrNull(1)?.toDoubleOrNull(),
-                    volume = parts.getOrNull(8)?.toLongOrNull(),
-                    high = parts.getOrNull(33)?.toDoubleOrNull(),
-                    low = parts.getOrNull(34)?.toDoubleOrNull(),
-                    amount = parts.getOrNull(37)?.toDoubleOrNull(),
-                    change = parts.getOrNull(3)?.toDoubleOrNull()?.minus(parts.getOrNull(2)?.toDoubleOrNull() ?: 0.0),
-                    changePercent = calculateChangePercent(parts),
-                    timestamp = System.currentTimeMillis()
-                )
-            } catch (e: Exception) { null }
-        }
-        
-        private fun calculateChangePercent(parts: List<String>): Double? {
-            val current = parts.getOrNull(3)?.toDoubleOrNull() ?: return null
-            val yesterday = parts.getOrNull(2)?.toDoubleOrNull() ?: return null
-            return if (yesterday != 0.0) ((current - yesterday) / yesterday * 100) else null
-        }
-    }
 }
 
 data class FundData(
@@ -71,36 +41,6 @@ data class FundData(
     
     val isUp: Boolean get() = (changePercent ?: 0.0) > 0
     val isEstimated: Boolean get() = netWorth != null && price != netWorth
-    
-    companion object {
-        fun fromEastmoney(code: String, json: String): FundData? {
-            val cleanJson = json.removePrefix("jsonpgz(").removeSuffix(")").trim()
-            
-            return try {
-                FundData(
-                    code = parseValue(cleanJson, "fundcode") ?: code,
-                    name = parseValue(cleanJson, "name") ?: "",
-                    estimatedValue = parseValue(cleanJson, "gsz")?.toDoubleOrNull(),
-                    netWorth = parseValue(cleanJson, "dwjz")?.toDoubleOrNull(),
-                    price = parseValue(cleanJson, "gsz")?.toDoubleOrNull() ?: 0.0,
-                    changePercent = parseValue(cleanJson, "gszzl")?.toDoubleOrNull(),
-                    change = calculateChange(parseValue(cleanJson, "gsz"), parseValue(cleanJson, "dwjz")),
-                    netWorthDate = parseValue(cleanJson, "jztime")
-                )
-            } catch (e: Exception) { null }
-        }
-        
-        private fun parseValue(json: String, key: String): String? {
-            val pattern = "\"$key\"\\s*:\\s*\"?([^,\"}]+)\"?".toRegex()
-            return pattern.find(json)?.groupValues?.getOrNull(1)?.trim()
-        }
-        
-        private fun calculateChange(gsz: String?, dwjz: String?): Double? {
-            val gszVal = gsz?.toDoubleOrNull() ?: return null
-            val dwjzVal = dwjz?.toDoubleOrNull() ?: return null
-            return if (dwjzVal != 0.0) gszVal - dwjzVal else null
-        }
-    }
 }
 
 data class CryptoData(

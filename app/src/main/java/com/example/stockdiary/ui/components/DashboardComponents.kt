@@ -189,14 +189,19 @@ fun AssetDistributionCard(
                     color = AppTheme.colors.onSurfaceVariant
                 )
             } else {
+                // 正值合计作为占比基准：负余额（如借币/欠币的加密货币）是净负债，
+                // 不应在资产分布里出现负百分比——金额标红、占比记为「负债」。
+                // 设计上负余额加密货币计入总资产而非总负债，这里只修正展示口径，不重分类。
+                val positiveTotal = entries.sumOf { it.second.sumOf { a -> a.totalValueCny }.coerceAtLeast(0.0) }
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceEvenly
                 ) {
                     entries.forEach { (type, typeAssets) ->
                         val typeValue = typeAssets.sumOf { it.totalValueCny }
-                        val typePercent = (typeValue / totalAssets * 100)
-                        DistributionItem(label = type.displayName, value = typeValue, percent = typePercent)
+                        val isDebt = typeValue < 0
+                        val typePercent = if (isDebt || positiveTotal <= 0) 0.0 else (typeValue / positiveTotal * 100)
+                        DistributionItem(label = type.displayName, value = typeValue, percent = typePercent, isDebt = isDebt)
                     }
                 }
             }
@@ -205,7 +210,7 @@ fun AssetDistributionCard(
 }
 
 @Composable
-fun DistributionItem(label: String, value: Double, percent: Double) {
+fun DistributionItem(label: String, value: Double, percent: Double, isDebt: Boolean = false) {
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         modifier = Modifier.width(70.dp)
@@ -215,9 +220,14 @@ fun DistributionItem(label: String, value: Double, percent: Double) {
         Text(
             text = "¥${if (value >= 10000) "${(value / 10000).format(1)}万" else value.format(0)}",
             style = MaterialTheme.typography.labelMedium,
-            fontWeight = FontWeight.Medium
+            fontWeight = FontWeight.Medium,
+            color = if (isDebt) AppTheme.colors.lossRed else MaterialTheme.colorScheme.onSurface
         )
-        Text(text = "${percent.format(1)}%", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+        Text(
+            text = if (isDebt) "负债" else "${percent.format(1)}%",
+            style = MaterialTheme.typography.labelSmall,
+            color = if (isDebt) AppTheme.colors.lossRed else MaterialTheme.colorScheme.primary
+        )
     }
 }
 

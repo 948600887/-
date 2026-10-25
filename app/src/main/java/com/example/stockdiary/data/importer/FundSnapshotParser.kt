@@ -104,6 +104,8 @@ object FundSnapshotParser {
 
             val share = numbers[0]
             val nav = numbers[1]
+            // 基金份额必须为正：场外基金不存在「负份额」这种合法状态（负余额只发生在币安加密货币，
+            // 由 BinanceImportService 单独保留），负值视为识别错误或脏数据跳过，口径与 FundEStatementParser 一致。
             if (share <= 0.0 || nav <= 0.0) {
                 incomplete.add(valueLine)
                 return@forEachIndexed

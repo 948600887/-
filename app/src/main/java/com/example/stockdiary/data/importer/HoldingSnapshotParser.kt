@@ -151,9 +151,10 @@ object HoldingSnapshotParser {
                 val name = pendingName
 
                 // quantity 必须严格为正（> 0）：与 FundEStatementParser 对齐，0 份额视为没读懂。
-                // 负数会在落库时因 Asset 构造器的 require(balance >= 0) 抛异常，
-                // 把整次导入打断成一句「数量不能为负数」，用户根本看不出是哪一行的问题；
-                // 这里提前把 <= 0 的行判掉，让它走 incomplete 报出来。
+                // 负数量只可能是数据识别错误——股票/基金不存在「负持仓」这种合法状态
+                // （借币/欠币这类负余额只发生在币安加密货币，由 BinanceImportService 单独保留；
+                // 内核也只允许 CRYPTO 类型持有负 balance）。所以这里把 <= 0 的行提前判掉，
+                // 走 incomplete 报出来，用户能看清是哪一行被跳过，而不是落库时整段崩溃。
                 if (name != null && quantity != null && quantity.isFinite() && quantity > 0.0) {
                     holdings.add(
                         ParsedHolding(

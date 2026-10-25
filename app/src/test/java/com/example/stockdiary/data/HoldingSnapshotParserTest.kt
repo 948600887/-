@@ -376,4 +376,14 @@ class HoldingSnapshotParserTest {
         assertEquals(1, r.incomplete.size)
         assertTrue(r.incomplete[0].contains("160719"))
     }
+
+    @Test
+    fun 数量为负时判为识别错误_进incomplete而非落库() {
+        // 股票/基金不存在「负持仓」这种合法状态（借币/欠币这类负余额只发生在币安加密货币，
+        // 由 BinanceImportService 单独保留）；负值在此视为数据错误，走 incomplete 让用户看清哪行被跳过。
+        val r = HoldingSnapshotParser.parse(noise + listOf("黄金LOF -50", "160719"))
+        assertTrue("负数量不应落库", r.holdings.isEmpty())
+        assertEquals(1, r.incomplete.size)
+        assertTrue(r.incomplete[0].contains("160719"))
+    }
 }

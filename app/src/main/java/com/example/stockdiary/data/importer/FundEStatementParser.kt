@@ -141,10 +141,13 @@ object FundEStatementParser {
                 name.isBlank() ->
                     problems.add("第 $lineNo 行缺基金名称（代码 $code）")
 
-                // 份额必须为正：Asset 构造器里有 require(balance >= 0)，
-                // 让负数走到落库会把整次导入打断，还说不清是哪一行
-                quantity == null || quantity <= 0.0 ->
+                // 份额必须为正：场外基金不存在「负份额」这种合法状态（负余额只发生在币安加密货币，
+                // 由 BinanceImportService 单独保留），这里负份额一律视为识别错误跳过，
+                // 与 HoldingSnapshotParser 的口径保持一致。
+                quantity == null ->
                     problems.add("第 $lineNo 行份额读不出来：$shareText")
+                quantity <= 0.0 ->
+                    problems.add("第 $lineNo 行份额为负、非有效持仓，已跳过：$shareText")
 
                 // 币种认不出来时不能默认成 CNY：那会让外币净值按人民币数值汇总，
                 // 错得无声无息。报出来让用户自己判断

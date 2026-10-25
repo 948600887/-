@@ -272,11 +272,13 @@ class FundEStatementParserTest {
     }
 
     @Test
-    fun 负份额会被挡下_不让它在落库时才炸() {
-        // Asset 构造器有 require(balance >= 0)，负数走到那里会把整次导入打断
+    fun 负份额会被挡下_明确报为份额为负已跳过() {
+        // 场外基金不存在「负份额」这种合法状态（负余额只发生在币安加密货币），
+        // 负份额一律视为识别错误跳过，且报错必须点明「为负」而不是含糊的「读不出来」。
         val r = FundEStatementParser.parse(table(row("1.0", "004502", "负份额", "-100.00")))
         assertTrue(r.holdings.isEmpty())
         assertEquals(1, r.problems.size)
+        assertTrue("应明确说明份额为负、已跳过", r.problems[0].contains("份额为负") && r.problems[0].contains("已跳过"))
     }
 
     @Test

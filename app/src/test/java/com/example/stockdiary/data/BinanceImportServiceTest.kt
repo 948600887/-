@@ -4,6 +4,7 @@ import com.example.stockdiary.data.repository.AssetRepository
 import com.example.stockdiary.data.importer.BinanceImportService
 import com.example.stockdiary.data.importer.estimatedValueCny
 import com.example.stockdiary.data.importer.filterDustByValue
+import com.example.stockdiary.data.importer.mergeEarnIntoBalances
 import com.example.stockdiary.data.importer.priceKeyFor
 import com.example.stockdiary.data.importer.referencePriceForImport
 import com.example.stockdiary.database.Asset
@@ -507,5 +508,121 @@ class BinanceImportServiceTest {
         assertEquals(1.0, referencePriceForImport("USDT", emptyMap())!!, 1e-9)
         // 冷门币查不到 → null
         assertEquals(null, referencePriceForImport("NEWCOIN", emptyMap()))
+    }
+
+    // ---------- 负余额（借币/欠币）必须留下 ----------
+
+    @Test
+    fun 负余额不被dust过滤丢掉() = runBlocking {
+        // 借币在接口里就是 free+locked 为负。丢掉等于「只记资产不记负债」→ 净资产虚高。
+        val preview = service.buildPreview(
+            balances = listOf(
+                balance("USDT", free = -30.0),   // 欠 30 USDT
+                balance("BTC", free = 0.5)       // 正常持仓
+            ),
+            existingAssets = emptyList()
+        )
+        val bySymbol = preview.items.associateBy { it.symbol }
+        assertEquals(-30.0, bySymbol["USDT"]!!.quantity, 1e-9)
+        assertEquals(0.5, bySymbol["BTCUSDT"]!!.quantity, 1e-9)
+    }
+
+    @Test
+    fun 同代码的负债与持仓合并为净额() = runBlocking {
+        // 持有 100、欠 30 → 净 70（币安自己的净额口径），而不是 130 或 100
+        val preview = service.buildPreview(
+            balances = listOf(
+                balance("USDT", free = 100.0),
+                balance("USDT", free = -30.0)
+            ),
+            existingAssets = emptyList()
+        )
+        assertEquals(1, preview.items.size)
+        assertEquals(70.0, preview.items[0].quantity, 1e-9)
+    }
+
+    @Test
+    fun 金额够大的负债不被市值过滤丢掉() = runBlocking {
+        // filterDustByValue 的判据必须是绝对值：欠 -700 元不能因为 < 阈值 10 元而被滤掉
+        val (kept, filtered) = filterDustByValue(
+            balances = listOf(
+                balance("USDT", free = -100.0),   // 欠 100 USDT → 必须保留
+                balance("AAA", free = 0.000001)   // 零头正持仓 → 滤掉
+            ),
+            priceOf = { 1.0 },
+            minValueCny = 10.0
+        )
+        assertEquals(listOf("USDT"), kept.map { it.asset })
+        assertEquals(1, filtered)
+    }
+
+    @Test
+    fun 估不出价的资产一律保留不丢弃() {
+        // 取不到价（新币/冷门币）→ value == null → 保留，宁可多导一条让人自己删
+        val (kept, filtered) = filterDustByValue(
+            balances = listOf(balance("NEWCOIN", free = 5.0)),
+            priceOf = { null },
+            minValueCny = 10.0
+        )
+        assertEquals(1, kept.size)
+        assertEquals(0, filtered)
+    }
+
+    // ---------- 理财持仓合并（取最大值，绝不重复计） ----------
+
+    private fun earn(asset: String, amount: Double, locked: Boolean = false) =
+        com.example.stockdiary.network.BinanceEarnPosition(
+            asset = asset,
+            amount = amount,
+            locked = locked
+        )
+
+    @Test
+    fun 理财为空时原样返回() {
+        val balances = listOf(balance("BTC", free = 0.5))
+        assertEquals(balances, mergeEarnIntoBalances(balances, emptyList()))
+    }
+
+    @Test
+    fun 理财已在现货里时不会重复计() {
+        // 现货 USDC 43.46 与对账单 Earn 的 USDC 43.46 完全一致 → 合并后仍是 43.46，
+        // 绝不能相加成 86.92（那等于把同一笔钱记两遍）
+        val merged = mergeEarnIntoBalances(
+            balances = listOf(balance("USDC", free = 43.46)),
+            earn = listOf(earn("USDC", 43.46))
+        )
+        assertEquals(1, merged.size)
+        assertEquals(43.46, merged[0].total, 1e-9)
+    }
+
+    @Test
+    fun 现货只有一部分时用理财数量补齐() {
+        // 实测场景：现货只体现 57.4，理财口径是 91.75 → 补齐到 91.75
+        val merged = mergeEarnIntoBalances(
+            balances = listOf(balance("USDT", free = 57.4)),
+            earn = listOf(earn("USDT", 91.75))
+        )
+        assertEquals(91.75, merged[0].total, 1e-9)
+    }
+
+    @Test
+    fun 理财独有的资产被加进来() {
+        // 现货里根本没有这个资产（纯理财持仓）
+        val merged = mergeEarnIntoBalances(
+            balances = listOf(balance("BTC", free = 0.5)),
+            earn = listOf(earn("PAXG", 0.002474))
+        )
+        assertEquals(2, merged.size)
+        assertEquals(0.002474, merged.first { it.asset == "PAXG" }.total, 1e-9)
+    }
+
+    @Test
+    fun 同一资产的活期与定期先合计再比较() {
+        // 活期 10 + 定期 30 = 40 > 现货 5 → 取 40
+        val merged = mergeEarnIntoBalances(
+            balances = listOf(balance("USDT", free = 5.0)),
+            earn = listOf(earn("USDT", 10.0), earn("USDT", 30.0, locked = true))
+        )
+        assertEquals(40.0, merged[0].total, 1e-9)
     }
 }

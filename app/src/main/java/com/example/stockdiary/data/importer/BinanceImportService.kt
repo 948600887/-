@@ -5,8 +5,10 @@ import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.network.BinanceAPI
 import com.example.stockdiary.network.BinanceBalance
+import com.example.stockdiary.network.BinanceEarnPosition
 import com.example.stockdiary.utils.AppLogger
 import com.example.stockdiary.utils.ExchangeRateManager
+import kotlin.math.abs
 
 /**
  * 币安现货持仓导入：把账户接口拉回的余额对齐到库里的加密资产，产出预览、确认后落库。
@@ -104,9 +106,15 @@ class BinanceImportService(
         existingAssets: List<Asset>
     ): Preview {
         val items = SnapshotAlignment.align(
-            // dust 过滤：币安会返还一堆 0.00000000 的零头资产，free+locked 低于阈值一律忽略，
-            // 否则预览里会出现几十条数量为 0 的「新增」，用户根本不知道自己持有这些
-            rows = balances.filter { it.total >= DUST_THRESHOLD },
+            // dust 过滤：币安会返还一堆 0.00000000 的零头资产，free+locked 的**绝对值**低于
+            // 阈值一律忽略，否则预览里会出现几十条数量为 0 的「新增」，用户根本不知道自己持有这些。
+            //
+            // 注意**负余额不能丢**：借币 / 组合保证金欠币在接口里就是 free+locked 为负，
+            // 丢掉等于「只记资产不记负债」，净资产被虚高（2026-10-25 对账单排查时发现）。
+            // 负余额按同代码合并时会与现货持仓自然抵消（持有 100、欠 30 → 净 70），
+            // 正是币安自己的净额口径；纯负债（没有对应持仓）会落成一条数量为负的加密资产，
+            // 参与净值计算时自动扣减。
+            rows = balances.filter { abs(it.total) >= DUST_THRESHOLD },
             existing = existingAssets,
             // 币安一个账户只有一份持仓，不存在「同代码跨多个账户」的冲突
             multiAccountConflict = false
@@ -370,12 +378,79 @@ internal fun filterDustByValue(
     var filtered = 0
     for (balance in balances) {
         val value = estimatedValueCny(balance.asset, balance.total, priceOf)
-        // value == null（估不出价）→ 保留；value < 阈值 → 滤掉
-        if (value == null || value >= minValueCny) {
+        // value == null（估不出价）→ 保留；|value| < 阈值 → 滤掉。
+        // 判据用绝对值：负余额是借币/欠币，金额大的负债**必须留下**（丢了就虚高净资产），
+        // 只有「几十元都不到」的零头负债才当噪声滤掉。
+        if (value == null || value >= minValueCny || value <= -minValueCny) {
             kept.add(balance)
         } else {
             filtered++
         }
     }
     return kept to filtered
+}
+
+/**
+ * 把理财持仓（活期 + 定期）合并进现货余额。
+ *
+ * ## 合并规则：同资产取 **较大值**，不是相加
+ *
+ * 为什么不能相加：`/api/v3/account` 的 balances **已经包含了一部分理财持仓**——
+ * 实测用户现货余额里的 USDC 43.46 / PAXG 0.002474 / BNB 0.003154 与官方对账单的
+ * Earn 持仓数字完全一致，说明这些理财资产在现货接口里是有体现的。直接相加会把
+ * 同一笔钱记两遍。取 max 则两种情形都对：
+ *
+ * - 理财已包含在现货里（两者相等或现货更大）→ 值不变，不会重复计；
+ * - 现货只有一部分 / 完全没有（这部分理财不在现货口径里）→ 用理财的完整数量补齐。
+ *
+ * 代价：若同一资产在两个来源里是**互不重叠的两笔**（如现货 57 + 定期 34.5），
+ * max 会漏掉小的那笔。宁可少记也不能虚高——虚高会让总资产凭空多出一笔钱，
+ * 比少记危险得多；且这种情况在币安口径下极少（理财接口返回的是该资产的全部持仓）。
+ *
+ * @param balances 现货余额（`/api/v3/account`）
+ * @param earn     理财持仓（simple-earn 的活期与定期接口）；为空时原样返回
+ * @return 合并后的余额列表（顺序：先现货原序，后理财独有的资产）
+ */
+internal fun mergeEarnIntoBalances(
+    balances: List<BinanceBalance>,
+    earn: List<BinanceEarnPosition>
+): List<BinanceBalance> {
+    if (earn.isEmpty()) return balances
+
+    val earnTotals = linkedMapOf<String, Double>()
+    for (position in earn) {
+        val key = position.asset.uppercase().trim()
+        if (key.isEmpty() || position.amount <= 0.0) continue
+        earnTotals[key] = (earnTotals[key] ?: 0.0) + position.amount
+    }
+    if (earnTotals.isEmpty()) return balances
+
+    var raised = 0
+    val merged = balances.map { balance ->
+        val key = balance.asset.uppercase().trim()
+        val earnAmount = earnTotals[key]
+        if (earnAmount != null && earnAmount > balance.total) {
+            raised++
+            // 用理财数量覆盖：free 存合并值、locked 归零（理财侧不再区分可用/冻结）
+            BinanceBalance(asset = balance.asset, free = earnAmount, locked = 0.0)
+        } else {
+            balance
+        }
+    }.toMutableList()
+
+    val known = balances.map { it.asset.uppercase().trim() }.toSet()
+    var added = 0
+    earnTotals.forEach { (asset, amount) ->
+        if (asset !in known) {
+            merged.add(BinanceBalance(asset = asset, free = amount, locked = 0.0))
+            added++
+        }
+    }
+
+    AppLogger.i(
+        "币安理财持仓合并：现货 ${balances.size} 项 + 理财 ${earnTotals.size} 个资产 → " +
+            "补齐 $raised 项、新增 $added 项",
+        "BinanceImport"
+    )
+    return merged
 }

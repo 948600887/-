@@ -4,6 +4,7 @@ import com.example.stockdiary.common.APIEndpoints
 import com.example.stockdiary.utils.AppLogger
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -34,6 +35,22 @@ data class BinanceBalance(
 }
 
 /**
+ * 简单理财（Simple Earn）的一条持仓。
+ *
+ * 币安的 Earn 持仓**不等于**现货余额：官方对账单实测（账户 1040426493，2026-10-22）
+ * 显示 Spot & Margin = 0.00 USD 而 Earn = 209.86 USD，钱全在理财里。`/api/v3/account`
+ * 只反映现货口径，理财里还有一部分并没落在现货余额上——只导入现货就会少算。
+ *
+ * @param amount 该产品的持有数量（活期取 `totalAmount`，定期取 `amount`）
+ * @param locked true = 定期/锁仓，false = 活期
+ */
+data class BinanceEarnPosition(
+    val asset: String,
+    val amount: Double,
+    val locked: Boolean
+)
+
+/**
  * 币安**签名账户接口**客户端（只读）。
  *
  * 与 [BinanceAPI] 的分工：那个是公开行情（ticker/klines，无需密钥）；
@@ -59,6 +76,23 @@ object BinanceAccountAPI {
 
     /** 账户查询接口（签名，需 API Key）。必须走 api.binance.com——公开行情镜像不服务 /account */
     private const val ACCOUNT_URL = APIEndpoints.Binance.BASE_URL + "/account"
+
+    /**
+     * 简单理财持仓接口（签名）：活期 / 定期。
+     *
+     * 与 [ACCOUNT_URL] 同主机（都只能走 api.binance.com，镜像不服务签名接口），
+     * 因此**同样不喂熔断器**（理由见 [getAccount] 的 451 注释）。
+     */
+    private const val EARN_FLEXIBLE_URL =
+        APIEndpoints.Binance.BASE_URL + "/sapi/v1/simple-earn/flexible/position"
+    private const val EARN_LOCKED_URL =
+        APIEndpoints.Binance.BASE_URL + "/sapi/v1/simple-earn/locked/position"
+
+    /**
+     * 理财持仓单页条数。真实账户的理财标的通常是个位数到几十个，
+     * 100 足以一页取完，不必做分页循环（多页 = 多轮签名请求，收益极小）。
+     */
+    private const val EARN_PAGE_SIZE = 100
 
     /** 批量最新价接口（公开免签）。走 data-api.binance.vision（不做地区封锁），用于导入时估算市值 */
     private const val PRICE_URL = APIEndpoints.Binance.MARKET_DATA_BASE_URL + APIEndpoints.Binance.TICKER
@@ -203,6 +237,129 @@ object BinanceAccountAPI {
                 Result.failure(userFacing)
             }
         }
+
+    /**
+     * 拉取简单理财持仓（活期 + 定期，只读）。
+     *
+     * ## 为什么必须单拉
+     *
+     * 官方对账单证实用户的钱可能 100% 在 Earn 钱包（现货 0.00），而 `/api/v3/account`
+     * 是现货口径，两者并不相等（实测导入后比币安自己的总资产少 ~34.5 USD）。
+     * 理财持仓要走签名接口单独取。
+     *
+     * ## 失败一律降级，绝不中断导入
+     *
+     * 这两个接口需要 API Key 开通相应读取权限，权限不足/接口调整/网络失败都是常态。
+     * **任何失败都返回空列表**（只导入现货），比抛异常把整个导入打回去好——
+     * 余额才是关键数据，理财只是补齐。失败原因记日志（币安的 code+msg，不含密钥）。
+     *
+     * @return 活期 + 定期持仓；失败返回空列表
+     */
+    suspend fun getEarnPositions(apiKey: String, apiSecret: String): List<BinanceEarnPosition> =
+        getEarnPositions(apiKey, apiSecret, client)
+
+    /** internal 重载：允许单测注入假 client，与 [getAccount] 同惯例 */
+    internal suspend fun getEarnPositions(
+        apiKey: String,
+        apiSecret: String,
+        httpClient: OkHttpClient
+    ): List<BinanceEarnPosition> = withContext(Dispatchers.IO) {
+        // 两个接口互不依赖，并发取省一次串行往返；各自失败互不影响
+        val flexible = async {
+            runCatching {
+                fetchEarnPage(EARN_FLEXIBLE_URL, apiKey, apiSecret, httpClient, locked = false)
+            }.onFailure { e ->
+                warnEarnFailure("活期", e)
+            }.getOrDefault(emptyList())
+        }
+        val lockedPositions = async {
+            runCatching {
+                fetchEarnPage(EARN_LOCKED_URL, apiKey, apiSecret, httpClient, locked = true)
+            }.onFailure { e ->
+                warnEarnFailure("定期", e)
+            }.getOrDefault(emptyList())
+        }
+        flexible.await() + lockedPositions.await()
+    }
+
+    /**
+     * 拉一页理财持仓。
+     *
+     * 非 2xx（未开通权限 / 接口下线 / 被地区限制）记一条警告后返回空——**不抛**，
+     * 由 [getEarnPositions] 降级成「只用现货」。
+     */
+    private suspend fun fetchEarnPage(
+        url: String,
+        apiKey: String,
+        apiSecret: String,
+        httpClient: OkHttpClient,
+        locked: Boolean
+    ): List<BinanceEarnPosition> {
+        val timestamp = System.currentTimeMillis()
+        // current/size 必须参与签名：它们是 query 的一部分，缺了会被判签名无效
+        val query = "current=1&size=$EARN_PAGE_SIZE&timestamp=$timestamp&recvWindow=$RECV_WINDOW"
+        val signature = sign(apiSecret, query)
+        val request = Request.Builder()
+            // 日志只记端点路径，url 里的 signature 由 secret 派生，绝不落盘
+            .url("$url?$query&signature=$signature")
+            .addHeader("X-MBX-APIKEY", apiKey)
+            .addHeader("User-Agent", "Mozilla/5.0")
+            .build()
+
+        val response = httpClient.newCall(request).execute()
+        response.use { resp ->
+            val body = resp.body?.string() ?: return emptyList()
+            if (!resp.isSuccessful) {
+                // 币安的 msg 说明原因（权限不足/参数错），不含密钥，可以记
+                AppLogger.w(
+                    "拉取币安${if (locked) "定期" else "活期"}理财持仓失败：${binanceError(body, resp.code).message}，" +
+                        "本次导入只用现货",
+                    "BinanceAccountAPI"
+                )
+                return emptyList()
+            }
+            return parseEarnPositions(body, locked)
+        }
+    }
+
+    /**
+     * 解析理财持仓响应：`{"rows":[{...}],"total":N}`。
+     *
+     * 活期行用 `totalAmount`、定期行用 `amount`，两个字段名不一致，按 [locked] 取对应字段，
+     * 取不到就退回另一个（接口微调时不至于整页失效）。
+     */
+    internal fun parseEarnPositions(body: String, locked: Boolean): List<BinanceEarnPosition> {
+        return try {
+            val rows = JSONObject(body).optJSONArray("rows") ?: return emptyList()
+            val result = mutableListOf<BinanceEarnPosition>()
+            for (i in 0 until rows.length()) {
+                val obj = rows.getJSONObject(i)
+                val asset = obj.optString("asset")
+                val primary = if (locked) "amount" else "totalAmount"
+                val fallback = if (locked) "totalAmount" else "amount"
+                val raw = obj.optString(primary).takeIf { it.isNotBlank() }
+                    ?: obj.optString(fallback)
+                val amount = raw.toDoubleOrNull() ?: continue
+                // 数量为 0 的行（已赎回空壳）没有导入意义，交给现货侧的 dust 过滤口径
+                if (asset.isBlank() || amount <= 0.0) continue
+                result.add(BinanceEarnPosition(asset = asset, amount = amount, locked = locked))
+            }
+            result
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            AppLogger.e("解析币安理财持仓失败: ${e::class.simpleName}", e, "BinanceAccountAPI")
+            emptyList()
+        }
+    }
+
+    private fun warnEarnFailure(kind: String, e: Throwable) {
+        if (e is CancellationException) throw e
+        AppLogger.w(
+            "拉取币安${kind}理财持仓异常: ${e::class.simpleName}，本次导入只用现货",
+            "BinanceAccountAPI"
+        )
+    }
 
     /**
      * 批量取最新价（公开免签）。

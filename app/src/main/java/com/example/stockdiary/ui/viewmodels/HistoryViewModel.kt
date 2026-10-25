@@ -1,5 +1,6 @@
 package com.example.stockdiary.ui.viewmodels
 
+import com.example.stockdiary.common.DateFormats
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewmodel.initializer
@@ -75,7 +76,7 @@ class HistoryViewModel(
 
     private val _selectedPeriod = MutableStateFlow(defaultPeriod)
 
-    private val dateFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd")
+    private val dateFormatter = DateFormats.ISO_DATE_FORMATTER
 
     init {
         // 只在资产或快照数据变化时排序和更新状态

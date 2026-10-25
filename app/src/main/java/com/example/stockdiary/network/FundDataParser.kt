@@ -1,5 +1,6 @@
 package com.example.stockdiary.network
 
+import com.example.stockdiary.common.DateFormats
 import com.example.stockdiary.utils.AppLogger
 import java.time.Instant
 import java.time.ZoneId
@@ -37,7 +38,7 @@ object FundDataParser {
     private val millionCopiesItemRegex = Regex("""\[(\d+),([0-9.]+)\]""")
     
     /** 日期格式化：时间戳 → yyyy-MM-dd */
-    private val dateFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd")
+    private val dateFormatter = DateFormats.ISO_DATE_FORMATTER
     
     data class NawData(
         val naw: Double = 0.0,

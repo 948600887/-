@@ -1,5 +1,6 @@
 package com.example.stockdiary.data.repository
 
+import com.example.stockdiary.common.DateFormats
 import com.example.stockdiary.data.dividend.DividendData
 import com.example.stockdiary.data.dividend.DividendRecord
 import com.example.stockdiary.data.dividend.DividendService
@@ -893,7 +894,7 @@ class DividendRepository private constructor(
                 try {
                     val date = java.time.LocalDate.parse(
                         record.exDividendDate,
-                        java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd")
+                        DateFormats.ISO_DATE_FORMATTER
                     )
                     date.isAfter(oneYearAgo)
                 } catch (e: CancellationException) {

@@ -1,5 +1,6 @@
 package com.example.stockdiary.ui.components
 
+import com.example.stockdiary.common.DateFormats
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
@@ -159,7 +160,7 @@ fun DividendDetailDialog(
                     val oneYearAgo = remember {
                         val calendar = java.util.Calendar.getInstance()
                         calendar.add(java.util.Calendar.DAY_OF_YEAR, -365)
-                        java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).format(calendar.time)
+                        java.text.SimpleDateFormat(DateFormats.ISO_DATE, java.util.Locale.US).format(calendar.time)
                     }
                     val recentRecords = records.filter { it.date >= oneYearAgo }
                     val recentAmount = perTenSharesToAmount(

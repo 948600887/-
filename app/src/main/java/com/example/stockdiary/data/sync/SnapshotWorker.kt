@@ -1,5 +1,6 @@
 package com.example.stockdiary.data.sync
 
+import com.example.stockdiary.common.DateFormats
 import com.example.stockdiary.data.repository.AssetRepository
 import android.content.Context
 import androidx.work.CoroutineWorker
@@ -27,7 +28,7 @@ class SnapshotWorker(
 
     override suspend fun doWork(): Result {
         return try {
-            val today = LocalDate.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd"))
+            val today = LocalDate.now().format(DateFormats.ISO_DATE_FORMATTER)
 
             val repository = AssetRepository.getInstance(applicationContext)
             val latestSnapshot = repository.getLatestSnapshot()

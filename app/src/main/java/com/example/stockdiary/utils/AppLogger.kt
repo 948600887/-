@@ -1,5 +1,6 @@
 package com.example.stockdiary.utils
 
+import com.example.stockdiary.common.DateFormats
 import android.content.Context
 import android.os.Build
 import android.util.Log
@@ -20,7 +21,7 @@ object AppLogger {
     private val isWriting = AtomicBoolean(false)
     private const val MAX_QUEUE_SIZE = 100
     private const val FLUSH_INTERVAL_MS = 2000L
-    private val logTimestampFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS")
+    private val logTimestampFormatter = DateFormats.ISO_DATETIME_MILLIS_FORMATTER
     
     private var lastFlushTime = System.currentTimeMillis()
     private var appContext: Context? = null

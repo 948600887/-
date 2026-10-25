@@ -1,5 +1,6 @@
 package com.example.stockdiary.ui.screens.calendar.components
 
+import com.example.stockdiary.common.DateFormats
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -75,7 +76,7 @@ fun CalendarCard(
 
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Text(
-                        text = currentMonth.format(DateTimeFormatter.ofPattern("yyyy年MM月")),
+                        text = currentMonth.format(DateFormats.CN_MONTH_FORMATTER),
                         fontSize = 16.sp,
                         fontWeight = FontWeight.Bold,
                         color = AppTheme.colors.onSurface

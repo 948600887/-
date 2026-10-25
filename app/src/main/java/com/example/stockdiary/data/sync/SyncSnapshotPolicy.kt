@@ -1,5 +1,6 @@
 package com.example.stockdiary.data.sync
 
+import com.example.stockdiary.common.DateFormats
 import com.example.stockdiary.data.repository.AssetRepository
 import com.example.stockdiary.utils.AppLogger
 import kotlinx.coroutines.CancellationException
@@ -15,7 +16,7 @@ import java.time.format.DateTimeFormatter
  */
 
 /** 与 [PriceSyncWorker] 同一日期格式（yyyy-MM-dd），别自创 */
-private val SNAPSHOT_DATE_FORMATTER: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd")
+private val SNAPSHOT_DATE_FORMATTER: DateTimeFormatter = DateFormats.ISO_DATE_FORMATTER
 
 /**
  * 纯判定：这次同步成功后该不该覆盖当日快照。

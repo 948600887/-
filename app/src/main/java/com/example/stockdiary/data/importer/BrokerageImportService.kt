@@ -1,5 +1,6 @@
 package com.example.stockdiary.data.importer
 
+import com.example.stockdiary.common.DateFormats
 import com.example.stockdiary.data.price.StockDataManager
 import android.annotation.SuppressLint
 import android.content.Context
@@ -625,7 +626,7 @@ class BrokerageImportService internal constructor(private val context: Context) 
             "yyyy.MM.dd HH:mm:ss", "yyyy-MM-dd HH:mm"
         )
         for (p in dateTimeFormats) {
-            runCatching { LocalDateTime.parse(s, DateTimeFormatter.ofPattern(p)) }
+            runCatching { LocalDateTime.parse(s, DateFormats.ofPattern(p)) }
                 .getOrNull()?.let { return it.toLocalDate().toString() }
         }
         // 纯日期
@@ -634,7 +635,7 @@ class BrokerageImportService internal constructor(private val context: Context) 
             "yyyyMMdd", "dd/MM/yyyy", "dd-MM-yyyy"
         )
         for (p in dateFormats) {
-            runCatching { LocalDate.parse(s, DateTimeFormatter.ofPattern(p)) }
+            runCatching { LocalDate.parse(s, DateFormats.ofPattern(p)) }
                 .getOrNull()?.let { return it.toString() }
         }
         // 中文：2024年1月5日
@@ -646,7 +647,7 @@ class BrokerageImportService internal constructor(private val context: Context) 
         }
         // 提取前 8/10 位数字尝试 yyyyMMdd
         Regex("\\d{8}").find(s)?.let { m ->
-            runCatching { LocalDate.parse(m.value, DateTimeFormatter.ofPattern("yyyyMMdd")) }
+            runCatching { LocalDate.parse(m.value, DateFormats.COMPACT_DATE_FORMATTER) }
                 .getOrNull()?.let { return it.toString() }
         }
         return null

@@ -1,5 +1,6 @@
 package com.example.stockdiary.data.calculator
 
+import com.example.stockdiary.common.DateFormats
 import com.example.stockdiary.database.AssetSnapshot
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
@@ -19,7 +20,7 @@ import java.time.format.DateTimeFormatter
  */
 object AssetGrowthCalculator {
 
-    private val DATE_FORMAT: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd")
+    private val DATE_FORMAT: DateTimeFormatter = DateFormats.ISO_DATE_FORMATTER
 
     data class Growth(
         val monthDelta: Double?,

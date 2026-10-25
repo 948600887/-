@@ -1,5 +1,6 @@
 package com.example.stockdiary.utils
 
+import com.example.stockdiary.common.DateFormats
 import android.app.Activity
 import android.app.Application
 import android.content.Context
@@ -85,7 +86,7 @@ object GlobalExceptionHandler {
     }
     
     private fun buildCrashInfo(thread: Thread?, throwable: Throwable): String {
-        val timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS"))
+        val timestamp = LocalDateTime.now().format(DateFormats.ISO_DATETIME_MILLIS_FORMATTER)
         val writer = StringWriter()
         throwable.printStackTrace(PrintWriter(writer))
         

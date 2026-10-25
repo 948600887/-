@@ -1,5 +1,6 @@
 package com.example.stockdiary.data.dividend
 
+import com.example.stockdiary.common.DateFormats
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
 import kotlinx.coroutines.CancellationException
@@ -180,10 +181,10 @@ object DividendYieldCalculator {
         if (dateStr.isBlank()) return null
         
         val formats = listOf(
-            DateTimeFormatter.ofPattern("yyyy-MM-dd"),
-            DateTimeFormatter.ofPattern("yyyy/MM/dd"),
-            DateTimeFormatter.ofPattern("yyyy年MM月dd日"),
-            DateTimeFormatter.ofPattern("yyyyMMdd")
+            DateFormats.ISO_DATE_FORMATTER,
+            DateFormats.SLASH_DATE_FORMATTER,
+            DateFormats.CN_DATE_FORMATTER,
+            DateFormats.COMPACT_DATE_FORMATTER
         )
         
         for (format in formats) {

@@ -1,5 +1,6 @@
 package com.example.stockdiary.data.sync
 
+import com.example.stockdiary.common.DateFormats
 import com.example.stockdiary.data.repository.AssetRepository
 import android.content.Context
 import androidx.work.CoroutineWorker
@@ -25,7 +26,7 @@ class PriceSyncWorker(
     params: WorkerParameters
 ) : CoroutineWorker(context, params) {
 
-    private val dateFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd")
+    private val dateFormatter = DateFormats.ISO_DATE_FORMATTER
     private val prefs by lazy { PriceSyncPreferencesManager.getInstance(applicationContext) }
 
     /**

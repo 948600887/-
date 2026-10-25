@@ -1,5 +1,6 @@
 package com.example.stockdiary.ui.screens
 
+import com.example.stockdiary.common.DateFormats
 import com.example.stockdiary.data.sync.SyncStrategy
 import android.Manifest
 import android.content.pm.PackageManager
@@ -596,6 +597,6 @@ private data class SettingsItemData(
 )
 
 private fun formatPriceSyncTime(timeMillis: Long): String {
-    val sdf = java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.getDefault())
+    val sdf = java.text.SimpleDateFormat(DateFormats.MONTH_DAY_TIME, java.util.Locale.getDefault())
     return sdf.format(java.util.Date(timeMillis))
 }

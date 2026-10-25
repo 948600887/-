@@ -1,5 +1,6 @@
 package com.example.stockdiary.data.export
 
+import com.example.stockdiary.common.DateFormats
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
@@ -236,7 +237,7 @@ class DataExporter(private val context: Context) {
             val file = File(exportDir, fileName)
 
             openCsvWriter(file).use { writer ->
-                val dateStr = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"))
+                val dateStr = LocalDateTime.now().format(DateFormats.ISO_DATETIME_FORMATTER)
                 writer.append("# 综合对账单,生成时间,$dateStr\n\n")
 
                 // 资产部分
@@ -298,7 +299,7 @@ class DataExporter(private val context: Context) {
             val file = File(exportDir, fileName)
             
             openCsvWriter(file).use { writer ->
-                val dateStr = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy年MM月dd日 HH:mm"))
+                val dateStr = LocalDateTime.now().format(DateFormats.CN_DATETIME_FORMATTER)
                 writer.append("=== 资产报告 ===\n")
                 writer.append("生成时间: $dateStr\n\n")
                 

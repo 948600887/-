@@ -35,12 +35,28 @@ object SinaStockAPI : StockAPI {
     private val batchPendingRequests = ConcurrentHashMap<String, kotlinx.coroutines.CompletableDeferred<Result<Map<String, SinaStockData>>>>()
     private val requestLock = Any()
     
-    private val client = NetworkClient.sinaClient.newBuilder()
+    private val client = createSinaHttpClient()
+
+    /**
+     * 构造新浪行情专用 OkHttpClient。
+     *
+     * 抽成 internal 供单测直接驱动**真实** client 配置做端到端 gzip 契约验证
+     * （见 SinaStockGzipDecompressionTest）——测试里若另建一个裸 client，
+     * 恰好会把要防的回归（有人给请求加回手动 Accept-Encoding）漏掉。
+     */
+    internal fun createSinaHttpClient(): OkHttpClient = NetworkClient.sinaClient.newBuilder()
         .addInterceptor {
             val request = it.request().newBuilder()
                 .addHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
                 .addHeader("Referer", "https://finance.sina.com.cn")
-                .addHeader("Accept-Encoding", "gzip, deflate")
+                // 注意：**绝不能**手动加 Accept-Encoding（如 gzip/deflate）！
+                // OkHttp 的 BridgeInterceptor 规则：请求若已带 Accept-Encoding，它就认为
+                // 「调用方要自己解压」而**不再自动解压**。新浪对稍大的响应会返回 gzip 压缩体
+                // （魔数 1f 8b），App 拿到压缩字节直接按 GBK 解码成乱码 → 正则
+                // `var hq_str_(\w+)="..."` 匹配不到任何代码 → 新浪行情全部解析失败、
+                // 静默回退腾讯（2026-10-25 诊断日志 12:56 轮「新浪成0/符败13」即此）。
+                // 删掉这个头后，OkHttp 自动加 `Accept-Encoding: gzip` 并自动解压，
+                // 上游拿到明文，解析恢复正常。
                 .build()
             it.proceed(request)
         }

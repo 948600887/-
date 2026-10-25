@@ -30,6 +30,13 @@ import com.example.stockdiary.utils.StockCodeManager
 import kotlinx.coroutines.CancellationException
 import java.io.IOException
 
+// ==========================================================================
+// §1 构造与依赖
+// 三个上游（东财 / 新浪 / 场外基金）+ Room DAO + 内存缓存与容量上限 + 本轮限流标志。
+// 全文件分区：§1 构造 §2 抓取状态 §3 预取 §4 缓存读 §5 单例/维护 §6 查询/抓取编排
+//            §7 写入 §8 旧批量预取 §9 文件级纯函数辅助。
+// ==========================================================================
+
 class DividendRepository private constructor(
     private val context: Context
 ) {
@@ -53,6 +60,11 @@ class DividendRepository private constructor(
      */
     @Volatile
     private var _otcRateLimitedThisCycle: Boolean = false
+
+// ==========================================================================
+// §2 抓取状态簿记（SharedPreferences，跨进程存活）
+// markFetched / markFailed / lastFetchedAt 等：记住「抓过」与「刚失败」。空结果（抓过且确实没分红）必须被记住，否则每次冷启动重抓全部标的 → 接口 514 限流（见 fetchState 的 KDoc）。
+// ==========================================================================
 
     /**
      * 每个代码「上次抓过的时间」，跨进程存活。
@@ -108,6 +120,11 @@ class DividendRepository private constructor(
         val value = runCatching { fetchState.getLong(FAILURE_KEY_PREFIX + symbol, 0L) }.getOrDefault(0L)
         return value.takeIf { it > 0L }
     }
+
+// ==========================================================================
+// §3 预取入口 prefetchDividends（批量抓取，冷启动/后台主力路径）
+// 东财合并请求 + Semaphore 限流 + 超时预算判定在 withPermit 内部。Semaphore 用法是踩过的坑：判定写在外层等于没判定，改法照抄 AssetSyncManager。
+// ==========================================================================
 
     /**
      * 一次性把一批标的的分红抓完，结果**按次返回**，由调用方在随后的逐条
@@ -262,6 +279,11 @@ class DividendRepository private constructor(
         )
         return batchResults
     }
+
+// ==========================================================================
+// §4 缓存读取（内存 Map + Room + 「抓过」时间戳三层判定）
+// getCachedAllowingStale(Batch) / primeDividendCache / CacheEntry。返回值可能是空列表（= 抓过且没有分红，有效答案）；只有 null 才代表调用方该去抓。
+// ==========================================================================
 
     /**
      * 冷启动专用的缓存读取：**TTL 过期也照用**，只留一个很硬的上限。
@@ -470,6 +492,11 @@ class DividendRepository private constructor(
         fun needsFullFetch(): Boolean = System.currentTimeMillis() - lastFullFetch > 30L * 24 * 60 * 60 * 1000
     }
     
+// ==========================================================================
+// §5 单例与缓存维护
+// getInstance（双检锁单例）+ clearCache / trimCacheIfNeeded / getCacheStats / close / consumeOtcRateLimitWarning（限流信号读即清零，供 VM 弹一次 Snackbar）。
+// ==========================================================================
+
     companion object {
         /** 「上次抓取时间」存放的 preferences 名，见 [fetchState] 的说明 */
         private const val FETCH_STATE_PREFS = "dividend_fetch_state"
@@ -561,6 +588,11 @@ class DividendRepository private constructor(
         _otcRateLimitedThisCycle = false
         return hit
     }
+
+// ==========================================================================
+// §6 单标的查询与抓取编排
+// getDividendsBySymbol 总入口 → tryGetFromCache（库/「抓过」复用）→ fetchSource 按标的分派到 东财 / 新浪 / 场外基金。失败抛 NoDividendAnswer 而不是返回 emptyList——「没问到」与「没有分红」不能混。
+// ==========================================================================
 
     /**
      * 判断 [symbol] 今天是否已经成功抓过一次分红。
@@ -1027,6 +1059,11 @@ class DividendRepository private constructor(
         }
     }
     
+// ==========================================================================
+// §7 写入（save / delete / getDb）
+// saveDividends / saveManualDividend / deleteManualDividend / getDbDividendsBySymbol / saveDividendsToDbInternal（增量与全量两条路径，合并规则见 mergeDividendRecords）。
+// ==========================================================================
+
     suspend fun saveDividends(symbol: String, records: List<DividendRecord>) {
         if (records.isEmpty()) return
         val normalized = StockCodeManager.normalizeSymbol(symbol)
@@ -1133,6 +1170,11 @@ class DividendRepository private constructor(
         trimCacheIfNeeded()
     }
     
+// ==========================================================================
+// §8 preFetchDividends（旧批量入口，按 SyncBudget 预算）
+// 与 §3 的 prefetchDividends 并存：这版按调用方传入的预算跳过后续代码、超时不写缓存（「抓过且没有分红」的结论留空，之后按需抓取再补，不丢数据）。
+// ==========================================================================
+
     /**
      * 老入口：逐条抓一批标的的分红（内部先跑一次 [prefetchDividends] 批量预取）。
      *
@@ -1237,6 +1279,11 @@ class DividendRepository private constructor(
         }
     }
 }
+
+// ==========================================================================
+// §9 文件级私有辅助（纯函数，可直接 JVM 单测）
+// shouldReuseEmptyResult（空结果复用判定）/ isFailedWithin（失败退避窗）/ chunkSecurityCodes（东财合并请求的代码分块，按编码后长度估算成本）。
+// ==========================================================================
 
 /**
  * 库里一条分红记录都没有时，该不该把它当成「缓存命中」而不是「没抓过」。

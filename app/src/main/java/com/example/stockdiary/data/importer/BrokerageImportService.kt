@@ -568,6 +568,12 @@ class BrokerageImportService internal constructor(private val context: Context) 
             } else t.price
             assetDao.updateBalanceAndPrice(existing.id, newBalance, newCost, now)
         } else {
+            // 已知限制（2026-10-25 审计记录，梦瑶决策保持现状）：
+            // 交割单只给代码不给类型，新建资产一律记为 STOCK。经此导入的 ETF/LOF/债券
+            // 在持仓页会被归到股票分组——仅影响分组展示与按类型汇总的统计口径，
+            // 不影响任何金额计算（行情按 symbol 取，与类型无关）。
+            // 要做类型推断可参考 HoldingSnapshotParser 的号段规则（51x/15x/58x → 基金），
+            // 或在导入预览页让用户逐只确认。
             assetDao.insertAsset(
                 Asset(
                     name = t.name.ifEmpty { t.symbol },

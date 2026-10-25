@@ -17,18 +17,48 @@ import okhttp3.OkHttpClient
  * 分红数据获取服务
  */
 class DividendService {
-    internal var client: OkHttpClient = NetworkClient.defaultClient
-    
+    /**
+     * 分红抓取使用的 OkHttpClient。
+     *
+     * 保持 `var` 供单测注入伪造客户端（见 DividendServiceTest）；
+     * 初始值经 [createDividendHttpClient] 构造，gzip 契约回归测试
+     * （见 DividendServiceGzipDecompressionTest）从同一工厂派生真实配置，
+     * 不在测试里另建裸 client——否则恰好会把要防的回归漏掉。
+     */
+    internal var client: OkHttpClient = createDividendHttpClient()
+
     companion object {
         private const val BASE_URL = "https://vip.stock.finance.sina.com.cn/corp/go.php/vISSUE_ShareBonus/stockid/"
-        
+
+        /**
+         * 构造分红抓取专用 OkHttpClient。
+         *
+         * 抽成 internal 供单测直接驱动**真实** client 配置做端到端 gzip 契约验证
+         * （见 DividendServiceGzipDecompressionTest）——测试里若另建一个裸 client，
+         * 恰好会把要防的回归（有人给请求加回手动 Accept-Encoding）漏掉。
+         *
+         * 当前经 [NetworkClient.defaultClient] 派生且无附加 newBuilder 链，
+         * 与修复前的构造保持逐字一致（该 client 本就只是共享池的一个别名）。
+         */
+        internal fun createDividendHttpClient(): OkHttpClient = NetworkClient.defaultClient
+
         // 请求头
         private val HEADERS = mapOf(
             "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "Referer" to "https://finance.sina.com.cn",
             "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language" to "zh-CN,zh;q=0.9,en;q=0.8",
-            "Accept-Encoding" to "gzip, deflate, br",
+            // 注意：**绝不能**手动加 Accept-Encoding（如 gzip, deflate, br）！
+            // OkHttp 的 BridgeInterceptor 规则：请求若已带 Accept-Encoding，它就认为
+            // 「调用方要自己解压」而**不再自动解压**。新浪这个页面（vip.stock.finance.sina.com.cn）
+            // 对稍大的响应会返回 gzip 压缩体（魔数 1f 8b），App 拿到压缩字节直接按 GBK
+            // 解码成乱码 → Jsoup 找不到任何分红表格 → 解析 0 条记录 → 上层吞成
+            // 「新浪分红源未应答」→ markFailed 6 小时退避：整条兜底源静默失效
+            // （2026-10-25 curl 实证：带该头请求返回 Content-Encoding: gzip 的压缩体，
+            // 不带则返回 58740 字节明文 HTML）。
+            // 删掉这个头后，OkHttp 自动加 `Accept-Encoding: gzip` 并自动解压，
+            // 上游拿到明文，GBK 解码与表格解析恢复正常。
+            // 这与 SinaStockAPI.createSinaHttpClient 里同型 bug（commit ee1fbba）是同一根因。
             "Connection" to "keep-alive"
         )
     }

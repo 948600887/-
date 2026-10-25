@@ -723,4 +723,80 @@ class DividendProgressCalculatorTest {
             ExchangeRateManager.resetForTesting()
         }
     }
+
+    // ===== 归月数组下标越界防护（P2 回归）=====
+    //
+    // 根因：exDate.substring(5, 7) 解析出的 month 无范围校验，而 monthlyReceived /
+    // monthlyScheduled 是 DoubleArray(13)（合法下标 0..12，槽 0 闲置）。
+    // 上游三个源都不做月份语义校验（基金电子对账单只查 10 字符+年份、基金快照只查
+    // 非空、东财分红详情 API 原样透传），QDII/银行理财 PDF 转 CSV 会引入
+    // "<年>-13-01" / "<年>-00-15" 这类脏日期：month=13 → 数组越界
+    // IndexOutOfBoundsException，炸掉 Dashboard/组合/日历/FIRE/设置四个消费方。
+    // 修复：month 加 takeIf { it in 1..12 } 守卫，脏记录静默跳过（return@recordLoop）。
+
+    @Test
+    fun `分红记录月份为13的脏数据不会炸掉归月且被静默跳过`() {
+        // "2026-13-01"：month=13。字符串比较下它恒大于任何真实"今天"
+        // （"13" > "10"），修复前走 exDate > todayStr 分支 → monthlyScheduled[13]
+        // 越界崩溃。修复后由 1..12 守卫挡掉，静默跳过。
+        val assets = listOf(asset("长江电力", "600900", 1000.0))
+        val records = mapOf(
+            "600900" to listOf(
+                record("$year-13-01", 5.0),   // 脏数据：月份 13
+                record(dateIn(3, 10), 3.0)    // 合法记录作对照
+            )
+        )
+
+        // 能走到这里即证明没抛 IndexOutOfBoundsException
+        val progress = DividendProgressCalculator.calculate(assets, records, midYear)
+
+        // 脏记录被跳过：已收只有 3 月那笔 300，笔数 1
+        assertEquals(300.0, progress.yearReceived, 0.001)
+        assertEquals(1, progress.receivedCount)
+        assertEquals(300.0, progress.monthly[2].received, 0.001)
+        // 脏记录不进任何月度槽（除 3 月那笔，其余月已收与待到账皆为 0）
+        assertTrue(
+            progress.monthly.filterIndexed { i, _ -> i != 2 }
+                .all { it.received == 0.0 && it.scheduled == 0.0 }
+        )
+    }
+
+    @Test
+    fun `分红记录月份为00的脏数据不会污染归月数组`() {
+        // "2026-00-15"：month=0。字符串比较下它恒小于年初（"00" < "01"）与任何
+        // 真实今天，修复前侥幸两个分支都进不去；修复后由守卫显式跳过，
+        // 绝不写进闲置槽 0（monthly 只暴露 1..12，槽 0 不可见也不该被写）。
+        val assets = listOf(asset("长江电力", "600900", 1000.0))
+        val records = mapOf("600900" to listOf(record("$year-00-15", 5.0)))
+
+        val progress = DividendProgressCalculator.calculate(assets, records, midYear)
+
+        assertEquals(0.0, progress.yearReceived, 0.001)
+        assertEquals(0, progress.receivedCount)
+        assertTrue(progress.monthly.all { it.received == 0.0 && it.scheduled == 0.0 })
+    }
+
+    @Test
+    fun `守卫只挡脏月份_1月和12月边界记录仍正确归月`() {
+        // 对照：takeIf { it in 1..12 } 不能误伤正常路径——取区间两端（1 月、12 月）
+        // 各一笔合法记录，照旧归月、照旧计已收/待到账
+        val assets = listOf(asset("红利LOF", "sh510880", 1000.0))
+        val records = mapOf(
+            "sh510880" to listOf(
+                record(dateIn(1, 15), 1.0),
+                record(dateIn(12, 20), 2.0)
+            )
+        )
+
+        val progress = DividendProgressCalculator.calculate(assets, records, midYear)
+
+        // 每十股 1 元 × 1000 ÷ 10 = 100（1 月，已过 midYear 10/14 → 已收）
+        assertEquals(100.0, progress.yearReceived, 0.001)
+        assertEquals(1, progress.receivedCount)
+        assertEquals(100.0, progress.monthly[0].received, 0.001)
+        assertEquals(0.0, progress.monthly[0].scheduled, 0.001)
+        // 每十股 2 元 × 1000 ÷ 10 = 200（12 月，未到 → 待到账柱）
+        assertEquals(0.0, progress.monthly[11].received, 0.001)
+        assertEquals(200.0, progress.monthly[11].scheduled, 0.001)
+    }
 }

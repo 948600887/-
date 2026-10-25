@@ -180,7 +180,19 @@ object DividendProgressCalculator {
                 // 从前按到账日（发放日）算：「去年 12 月除息、今年 1 月发放」的跨年分红
                 // 会混进今年的已收，而分母（按除息日）根本不含它 → 算出「已收 > 预计」。
                 // 3/28 除息、4/10 到账的那笔，现在归 3 月（除息日所在月）。
-                val month = exDate.substring(5, 7).toIntOrNull() ?: return@recordLoop
+                //
+                // 月份必须落在 1..12：monthlyReceived / monthlyScheduled 是 DoubleArray(13)
+                // （合法下标 0..12，槽 0 闲置）。上游三个源都不做月份语义校验——基金电子
+                // 对账单（FundEStatementParser）只查 10 字符+年份、基金快照（FundSnapshotParser）
+                // 只查非空、东财分红详情 API 原样透传，QDII/银行理财 PDF 转 CSV 是现实的
+                // 脏数据引入源。脏 exDate="2026-13-01" → month=13 →
+                // monthlyReceived[13] / monthlyScheduled[13] 直接 IndexOutOfBoundsException，
+                // 炸掉 Dashboard/组合/日历/FIRE/设置四个消费方；"2026-00-15" → month=0 虽不
+                // 越界却会污染闲置槽 0。两者一并由 takeIf { it in 1..12 } 挡掉。
+                // 选择静默跳过（return@recordLoop）而不是崩溃或记 0：一条上游脏数据不该让
+                // 整个收息进度算不出来，记 0 又会把「这个月真的派了 0 元」和「数据脏」混为一谈。
+                // 合法数据（1..12）走原路径，行为零变化。
+                val month = exDate.substring(5, 7).toIntOrNull()?.takeIf { it in 1..12 } ?: return@recordLoop
 
                 when {
                     exDate >= yearStart && exDate <= todayStr -> {

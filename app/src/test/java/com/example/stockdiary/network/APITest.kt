@@ -98,6 +98,23 @@ class FundAPIParseTest {
 class BinanceAPISymbolTest {
 
     @Test
+    fun `新浪实时行情URL不带rn缓存bust参数_否则会被当成股票代码一部分`() {
+        // 回归：曾因拼接 &rn=timestamp 且缺少 ? 分隔，新浪把 sh601728&rn=... 当成代码，
+        // 返回 41 字节空响应，导致新浪对所有 A 股失效、静默回退腾讯。
+        val url = SinaStockAPI.buildRealtimeUrl("sh601728")
+        assertEquals("https://hq.sinajs.cn/list=sh601728", url)
+        assertFalse("URL 绝不能包含 &rn= 之类的 query 参数", url.contains("&rn="))
+        assertFalse("URL 绝不能包含 ?rn= 之类的 query 参数", url.contains("?rn="))
+    }
+
+    @Test
+    fun `新浪批量实时行情URL多代码用逗号拼接_无query参数`() {
+        val url = SinaStockAPI.buildRealtimeUrl("sh601728,sz000001")
+        assertEquals("https://hq.sinajs.cn/list=sh601728,sz000001", url)
+        assertFalse(url.contains("rn="))
+    }
+
+    @Test
     fun `formatSymbol keeps USDT pair unchanged`() {
         assertEquals("BTCUSDT", BinanceAPI.formatSymbol("BTCUSDT"))
     }

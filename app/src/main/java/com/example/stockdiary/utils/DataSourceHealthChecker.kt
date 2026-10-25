@@ -39,19 +39,33 @@ object DataSourceHealthChecker {
                 .addHeader("User-Agent", "Mozilla/5.0")
                 .addHeader("Referer", "https://finance.sina.com.cn")
                 .build()
-            
+
             // 必须 use{}：ResponseBody 不 close 的话连接不会归还连接池，
             // 每次打开设置页都会泄漏 3 条，直到 keepAlive 60s 超时才释放
             client.newCall(request).execute().use { response ->
                 val latency = System.currentTimeMillis() - startTime
+                val bodyText = if (response.isSuccessful) response.body?.string().orEmpty() else ""
+
+                // 不能只看 HTTP 200：新浪在缺 Referer、或请求被 query 参数污染时仍回 200 + 空体，
+                // 会让「新浪=正常」成为假健康（见 SinaStockAPI.buildRealtimeUrl 注释：
+                // 曾因 &rn= 时间戳污染代码，所有 A 股返回 41 字节空响应却仍判 200）。
+                // 必须确认响应体里确有 sh600519 的真实报价（名称非空）才判为可用。
+                val healthy = response.isSuccessful && runCatching {
+                    val m = Regex("""hq_str_sh600519="([^"]*)"""").find(bodyText)
+                    m?.groupValues?.get(1)?.split(",")?.firstOrNull()?.isNotBlank() == true
+                }.getOrDefault(false)
 
                 DataSourceHealth(
                     name = "新浪财经",
                     url = "hq.sinajs.cn",
-                    isAvailable = response.isSuccessful,
+                    isAvailable = healthy,
                     latency = latency,
                     lastCheck = System.currentTimeMillis(),
-                    errorMessage = if (!response.isSuccessful) "HTTP ${response.code}" else null
+                    errorMessage = when {
+                        !response.isSuccessful -> "HTTP ${response.code}"
+                        !healthy -> "返回空行情（Referer 缺失或请求被污染，实际取不到价）"
+                        else -> null
+                    }
                 )
             }
         } catch (e: CancellationException) {

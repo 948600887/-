@@ -59,6 +59,19 @@ object SinaStockAPI : StockAPI {
     internal fun resetHttpClientForTesting() {
         httpClientForTesting = null
     }
+
+    /**
+     * 构造新浪实时行情 URL。
+     *
+     * 注意：**不能**追加 `&rn=timestamp` 之类的 query 参数做缓存 bust——
+     * hq.sinajs.cn 是老接口，只认路径里的 `list=<代码>`，会把 `&rn=...` 整体当成
+     * 股票代码的一部分，导致返回 `var hq_str_sh601728&rn=...="";`（41 字节空响应），
+     * 于是上层把它当「该源不支持此代码」静默回退腾讯，新浪事实上彻底失效。
+     *
+     * 而 [NetworkClient.sinaClient] 派生自 baseClient，未配置任何 OkHttp 磁盘缓存，
+     * 没有缓存可 bust，故直接用裸路径即可（详见 2026-10-25 全面逻辑审计）。
+     */
+    internal fun buildRealtimeUrl(codeString: String): String = "$BASE_URL_REALTIME$codeString"
     
     fun initCache(context: Context) {
         PriceCacheManager.init(context)
@@ -173,8 +186,7 @@ object SinaStockAPI : StockAPI {
                         
                         try {
                             val codeString = batch.joinToString(",")
-                            val timestamp = System.currentTimeMillis()
-                            val url = "${BASE_URL_REALTIME}${codeString}&rn=$timestamp"
+                            val url = buildRealtimeUrl(codeString)
                             
                             val httpRequest = Request.Builder()
                                 .url(url)

@@ -32,16 +32,18 @@ fun FireCalculationDialog(
     onExpenseChange: (String) -> Unit
 ) {
     val focusManager = LocalFocusManager.current
-    // FIRE 的分子（年分红）是人民币口径，分母（总资产）也必须折算成人民币，
-    // 否则外币资产会把覆盖率算歪。
-    val totalValue = assets.sumOf { it.totalValueCny }
-    val annualDividend = realAnnualIncome
-    val monthlyDividend = annualDividend / 12
     val expense = monthlyExpense.toDoubleOrNull() ?: 5000.0
-    val realYield = if (totalValue > 0) (annualDividend / totalValue) * 100 else 0.0
-    val fireCoverage = if (expense > 0) (monthlyDividend / expense) * 100 else 0.0
-    val fireTarget = if (realYield > 0) (expense * 12) / (realYield / 100) else 0.0
-    val fireProgress = if (fireTarget > 0) (totalValue / fireTarget) * 100 else 0.0
+    // FIRE 分子（年分红）是人民币口径，分母也必须折算成人民币；
+    // 分母统一用【净资产】口径（非负债资产 − 负债资产），与 AssetSnapshot.fromAssets 一致，
+    // 避免账户有贷款/信用卡/房贷等负债时 FIRE 目标被系统性夸大。
+    val metrics = computeFireMetrics(assets, realAnnualIncome, expense)
+    val totalValue = metrics.netWorth
+    val annualDividend = realAnnualIncome
+    val monthlyDividend = metrics.monthlyDividend
+    val realYield = metrics.realYield
+    val fireCoverage = metrics.fireCoverage
+    val fireTarget = metrics.fireTarget
+    val fireProgress = metrics.fireProgress
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -165,7 +167,7 @@ fun FireCalculationDialog(
                 Spacer(modifier = Modifier.height(16.dp))
                 if (realYield > 0) {
                     Text("FIRE目标: ¥${fireTarget.format(0)}", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text("当前持仓: ¥${totalValue.format(0)}", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("当前净资产: ¥${totalValue.format(0)}", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 } else {
                     Text("暂无分红数据，无法推算FIRE目标", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
@@ -177,4 +179,37 @@ fun FireCalculationDialog(
             }
         }
     )
+}
+
+/**
+ * FIRE 进度核心计算。分母统一使用【净资产】口径：
+ * 非负债资产（含负余额加密货币，其 totalValueCny 为负、自动扣减）减去 负债资产，
+ * 与 [com.example.stockdiary.database.AssetSnapshot.fromAssets] 的 netAssets 一致。
+ * 用净资产而非毛资产，避免账户有贷款/信用卡/房贷等负债时 FIRE 目标被系统性夸大。
+ */
+internal data class FireMetrics(
+    val netWorth: Double,
+    val monthlyDividend: Double,
+    val realYield: Double,
+    val fireCoverage: Double,
+    val fireTarget: Double,
+    val fireProgress: Double
+)
+
+internal fun computeFireMetrics(
+    assets: List<Asset>,
+    realAnnualIncome: Double,
+    monthlyExpense: Double
+): FireMetrics {
+    val nonLiabilityValue = assets.filter { !it.type.isLiability }.sumOf { it.totalValueCny }
+    val liabilityValue = assets.filter { it.type.isLiability }.sumOf { it.totalValueCny }
+    val netWorth = nonLiabilityValue - liabilityValue
+
+    val annualDividend = realAnnualIncome
+    val monthlyDividend = annualDividend / 12
+    val realYield = if (netWorth > 0) (annualDividend / netWorth) * 100 else 0.0
+    val fireCoverage = if (monthlyExpense > 0) (monthlyDividend / monthlyExpense) * 100 else 0.0
+    val fireTarget = if (realYield > 0) (monthlyExpense * 12) / (realYield / 100) else 0.0
+    val fireProgress = if (fireTarget > 0) (netWorth / fireTarget) * 100 else 0.0
+    return FireMetrics(netWorth, monthlyDividend, realYield, fireCoverage, fireTarget, fireProgress)
 }

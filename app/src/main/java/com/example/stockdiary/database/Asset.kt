@@ -33,7 +33,12 @@ data class Asset(
 ) {
     init {
         require(name.isNotBlank()) { "资产名称不能为空" }
-        require(balance >= 0) { "数量不能为负数" }
+        // 加密货币允许负余额：币安借币 / 组合保证金欠币在账户接口里 free+locked 就是负值，
+        // 负余额按设计落成一条数量为负的 CRYPTO 资产，参与净值计算时自动扣减
+        // （见 BinanceImportService 的 dust 过滤注释与 SnapshotAlignment.commit）。
+        // 其它类型（股票 / 基金 / 存款 / 贷款 / 负债）数量必须是非负，保持原约束——
+        // 这些类型出现负值是数据错误，应当直接拒绝，而不是静默存成脏数据。
+        require(balance >= 0 || type == AssetType.CRYPTO) { "数量不能为负数" }
         // purchasePrice 现在只作「参考单价」：无行情时的市值估算兜底，不再是成本
         require(purchasePrice >= 0) { "参考单价不能为负数" }
     }

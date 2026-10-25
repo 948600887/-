@@ -412,6 +412,37 @@ class SnapshotAlignmentTest {
     }
 
     @Test
+    fun 负数量的新资产落库为数量为负的加密货币_不抛异常() = runBlocking {
+        // 回归：此前 Asset.init 的 require(balance >= 0) 会在 commit 构造 Asset 时抛
+        // IllegalArgumentException，导致导入任何含借币/欠币（负余额）的钱包直接崩溃，
+        // 且 Room 每次读库也走构造器，负余额一旦写入后每次读取都会崩。
+        // 现在是加密货币允许负余额，必须能正常落库、数量原样保留为负。
+        val writer = FakeWriter()
+        val cryptoPolicy = CommitPolicy(
+            defaultAccount = "币安",
+            assetTypeOf = { AssetType.CRYPTO },
+            defaultCurrency = "USD"
+        )
+        val result = SnapshotAlignment.commit(
+            rows = listOf(
+                CommitRow(
+                    symbol = "USDTUSDT", name = "USDT", quantity = -30.0,
+                    status = ItemStatus.NEW, existing = null, nav = 1.0, currency = "USD"
+                )
+            ),
+            writer = writer,
+            account = "币安",
+            policy = cryptoPolicy
+        )
+        assertEquals(1, result.inserted)
+        val asset = writer.inserted.flatten().single()
+        assertEquals(AssetType.CRYPTO, asset.type)
+        assertEquals(-30.0, asset.balance, 1e-9)
+        // 稳态校验：负余额加密货币的资产值应为负，参与净值时自动扣减
+        assertEquals(-30.0, asset.totalValue, 1e-9)
+    }
+
+    @Test
     fun 覆盖只改数量_有净值时连价格一起刷新() {
         val writer = FakeWriter()
         val existing = asset(7L, "sh515080", 10000.0)

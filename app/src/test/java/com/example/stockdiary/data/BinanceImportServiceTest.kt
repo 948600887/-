@@ -542,6 +542,31 @@ class BinanceImportServiceTest {
     }
 
     @Test
+    fun 负余额commit落成数量为负的加密货币资产_不再崩溃() = runBlocking {
+        // 端到端回归：纯负债（没有对应持仓的负余额）按设计落成一条数量为负的 CRYPTO 资产，
+        // 参与净值计算自动扣减。修复前 Asset.init 的 require(balance >= 0) 会让 commit
+        // 在构造 Asset 时抛 IllegalArgumentException，导入任何含借币的钱包直接崩溃；
+        // 且 Room 每次读库也走构造器，负余额一旦写入后每次读取都会崩。
+        val captured = slot<List<Asset>>()
+        coEvery { repo.insertAssets(capture(captured)) } returns Unit
+
+        val preview = service.buildPreview(
+            balances = listOf(balance("USDT", free = -30.0)),
+            existingAssets = emptyList()
+        )
+        assertEquals(-30.0, preview.items.single().quantity, 1e-9)
+
+        service.commit(preview, account = "币安", prices = emptyMap())
+
+        val asset = captured.captured.single()
+        assertEquals(AssetType.CRYPTO, asset.type)
+        assertEquals(-30.0, asset.balance, 1e-9)
+        // 稳定币参考价按 1.0 美元预填，故总市值 = -30 美元（负，自动扣减净值）
+        assertEquals(1.0, asset.currentPrice!!, 1e-9)
+        assertEquals(-30.0, asset.totalValue, 1e-9)
+    }
+
+    @Test
     fun 金额够大的负债不被市值过滤丢掉() = runBlocking {
         // filterDustByValue 的判据必须是绝对值：欠 -700 元不能因为 < 阈值 10 元而被滤掉
         val (kept, filtered) = filterDustByValue(

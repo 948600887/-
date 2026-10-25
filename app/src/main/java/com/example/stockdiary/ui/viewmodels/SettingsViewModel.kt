@@ -4,6 +4,8 @@ import android.content.Context
 import android.content.Intent
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.viewmodel.initializer
+import androidx.lifecycle.viewmodel.viewModelFactory
 import androidx.lifecycle.viewModelScope
 import com.example.stockdiary.common.Result
 import com.example.stockdiary.data.repository.AssetRepository
@@ -436,19 +438,24 @@ class SettingsViewModel(
         }
     }
 
-    class Factory(private val container: AppContainer) : ViewModelProvider.Factory {
-        @Suppress("UNCHECKED_CAST")
-        override fun <T : ViewModel> create(modelClass: Class<T>): T {
-            return SettingsViewModel(
-                appContext = container.context.applicationContext,
-                assetRepository = container.assetRepository,
-                snapshotDao = container.database.snapshotDao(),
-                transactionDao = container.database.transactionDao(),
-                dataExporter = container.dataExporter,
-                dashboardPreferencesManager = container.dashboardPreferencesManager,
-                dataSourceHealthChecker = DataSourceHealthChecker,
-                priceSyncPreferencesManager = container.priceSyncPreferencesManager
-            ) as T
+    companion object {
+        /**
+         * 工厂统一用 lifecycle 的 viewModelFactory DSL：initializer 按请求的 modelClass 自动匹配，
+         * 免去手写 create(modelClass) 逐个 cast 的样板（原 9 个 VM 各一份，漏改一个就是运行期 ClassCastException）。
+         */
+        fun factory(container: AppContainer): ViewModelProvider.Factory = viewModelFactory {
+            initializer {
+                SettingsViewModel(
+                    appContext = container.context.applicationContext,
+                    assetRepository = container.assetRepository,
+                    snapshotDao = container.database.snapshotDao(),
+                    transactionDao = container.database.transactionDao(),
+                    dataExporter = container.dataExporter,
+                    dashboardPreferencesManager = container.dashboardPreferencesManager,
+                    dataSourceHealthChecker = DataSourceHealthChecker,
+                    priceSyncPreferencesManager = container.priceSyncPreferencesManager
+                )
+            }
         }
     }
 }

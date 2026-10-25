@@ -74,7 +74,7 @@ fun CalendarScreen(
     onNavigateToAssets: () -> Unit = {}
 ) {
     val container = LocalAppContainer.current
-    val viewModel: CalendarViewModel = viewModel(factory = CalendarViewModel.Factory(container))
+    val viewModel: CalendarViewModel = viewModel(factory = CalendarViewModel.factory(container))
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
 
     // 回前台保鲜检查：App 进程被 Doze 冻结时，VM 里的午夜重算协程会被推迟到解锁后才跑，

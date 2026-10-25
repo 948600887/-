@@ -3,6 +3,8 @@ package com.example.stockdiary.ui.viewmodels
 import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.viewmodel.initializer
+import androidx.lifecycle.viewmodel.viewModelFactory
 import androidx.lifecycle.viewModelScope
 import com.example.stockdiary.data.importer.BrokerageImportService
 import com.example.stockdiary.data.importer.OcrStatementService
@@ -64,7 +66,7 @@ open class ImportBrokerageViewModel(
     /** 逐行的「补填证券代码」校验任务，用于防抖 */
     private val symbolCheckJobs = mutableMapOf<Int, Job>()
 
-    private companion object {
+    companion object {
         /** 输入停顿多久后才做校验与查库，避免每敲一个字符查一次库、也避免半截输入闪错误 */
         const val SYMBOL_CHECK_DEBOUNCE_MS = 450L
 
@@ -73,6 +75,19 @@ open class ImportBrokerageViewModel(
 
         const val ERR_SYMBOL_FORMAT_PREFIX = "证券代码格式不正确"
         const val SYMBOL_HINT = "应为 6 位数字，如 515080"
+
+        /**
+         * 工厂统一用 lifecycle 的 viewModelFactory DSL：initializer 按请求的 modelClass 自动匹配，
+         * 免去手写 create(modelClass) 逐个 cast 的样板（原 9 个 VM 各一份，漏改一个就是运行期 ClassCastException）。
+         */
+        fun factory(container: AppContainer): ViewModelProvider.Factory = viewModelFactory {
+            initializer {
+                ImportBrokerageViewModel(
+                    container.brokerageImportService,
+                    container.ocrStatementService
+                )
+            }
+        }
     }
 
     val supportedCharsets: List<Pair<String, Charset>> =

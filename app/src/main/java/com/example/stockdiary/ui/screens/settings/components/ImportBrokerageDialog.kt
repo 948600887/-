@@ -30,7 +30,7 @@ fun ImportBrokerageDialog(
     onDismiss: () -> Unit
 ) {
     val viewModel: ImportBrokerageViewModel = viewModel(
-        factory = ImportBrokerageViewModel.Factory(container)
+        factory = ImportBrokerageViewModel.factory(container)
     )
     val state by viewModel.uiState.collectAsStateWithLifecycle()
 

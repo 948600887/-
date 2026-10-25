@@ -4,6 +4,8 @@ import android.content.Context
 import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.viewmodel.initializer
+import androidx.lifecycle.viewmodel.viewModelFactory
 import androidx.lifecycle.viewModelScope
 import com.example.stockdiary.data.repository.AssetRepository
 import com.example.stockdiary.data.sync.AssetSyncManager
@@ -379,19 +381,21 @@ open class HoldingSnapshotViewModel(
         ) }
     }
 
-    class Factory(
-        private val container: AppContainer,
-        private val source: Source
-    ) : ViewModelProvider.Factory {
-        @Suppress("UNCHECKED_CAST")
-        override fun <T : ViewModel> create(modelClass: Class<T>): T {
-            return HoldingSnapshotViewModel(
-                context = container.context,
-                repository = container.assetRepository,
-                service = container.holdingSnapshotService,
-                recognizer = container.imageTextRecognizer,
-                source = source
-            ) as T
+    companion object {
+        /**
+         * 工厂统一用 lifecycle 的 viewModelFactory DSL：initializer 按请求的 modelClass 自动匹配，
+         * 免去手写 create(modelClass) 逐个 cast 的样板（原 9 个 VM 各一份，漏改一个就是运行期 ClassCastException）。
+         */
+        fun factory(container: AppContainer, source: Source): ViewModelProvider.Factory = viewModelFactory {
+            initializer {
+                HoldingSnapshotViewModel(
+                    context = container.context,
+                    repository = container.assetRepository,
+                    service = container.holdingSnapshotService,
+                    recognizer = container.imageTextRecognizer,
+                    source = source
+                )
+            }
         }
     }
 }

@@ -54,7 +54,7 @@ fun HistoryScreen(
     modifier: Modifier = Modifier
 ) {
     val container = LocalAppContainer.current
-    val viewModel: HistoryViewModel = viewModel(factory = HistoryViewModel.Factory(container))
+    val viewModel: HistoryViewModel = viewModel(factory = HistoryViewModel.factory(container))
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
 
     val snackbarHostState = remember { SnackbarHostState() }

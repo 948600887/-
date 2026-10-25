@@ -89,7 +89,7 @@ fun BinanceImportDialog(
     onDismiss: () -> Unit
 ) {
     val viewModel: BinanceImportViewModel = viewModel(
-        factory = BinanceImportViewModel.Factory(container)
+        factory = BinanceImportViewModel.factory(container)
     )
     val state by viewModel.uiState.collectAsStateWithLifecycle()
 

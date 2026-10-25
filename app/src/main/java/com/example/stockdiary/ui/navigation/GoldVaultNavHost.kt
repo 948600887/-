@@ -57,13 +57,13 @@ fun GoldVaultNavHost() {
     var currentDetailId by rememberSaveable { mutableStateOf<Long?>(null) }
     val selectedScreen = screensByRoute[selectedScreenRoute] ?: Screen.Dashboard
 
-    val dashboardViewModel: DashboardViewModel = viewModel(factory = DashboardViewModel.Factory(container))
-    val portfolioViewModel: PortfolioViewModel = viewModel(factory = PortfolioViewModel.Factory(container))
+    val dashboardViewModel: DashboardViewModel = viewModel(factory = DashboardViewModel.factory(container))
+    val portfolioViewModel: PortfolioViewModel = viewModel(factory = PortfolioViewModel.factory(container))
 
     val detailViewModel = currentDetailId?.let { id ->
         viewModel<AssetDetailViewModel>(
             key = "detail_$id",
-            factory = AssetDetailViewModel.Factory(container, id)
+            factory = AssetDetailViewModel.factory(container, id)
         )
     }
 

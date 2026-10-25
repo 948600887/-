@@ -2,6 +2,8 @@ package com.example.stockdiary.ui.viewmodels
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.viewmodel.initializer
+import androidx.lifecycle.viewmodel.viewModelFactory
 import androidx.lifecycle.viewModelScope
 import com.example.stockdiary.data.sync.AssetSyncManager
 import com.example.stockdiary.data.dividend.DividendRecord
@@ -176,10 +178,13 @@ class AssetDetailViewModel(private val container: AppContainer, private val asse
         _asset.value = repository.getAssetById(currentAsset.id)
     }
 
-    class Factory(private val container: AppContainer, private val assetId: Long) : ViewModelProvider.Factory {
-        @Suppress("UNCHECKED_CAST")
-        override fun <T : ViewModel> create(modelClass: Class<T>): T {
-            return AssetDetailViewModel(container, assetId) as T
+    companion object {
+        /**
+         * 工厂统一用 lifecycle 的 viewModelFactory DSL：initializer 按请求的 modelClass 自动匹配，
+         * 免去手写 create(modelClass) 逐个 cast 的样板（原 9 个 VM 各一份，漏改一个就是运行期 ClassCastException）。
+         */
+        fun factory(container: AppContainer, assetId: Long): ViewModelProvider.Factory = viewModelFactory {
+            initializer { AssetDetailViewModel(container, assetId) }
         }
     }
 }

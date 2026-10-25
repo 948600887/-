@@ -88,7 +88,7 @@ fun SettingsScreen(
             context.packageManager.getPackageInfo(context.packageName, 0).versionName
         }.getOrNull() ?: "1.0.0"
     }
-    val viewModel: SettingsViewModel = viewModel(factory = SettingsViewModel.Factory(container))
+    val viewModel: SettingsViewModel = viewModel(factory = SettingsViewModel.factory(container))
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val dashboardPrefs by viewModel.dashboardPreferences.collectAsStateWithLifecycle()
     val autoPriceSyncEnabled by viewModel.autoPriceSyncEnabled.collectAsStateWithLifecycle()

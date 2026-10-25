@@ -62,7 +62,7 @@ fun HoldingSnapshotDialog(
     // 会复用上一个 Dialog 的 ViewModel，带着上一次的预览和账户名
     val viewModel: HoldingSnapshotViewModel = viewModel(
         key = source.name,
-        factory = HoldingSnapshotViewModel.Factory(container, source)
+        factory = HoldingSnapshotViewModel.factory(container, source)
     )
     val state by viewModel.uiState.collectAsStateWithLifecycle()
 

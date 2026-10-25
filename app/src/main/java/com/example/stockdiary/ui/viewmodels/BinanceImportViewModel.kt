@@ -3,6 +3,8 @@ package com.example.stockdiary.ui.viewmodels
 import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.viewmodel.initializer
+import androidx.lifecycle.viewmodel.viewModelFactory
 import androidx.lifecycle.viewModelScope
 import com.example.stockdiary.data.repository.AssetRepository
 import com.example.stockdiary.data.importer.BinanceCredentialsManager
@@ -323,19 +325,20 @@ open class BinanceImportViewModel(
     companion object {
         /** 零碎资产市值阈值默认值（人民币） */
         const val DEFAULT_THRESHOLD_CNY = 10.0
-    }
 
-    class Factory(
-        private val container: AppContainer
-    ) : ViewModelProvider.Factory {
-        @Suppress("UNCHECKED_CAST")
-        override fun <T : ViewModel> create(modelClass: Class<T>): T {
-            return BinanceImportViewModel(
-                context = container.context,
-                repository = container.assetRepository,
-                service = container.binanceImportService,
-                credentialsManager = container.binanceCredentialsManager
-            ) as T
+        /**
+         * 工厂统一用 lifecycle 的 viewModelFactory DSL：initializer 按请求的 modelClass 自动匹配，
+         * 免去手写 create(modelClass) 逐个 cast 的样板（原 9 个 VM 各一份，漏改一个就是运行期 ClassCastException）。
+         */
+        fun factory(container: AppContainer): ViewModelProvider.Factory = viewModelFactory {
+            initializer {
+                BinanceImportViewModel(
+                    context = container.context,
+                    repository = container.assetRepository,
+                    service = container.binanceImportService,
+                    credentialsManager = container.binanceCredentialsManager
+                )
+            }
         }
     }
 }

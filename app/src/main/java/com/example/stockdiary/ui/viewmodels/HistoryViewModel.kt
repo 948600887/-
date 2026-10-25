@@ -2,6 +2,8 @@ package com.example.stockdiary.ui.viewmodels
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.viewmodel.initializer
+import androidx.lifecycle.viewmodel.viewModelFactory
 import androidx.lifecycle.viewModelScope
 import com.example.stockdiary.data.calculator.MonthlyReturn
 import com.example.stockdiary.data.calculator.SNAPSHOT_ORDER
@@ -37,6 +39,19 @@ class HistoryViewModel(
 
     companion object {
         private val VALID_PERIODS = setOf("1W", "1M", "3M", "6M", "1Y", "ALL")
+
+        /**
+         * 工厂统一用 lifecycle 的 viewModelFactory DSL：initializer 按请求的 modelClass 自动匹配，
+         * 免去手写 create(modelClass) 逐个 cast 的样板（原 9 个 VM 各一份，漏改一个就是运行期 ClassCastException）。
+         */
+        fun factory(container: AppContainer): ViewModelProvider.Factory = viewModelFactory {
+            initializer {
+                HistoryViewModel(
+                    assetRepository = container.assetRepository,
+                    dashboardPreferencesManager = container.dashboardPreferencesManager
+                )
+            }
+        }
     }
 
     data class UiState(
@@ -178,19 +193,6 @@ class HistoryViewModel(
 
     fun clearError() {
         _uiState.update { it.copy(errorMessage = null) }
-    }
-
-    class Factory(private val container: AppContainer) : ViewModelProvider.Factory {
-        @Suppress("UNCHECKED_CAST")
-        override fun <T : ViewModel> create(modelClass: Class<T>): T {
-            require(modelClass.isAssignableFrom(HistoryViewModel::class.java)) {
-                "Unknown ViewModel class: ${modelClass.name}"
-            }
-            return HistoryViewModel(
-                assetRepository = container.assetRepository,
-                dashboardPreferencesManager = container.dashboardPreferencesManager
-            ) as T
-        }
     }
 }
 

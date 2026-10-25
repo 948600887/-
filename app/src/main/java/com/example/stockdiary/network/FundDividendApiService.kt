@@ -1,6 +1,7 @@
 package com.example.stockdiary.network
 
 import com.example.stockdiary.data.dividend.DividendHtmlParser
+import com.example.stockdiary.data.dividend.DividendDateValidator
 import com.example.stockdiary.data.dividend.DividendRecord
 import com.example.stockdiary.common.Timeouts
 import com.example.stockdiary.network.NetworkClient
@@ -218,15 +219,19 @@ class FundDividendApiService {
                     if (cells.size <= maxOf(headerIndices.exDateIndex, headerIndices.dividendIndex)) continue
 
                     try {
-                        val exDate = cells.getOrNull(headerIndices.exDateIndex)?.text()?.trim() ?: ""
+                        val rawExDate = cells.getOrNull(headerIndices.exDateIndex)?.text()?.trim() ?: ""
                         val regDate = cells.getOrNull(headerIndices.regDateIndex)?.text()?.trim() ?: ""
                         val dividendText = cells.getOrNull(headerIndices.dividendIndex)?.text()?.trim() ?: ""
 
-                        if (!exDate.matches(Regex("\\d{4}-\\d{2}-\\d{2}"))) continue
+                        // 除息日过语义校验：除了原来的形态正则，再加真实日历校验，
+                        // 挡掉 2026-13-01 / 2026-02-30 这类脏日期——它曾让消费端
+                        // month=13 炸 IndexOutOfBounds（见 DividendDateValidator 注释）。
+                        // 归一后恒为 10 字符 yyyy-MM-dd，下游可直接当合法日期用。
+                        val exDate = DividendDateValidator.normalizeOrNull(rawExDate) ?: continue
 
                         val dividendPerShare = parseFundDividendAmount(dividendText)
                         if (dividendPerShare > 0 && dividendPerShare <= MAX_DIVIDEND_PER_TEN_SHARES) {
-                            val fiscalYear = if (exDate.length >= 4) exDate.substring(0, 4) else ""
+                            val fiscalYear = exDate.substring(0, 4)
                             records.add(
                                 DividendRecord(
                                     exDividendDate = exDate,
@@ -261,8 +266,11 @@ class FundDividendApiService {
 
                     for (cell in cells) {
                         val text = cell.text().trim()
-                        if (text.matches(Regex("\\d{4}-\\d{2}-\\d{2}"))) {
-                            date = text
+                        // 兜底路径与主路径用同一把尺子：形态 + 真实日历双重校验，
+                        // 脏日期（2026-13-01 等）连备选资格都不该有
+                        val normalized = DividendDateValidator.normalizeOrNull(text)
+                        if (normalized != null) {
+                            date = normalized
                         }
                         if (text.contains("每10份派") || text.contains("每份派")) {
                             dividendText = text

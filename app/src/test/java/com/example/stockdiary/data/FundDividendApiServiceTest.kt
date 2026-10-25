@@ -57,6 +57,24 @@ class FundDividendApiServiceTest {
         assertTrue(service.parseDividendHtml("", "110011").isEmpty())
     }
 
+    @Test
+    fun `parseDividendHtml 除息日脏月份行被丢弃_合法行保留`() {
+        // 2026-13-01 形态合法但日历不存在：曾让消费端 month=13 炸 IndexOutOfBounds，
+        // 现在必须在入口就丢；同一表里的合法行不受影响
+        val html = """
+            <table>
+              <tr><th>年份</th><th>权益登记日</th><th>除息日</th><th>每10份分红</th><th>分红发放日</th></tr>
+              <tr><td>2026</td><td>2026-12-30</td><td>2026-13-01</td><td>1.20</td><td>2026-12-31</td></tr>
+              <tr><td>2023</td><td>2023-06-05</td><td>2023-06-06</td><td>1.20</td><td>2023-06-09</td></tr>
+            </table>
+        """.trimIndent()
+
+        val records = service.parseDividendHtml(html, "110011")
+
+        assertEquals(1, records.size)
+        assertEquals("2023-06-06", records[0].exDividendDate)
+    }
+
     // ---------- 单位换算 ----------
 
     @Test

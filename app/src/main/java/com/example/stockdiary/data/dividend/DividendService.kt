@@ -171,14 +171,22 @@ class DividendService {
                         val dividendPerShare = StockCodeManager.parseDividendAmount(dividendText)
                         if (dividendPerShare <= 0) continue
 
-                        val exDividendDate = cells.getOrNull(headerIndices.exDateIndex)?.text()?.trim() ?: ""
+                        val rawExDate = cells.getOrNull(headerIndices.exDateIndex)?.text()?.trim() ?: ""
+                        // 除息日为空保持既有行为（未实施的预案行可能没有除息日）；
+                        // 非空但非法（如 2026-13-01、2026-02-30）则丢弃整行——
+                        // 脏日期会让消费端 month=13 炸 IndexOutOfBounds，必须在入口拦住。
+                        val normalizedExDate = DividendDateValidator.normalizeOrNull(rawExDate)
+                        if (rawExDate.isNotEmpty() && normalizedExDate == null) {
+                            AppLogger.w("新浪分红行除权除息日非法，丢弃该行: $rawExDate", "DividendService")
+                            continue
+                        }
                         val fiscalYear = StockCodeManager.extractFiscalYear(announceDate).toString()
 
-                        AppLogger.d("解析到分红记录: 日期=$announceDate, 派息=$dividendPerShare, 除权日=$exDividendDate, 财年=$fiscalYear", "DividendService")
+                        AppLogger.d("解析到分红记录: 日期=$announceDate, 派息=$dividendPerShare, 除权日=${normalizedExDate.orEmpty()}, 财年=$fiscalYear", "DividendService")
 
                         records.add(
                             DividendRecord(
-                                exDividendDate = exDividendDate,
+                                exDividendDate = normalizedExDate.orEmpty(),
                                 dividendPerShare = dividendPerShare.toString(),
                                 announceDate = announceDate,
                                 fiscalYear = fiscalYear

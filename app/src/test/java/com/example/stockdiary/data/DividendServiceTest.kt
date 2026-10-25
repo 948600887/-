@@ -85,6 +85,40 @@ class DividendServiceTest {
         assertTrue(service.parseDividendHtml("", "600519", "sh").isEmpty())
     }
 
+    @Test
+    fun `parseDividendHtml 除息日脏月份行被丢弃`() {
+        // 2026-13-08 形态合法但日历不存在：曾让消费端 month=13 炸 IndexOutOfBounds，
+        // 现在必须在入口就丢，整表只此一行 → 解析结果为空
+        val html = """
+            <table>
+              <caption>分红配送记录</caption>
+              <tr><th>公告日期</th><th>送股(股)</th><th>转增(股)</th>
+                  <th>派息(税前)(元)</th><th>进度</th><th>除权除息日</th></tr>
+              <tr><td>2026-12-01</td><td>0</td><td>0</td><td>1.00</td><td>实施</td><td>2026-13-08</td></tr>
+            </table>
+        """.trimIndent()
+
+        assertTrue(service.parseDividendHtml(html, "600519", "sh").isEmpty())
+    }
+
+    @Test
+    fun `parseDividendHtml 除息日为空的预案行保持既有行为仍保留`() {
+        // 空除息日不是脏数据：未实施的预案行可能没有除息日，既有行为是保留该行
+        val html = """
+            <table>
+              <caption>分红配送记录</caption>
+              <tr><th>公告日期</th><th>送股(股)</th><th>转增(股)</th>
+                  <th>派息(税前)(元)</th><th>进度</th><th>除权除息日</th></tr>
+              <tr><td>2026-12-01</td><td>0</td><td>0</td><td>1.00</td><td>预案</td><td></td></tr>
+            </table>
+        """.trimIndent()
+
+        val records = service.parseDividendHtml(html, "600519", "sh")
+
+        assertEquals(1, records.size)
+        assertEquals("", records[0].exDividendDate)
+    }
+
     // ---------- 网络层降级 ----------
 
     @Test

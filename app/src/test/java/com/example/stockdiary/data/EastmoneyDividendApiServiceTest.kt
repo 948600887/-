@@ -191,6 +191,33 @@ class EastmoneyDividendApiServiceTest {
         assertNull(service.mapDividendItem(blank, "600519"))
     }
 
+    @Test
+    fun `mapDividendItem 除权除息日形态合法但日历不存在_判脏丢弃`() {
+        // 2026-13-01 / 2026-00-10 月越界，2026-02-30 / 2023-02-29 日历不存在，
+        // 2026-1-5 非补零——曾让消费端 month=13 炸 IndexOutOfBounds，必须在入口拦掉
+        val month13 = JSONObject(
+            """{"EX_DIVIDEND_DATE":"2026-13-01 00:00:00","ASSIGN_PROGRESS":"实施","PRETAX_BONUS_RMB":30.66}"""
+        )
+        val month00 = JSONObject(
+            """{"EX_DIVIDEND_DATE":"2026-00-10","ASSIGN_PROGRESS":"实施","PRETAX_BONUS_RMB":30.66}"""
+        )
+        val feb30 = JSONObject(
+            """{"EX_DIVIDEND_DATE":"2026-02-30","ASSIGN_PROGRESS":"实施","PRETAX_BONUS_RMB":30.66}"""
+        )
+        val feb29NonLeap = JSONObject(
+            """{"EX_DIVIDEND_DATE":"2023-02-29","ASSIGN_PROGRESS":"实施","PRETAX_BONUS_RMB":30.66}"""
+        )
+        val notPadded = JSONObject(
+            """{"EX_DIVIDEND_DATE":"2026-1-5","ASSIGN_PROGRESS":"实施","PRETAX_BONUS_RMB":30.66}"""
+        )
+
+        assertNull(service.mapDividendItem(month13, "600519"))
+        assertNull(service.mapDividendItem(month00, "600519"))
+        assertNull(service.mapDividendItem(feb30, "600519"))
+        assertNull(service.mapDividendItem(feb29NonLeap, "600519"))
+        assertNull(service.mapDividendItem(notPadded, "600519"))
+    }
+
     // ---------- 降级 ----------
 
     @Test

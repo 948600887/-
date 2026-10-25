@@ -1,6 +1,7 @@
 package com.example.stockdiary.network
 
 import com.example.stockdiary.data.dividend.DividendData
+import com.example.stockdiary.data.dividend.DividendDateValidator
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import com.example.stockdiary.utils.AppLogger
@@ -165,12 +166,16 @@ class EastmoneyDividendApiService(private val context: Context) {
      *              否则调用方没法把结果发回给对应的标的。
      */
     internal fun mapDividendItem(item: JSONObject, ticker: String): DividendData? {
-        val exDate = item.optString("EX_DIVIDEND_DATE", "")
+        // 除息日过语义校验：trim + 取前 10 字符（接口给的是 "2023-12-19 00:00:00"）+
+        // 真实日历日期。脏日期（2026-13-01 等）直接丢弃整条，不带进分红管线——
+        // 它曾让消费端 month=13 炸 IndexOutOfBounds（见 DividendDateValidator 注释）。
+        val exDate = DividendDateValidator.normalizeOrNull(item.optString("EX_DIVIDEND_DATE", ""))
+            ?: return null
         val pretaxBonus = item.optDouble("PRETAX_BONUS_RMB", -1.0)
         val noticeDate = item.optString("PLAN_NOTICE_DATE", "")
         val assignProgress = item.optString("ASSIGN_PROGRESS", "")
 
-        if (exDate.isBlank() || pretaxBonus <= 0 ||
+        if (pretaxBonus <= 0 ||
             (!assignProgress.contains("实施") && !assignProgress.contains("完毕"))) {
             return null
         }
@@ -178,7 +183,7 @@ class EastmoneyDividendApiService(private val context: Context) {
         // 与应用内 dividendPerShare（每十股分红）单位一致，无需转换
         return DividendData(
             ticker = ticker,
-            date = exDate.take(10),
+            date = exDate,
             dividend = 0.0,
             dividendPerShare = pretaxBonus,
             reportDate = if (noticeDate.isNotEmpty()) noticeDate.take(10) else ""

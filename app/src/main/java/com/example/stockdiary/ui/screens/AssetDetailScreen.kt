@@ -47,12 +47,16 @@ fun AssetDetailScreen(
     modifier: Modifier = Modifier,
     onNavigateBack: () -> Unit = {}
 ) {
-    val asset by viewModel.asset.collectAsStateWithLifecycle()
-    val dividends by viewModel.dividends.collectAsStateWithLifecycle()
-    val isLoading by viewModel.isLoading.collectAsStateWithLifecycle()
-    val isDividendLoading by viewModel.isDividendLoading.collectAsStateWithLifecycle()
-    val errorMessage by viewModel.errorMessage.collectAsStateWithLifecycle()
-    val isRefreshing by viewModel.isRefreshing.collectAsStateWithLifecycle()
+    // 六条流已合流为 AssetDetailViewModel.AssetDetailUiState（同 Dashboard/Portfolio 模式）：
+    // 一次加载/刷新改哪几个字段集中在一处，UI 只保留一条订阅。
+    // 下面按原变量名取别名，页面主体逻辑不动。
+    val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val asset = uiState.asset
+    val dividends = uiState.dividends
+    val isLoading = uiState.isLoading
+    val isDividendLoading = uiState.isDividendLoading
+    val errorMessage = uiState.errorMessage
+    val isRefreshing = uiState.isRefreshing
 
     var showEditDialog by remember { mutableStateOf(false) }
     var showAdjustDialog by remember { mutableStateOf(false) }

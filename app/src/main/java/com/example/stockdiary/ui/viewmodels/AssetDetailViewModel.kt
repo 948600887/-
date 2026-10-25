@@ -9,12 +9,14 @@ import com.example.stockdiary.data.sync.AssetSyncManager
 import com.example.stockdiary.data.dividend.DividendRecord
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
+import com.example.stockdiary.database.Transaction
 import com.example.stockdiary.di.AppContainer
 import com.example.stockdiary.utils.AppLogger
 import com.example.stockdiary.utils.StockCodeManager
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.CancellationException
 
@@ -24,26 +26,36 @@ class AssetDetailViewModel(private val container: AppContainer, private val asse
     private val dividendRepository = container.dividendRepository
     private val transactionDao = container.database.transactionDao()
 
-    private val _asset = MutableStateFlow<Asset?>(null)
-    val asset: StateFlow<Asset?> = _asset.asStateFlow()
+    /**
+     * 资产详情页状态机：一次「进场加载 / 下拉刷新 / 编辑 / 加减仓」先后推进哪些字段，全在这里。
+     *
+     * 此前是 7 个各自为政的 MutableStateFlow（资产、分红记录、交易流水、首屏 loading、
+     * 分红 loading、错误、刷新态），写入点散落在 loadAssetData / loadDividendData /
+     * loadTransactionData / refreshData / 异常处理里；UI 同层 collect 六条流，
+     * 任一个发射都整体重组。合并不损失重组粒度，只是少六次订阅，
+     * 且「加载到底改了什么」一处可答。
+     *
+     * 七个字段全部由一次性加载/刷新动作驱动（本 VM 没有 Room 派生流：
+     * 资产走 getAssetById、流水走 transactionDao.getBySymbol、分红走
+     * dividendRepository.getDividendsBySymbol，都是一次性 suspend 查询），
+     * 因此用纯 MutableStateFlow 承载，不强行 combine。
+     *
+     * 注意 [isLoading] 初值为 true：进场即首屏加载中；其余字段的初始值与
+     * 迁移前各流初值逐一对应（asset=null、两个列表为空、两个 loading=false、
+     * errorMessage=null、isRefreshing=false）。
+     */
+    data class AssetDetailUiState(
+        val asset: Asset? = null,
+        val dividends: List<DividendRecord> = emptyList(),
+        val transactions: List<Transaction> = emptyList(),
+        val isLoading: Boolean = true,
+        val isDividendLoading: Boolean = false,
+        val errorMessage: String? = null,
+        val isRefreshing: Boolean = false,
+    )
 
-    private val _dividends = MutableStateFlow<List<DividendRecord>>(emptyList())
-    val dividends: StateFlow<List<DividendRecord>> = _dividends.asStateFlow()
-
-    private val _transactions = MutableStateFlow<List<com.example.stockdiary.database.Transaction>>(emptyList())
-    val transactions: StateFlow<List<com.example.stockdiary.database.Transaction>> = _transactions.asStateFlow()
-
-    private val _isLoading = MutableStateFlow(true)
-    val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
-
-    private val _isDividendLoading = MutableStateFlow(false)
-    val isDividendLoading: StateFlow<Boolean> = _isDividendLoading.asStateFlow()
-
-    private val _errorMessage = MutableStateFlow<String?>(null)
-    val errorMessage: StateFlow<String?> = _errorMessage.asStateFlow()
-
-    private val _isRefreshing = MutableStateFlow(false)
-    val isRefreshing: StateFlow<Boolean> = _isRefreshing.asStateFlow()
+    private val _uiState = MutableStateFlow(AssetDetailUiState())
+    val uiState: StateFlow<AssetDetailUiState> = _uiState.asStateFlow()
 
     init {
         loadAssetData()
@@ -53,8 +65,7 @@ class AssetDetailViewModel(private val container: AppContainer, private val asse
         viewModelScope.launch {
             try {
                 val foundAsset = repository.getAssetById(assetId)
-                _asset.value = foundAsset
-                _errorMessage.value = null
+                _uiState.update { it.copy(asset = foundAsset, errorMessage = null) }
                 if (foundAsset != null) {
                     loadDividendData(forceRefresh = forceRefreshDividend)
                     loadTransactionData(foundAsset)
@@ -62,41 +73,40 @@ class AssetDetailViewModel(private val container: AppContainer, private val asse
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                _errorMessage.value = "加载失败，请稍后重试"
+                _uiState.update { it.copy(errorMessage = "加载失败，请稍后重试") }
                 AppLogger.e("加载资产详情失败: ${e.message}", e, "AssetDetailVM")
             } finally {
-                _isLoading.value = false
-                _isRefreshing.value = false
+                _uiState.update { it.copy(isLoading = false, isRefreshing = false) }
             }
         }
     }
 
     private suspend fun loadDividendData(forceRefresh: Boolean = false) {
-        val currentAsset = _asset.value
+        val currentAsset = _uiState.value.asset
         if (currentAsset == null || (currentAsset.type != AssetType.STOCK && currentAsset.type != AssetType.FUND)) return
 
-        _isDividendLoading.value = true
+        _uiState.update { it.copy(isDividendLoading = true) }
         try {
             val rawSymbol = currentAsset.symbol ?: ""
             val symbol = StockCodeManager.normalizeSymbol(rawSymbol)
 
             if (symbol.isNotBlank()) {
                 val result = dividendRepository.getDividendsBySymbol(symbol, forceRefresh = forceRefresh)
-                _dividends.value = result
+                _uiState.update { it.copy(dividends = result) }
             }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             AppLogger.e("加载分红数据异常: ${e.message}", tag = "AssetDetailVM")
         } finally {
-            _isDividendLoading.value = false
+            _uiState.update { it.copy(isDividendLoading = false) }
         }
     }
 
     private suspend fun loadTransactionData(asset: Asset) {
         val symbol = asset.symbol ?: return
         try {
-            _transactions.value = transactionDao.getBySymbol(symbol)
+            _uiState.update { it.copy(transactions = transactionDao.getBySymbol(symbol)) }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -106,9 +116,9 @@ class AssetDetailViewModel(private val container: AppContainer, private val asse
 
     fun refreshData() {
         viewModelScope.launch {
-            _isRefreshing.value = true
+            _uiState.update { it.copy(isRefreshing = true) }
             try {
-                val currentAsset = _asset.value
+                val currentAsset = _uiState.value.asset
                 // 加密货币详情页同样走单独刷新（同步引擎 CRYPTO 分支见
                 // AssetSyncManager.syncSingleAsset:536，币安取价 + 主机熔断 + LD 1:1 计价）。
                 // 银行存款无实时行情，不同步
@@ -125,27 +135,27 @@ class AssetDetailViewModel(private val container: AppContainer, private val asse
                         throw e
                     } catch (e: Exception) {
                         AppLogger.w("资产详情页同步失败: ${e.message}", "AssetDetailViewModel")
-                        _errorMessage.value = "价格同步失败: ${e.localizedMessage ?: e.message}"
+                        _uiState.update { it.copy(errorMessage = "价格同步失败: ${e.localizedMessage ?: e.message}") }
                     }
                 }
                 loadAssetData(forceRefreshDividend = true)
             } finally {
-                _isRefreshing.value = false
+                _uiState.update { it.copy(isRefreshing = false) }
             }
         }
     }
 
     suspend fun deleteAsset() {
-        _asset.value?.let { repository.deleteAsset(it) }
+        _uiState.value.asset?.let { repository.deleteAsset(it) }
     }
 
     suspend fun updateAsset(updatedAsset: Asset) {
         repository.updateAsset(updatedAsset)
-        _asset.value = updatedAsset
+        _uiState.update { it.copy(asset = updatedAsset) }
     }
 
     suspend fun adjustPosition(updatedAsset: Asset) {
-        val currentAsset = _asset.value ?: return
+        val currentAsset = _uiState.value.asset ?: return
         val delta = updatedAsset.balance - currentAsset.balance
         if (delta > 0) {
             // UI 传进来的 purchasePrice 已经是"加仓后摊薄的新成本"，
@@ -175,7 +185,7 @@ class AssetDetailViewModel(private val container: AppContainer, private val asse
             // 会用 0 数量写一条卖出流水，而用户真正改动的成本价反而不保存。
             repository.updateAsset(updatedAsset)
         }
-        _asset.value = repository.getAssetById(currentAsset.id)
+        _uiState.update { it.copy(asset = repository.getAssetById(currentAsset.id)) }
     }
 
     companion object {

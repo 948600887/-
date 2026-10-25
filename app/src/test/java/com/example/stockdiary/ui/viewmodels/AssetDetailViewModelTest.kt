@@ -123,7 +123,7 @@ class AssetDetailViewModelTest {
 
     @Test
     fun `当前资产为空时 adjustPosition 直接返回不崩溃`() {
-        // 不传 current，init 里 getAssetById 返回 null，_asset 为空
+        // 不传 current，init 里 getAssetById 返回 null，uiState.asset 为空
         coEvery { assetRepo.getAssetById(any()) } returns null
         val vm = buildVm()
 

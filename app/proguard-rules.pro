@@ -61,3 +61,11 @@
 -dontwarn okhttp3.**
 -dontwarn okio.**
 -keep class com.squareup.okhttp3.** { *; }
+
+# ========== JSpecify 注解（jsoup 1.17.2 引用，运行时缺失） ==========
+# jsoup 1.17.x 起用 org.jspecify.annotations.NullMarked 标注包级空安全契约。
+# 该注解是编译期依赖、不随 APK 分发，R8 全量模式默认把「引用缺失类」当错误。
+# 注解类在运行期缺失无害（JVM 静默忽略找不到的注解），关掉这一类警告即可。
+# 规则来自 AGP 生成的 app/build/outputs/mapping/release/missing_rules.txt，
+# 未扩大化——只此一条，不整包 -dontwarn。
+-dontwarn org.jspecify.annotations.NullMarked

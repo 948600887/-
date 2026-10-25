@@ -115,10 +115,11 @@ dependencies {
     kapt("androidx.room:room-compiler:2.6.1")
     implementation("androidx.room:room-ktx:2.6.1")
 
-    // Retrofit + OkHttp
-    implementation("com.squareup.retrofit2:retrofit:2.9.0")
-    implementation("com.squareup.retrofit2:converter-gson:2.9.0")
+    // OkHttp（项目实际全裸 OkHttp：Retrofit 曾经声明但零 import，已删）
+    // gson 显式声明：SymbolAliasStore 直接用（此前靠 converter-gson 传递依赖，
+    // 删 retrofit 时会连带消失）。版本与删除前 classpath 解析结果一致（2.10.1）。
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("com.google.code.gson:gson:2.10.1")
 
     // coroutines 版本显式钉到 1.7.3：原先靠 firebase-bom 间接钉在 1.7.3（该版本本机缓存齐全）。
     // 删掉 firebase 后，compose-runtime 1.6.1 把 coroutines-android 解析到 1.7.1，

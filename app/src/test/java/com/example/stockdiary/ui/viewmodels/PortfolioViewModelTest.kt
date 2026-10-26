@@ -22,7 +22,13 @@ import io.mockk.verify
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.setMain
@@ -183,6 +189,62 @@ class PortfolioViewModelTest {
             } finally {
                 trackJob.cancel()
             }
+        } finally {
+            unmockkAll()
+        }
+    }
+
+    @Test
+    fun `refresh 成功时通过 syncDone 一次性事件上报结果`() = runTest {
+        // 回归：刷新完成改为 SharedFlow 一次性事件（替代原 UiState 持久字段 + clearSyncResult），
+        // 连点刷新 / 离开页面再回来都不会重复弹或丢弹。这里断言成功时恰好发射一次且内容正确。
+        mockkObject(AssetSyncManager)
+        try {
+            val expected = SyncResult(successCount = 7, failedCount = 2, truncatedByTimeLimit = false)
+            coEvery {
+                AssetSyncManager.syncAllAssets(any(), any(), any(), any(), any(), any(), any(), any(), any())
+            } returns expected
+
+            val vm = buildVm()
+            val (trackJob, latest) = vm.uiState.trackIn(this)
+            // UNDISPATCHED：让 first() 在 refresh() 前就同步完成订阅，确保一次性事件被捕获；
+            // 事件经测试调度器确定性送达（见 UiStateCollectExt 同款 trackIn 机制）
+            val event = async(start = CoroutineStart.UNDISPATCHED) { vm.syncDone.first() }
+            vm.refresh()
+            val result = withTimeout(5000) { event.await() }
+            assertEquals(expected, result)
+            assertEquals(null, latest().errorMessage)
+            trackJob.cancel()
+        } finally {
+            unmockkAll()
+        }
+    }
+
+    @Test
+    fun `refresh 同步抛异常时不发 syncDone 事件`() = runTest {
+        // 同步阶段抛异常走 errorMessage 反馈，不应再发「刷新完成」一次性事件（避免与失败提示打架）
+        mockkObject(AssetSyncManager)
+        try {
+            coEvery {
+                AssetSyncManager.syncAllAssets(any(), any(), any(), any(), any(), any(), any(), any(), any())
+            } throws RuntimeException("网络挂了")
+
+            val vm = buildVm()
+            val (trackJob, latest) = vm.uiState.trackIn(this)
+            val event = async(start = CoroutineStart.UNDISPATCHED) { vm.syncDone.first() }
+            vm.refresh()
+            // 同步抛异常路径下不应发射；first() 永不返回，用超时确认「没有事件」而非「还没收到」
+            var received = false
+            try {
+                withTimeout(500) { event.await() }
+                received = true
+            } catch (_: TimeoutCancellationException) {
+                // 期望超时：未发射任何事件
+            }
+            assertFalse("同步抛异常时不应发射 syncDone 事件", received)
+            assertEquals("刷新失败：网络挂了", latest().errorMessage)
+            event.cancel() // first() 未收到事件仍在挂起，显式取消避免 runTest 判协程泄漏
+            trackJob.cancel()
         } finally {
             unmockkAll()
         }

@@ -26,6 +26,9 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineExceptionHandler
@@ -79,7 +82,6 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
         val assets: List<Asset> = emptyList(),
         val isRefreshing: Boolean = false,
         val syncProgress: SyncProgress? = null,
-        val syncResult: SyncResult? = null,
         val estimatedAnnualDividend: Double = 0.0,
         val dividendLoading: Boolean = false,
         val incomeCalculationStatus: String? = null,
@@ -88,6 +90,17 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
     )
 
     private val _uiState = MutableStateFlow(PortfolioUiState())
+
+    /**
+     * 刷新完成的一次性事件流：替代原本放在 [PortfolioUiState] 里的 `syncResult` 持久字段。
+     * 旧写法把「刷新完成」做成 UI 状态里的持久字段，依赖 Snackbar 关掉后清除 ——
+     * 连点刷新 / 离开页面再回来都会出竞态（第二次弹窗被 cancel、或残留旧弹窗又弹一次）。
+     * 改用 [syncDone] 事件流后，刷新完成不再写持久字段、也不再需要「弹完清掉」，
+     * 天然不残留、不重叠。replay=0 保证新进场不会收到历史事件，
+     * extraBufferCapacity=1 让「正在弹 Snackbar 时又刷完一次」也能排上队、不丢。
+     */
+    private val _syncDone = MutableSharedFlow<SyncResult>(extraBufferCapacity = 1)
+    val syncDone: SharedFlow<SyncResult> = _syncDone.asSharedFlow()
 
     /**
      * assets 由 Room Flow 驱动、其余字段由刷新动作驱动，用 combine 汇成一条流。
@@ -264,7 +277,7 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
 
     fun refresh() {
         viewModelScope.launch(refreshExceptionHandler) {
-            _uiState.update { it.copy(isRefreshing = true, errorMessage = null, syncResult = null) }
+            _uiState.update { it.copy(isRefreshing = true, errorMessage = null) }
             // 两个范围，别混（与资产页 DashboardViewModel 同一套规则）：
             // - priceAssets 用于同步，只含有行情的类型。原先只含 STOCK+FUND，
             //   把加密货币漏了——而持仓页是显示加密货币的，于是在本页点刷新，
@@ -367,7 +380,10 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
                         it.copy(dividendWarning = "今日部分场外基金分红因天天基金限流未能抓取完整，可稍后手动重试")
                     }
                 }
-                _uiState.update { it.copy(syncResult = syncResult, isRefreshing = false) }
+                _uiState.update { it.copy(isRefreshing = false) }
+                // 刷新成功才发一次性完成事件（syncResult 为 null 表示同步阶段已抛异常，
+                // 已走 errorMessage 反馈，不再弹「完成」以免与失败提示打架）
+                syncResult?.let { _syncDone.tryEmit(it) }
             }
         }
     }
@@ -394,11 +410,6 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
 
     fun clearError() {
         _uiState.update { it.copy(errorMessage = null) }
-    }
-
-    /** Snackbar 弹完调用：清掉结果，避免下次进场重复弹同一条 */
-    fun clearSyncResult() {
-        _uiState.update { it.copy(syncResult = null, syncProgress = null) }
     }
 
     // 「设置 → 仪表盘显示」里把某类资产全关掉后，这里会整片空白，

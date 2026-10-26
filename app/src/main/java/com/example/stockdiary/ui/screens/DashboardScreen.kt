@@ -27,6 +27,7 @@ import com.example.stockdiary.ui.viewmodels.DashboardViewModel
 import com.example.stockdiary.utils.AppLogger
 import com.example.stockdiary.utils.sumTotalValueCny
 import com.example.stockdiary.utils.totalValueCny
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -42,7 +43,6 @@ fun DashboardScreen(
     val assets = uiState.assets
     val isRefreshing = uiState.isRefreshing
     val syncProgress = uiState.syncProgress
-    val syncResult = uiState.syncResult
     val dividendLoading = uiState.dividendLoading
     val realAnnualIncome = uiState.realAnnualIncome
     val incomeCalculationStatus = uiState.incomeCalculationStatus
@@ -131,8 +131,11 @@ fun DashboardScreen(
         onDispose { dashboardLifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
-    syncResult?.let { result ->
-        LaunchedEffect(result) {
+    // 刷新完成一次性事件：用 SharedFlow 收尾，不再依赖会被清掉的持久字段，
+    // 连点刷新 / 离开页面再回来都不会重复弹或丢弹（见 DashboardViewModel.syncDone）。
+    // replay=0 保证新进场收不到历史事件，extraBufferCapacity=1 让「正在弹时又刷完一次」排队不丢
+    LaunchedEffect(Unit) {
+        viewModel.syncDone.collect { result ->
             val msg = buildString {
                 // 统一结果反馈：成功/失败都报数，用户才知道这一轮到底刷到了什么
                 append("刷新完成：成功 ${result.successCount}")
@@ -142,7 +145,6 @@ fun DashboardScreen(
                 append(result.skippedHint)
             }
             snackbarHostState.showSnackbar(msg)
-            viewModel.clearSyncResult()
         }
     }
 

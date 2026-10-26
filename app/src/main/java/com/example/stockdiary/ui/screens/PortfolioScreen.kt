@@ -35,6 +35,7 @@ import com.example.stockdiary.ui.theme.*
 import com.example.stockdiary.ui.viewmodels.PortfolioViewModel
 import com.example.stockdiary.utils.sumTotalValueCny
 import com.example.stockdiary.utils.totalValueCny
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 
 /** 负债单独成组时使用的分组 key；真实账户名不会叫这个，不会与账户分组撞车 */
@@ -143,7 +144,6 @@ fun PortfolioScreen(
     val assets = uiState.assets
     val isRefreshing = uiState.isRefreshing
     val syncProgress = uiState.syncProgress
-    val syncResult = uiState.syncResult
     val estimatedAnnualDividend = uiState.estimatedAnnualDividend
     val dividendLoading = uiState.dividendLoading
     val incomeCalculationStatus = uiState.incomeCalculationStatus
@@ -418,17 +418,19 @@ fun PortfolioScreen(
         }
     }
 
-    // 刷新结果反馈：成功/失败都报数。持仓页原先只有 errorMessage、没有成功反馈，
-    // 用户点完刷新只看到转圈停下，到底刷成了几个无从得知（资产页一直有）
-    syncResult?.let { result ->
-        LaunchedEffect(result) {
+    // 刷新完成一次性事件：用 SharedFlow 收尾，不再依赖会被清掉的持久字段，
+    // 连点刷新 / 离开页面再回来都不会重复弹或丢弹（见 PortfolioViewModel.syncDone）。
+    // replay=0 保证新进场收不到历史事件，extraBufferCapacity=1 让「正在弹时又刷完一次」排队不丢
+    LaunchedEffect(Unit) {
+        viewModel.syncDone.collect { result ->
+            // 刷新结果反馈：成功/失败都报数。持仓页原先只有 errorMessage、没有成功反馈，
+            // 用户点完刷新只看到转圈停下，到底刷成了几个无从得知（资产页一直有）
             val msg = if (result.failedCount > 0) {
                 "刷新完成：成功 ${result.successCount}，失败 ${result.failedCount}"
             } else {
                 "刷新完成：成功 ${result.successCount}"
             } + result.skippedHint // 上百个加密货币若因行情源不可达没更新，得让用户看见
             snackbarHostState.showSnackbar(msg)
-            viewModel.clearSyncResult()
         }
     }
 

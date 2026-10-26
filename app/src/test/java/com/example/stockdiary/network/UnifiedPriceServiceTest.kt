@@ -249,6 +249,30 @@ class UnifiedPriceServiceTest {
         assertEquals(Phase.CLOSED, BinanceHostGate.phaseForTesting())
     }
 
+    // ---------- 取消 / 切后台中断：不算「主机不可达」，绝不能喂熔断 ----------
+
+    @Test
+    fun isCancellationArtifact_OkHttp取消抛Canceled算我们自己放弃() {
+        // 切后台(onStop)取消同步 → OkHttp 以 IOException("Canceled") 收尾：
+        // 这是我们主动放弃，不是主机不可达的证据，不能计入熔断。
+        assertTrue(isCancellationArtifact(java.io.IOException("Canceled")))
+    }
+
+    @Test
+    fun isCancellationArtifact_协程取消异常算我们自己放弃() {
+        assertTrue(isCancellationArtifact(kotlinx.coroutines.CancellationException("canceled by onStop")))
+    }
+
+    @Test
+    fun isCancellationArtifact_真实超时不算我们自己放弃() {
+        // 带 timeout 语义的是真的等到超时，是网络状况的证据（是否该计入由调用方
+        // 另用 currentCoroutineContext().isActive 判定），这里不能排除。
+        assertFalse(isCancellationArtifact(java.io.InterruptedIOException("timeout")))
+        assertFalse(isCancellationArtifact(java.net.SocketTimeoutException("timeout")))
+        assertFalse(isCancellationArtifact(java.net.ConnectException("failed to connect")))
+        assertFalse(isCancellationArtifact(java.net.UnknownHostException("data-api.binance.vision")))
+    }
+
     @Test
     fun `getCryptoPrice 用户填错符号两个候选都400仍真实失败`() = runBlocking {
         // SHIB2USDT 是错误符号（真实是 SHIBUSDT）：primary=SHIB2USDT、fallback=SHIB2USDTUSDT

@@ -57,7 +57,7 @@ class BinanceHostGateTest {
     // ---------- 阈值：误伤修复 ----------
 
     @Test
-    fun `连续 4 次失败未达阈值5，不熔断`() {
+    fun `连续阈值减一次失败未达阈值_不熔断`() {
         repeat(BinanceHostGate.FAIL_THRESHOLD - 1) { BinanceHostGate.onNetworkFailure(base) }
         assertEquals(Phase.CLOSED, BinanceHostGate.phaseForTesting())
         // CLOSED 仍放行
@@ -78,7 +78,7 @@ class BinanceHostGateTest {
     }
 
     @Test
-    fun `第 5 次失败达到阈值，熔断且 blockCount 加一`() {
+    fun `累计到阈值那次失败触发熔断且blockCount加一`() {
         tripOpen()
         assertEquals(Phase.OPEN, BinanceHostGate.phaseForTesting())
         assertTrue(BinanceHostGate.isUnavailable())
@@ -115,20 +115,47 @@ class BinanceHostGateTest {
         assertFalse(BinanceHostGate.tryAcquireProbe(base + BinanceHostGate.COOLDOWN_MS - 1))
     }
 
+    /**
+     * 阈值无关写法：先攒 2 次 → 成功清零 → 再攒到「阈值-1」仍不熔断 → 再 1 次才熔断。
+     * 用 [BinanceHostGate.FAIL_THRESHOLD] 推导，改阈值时本用例自动适配（曾因阈值硬编码 5 而假绿）。
+     */
     @Test
-    fun `onSuccess 单独调用能把计数清零，需重新累计 5 次才熔断`() {
+    fun `onSuccess 单独调用能把计数清零_需重新累计到阈值才熔断`() {
         BinanceHostGate.onNetworkFailure(base)
         BinanceHostGate.onNetworkFailure(base)
         BinanceHostGate.onSuccess()
         assertEquals(0, BinanceHostGate.consecutiveFailuresForTesting())
-        // 若计数没被清零，这里 4+2=6 早已越过阈值；清零后只到 4，不熔断
-        repeat(4) { BinanceHostGate.onNetworkFailure(base) }
+        // 若计数没被清零，这里 (阈值-1)+2 早已越过阈值；清零后只到 (阈值-1)，不熔断
+        repeat(BinanceHostGate.FAIL_THRESHOLD - 1) { BinanceHostGate.onNetworkFailure(base) }
         assertEquals(Phase.CLOSED, BinanceHostGate.phaseForTesting())
         assertTrue(BinanceHostGate.tryAcquireProbe(base))
-        // 再失败一次（第 5 次）才重新熔断
+        // 再失败一次才重新熔断
         BinanceHostGate.onNetworkFailure(base)
         assertEquals(Phase.OPEN, BinanceHostGate.phaseForTesting())
         assertFalse(BinanceHostGate.tryAcquireProbe(base))
+    }
+
+    /**
+     * **本轮最重要的回归**：一整波并发超时（= 同步并发度 6）必须**不熔断**。
+     *
+     * 真机诊断 20261026_230142 实锤：10:33 与 20:07 各有一波 6 个在途请求同时
+     * `InterruptedIOException: timeout`，而旧阈值 5 ≤ 并发度 6 ⇒ **一波就打满阈值**，
+     * 10:33 那轮直接 跳过 130 个（币安熔断 129）、耗时 32s（正常轮 5~11s）。
+     * 铁律：阈值必须严格大于同步并发度，否则单波抖动必然误熔整个加密货币组合。
+     */
+    @Test
+    fun `单波6连失败不熔断_阈值必须高于同步并发度`() {
+        val concurrency = 6 // AssetSyncManager.MAX_CONCURRENT_SYNC
+        assertTrue(
+            "阈值(${BinanceHostGate.FAIL_THRESHOLD}) 必须严格大于同步并发度($concurrency)，否则单波抖动必然误熔",
+            BinanceHostGate.FAIL_THRESHOLD > concurrency
+        )
+        repeat(concurrency) { BinanceHostGate.onNetworkFailure(base) }
+        assertEquals(Phase.CLOSED, BinanceHostGate.phaseForTesting())
+        assertEquals(concurrency, BinanceHostGate.consecutiveFailuresForTesting())
+        assertEquals(0, BinanceHostGate.blockCountForTesting())
+        assertTrue("一整波并发超时后，后续请求仍应正常放行", BinanceHostGate.tryAcquireProbe(base))
+        assertFalse(BinanceHostGate.isUnavailable())
     }
 
     // ---------- HALF_OPEN 半开探测 ----------

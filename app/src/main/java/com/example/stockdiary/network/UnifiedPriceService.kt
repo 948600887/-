@@ -419,7 +419,13 @@ object UnifiedPriceService {
                 // 「同步多次失败」通知；连续达阈值后冷却期内直接短路（见 BinanceHostGate）。
                 // CancellationException 已在上面重抛，不会被误计成失败。
                 // 网络异常对所有候选都一样，不再试后续候选。
-                if (e is ConnectException || e is SocketTimeoutException || e is UnknownHostException || e is IOException) {
+                // 「我们自己放弃」不算主机不可达的证据，绝不喂熔断器。
+                // 典型是切后台（MainActivity onStop 取消同步）：协程取消了，但阻塞中的
+                // execute() 不会被打断，仍要跑到 callTimeout 才以 InterruptedIOException 收尾。
+                // 这些失败若计入，一次切后台就能凑满阈值、把整个主机熔断 5 分钟——
+                // 真机日志实锤：20:06:59 切后台 → 20:07:05 六个 35s 超时 → 触发熔断。
+                val gaveUp = !currentCoroutineContext().isActive || isCancellationArtifact(e)
+                if (!gaveUp && (e is ConnectException || e is SocketTimeoutException || e is UnknownHostException || e is IOException)) {
                     // 偶发网络级失败（连不上 / 超时 / 域名解析失败 / IO 错误）喂 TRANSIENT：
                     // 按标准三态累计 / 冷却 / 半开探测自愈，不粘死（地区封锁才粘死，见 451 分支）。
                     BinanceHostGate.onNetworkFailure(System.currentTimeMillis(), FailureType.TRANSIENT)
@@ -490,4 +496,24 @@ object UnifiedPriceService {
         FundAPI.clearCache()
         AppLogger.i("价格缓存已清空 (${sizeBefore} 条)", TAG)
     }
+}
+
+/**
+ * 判断异常是不是「我们自己放弃导致的收尾产物」，而不是「主机不可达」的证据。
+ *
+ * 必须排除的两类（否则一次切后台就能凑满熔断阈值，把整个币安主机熔断 5 分钟）：
+ * - [CancellationException]：协程被取消（调用方最上面已重抛，这里兜底）；
+ * - OkHttp 的 `IOException("Canceled")`：[okhttp3.Call] 被 cancel 后以这个形态收尾。
+ *
+ * 刻意**不**排除带 timeout 语义的 [java.io.InterruptedIOException]（message="timeout"）：
+ * 那是真的等到超时，本身是网络状况的证据；它是否该计入由调用方另用
+ * `currentCoroutineContext().isActive` 判定（放弃之后的超时不算数）。
+ *
+ * 放文件级是为了能直接 JVM 单测（与 isRealDividendPage / isHostUnreachable 同惯例）。
+ */
+internal fun isCancellationArtifact(e: Throwable): Boolean {
+    if (e is CancellationException) return true
+    // OkHttp 取消 call 后抛 IOException("Canceled")
+    if (e is IOException && e.message?.equals("canceled", ignoreCase = true) == true) return true
+    return false
 }

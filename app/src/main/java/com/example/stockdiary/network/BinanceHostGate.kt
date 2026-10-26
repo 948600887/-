@@ -60,13 +60,14 @@ private data class GateState(
  * 自然过去」，过期后下一轮同步直接全量重打、再烧一轮 20s 才可能再次熔断。
  *
  * 三态改造：
- * - 阈值 3→5（≈两波抖动），真实不可达仍能在约 40s 内熔断，单波抖动不再误伤；
+ * - 阈值 3→5→**8**：铁律是必须**高于同步并发度 6**，否则单波并发超时即误熔
+ *   （真机实锤见 [FAIL_THRESHOLD] 的注释）；
  * - 冷却 10min→5min，配合半开探测把「恢复成本」从全量重打降到 1 个探测请求；
  * - 冷却结束进 [Phase.HALF_OPEN]，只放行一个探测：成功→闭路，失败→立即重开冷却。
  *
  * ## 线程安全
  *
- * 价格同步是 3 并发的（AssetSyncManager.Semaphore），再加手动刷新可能与后台 Worker 撞车。
+ * 价格同步是 6 并发的（AssetSyncManager.MAX_CONCURRENT_SYNC），再加手动刷新可能与后台 Worker 撞车。
  * 整个状态打包进 [GateState]、用 [AtomicReference] 整包 CAS：并发越界时只熔断一次、
  * 日志只打一条；[blockCount] 用 [AtomicInteger] 单独计「从健康态判死」的次数。
  */
@@ -76,11 +77,17 @@ internal object BinanceHostGate {
     /**
      * 触发熔断的连续网络级失败次数。
      *
-     * 取 5（原为 3）：3 恰等于同步并发度，单波抖动（3 个在途同时挂满 20s callTimeout）
-     * 就误熔半个组合，误伤率过高。5 ≈ 两波抖动，真实不可达仍能在约 40s 内熔断——
-     * 且 Part B 看门狗已给同步总预算兜底，多烧一波也不怕。
+     * **取值铁律：必须大于价格同步的并发度**（[com.example.stockdiary.data.sync.AssetSyncManager]
+     * 的 `MAX_CONCURRENT_SYNC`=6）。否则一波网络抖动里全部在途请求会同时挂满 callTimeout，
+     * **一次就凑满阈值 → 误熔**，把整个加密货币组合整批停更。
+     *
+     * 取 8（曾为 5，而 5 ≤ 并发度 6）：真机日志 2026-10-26 两次实锤——10:33 与 20:07 各有一波
+     * 6 个并发请求同时 `InterruptedIOException: timeout`，阈值 5 被**一波**打满，10:33 那轮
+     * 直接 **跳过 130 个（币安熔断 129）、耗时 32s**（正常轮只要 5~11s）。
+     * 8 > 6 ⇒ 单波抖动不再误熔；真实不可达仍会在约两波（≈40s）内熔断——
+     * 且同步总预算看门狗已兜底，多烧一波也不怕。
      */
-    const val FAIL_THRESHOLD = 5
+    const val FAIL_THRESHOLD = 8
 
     /**
      * 熔断冷却时长（毫秒）。

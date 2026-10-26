@@ -60,13 +60,13 @@ private const val TREND_PADDING_BOTTOM = 64f
 private const val TREND_LABEL_GAP = 8f
 /**
  * X 轴日期标签之间的额外留白（px，除标签自身宽度外）。
- * 只有「放得下」判定用得到：标签密到影响阅读时不出，而不是排到刚好不重叠。
+ * 只参与「最多能放几个」的容量估算；实际数量按同花顺式自然步长选，不会排满。
  */
 private const val TREND_LABEL_SPACING = 16f
-/** X 轴日期标签的挑选预算上限：再宽的屏也不多画（同花顺 6 个月只标 4 个月初） */
-internal const val MAX_X_LABELS = 6
-/** 稀疏化步长档位（天）：先小后大，取第一个能让标签数落进预算的 */
-private val DAY_STEP_LADDER = listOf(1L, 2L, 3L, 7L, 14L)
+/** X 轴标签预算上限：同花顺的资产曲线通常只画 3～5 个刻度 */
+internal const val MAX_X_LABELS = 5
+/** 自然步长选档时希望落到的刻度数（同花顺最常见 4 个） */
+private const val TARGET_X_LABELS = 4
 
 /**
  * 按时间戳等距排布折线点的 x 坐标。
@@ -108,19 +108,21 @@ internal fun nearestPointIndex(x: Float, positions: List<Float>): Int {
 }
 
 /**
- * 为 X 轴日期标签挑选该画哪些快照的下标。**同花顺规则：按可见跨度选自然日历步长**，
- * 不是「能塞下多少就塞多少」——6 个月只标 4 个月初，一个月每周一个，绝不排满。
+ * 为 X 轴日期标签挑选该画哪些快照的下标。**同花顺规则：先按跨度选自然日历步长，
+ * 再把刻度控制在 3～5 个**——不是「能塞下多少就塞多少」。
  *
- * 每份快照的日期都尽量标在**它自己的点上**：缺口在哪用户直接看得出来
- * （与跨缺口虚线段互相印证）。首末下标永远保留（最起码知道起止）。
+ * 三张同花顺截图的共同点：
+ * - 本月（26 天）：10-05 / 10-12 / 10-19 / 10-26，周级步长锚定周一；
+ * - 近三月（87 天）：08-01 / 09-01 / 10-01，月级步长锚定每月 1 号；
+ * - 全部（多年）：01-01 / 07-01 / 01-01 / 07-01，半年级步长锚定 1/1、7/1。
  *
- * 稀疏档位（按首末快照的日期跨度）：
- * - 跨度 ≤ 14 天：步长 1/2/3 天（一周视图逐日，全部画在各自的点上）
- * - 跨度 ≤ 62 天：步长 7/14 天（一周一个 / 双周一个）
- * - 更长：步长 N 个自然月，**锚定每月 1 号**（N 随跨度与屏宽涨，半年/一年/全部依次变疏）
- *
- * [labelWidths] 与 [positions] 同序同长；最后仍有一道像素级防重叠兜底（窄屏 /
- * 标签异常宽时再削），保证物理上不叠字。
+ * 因此这里不是抄固定刻度数，而是：
+ * 1. 候选步长按「日 → 周 → 月 → 季 → 半年 → 年」排列，取刻度数最接近
+ *    [TARGET_X_LABELS]、且不超过屏宽容量的那一档；
+ * 2. 日/周档以最后一个快照为锚点（周档对齐周一），月及以上锚定自然日历边界；
+ * 3. 刻度只映射到真实存在的快照日期上，缺口不会被凭空补一个日期；
+ * 4. 最后按**标签实际绘制矩形**做像素级防重叠（首标签左对齐、末标签右对齐），
+ *    中间放不下就跳过，绝不叠字。
  */
 internal fun trendXLabelIndices(
     dates: List<java.time.LocalDate?>,
@@ -132,55 +134,170 @@ internal fun trendXLabelIndices(
     if (positions.size == 1) return listOf(0)
     val n = positions.size
 
-    // 放得下就全画：一周 8 个点、稀疏缺口都走这条（不掺日历步长）
     val widest = labelWidths.maxOrNull() ?: 0f
     val availableWidth = (positions.last() - positions.first()).coerceAtLeast(0f)
-    val fitsAll = n <= ((availableWidth + minGap) / (widest + TREND_LABEL_SPACING)).toInt()
-    if (fitsAll) return (0 until n).toList()
+    // 屏宽只决定「最多能放几个」；刻度数仍按自然步长选，宽屏不会因此排满
+    val capacity = ((availableWidth + minGap) / (widest + TREND_LABEL_SPACING)).toInt()
+    val maxTicks = capacity.coerceIn(1, MAX_X_LABELS)
 
     val first = dates.firstOrNull { it != null }
     val last = dates.lastOrNull { it != null }
     if (first == null || last == null) {
         // 日期全是脏数据：退化成等距稀疏，保住「有刻度、不叠字」
-        return thinEvenly(n)
-    }
-    val spanDays = ChronoUnit.DAYS.between(first, last)
-    // 首末各占一个名额，剩下的是步长挑选的预算；屏越窄预算越小
-    val budget = (((availableWidth + minGap) / (widest + TREND_LABEL_SPACING)).toInt())
-        .coerceIn(2, MAX_X_LABELS) - 2
-
-    val ticks: List<java.time.LocalDate> = if (spanDays <= 62) {
-        val step = DAY_STEP_LADDER.firstOrNull { spanDays / it <= budget } ?: DAY_STEP_LADDER.last()
-        generateSequence(first) { it.plusDays(step) }.takeWhile { !it.isAfter(last) }.toList()
-    } else {
-        // 月口径：锚定每月 1 号，步长按月数随跨度涨（半年起每 2 个月、一年起每 3 个月…）
-        val monthStep = maxOf(1, ceil(spanDays / 30.44 / budget.coerceAtLeast(1)).toInt())
-        val anchor = first.withDayOfMonth(1)
-        generateSequence(anchor) { it.plusMonths(monthStep.toLong()) }
-            .takeWhile { !it.isAfter(last) }
-            .toList()
+        return thinEvenly(n, maxTicks)
     }
 
-    // 每个 tick 取「日期不早于它的第一个快照」；tick 递增，cursor 单调前进即可
-    val kept = sortedSetOf(0, n - 1)
+    val ticks = selectTrendTickDates(first, last, maxTicks)
+    val kept = sortedSetOf<Int>()
     var cursor = 0
     for (tick in ticks) {
+        // 每个 tick 取「日期不早于它的第一个快照」；tick 递增，cursor 单调前进即可
         while (cursor < n && dates[cursor]?.isBefore(tick) == true) cursor++
         if (cursor < n) kept.add(cursor)
     }
+    if (kept.isEmpty()) return thinEvenly(n, maxTicks)
     return kept.sorted().filterWithOverlapGuard(positions, labelWidths, minGap)
 }
 
-/** 日期全脏时的退化稀疏：等距挑，首末保留 */
-private fun thinEvenly(count: Int): List<Int> {
-    if (count <= 2) return (0 until count).toList()
-    val step = ceil(count / (MAX_X_LABELS - 2.0)).toInt().coerceAtLeast(1)
+/**
+ * 候选步长：[dayStep] > 0 为日/周档，否则为月档。
+ * 列表顺序即优先级：刻度数打平时优先保留更细的步长（信息更多）。
+ */
+private data class TrendTickStep(
+    val dayStep: Long = 0L,
+    val monthStep: Int = 0,
+    val alignToWeekStart: Boolean = false,
+    val monthAnchor: TrendMonthAnchor = TrendMonthAnchor.MONTH_START
+)
+
+private enum class TrendMonthAnchor { MONTH_START, QUARTER_START, HALF_YEAR_START, YEAR_START }
+
+private val TREND_TICK_STEPS = listOf(
+    TrendTickStep(dayStep = 1L),
+    TrendTickStep(dayStep = 2L),
+    TrendTickStep(dayStep = 3L),
+    TrendTickStep(dayStep = 7L, alignToWeekStart = true),
+    TrendTickStep(dayStep = 14L, alignToWeekStart = true),
+    TrendTickStep(monthStep = 1),
+    TrendTickStep(monthStep = 2),
+    TrendTickStep(monthStep = 3, monthAnchor = TrendMonthAnchor.QUARTER_START),
+    TrendTickStep(monthStep = 6, monthAnchor = TrendMonthAnchor.HALF_YEAR_START),
+    TrendTickStep(monthStep = 12, monthAnchor = TrendMonthAnchor.YEAR_START),
+    TrendTickStep(monthStep = 24, monthAnchor = TrendMonthAnchor.YEAR_START)
+)
+
+/**
+ * 选出刻度数最接近 [TARGET_X_LABELS]、且不超过 [maxTicks] 的自然步长。
+ * 例：12 天 → 每 3 天；26 天 → 每周（周一）；87 天 → 每月 1 号；多年 → 1/1、7/1。
+ */
+private fun selectTrendTickDates(
+    first: java.time.LocalDate,
+    last: java.time.LocalDate,
+    maxTicks: Int
+): List<java.time.LocalDate> {
+    val target = minOf(TARGET_X_LABELS, maxTicks)
+    var best: List<java.time.LocalDate>? = null
+    var bestDistance = Int.MAX_VALUE
+    for (step in TREND_TICK_STEPS) {
+        val ticks = generateTrendTicks(step, first, last)
+        if (ticks.isEmpty() || ticks.size > maxTicks) continue
+        val distance = abs(ticks.size - target)
+        if (distance < bestDistance) {
+            best = ticks
+            bestDistance = distance
+        }
+    }
+    if (best != null) return best
+
+    // 跨度极长、现有档位都太密：从 24 个月起继续加倍，直到落进预算
+    var months = 24
+    while (months <= 1200) {
+        val ticks = generateMonthTicks(first, last, months, TrendMonthAnchor.YEAR_START)
+        if (ticks.isNotEmpty() && ticks.size <= maxTicks) return ticks
+        months *= 2
+    }
+    return listOf(last)
+}
+
+private fun generateTrendTicks(
+    step: TrendTickStep,
+    first: java.time.LocalDate,
+    last: java.time.LocalDate
+): List<java.time.LocalDate> = if (step.dayStep > 0L) {
+    generateDayTicks(first, last, step.dayStep, step.alignToWeekStart)
+} else {
+    generateMonthTicks(first, last, step.monthStep, step.monthAnchor)
+}
+
+/** 日/周档以最后一天为锚点向前倒推；周档先退到周一，保证落在自然周界上 */
+private fun generateDayTicks(
+    first: java.time.LocalDate,
+    last: java.time.LocalDate,
+    dayStep: Long,
+    alignToWeekStart: Boolean
+): List<java.time.LocalDate> {
+    var anchor = if (alignToWeekStart) {
+        last.minusDays((last.dayOfWeek.value - 1).toLong())
+    } else {
+        last
+    }
+    val ticks = mutableListOf<java.time.LocalDate>()
+    while (!anchor.isBefore(first)) {
+        ticks.add(anchor)
+        anchor = anchor.minusDays(dayStep)
+    }
+    return ticks.asReversed()
+}
+
+/** 月及以上档锚定自然日历边界（1 号 / 季初 / 1 月与 7 月 / 1 月 1 日） */
+private fun generateMonthTicks(
+    first: java.time.LocalDate,
+    last: java.time.LocalDate,
+    monthStep: Int,
+    anchor: TrendMonthAnchor
+): List<java.time.LocalDate> {
+    val startMonth = when (anchor) {
+        TrendMonthAnchor.MONTH_START -> last.monthValue
+        TrendMonthAnchor.QUARTER_START -> ((last.monthValue - 1) / 3) * 3 + 1
+        TrendMonthAnchor.HALF_YEAR_START -> if (last.monthValue >= 7) 7 else 1
+        TrendMonthAnchor.YEAR_START -> 1
+    }
+    var tick = java.time.LocalDate.of(last.year, startMonth, 1)
+    val ticks = mutableListOf<java.time.LocalDate>()
+    while (!tick.isBefore(first)) {
+        ticks.add(tick)
+        tick = tick.minusMonths(monthStep.toLong())
+    }
+    return ticks.asReversed()
+}
+
+/** 日期全脏时的退化稀疏：按预算等距挑，首末保留 */
+private fun thinEvenly(count: Int, maxTicks: Int): List<Int> {
+    if (count <= 1) return (0 until count).toList()
+    val target = minOf(TARGET_X_LABELS, maxTicks).coerceAtLeast(1)
+    if (count <= target) return (0 until count).toList()
+    if (target == 1) return listOf(count - 1)
+    val step = ceil(count / (target - 1).toDouble()).toInt().coerceAtLeast(1)
     return (0 until count).filter { it % step == 0 || it == count - 1 }
 }
 
 /**
- * 像素级防重叠兜底：与上一个已画标签间隔不足 [minGap] 就跳过中间的。
- * 首末下标永远保留（最起码知道起止）。internal 供单测直接钉边界。
+ * 标签实际绘制矩形的左边（px）。首标签贴绘图区左边缘，末标签贴右边缘，
+ * 中间居中。**绘制和防重叠必须共用它**，否则首尾标签会按居中框量出多余的间隙。
+ */
+internal fun trendXLabelLeft(
+    index: Int,
+    positions: List<Float>,
+    labelWidths: List<Float>
+): Float = when (index) {
+    0 -> positions[0]
+    positions.lastIndex -> positions[positions.lastIndex] - labelWidths[index]
+    else -> positions[index] - labelWidths[index] / 2f
+}
+
+/**
+ * 像素级防重叠兜底：按实际绘制矩形，与上一个已画标签间隔不足 [minGap] 就跳过。
+ * 不再无条件保留首末——放不下时宁可少一个标签，也不让两组日期叠在一起。
  */
 internal fun List<Int>.filterWithOverlapGuard(
     positions: List<Float>,
@@ -190,13 +307,12 @@ internal fun List<Int>.filterWithOverlapGuard(
     val kept = mutableListOf<Int>()
     var lastEnd = Float.NEGATIVE_INFINITY
     for (index in this) {
-        val isEdge = index == first() || index == last()
-        val start = positions[index] - labelWidths[index] / 2f
-        val end = positions[index] + labelWidths[index] / 2f
-        // 首末必须画；中间的与上一个已画标签间隔不足 minGap 就跳过
-        if (isEdge || start - lastEnd >= minGap) {
+        if (index !in positions.indices) continue
+        val left = trendXLabelLeft(index, positions, labelWidths)
+        val end = left + labelWidths[index]
+        if (left - lastEnd >= minGap) {
             kept.add(index)
-            if (end > lastEnd) lastEnd = end
+            lastEnd = end
         }
     }
     return kept
@@ -411,15 +527,11 @@ fun AssetTrendChart(
             }
 
             // 标签文本、宽度和需要显示的下标均已缓存，draw 期不再整表 format/measure。
+            // 左边界与防重叠共用 trendXLabelLeft：首尾贴边、中间居中，量出来的框就是画出来的框。
             chart.labelIndices.forEach { index ->
-                val labelX = when (index) {
-                    0 -> chart.paddingLeft
-                    snapshots.lastIndex -> chart.paddingRightX - labelCache.widths[index]
-                    else -> chart.points[index].x - labelCache.widths[index] / 2f
-                }
                 drawContext.canvas.nativeCanvas.drawText(
                     labelCache.texts[index],
-                    labelX,
+                    trendXLabelLeft(index, chart.positions, labelCache.widths),
                     chart.labelY,
                     axisPaint
                 )

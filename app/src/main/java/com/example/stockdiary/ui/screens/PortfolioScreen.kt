@@ -609,9 +609,20 @@ fun PortfolioScreen(
                 }
             }
         } else {
+            // 加号(FAB)是**悬浮**在列表之上的：Scaffold 的 innerPadding 只为 topBar / bottomBar
+            // 预留空间，**不会**为 FAB 预留。不手动留白的话，滚到底时最后一项资产会被绿色加号
+            // 压住一截（真机截图：LDBTC 的金额被盖掉）。
+            // 56dp(FAB 直径) + 16dp(Scaffold 给 FAB 的默认外边距) = 72dp；批量选择态下 FAB 隐藏
+            // （换成底部操作栏，其高度已由 innerPadding 计入），此时不留白，避免底部空一大块。
+            val fabBottomSpace = if (selectionMode) 0.dp else 72.dp
             LazyColumn(
                 modifier = Modifier.fillMaxSize().padding(padding),
-                contentPadding = PaddingValues(16.dp),
+                contentPadding = PaddingValues(
+                    start = 16.dp,
+                    top = 16.dp,
+                    end = 16.dp,
+                    bottom = 16.dp + fabBottomSpace
+                ),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 item {

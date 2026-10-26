@@ -229,7 +229,15 @@ fun DashboardScreen(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(padding),
-                contentPadding = PaddingValues(16.dp),
+                // 与 PortfolioScreen 同因：加号(FAB)悬浮在列表之上，而 Scaffold 的 innerPadding
+                // **不为 FAB 预留空间**，不手动留白滚到底时最后一项会被绿色加号压住。
+                // 56dp(FAB 直径) + 16dp(Scaffold 给 FAB 的默认外边距) = 72dp。
+                contentPadding = PaddingValues(
+                    start = 16.dp,
+                    top = 16.dp,
+                    end = 16.dp,
+                    bottom = 16.dp + 72.dp
+                ),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 // 总资产卡片

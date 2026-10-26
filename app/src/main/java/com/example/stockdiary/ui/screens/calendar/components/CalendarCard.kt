@@ -132,7 +132,11 @@ fun CalendarCard(
                             CalendarDayCell(
                                 day = calendarDays[index],
                                 isSelected = selectedDate == calendarDays[index].date,
-                                hasDividend = calendarDays[index].isCurrentMonth && calendarDays[index].date in dividendDates,
+                                // 无数据的格子（当日无快照、没有金额）不显示「分」：
+                                // 否则「有分红记录但当日无数据」的日期上只剩一个孤立的红色「分」，像无数据格子上的噪点。
+                                hasDividend = calendarDays[index].isCurrentMonth &&
+                                    calendarDays[index].value != 0.0 &&
+                                    calendarDays[index].date in dividendDates,
                                 isAssetCalendar = isAssetCalendar,
                                 onClick = {
                                     if (calendarDays[index].isCurrentMonth) {

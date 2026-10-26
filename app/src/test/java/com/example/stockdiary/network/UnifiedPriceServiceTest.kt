@@ -210,6 +210,21 @@ class UnifiedPriceServiceTest {
         assertEquals(Phase.CLOSED, BinanceHostGate.phaseForTesting())
     }
 
+    /**
+     * 锁仓路径的 WBETH 兜底：LDWBETH 剥出底层 WBETH，底层同样以报价币 ETH 结尾被误判成交易对，
+     * 必须也走 cryptoSymbolCandidates 落到 WBETHUSDT 兜底取到价。钉死 5594703 只修了非锁仓分支、
+     * 漏了锁仓分支的回归（2026-10-26 真机日志 LDWBETH 连续多轮同步 400、刷新「失败 3」之一）。
+     */
+    @Test
+    fun `getCryptoPrice LDWBETH锁仓底层WBETH主候选400兜底WBETHUSDT200命中`() = runBlocking {
+        val result = UnifiedPriceService.getCryptoPrice("LDWBETH", client = fakeClient(TickerWbethRetryInterceptor()))
+        assertTrue("锁仓底层 WBETH 主候选 400 后必须落到 WBETHUSDT 取到价", result.isSuccess)
+        assertEquals(2700.0, result.getOrNull()!!.price, 1e-9)
+        // 兜底命中是真正的 2xx 成功：连续失败计数清零（不被 400 误判成网络失败）
+        assertEquals(0, BinanceHostGate.consecutiveFailuresForTesting())
+        assertEquals(Phase.CLOSED, BinanceHostGate.phaseForTesting())
+    }
+
     @Test
     fun `getCryptoPrice 用户填错符号两个候选都400仍真实失败`() = runBlocking {
         // SHIB2USDT 是错误符号（真实是 SHIBUSDT）：primary=SHIB2USDT、fallback=SHIB2USDTUSDT

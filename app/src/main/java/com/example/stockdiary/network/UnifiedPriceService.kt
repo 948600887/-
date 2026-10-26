@@ -293,7 +293,9 @@ object UnifiedPriceService {
 
         // 候选交易对：先按既有映射算出（多数情况正确），再补一个「裸码 + USDT」兜底，
         // 解决 WBETH 这类 ticker 以报价币名结尾、被误判成已是交易对导致永远 400 的问题
-        // （详见 [BinanceAPI.cryptoSymbolCandidates]）。LD 理财/锁仓仍走底层 1:1 计价。
+        // （详见 [BinanceAPI.cryptoSymbolCandidates]）。LD 理财/锁仓走底层 1:1 计价，
+        // 但底层本身也可能是 WBETH 这种「以报价币结尾」的码——所以锁仓分支同样套用
+        // cryptoSymbolCandidates（而非裸 listOf），让 WBETH 类底层也能落到 WBETHUSDT 兜底。
         val candidates: List<String> = if (BinanceAPI.isEarnProduct(code)) {
             val underlying = BinanceAPI.earnUnderlyingPair(code)
             if (underlying == null) {
@@ -315,7 +317,7 @@ object UnifiedPriceService {
                 )
             }
             AppLogger.d("理财/锁仓产品 $code 按底层 $underlying 1:1 计价", TAG)
-            listOf(underlying)
+            BinanceAPI.cryptoSymbolCandidates(underlying)
         } else {
             BinanceAPI.cryptoSymbolCandidates(code)
         }

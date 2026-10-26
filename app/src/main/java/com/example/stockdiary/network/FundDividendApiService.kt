@@ -8,11 +8,15 @@ import com.example.stockdiary.network.NetworkClient
 import com.example.stockdiary.utils.AppLogger
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.jsoup.HttpStatusException
 import org.jsoup.Jsoup
 import kotlinx.coroutines.CancellationException
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * 场外基金分红API服务
@@ -62,6 +66,135 @@ class FundDividendApiService {
          */
         @Volatile
         internal var otcRateLimitHit = false
+
+        // ---- 天天基金 fhsp 整源熔断（通用失败：5xx / 超时 / 反爬空页 / 解析失败）----
+        // 与上面两个「确定性单一原因」的短退避（rateLimitedUntil=514/429、hostUnreachableUntil=DNS）
+        // 正交：这里处理「整个 fhsp 源在抖/挂」的通用情况——靠连续**通用失败**计数触发，
+        // 指数退避 + 抖动。触发后整段时间内所有基金统一跳过「真实抓取」，避免对已经不健康的源
+        // 反复猛打、把无效等待从「标的数 × 2 次超时」进一步压到「一次」，并给源喘息恢复的机会。
+        // 514/429 与 DNS 由各自窗口处理、不计入本熔断（它们是确定的单一原因，已短退避）。
+        private const val FHSP_FAIL_THRESHOLD = 5
+        private const val FHSP_BACKOFF_BASE_MS = 30_000L       // 首档退避 30s
+        private const val FHSP_BACKOFF_MAX_MS = 10 * 60_000L   // 上限 10min
+
+        /** fhsp 整源熔断相位：CLOSED 放行 / OPEN 冷却短路（无需半开探测，靠真实取价成功自愈）。 */
+        internal enum class FhspPhase { CLOSED, OPEN }
+        private data class FhspGateState(val phase: FhspPhase, val blockedUntil: Long)
+
+        /** fhsp 整源熔断状态（整包 CAS，防并发越界）。 */
+        private val fhspState = AtomicReference(FhspGateState(FhspPhase.CLOSED, 0L))
+        /** 连续通用失败计数（CLOSED 下累计；达阈值才熔断，OPEN 下仅作有界记账）。 */
+        internal val fhspConsecutiveFailures = AtomicInteger(0)
+        /** 已熔断次数（指数退避档位：第 n 次熔断退避 ≈ base×2^(n-1)）。 */
+        internal val fhspBackoffHits = AtomicInteger(0)
+        /** 诊断读数与供 Repository 读取的公开窗口（与 rateLimitedUntil 同风格）。 */
+        @Volatile
+        internal var fhspBlockedUntil: Long = 0L
+
+        // 两档并发闸门：健康档 2 并发（与 AssetSyncManager.FUND_MAX_CONCURRENT_SYNC 对齐，不抢总闸）；
+        // 降级档串行（Mutex）——刚从熔断恢复或正处于退避时，把对 fhsp 的并发压到 1，给源喘息。
+        private val fhspHealthySemaphore = Semaphore(2)
+        private val fhspDegradedMutex = Mutex()
+        /** 降级标记：熔断触发后置 true（并发档切到串行），真实取价成功自愈后置 false。 */
+        @Volatile
+        internal var fhspDegraded: Boolean = false
+
+        /** fhsp 整源熔断闸门：OPEN 且冷却未到 → true（调用方据此跳过真实抓取）。 */
+        internal fun fhspIsBlocked(now: Long): Boolean {
+            val s = fhspState.get()
+            return s.phase == FhspPhase.OPEN && now < s.blockedUntil
+        }
+
+        /**
+         * 记录一次 fhsp 通用失败：连续达 [FHSP_FAIL_THRESHOLD] 即熔断；冷却过期后的「探测失败」
+         * 会重新熔断并把退避档位 +1（指数增长，30s×2^(n-1)，封顶 [FHSP_BACKOFF_MAX_MS]），
+         * 再叠加最多 +30% 抖动平摊重试风暴。一次真正的成功（[fhspOnSuccess]）会清零档位，
+         * 所以「源已恢复」不背惩罚，只有「反复失败」才会把退避越拉越长。
+         */
+        internal fun fhspOnFailure(now: Long) {
+            while (true) {
+                val s = fhspState.get()
+                when (s.phase) {
+                    FhspPhase.OPEN -> {
+                        if (now < s.blockedUntil) {
+                            // 冷却仍在进行：不顺延、仅把计数记一下（有界），返回
+                            fhspConsecutiveFailures.incrementAndGet()
+                            return
+                        }
+                        // 冷却已过期却仍是 OPEN = 冷却结束后的那次抓取（探测）失败：
+                        // 重新熔断，退避档位 +1（指数增长），给源更长的喘息。
+                        val hits = fhspBackoffHits.incrementAndGet()
+                        val shift = (hits - 1).coerceAtMost(31)
+                        val exp = (FHSP_BACKOFF_BASE_MS shl shift).coerceAtMost(FHSP_BACKOFF_MAX_MS)
+                        val jitter = (Math.random() * exp * 0.3).toLong()  // 最多 +30% 抖动
+                        val backoff = exp + jitter
+                        val reopened = FhspGateState(FhspPhase.OPEN, now + backoff)
+                        if (fhspState.compareAndSet(s, reopened)) {
+                            fhspBlockedUntil = reopened.blockedUntil
+                            fhspDegraded = true
+                            AppLogger.w(
+                                "天天基金(fhsp)冷却后探测仍失败，重新熔断 ${backoff / 1000} 秒" +
+                                    "（档位 $hits，暂停抓取）",
+                                TAG
+                            )
+                            return
+                        }
+                        // CAS 失败，重读重试
+                    }
+                    FhspPhase.CLOSED -> {
+                        val consecutive = fhspConsecutiveFailures.incrementAndGet()
+                        if (consecutive < FHSP_FAIL_THRESHOLD) return
+                        // 达阈值：首次熔断，退避档位从 1 起（指数增长），+ 抖动
+                        val hits = fhspBackoffHits.incrementAndGet()
+                        val shift = (hits - 1).coerceAtMost(31)
+                        val exp = (FHSP_BACKOFF_BASE_MS shl shift).coerceAtMost(FHSP_BACKOFF_MAX_MS)
+                        val jitter = (Math.random() * exp * 0.3).toLong()  // 最多 +30% 抖动
+                        val backoff = exp + jitter
+                        val opened = FhspGateState(FhspPhase.OPEN, now + backoff)
+                        if (fhspState.compareAndSet(s, opened)) {
+                            fhspBlockedUntil = opened.blockedUntil
+                            fhspDegraded = true
+                            AppLogger.w(
+                                "天天基金(fhsp)连续 $consecutive 次通用失败，整源熔断 ${backoff / 1000} 秒" +
+                                    "（暂停抓取，至冷却结束自愈）",
+                                TAG
+                            )
+                            return
+                        }
+                        // CAS 失败，重读重试
+                    }
+                }
+            }
+        }
+
+        /** 记录一次 fhsp 真实成功：清零计数与退避档位，解除熔断与降级，恢复正常两档并发。 */
+        internal fun fhspOnSuccess() {
+            if (fhspState.get().phase == FhspPhase.OPEN || fhspConsecutiveFailures.get() != 0) {
+                AppLogger.i("天天基金(fhsp)恢复，整源熔断解除", TAG)
+            }
+            fhspConsecutiveFailures.set(0)
+            fhspBackoffHits.set(0)
+            fhspState.set(FhspGateState(FhspPhase.CLOSED, 0L))
+            fhspDegraded = false
+        }
+
+        /** 测试专用读数：当前 fhsp 熔断相位 */
+        internal fun fhspPhaseForTesting(): FhspPhase = fhspState.get().phase
+        /** 测试专用读数：当前是否处于整源熔断 OPEN（冷却中） */
+        internal fun fhspIsOpenForTesting(): Boolean = fhspState.get().phase == FhspPhase.OPEN
+        /** 测试专用读数：当前连续通用失败计数 */
+        internal fun fhspConsecutiveForTesting(): Int = fhspConsecutiveFailures.get()
+        /** 测试专用读数：已熔断次数（退避档位） */
+        internal fun fhspBackoffHitsForTesting(): Int = fhspBackoffHits.get()
+
+        /** 测试专用复位：清 fhsp 整源熔断状态，防漏给别的测试类（与 resetForTesting 同惯例）。 */
+        internal fun fhspResetForTesting() {
+            fhspState.set(FhspGateState(FhspPhase.CLOSED, 0L))
+            fhspConsecutiveFailures.set(0)
+            fhspBackoffHits.set(0)
+            fhspBlockedUntil = 0L
+            fhspDegraded = false
+        }
     }
 
     // 复用统一客户端：通过 defaultClient.newBuilder() 派生，共享底层 ConnectionPool/Dispatcher
@@ -77,21 +210,53 @@ class FundDividendApiService {
     /**
      * 获取场外基金分红历史
      * @param fundCode 纯数字基金代码，如 "110011"
+     *
+     * 编排：先做三道「顶部短路」——514/429 限流退避、DNS 主机不可达退避、整源熔断（fhsp）
+     * 三者任一命中即直接失败、绝不发起网络请求（详见各自说明）；通过后才进入两档并发闸门，
+     * 把真实抓取（[fetchFundDividendInner]）的并发控在「健康 2 / 降级串行」两档，最后按抓取
+     * 成败精确记账整源熔断（成功→自愈，通用失败→累计触发）。
      */
     suspend fun getFundDividendHistory(fundCode: String): Result<List<DividendRecord>> = withContext(Dispatchers.IO) {
+        val now = System.currentTimeMillis()
         // 进程级限流退避：一旦被天天基金 514/429 限流，整段时间内所有基金统一跳过，
         // 不再对同一个被限流的主机用 OkHttp 或 Jsoup 反复猛打（只会拉长封禁窗口）。
-        if (System.currentTimeMillis() < rateLimitedUntil) {
+        if (now < rateLimitedUntil) {
             AppLogger.w("天天基金限流退避中，跳过 $fundCode 本次抓取", TAG)
             return@withContext Result.failure(Exception("天天基金限流退避中，跳过"))
         }
         // 主机不可达退避：DNS 都解析不了时，后续每只基金都会走同样的失败路径，
         // 不短路就是「标的数 × 2 个超时」的纯等待
-        if (System.currentTimeMillis() < hostUnreachableUntil) {
+        if (now < hostUnreachableUntil) {
             AppLogger.w("天天基金主机不可达退避中，跳过 $fundCode 本次抓取", TAG)
             return@withContext Result.failure(Exception("天天基金主机不可达退避中，跳过"))
         }
+        // 整源熔断（fhsp 通用失败累计触发，指数退避）：整个 fhsp 源在抖/挂时统一短路，
+        // 不再对已经不健康的源反复猛打。自愈由真实取价成功驱动（见 fetchFundDividendInner）。
+        if (fhspIsBlocked(now)) {
+            AppLogger.w("天天基金(fhsp)整源熔断冷却中，跳过 $fundCode 本次抓取", TAG)
+            return@withContext Result.failure(Exception("天天基金整源熔断冷却中，跳过"))
+        }
 
+        // 两档并发闸门：降级（刚从熔断恢复/退避中）串行（Mutex），健康档 2 并发（Semaphore）。
+        // 取快照决定用哪档——中途即便标记翻转也不影响本次已选定的闸门，避免半途切换死锁。
+        val useDegraded = fhspDegraded
+        if (useDegraded) fhspDegradedMutex.lock() else fhspHealthySemaphore.acquire()
+        try {
+            return@withContext fetchFundDividendInner(fundCode)
+        } finally {
+            if (useDegraded) fhspDegradedMutex.unlock() else fhspHealthySemaphore.release()
+        }
+    }
+
+    /**
+     * 真实抓取逻辑（OkHttp + Jsoup 兜底），不含顶部短路与并发闸门（由 [getFundDividendHistory] 负责）。
+     *
+     * 整源熔断记账在此按返回路径精确落位：
+     * - 成功页（isRealDividendPage）或有数据的 Jsoup 结果 → [fhspOnSuccess] 自愈；
+     * - 特定短退避（514/429、DNS）由各自窗口处理、不计入本熔断（直接失败、不调 [fhspOnFailure]）；
+     * - 其余通用失败（5xx 落到反爬页、超时、解析全空等）→ 累计触发整源熔断。
+     */
+    private suspend fun fetchFundDividendInner(fundCode: String): Result<List<DividendRecord>> {
         val url = FHSP_URL.replace("{code}", fundCode)
 
         // 第一次尝试：使用 OkHttp
@@ -125,18 +290,20 @@ class FundDividendApiService {
                     // 唯一还值得换 Jsoup 重试的情况是**拿到的根本不是分红页**
                     // （反爬页 / 错误页），判据见 [isRealDividendPage]。
                     if (isRealDividendPage(html)) {
-                        return@withContext Result.success(records)
+                        fhspOnSuccess()
+                        return Result.success(records)
                     }
                     AppLogger.w("天天基金返回的页面不像分红页（可能是反爬页），换 Jsoup 重试", TAG)
                 } else {
                     AppLogger.w("OkHttp HTTP 请求失败: ${response.code}", TAG)
                     // 限流（514/429）：设置退避窗口并直接失败，绝不再用 Jsoup 对同一个被限流
                     // 主机补刀——那只会让限流窗口更久。其它非 2xx 仍保留降级到 Jsoup 的机会。
+                    // 注意：514/429 由 rateLimitedUntil 单独处理，**不计入整源熔断**（见 fhspOnFailure）。
                     if (response.code == 514 || response.code == 429) {
                         rateLimitedUntil = System.currentTimeMillis() + RATE_LIMIT_BACKOFF_MS
                         otcRateLimitHit = true
                         AppLogger.w("天天基金限流（${response.code}），本周期退避，不再用 Jsoup 兜底猛打", TAG)
-                        return@withContext Result.failure(Exception("天天基金限流（${response.code}），本周期退避"))
+                        return Result.failure(Exception("天天基金限流（${response.code}），本周期退避"))
                     }
                 }
             }
@@ -146,10 +313,11 @@ class FundDividendApiService {
             AppLogger.w("OkHttp 获取天天基金分红失败: ${e.message}", TAG)
             // DNS 解析失败是确定性故障：下面 Jsoup 打的是同一个主机、必然同样失败，
             // 再补一遍等于让每只基金都白等第二个超时。设退避窗口并直接失败。
+            // DNS 由 hostUnreachableUntil 单独处理，**不计入整源熔断**。
             if (isHostUnreachable(e)) {
                 hostUnreachableUntil = System.currentTimeMillis() + HOST_UNREACHABLE_BACKOFF_MS
                 AppLogger.w("天天基金主机不可达（DNS 解析失败），本轮退避 60s，不再用 Jsoup 兜底", TAG)
-                return@withContext Result.failure(e)
+                return Result.failure(e)
             }
         }
 
@@ -166,25 +334,30 @@ class FundDividendApiService {
             val records = parseDividendHtml(html, fundCode)
             AppLogger.d("Jsoup 解析到 ${records.size} 条基金分红记录", TAG)
             if (records.isNotEmpty()) {
-                return@withContext Result.success(records)
+                fhspOnSuccess()
+                return Result.success(records)
             }
         } catch (e: CancellationException) {
             throw e
         } catch (e: HttpStatusException) {
             // 限流（514/429）：同样设置退避窗口并直接失败，不再继续走最终的兜底失败逻辑
             // 或重复对限流主机发请求。其它 HttpStatusException（如 404/503）仍按普通异常处理。
+            // 514/429 由 rateLimitedUntil 单独处理，**不计入整源熔断**。
             if (e.statusCode == 514 || e.statusCode == 429) {
                 rateLimitedUntil = System.currentTimeMillis() + RATE_LIMIT_BACKOFF_MS
                 otcRateLimitHit = true
                 AppLogger.w("天天基金限流（${e.statusCode}），本周期退避，不再用 Jsoup 兜底猛打", TAG)
-                return@withContext Result.failure(Exception("天天基金限流（${e.statusCode}），本周期退避"))
+                return Result.failure(Exception("天天基金限流（${e.statusCode}），本周期退避"))
             }
             AppLogger.e("Jsoup 获取天天基金分红失败: ${e.message}", e, TAG)
         } catch (e: Exception) {
             AppLogger.e("Jsoup 获取天天基金分红失败: ${e.message}", e, TAG)
         }
 
-        return@withContext Result.failure(Exception("无法获取天天基金分红数据"))
+        // 落到这里 = 通用失败（5xx 落到反爬页 / 超时 / 解析全空等）：累计触发整源熔断
+        // （非 514/429、非 DNS——那两类由各自窗口短退避）。
+        fhspOnFailure(System.currentTimeMillis())
+        return Result.failure(Exception("无法获取天天基金分红数据"))
     }
 
     /**

@@ -200,5 +200,7 @@ class FundDividendApiServiceTest {
     fun resetBackoff() {
         // 防止退避窗口污染相邻用例
         FundDividendApiService.rateLimitedUntil = 0L
+        FundDividendApiService.hostUnreachableUntil = 0L
+        FundDividendApiService.fhspResetForTesting()
     }
 }

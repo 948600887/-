@@ -15,6 +15,18 @@ import java.util.concurrent.atomic.AtomicReference
 internal enum class Phase { CLOSED, OPEN, HALF_OPEN }
 
 /**
+ * 失败类型：喂给 [onNetworkFailure] 区分「瞬断」与「地区封锁」，二者冷却策略不同。
+ *
+ * - [TRANSIENT]：连不上 / 超时 / 域名解析失败 / IO 错误等**偶发**故障。主机大概率很快恢复，
+ *   用较短的 [COOLDOWN_MS] 冷却 + 半开探测快速恢复（详见 [onNetworkFailure]）。
+ * - [REGION_BLOCKED]：451/403 地区封锁 / 访问被拒。主机**可达但本用户用不了**，且换 IP 无效，
+ *   是**确定性、会话内持久**的故障。一旦据此熔断即打上粘性标记 [regionBlocked]，
+ *   之后 [tryAcquireProbe] 永久拒绝探测（不再每轮白探一次），彻底灭掉旧实现里「每 5 分钟空探、
+ *   无限循环」的问题。下次进程启动（[resetForTesting]）才重新评估。
+ */
+internal enum class FailureType { TRANSIENT, REGION_BLOCKED }
+
+/**
  * 熔断器的不可变快照（整包 CAS，保证状态迁移原子）。
  *
  * @param phase 当前相位
@@ -99,6 +111,18 @@ internal object BinanceHostGate {
     private val blockCount = AtomicInteger(0)
 
     /**
+     * 粘性「地区封锁」标记（仅由 [FailureType.REGION_BLOCKED] 失败置位，[resetForTesting] 清零）。
+     *
+     * 一旦置位，[tryAcquireProbe] 永久拒绝探测——彻底灭掉旧实现里「每 5 分钟空探一次、
+     * 无限循环」的问题。地区封锁（451/403）是确定性、会话内持久的故障：换 IP 无效、
+     * 主机可达但本用户用不了，凉一个冷却窗口再探也是 451，白探还白烧时间。
+     * 所以一旦据此熔断（阈值到达 / 已在 OPEN·HALF_OPEN 下再失败），直接粘死，
+     * 等下次进程启动（[resetForTesting]）重新评估即可。
+     */
+    @Volatile
+    private var regionBlocked: Boolean = false
+
+    /**
      * 请求闸门（**带 CAS 副作用，调用即可能消耗唯一的半开探测槽**）：这次加密货币询价到底发不发。
      *
      * ⚠️ 严禁在「非真正要发请求」的路径上调用（典型反面教材：UI 想判断可用性而顺手调它）——
@@ -115,6 +139,9 @@ internal object BinanceHostGate {
      * 用 CAS 保证「冷却结束瞬间的并发请求里只有一个能成为探测」。
      */
     fun tryAcquireProbe(now: Long): Boolean {
+        // 地区封锁（451/403）粘性短路：一旦据此熔断，永久拒绝探测，不再每轮空探。
+        // 此短路高于相位判定——即便 OPEN 冷却早已过期，也直接拒（regionBlocked 时相位恒 OPEN）。
+        if (regionBlocked) return false
         while (true) {
             val s = state.get()
             when (s.phase) {
@@ -186,16 +213,24 @@ internal object BinanceHostGate {
     }
 
     /**
-     * 记录一次网络级失败（连不上 / 超时 / 域名解析失败 / IO 错误）。
+     * 记录一次网络级失败（连不上 / 超时 / 域名解析失败 / IO 错误 / 地区封锁）。
      *
-     * - HALF_OPEN（探测失败）→ 主机仍不可达的确定证据，**立即重开冷却**
-     *   （blockedUntil = now + [COOLDOWN_MS]，不等计数到阈值），打日志；不计入 [blockCount]；
-     * - OPEN（冷却期内迟来失败）→ 不顺延截止时间（每次失败都顺延，主机长时间不可达时
-     *   熔断永远解不了封），也不重复打日志；把计数压回阈值以下，防止随并发虚涨越界；
+     * @param type 失败类型（默认 [FailureType.TRANSIENT]）：
+     *   - [FailureType.TRANSIENT]：偶发故障，按标准三态累计 / 冷却 / 半开探测自愈；
+     *   - [FailureType.REGION_BLOCKED]：451/403 地区封锁 / 访问被拒——主机可达但本用户用不了，
+     *     换 IP 无效。一旦**据此熔断**（阈值到达 / 已在 OPEN·HALF_OPEN 下再失败），即打粘性
+     *     [regionBlocked] 标记，[tryAcquireProbe] 此后永久拒探测，灭掉无限空探循环。
+     *     注意：单发地区封锁仍只计数、不立即粘死（与现有契约 `getCryptoPrice 收到451…` 一致：
+     *     单发 451 不熔断、UI 不显示暂不可达），要凑满 [FAIL_THRESHOLD] 才粘死。
+     *
+     * 各相位下（TRANSIENT 与 REGION_BLOCKED 共用同一套状态迁移，仅 REGION_BLOCKED 在
+     * 成功 CAS 时额外置位 [regionBlocked]）：
+     * - HALF_OPEN（探测失败）→ 主机仍不可达的确定证据，**立即重开冷却**（不等计数到阈值），打日志；
+     * - OPEN（冷却期内迟来失败）→ 不顺延截止时间、不重复日志，只把计数压回阈值以下防越界；
      * - CLOSED → 累计，达到 [FAIL_THRESHOLD] 时 CAS 转 OPEN（只熔断一次、日志只打一条）、
      *   [blockCount] +1、计数清零。
      */
-    fun onNetworkFailure(now: Long) {
+    fun onNetworkFailure(now: Long, type: FailureType = FailureType.TRANSIENT) {
         while (true) {
             val s = state.get()
             when (s.phase) {
@@ -203,6 +238,8 @@ internal object BinanceHostGate {
                     // 探测失败：主机仍不可达，立即重开冷却（不等阈值）
                     val reopened = s.copy(phase = Phase.OPEN, blockedUntil = now + COOLDOWN_MS, probeUntil = 0L, consecutiveFailures = 0)
                     if (state.compareAndSet(s, reopened)) {
+                        // 若是地区封锁（探测也 451），打粘性标记，之后永久拒探测。
+                        if (type == FailureType.REGION_BLOCKED) regionBlocked = true
                         AppLogger.w(
                             "币安主机探测失败，重新熔断 ${COOLDOWN_MS / 1000} 秒" +
                                 "（至 ${Instant.ofEpochMilli(reopened.blockedUntil)} 暂停访问）",
@@ -213,8 +250,13 @@ internal object BinanceHostGate {
                     // CAS 失败，重读重试
                 }
                 Phase.OPEN -> {
-                    // 仍在冷却期：不顺延、不重复日志，只把计数压回阈值以下防越界
-                    if (state.compareAndSet(s, s.copy(consecutiveFailures = FAIL_THRESHOLD - 1))) return
+                    // 仍在冷却期：不顺延、不重复日志，只把计数压回阈值以下防越界。
+                    // 期间若又撞到地区封锁，顺手把粘性标记打上（已 OPEN 不影响行为，但保证
+                    // 即便本次冷却是瞬断触发的、后来才确认是地区封锁，之后也不会空探）。
+                    if (state.compareAndSet(s, s.copy(consecutiveFailures = FAIL_THRESHOLD - 1))) {
+                        if (type == FailureType.REGION_BLOCKED) regionBlocked = true
+                        return
+                    }
                 }
                 Phase.CLOSED -> {
                     val failures = s.consecutiveFailures + 1
@@ -226,6 +268,8 @@ internal object BinanceHostGate {
                         val opened = GateState(Phase.OPEN, now + COOLDOWN_MS, 0L, 0)
                         if (state.compareAndSet(s, opened)) {
                             blockCount.incrementAndGet()
+                            // 地区封锁：据此熔断即粘死，永久拒探测（见 [regionBlocked]）。
+                            if (type == FailureType.REGION_BLOCKED) regionBlocked = true
                             AppLogger.w(
                                 "币安主机连续 $failures 次网络级失败，熔断 ${COOLDOWN_MS / 1000} 秒" +
                                     "（至 ${Instant.ofEpochMilli(opened.blockedUntil)} 暂停访问）",
@@ -244,6 +288,7 @@ internal object BinanceHostGate {
     internal fun resetForTesting() {
         state.set(GateState(Phase.CLOSED, 0L, 0L, 0))
         blockCount.set(0)
+        regionBlocked = false
     }
 
     /** 测试专用读数：当前连续失败计数 */
@@ -257,4 +302,7 @@ internal object BinanceHostGate {
 
     /** 测试专用读数：当前相位，供三态迁移断言 */
     internal fun phaseForTesting(): Phase = state.get().phase
+
+    /** 测试专用读数：是否处于粘性地区封锁（451/403 据此熔断后永久 true，直到 [resetForTesting]） */
+    internal fun regionBlockedForTesting(): Boolean = regionBlocked
 }

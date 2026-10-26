@@ -377,7 +377,9 @@ object UnifiedPriceService {
                         // 同步失败（旧代码在 isSuccessful 检查前就调 onSuccess，把 451 探活当成功，
                         // 熔断一解除又被 451、循环空转——地区封锁用户每轮同步都被 451 刷屏）。
                         if (it.code == 451 || it.code == 403) {
-                            BinanceHostGate.onNetworkFailure(System.currentTimeMillis())
+                            // 地区封锁（451/403）喂 REGION_BLOCKED：据此熔断后即粘死，永久拒探测，
+                            // 不再每轮空探一次 451（灭掉旧实现里「每 5 分钟空探、无限循环」的问题）。
+                            BinanceHostGate.onNetworkFailure(System.currentTimeMillis(), FailureType.REGION_BLOCKED)
                             return@withContext Result.failure(BinanceAccountAPI.binanceError(body, it.code))
                         }
                         // 400 非法符号：候选还有下一个就试，否则判失败（主机其实可达，
@@ -418,7 +420,9 @@ object UnifiedPriceService {
                 // CancellationException 已在上面重抛，不会被误计成失败。
                 // 网络异常对所有候选都一样，不再试后续候选。
                 if (e is ConnectException || e is SocketTimeoutException || e is UnknownHostException || e is IOException) {
-                    BinanceHostGate.onNetworkFailure(System.currentTimeMillis())
+                    // 偶发网络级失败（连不上 / 超时 / 域名解析失败 / IO 错误）喂 TRANSIENT：
+                    // 按标准三态累计 / 冷却 / 半开探测自愈，不粘死（地区封锁才粘死，见 451 分支）。
+                    BinanceHostGate.onNetworkFailure(System.currentTimeMillis(), FailureType.TRANSIENT)
                 }
                 AppLogger.e("获取加密货币价格失败: $code", e, TAG)
                 // 连接类失败（连不上/超时/域名解析不了）换成一句人话：OkHttp 原始 message

@@ -159,6 +159,30 @@ class UnifiedPriceServiceTest {
         assertEquals(Phase.OPEN, BinanceHostGate.phaseForTesting())
         assertTrue("连续 451 达阈值后应显示「币安暂不可达」", BinanceHostGate.isUnavailable())
         assertEquals(1, BinanceHostGate.blockCountForTesting())
+        // 451 喂的是 REGION_BLOCKED：据此熔断即粘死，之后不再每轮空探（灭掉无限 5min 循环）。
+        assertTrue(
+            "连续 451 据此熔断后必须打粘性地区封锁标记，永久拒探测",
+            BinanceHostGate.regionBlockedForTesting()
+        )
+    }
+
+    @Test
+    fun `getCryptoPrice 地区封锁熔断后冷却过期仍不空探`() = runBlocking {
+        // 连续 451 熔断并粘死；即便冷却早已过期，getCryptoPrice 也不应再对各币发 451 探测
+        // （否则地区封锁用户每轮同步仍被 451 刷屏）。用一个「先 451 后 200」的拦截器验证：
+        // 粘死后，即便探测器后续换成可用节点，本次进程内也不会被放行去探测。
+        repeat(BinanceHostGate.FAIL_THRESHOLD) {
+            UnifiedPriceService.getCryptoPrice("BTC", client = fakeClient(Ticker451Interceptor()))
+        }
+        assertTrue(BinanceHostGate.regionBlockedForTesting())
+
+        // blockedUntil 早已过期（用远超冷却的 now 调 tryAcquireProbe，模拟下一轮同步），
+        // 粘死状态下必须仍拒绝——这就是「不再无限空探」的钉死点。
+        val longAfter = System.currentTimeMillis() + BinanceHostGate.COOLDOWN_MS * 100
+        assertFalse(
+            "地区封锁粘死后，冷却过期也不该再对币安发探测请求",
+            BinanceHostGate.tryAcquireProbe(longAfter)
+        )
     }
 
     // ---------- 候选交易对重试（WBETH 修复的核心契约） ----------

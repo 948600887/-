@@ -249,4 +249,93 @@ class BinanceHostGateTest {
         assertTrue("探测中", BinanceHostGate.statusText().contains("探测中"))
         assertFalse("HALF_OPEN 也属暂不可达", BinanceHostGate.statusText().contains("正常"))
     }
+
+    // ---------- 地区封锁（REGION_BLOCKED）：粘死，不再无限空探 ----------
+
+    /**
+     * 单发地区封锁仍只计数、不立即粘死——与既有契约 `getCryptoPrice 收到451…` 一致：
+     * 单发 451 不熔断、UI 不显示暂不可达、regionBlocked 仍为 false（要凑满阈值才粘死）。
+     */
+    @Test
+    fun `单发地区封锁仍只计数不粘死_与既有契约一致`() {
+        BinanceHostGate.onNetworkFailure(base, FailureType.REGION_BLOCKED)
+        assertEquals(Phase.CLOSED, BinanceHostGate.phaseForTesting())
+        assertEquals(1, BinanceHostGate.consecutiveFailuresForTesting())
+        assertFalse("单发 451 未达阈值，不应粘死", BinanceHostGate.regionBlockedForTesting())
+        assertFalse(BinanceHostGate.isUnavailable())
+    }
+
+    /**
+     * 地区封锁达阈值熔断后**粘死**：regionBlocked 置位，冷却过期后 [tryAcquireProbe]
+     * 仍永久拒绝探测（不再每 5 分钟白探一次 451）。这正是要灭掉的「无限空探循环」。
+     */
+    @Test
+    fun `地区封锁达阈值熔断并粘死_永久拒绝探测`() {
+        repeat(BinanceHostGate.FAIL_THRESHOLD) {
+            BinanceHostGate.onNetworkFailure(base, FailureType.REGION_BLOCKED)
+        }
+        assertEquals(Phase.OPEN, BinanceHostGate.phaseForTesting())
+        assertTrue(BinanceHostGate.regionBlockedForTesting())
+        assertEquals(1, BinanceHostGate.blockCountForTesting())
+
+        // 冷却早已过期（now 远超 blockedUntil），普通 TRANSIENT 此刻会进 HALF_OPEN 探测；
+        // 但地区封锁已粘死，必须永远拒探测。
+        val longAfter = base + BinanceHostGate.COOLDOWN_MS * 100
+        assertFalse("地区封锁粘死后，冷却过期也不该再探测", BinanceHostGate.tryAcquireProbe(longAfter))
+        // 相位仍 OPEN（粘死期间不会因探测而被改写）
+        assertEquals(Phase.OPEN, BinanceHostGate.phaseForTesting())
+        assertTrue(BinanceHostGate.isUnavailable())
+    }
+
+    /**
+     * 瞬断先熔断（OPEN），冷却期内又确认是地区封锁：即便最初是瞬断触发的熔断，
+     * 一旦期间撞到地区封锁也打粘性标记，冷却过期后不再空探。覆盖「先瞬断后确认封锁」的真实序列。
+     */
+    @Test
+    fun `瞬断熔断后期间确认地区封锁也粘死`() {
+        // 先用瞬断（TRANSIENT）凑满阈值熔断
+        repeat(BinanceHostGate.FAIL_THRESHOLD) { BinanceHostGate.onNetworkFailure(base, FailureType.TRANSIENT) }
+        assertEquals(Phase.OPEN, BinanceHostGate.phaseForTesting())
+        assertFalse("瞬断熔断时不应粘死", BinanceHostGate.regionBlockedForTesting())
+
+        // 冷却期内又撞到一次地区封锁（如半开探测 451）
+        BinanceHostGate.onNetworkFailure(base + 1_000, FailureType.REGION_BLOCKED)
+        assertTrue("期间确认地区封锁后必须粘死", BinanceHostGate.regionBlockedForTesting())
+
+        // 冷却过期后永久拒探测
+        val longAfter = base + BinanceHostGate.COOLDOWN_MS * 100
+        assertFalse(BinanceHostGate.tryAcquireProbe(longAfter))
+    }
+
+    /**
+     * 半开探测本身撞到地区封锁（451）：立即重开冷却并粘死，不再每轮空探。
+     */
+    @Test
+    fun `半开探测撞地区封锁_重开冷却并粘死`() {
+        // 瞬断熔断 → 冷却结束 → 成为探测
+        repeat(BinanceHostGate.FAIL_THRESHOLD) { BinanceHostGate.onNetworkFailure(base, FailureType.TRANSIENT) }
+        assertTrue(BinanceHostGate.tryAcquireProbe(afterCooldown)) // 成为探测，进入 HALF_OPEN
+        assertEquals(Phase.HALF_OPEN, BinanceHostGate.phaseForTesting())
+
+        // 探测以 451 失败：重开冷却 + 粘死
+        BinanceHostGate.onNetworkFailure(afterCooldown, FailureType.REGION_BLOCKED)
+        assertEquals(Phase.OPEN, BinanceHostGate.phaseForTesting())
+        assertTrue(BinanceHostGate.regionBlockedForTesting())
+        // blockCount 不应因这次「同一次熔断 episode 的延续」而再涨
+        assertEquals(1, BinanceHostGate.blockCountForTesting())
+
+        // 永久拒探测
+        assertFalse(BinanceHostGate.tryAcquireProbe(afterCooldown + BinanceHostGate.COOLDOWN_MS * 100))
+    }
+
+    /** [resetForTesting] 必须清除 regionBlocked，否则会漏给别的测试类造成误判 */
+    @Test
+    fun `resetForTesting 清除 regionBlocked 标记`() {
+        repeat(BinanceHostGate.FAIL_THRESHOLD) { BinanceHostGate.onNetworkFailure(base, FailureType.REGION_BLOCKED) }
+        assertTrue(BinanceHostGate.regionBlockedForTesting())
+        BinanceHostGate.resetForTesting()
+        assertFalse(BinanceHostGate.regionBlockedForTesting())
+        assertEquals(Phase.CLOSED, BinanceHostGate.phaseForTesting())
+        assertEquals(0, BinanceHostGate.blockCountForTesting())
+    }
 }

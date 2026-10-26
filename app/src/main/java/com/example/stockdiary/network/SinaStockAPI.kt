@@ -11,6 +11,7 @@ import java.io.IOException
 import java.net.URLEncoder
 import java.nio.charset.Charset
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicReference
 import org.json.JSONArray
 import org.json.JSONObject
 import com.example.stockdiary.common.APIEndpoints
@@ -20,6 +21,11 @@ import com.example.stockdiary.utils.PerformanceMonitor
 import com.example.stockdiary.utils.StockCodeManager
 import com.example.stockdiary.data.price.PriceCacheManager
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 
 object SinaStockAPI : StockAPI {
     private const val TAG = "SinaStockAPI"
@@ -34,6 +40,16 @@ object SinaStockAPI : StockAPI {
     private val pendingRequests = ConcurrentHashMap<String, kotlinx.coroutines.CompletableDeferred<Result<SinaStockData>>>()
     private val batchPendingRequests = ConcurrentHashMap<String, kotlinx.coroutines.CompletableDeferred<Result<Map<String, SinaStockData>>>>()
     private val requestLock = Any()
+
+    /**
+     * 批量行情的有界并发度：每轮同步里新浪批量接口原本是串行
+     * （N/20 批 × (耗时 + 300ms 批间延迟)），改成有界并发后最多同时发出
+     * [MAX_BATCH_CONCURRENCY] 批，既提速又不会因并发过高把新浪打爆或触发更严的限流。
+     */
+    private const val MAX_BATCH_CONCURRENCY = 4
+
+    /** 批量行情并发信号量：限制同时进行的批请求数（见 [getRealtimeData] 与 [fetchBatch]） */
+    private val batchSemaphore = Semaphore(MAX_BATCH_CONCURRENCY)
     
     private val client = createSinaHttpClient()
 
@@ -169,138 +185,26 @@ object SinaStockAPI : StockAPI {
                 // 都吞成「部分缓存结果」，allResults 空时又被统一扔成符号级文案「未获取到股票数据」，
                 // 导致上层源级熔断器把真·源级故障误判成「代码不支持」而永不熔禁（饿死）。
                 // 这里把原始异常记下，空结果时优先透出它（见下方 allResults.isEmpty 分支）。
-                // mapIndexed 是串行的，捕获改写局部 var 无线程竞争。
-                var lastBatchException: Exception? = null
+                // 并行化后用 AtomicReference 保证多个批并发失败时只记第一次、不竞态覆盖。
+                val lastBatchException = AtomicReference<Exception?>(null)
 
-                val batchResults = batches.mapIndexed { index, batch ->
-                    // 放在最外层 try 之前：try 块内声明的局部变量对其自身 catch 不可见（兄弟作用域），
-                    // 而内/外两层 catch 的日志都要带出失败 URL，故声明在最外层 try 外面。
-                    var reqUrl: String = "(未构造URL)"
-                    try {
-                        val batchKey = batch.sorted().joinToString(",")
-                        
-                        val existingRequest = batchPendingRequests[batchKey]
-                        if (existingRequest != null) {
-                            // 复用别人的在飞请求：失败必须**照原样透出**并记进 lastBatchException。
-                            // 若像以前那样直接 getOrElse { emptyMap() } 把失败吞成空结果，这个批次的
-                            // 原始异常就丢了：下面 allResults.isEmpty() 分支因为拿不到批级异常，
-                            // 会退化成符号级文案「未获取到股票数据」→ 上层源级熔断器把真·源级故障
-                            // （超时 / 连接失败 / 403 限流）误判成「代码不支持」而**永不熔禁**——
-                            // 恰恰是本函数上方注释要修掉的「饿死」问题，而且在并发去重路径上
-                            // （手动刷新撞上后台 Worker）必然命中。
-                            val shared = existingRequest.await()
-                            shared.exceptionOrNull()?.let { err ->
-                                if (lastBatchException == null) {
-                                    lastBatchException = err as? Exception ?: Exception(err)
-                                }
-                            }
-                            return@mapIndexed shared.getOrElse { emptyMap() }
+                // 批次并行：用信号量把同时进行的批请求限制在 [MAX_BATCH_CONCURRENCY] 以内，
+                // 删除原先批间串行的 300ms 延迟——限流已改由信号量兜底。每批内部仍保留
+                // batchPendingRequests 的并发去重与 request 收尾（见 [fetchBatch]）。
+                val batchResults = coroutineScope {
+                    batches.map { batch ->
+                        async {
+                            batchSemaphore.withPermit { fetchBatch(batch, context, suspendedOut, lastBatchException) }
                         }
-                        
-                        val request = CompletableDeferred<Result<Map<String, SinaStockData>>>()
-                        batchPendingRequests[batchKey] = request
-                        
-                        try {
-                            val codeString = batch.joinToString(",")
-                            val url = buildRealtimeUrl(codeString)
-                            
-                            val httpRequest = Request.Builder()
-                                .url(url)
-                                .build()
-                            
-                            val response = activeClient.newCall(httpRequest).execute()
-                            reqUrl = httpRequest.url.toString()
-                            response.use {
-                                if (!it.isSuccessful) {
-                                    // 诊断增强：新浪偶发被限流/封禁时只给个 code 很难定位，
-                                    // 这里把 URL 和响应体前 200 字一起记下来，方便区分
-                                    // 「被墙/403 限流」与「真·源级故障」（上层源级熔断靠这个判断）。
-                                    val bodyPeek = runCatching { it.body?.string()?.take(200) }.getOrNull().orEmpty()
-                                    AppLogger.e("新浪行情 HTTP ${it.code} 非成功 | url=$reqUrl | 响应体前200=$bodyPeek", tag = TAG)
-                                    if (it.code == 403) {
-                                        throw IOException("API请求频率过高，请稍后再试")
-                                    }
-                                    throw IOException("API响应错误: ${it.code}")
-                                }
-
-                                val responseBody = it.body
-                                if (responseBody == null) {
-                                    throw IOException("API返回空数据")
-                                }
-                                val bytes = responseBody.use { body -> body.bytes() }
-                                if (bytes.isEmpty()) {
-                                    AppLogger.e("新浪行情返回空 body | url=$reqUrl", tag = TAG)
-                                    throw IOException("API返回空数据")
-                                }
-                                val text = String(bytes, Charset.forName("GBK"))
-
-                                val suspended = mutableSetOf<String>()
-                                val batchResult = parseRealtimeData(text, batch, suspended)
-                                suspendedOut?.addAll(suspended)
-
-                                batchResult.forEach { (code, data) ->
-                                    cacheData(code, data)
-                                    if (context != null) {
-                                        PriceCacheManager.cachePrice(code, data, "sina")
-                                    }
-                                }
-
-                                // 批次间延迟，防止API限流（串行处理非首批次时生效）
-                                if (index > 0) {
-                                    kotlinx.coroutines.delay(RequestLimits.DELAY_MS)
-                                }
-
-                                request.complete(Result.success(batchResult))
-                                return@use batchResult
-                            }
-                        } catch (e: CancellationException) {
-                            throw e
-                        } catch (e: Exception) {
-                            AppLogger.e("批次请求失败 url=$reqUrl: ${e.message}", e, TAG)
-                            request.complete(Result.failure(e))
-                            if (lastBatchException == null) lastBatchException = e
-                            val partialResult = mutableMapOf<String, SinaStockData>()
-                            batch.forEach { code ->
-                                getCachedData(code)?.let { partialResult[code] = it }
-                                context?.let {
-                                    PriceCacheManager.getCachedPrice(code)?.let { partialResult[code] = it }
-                                }
-                            }
-                            partialResult
-                        } finally {
-                            batchPendingRequests.remove(batchKey)
-                            // 取消路径（以及任何异常提前退出）必须把 deferred 收尾：
-                            // CompletableDeferred 没有父 Job，**不会**随本协程取消而完成。
-                            // 不显式 cancel，其它作用域里已经 await() 它的协程会永久挂起
-                            // （典型：AssetSyncManager 看门狗超预算 cancel 了本轮，
-                            //   而后台 Worker 的同步正 await 同一个批次键 → 卡到 WorkManager 超时）。
-                            // 与 UnifiedPriceService 里的同一道保险对齐。
-                            if (!request.isCompleted) {
-                                request.cancel()
-                            }
-                        }
-                    } catch (e: CancellationException) {
-                        throw e
-                    } catch (e: Exception) {
-                        AppLogger.e("批次请求异常 url=$reqUrl: ${e.message}", e, TAG)
-                        if (lastBatchException == null) lastBatchException = e
-                        val partialResult = mutableMapOf<String, SinaStockData>()
-                        batch.forEach { code ->
-                            getCachedData(code)?.let { partialResult[code] = it }
-                            context?.let {
-                                PriceCacheManager.getCachedPrice(code)?.let { partialResult[code] = it }
-                            }
-                        }
-                        partialResult
-                    }
+                    }.awaitAll()
                 }
-                
+
                 batchResults.forEach { batchResult ->
                     allResults.putAll(batchResult)
                 }
                 
                 if (allResults.isEmpty()) {
-                    val batchError = lastBatchException
+                    val batchError = lastBatchException.get()
                     if (batchError != null) {
                         // 曾有批级异常（超时 / 连接失败 / 403 限流 / 空 body）：透出原始异常，
                         // 让上层源级熔断器与 NetworkRetryHelper 拿到真实原因，而不是被吞成
@@ -327,6 +231,147 @@ object SinaStockAPI : StockAPI {
         }
     }
     
+    /**
+     * 抓一批代码（≤[RequestLimits.BATCH_SIZE] 个）的实时行情。
+     *
+     * 从 [getRealtimeData] 的批循环里抽出来的独立单元，便于在 [getRealtimeData] 里用
+     * 有界并发（[batchSemaphore]）并行跑多批。保持全部既有行为不变：
+     * - [batchPendingRequests] 并发去重（同一批 key 在飞只复用一次）；
+     * - 成功写内存缓存 + 磁盘缓存（context != null 时）；
+     * - 失败按既有规则透传原始异常、用旧缓存做部分回填、并收尾 [CompletableDeferred]
+     *   （否则并发 await 它的协程会永久挂起）。
+     *
+     * @param lastBatchException 跨批共享的「首个批级异常」记录点（AtomicReference，并发安全）。
+     */
+    private suspend fun fetchBatch(
+        batch: List<String>,
+        context: Context?,
+        suspendedOut: MutableSet<String>?,
+        lastBatchException: AtomicReference<Exception?>
+    ): Map<String, SinaStockData> {
+        // 放在最外层 try 之前：try 块内声明的局部变量对其自身 catch 不可见（兄弟作用域），
+        // 而内/外两层 catch 的日志都要带出失败 URL，故声明在最外层 try 外面。
+        var reqUrl: String = "(未构造URL)"
+        // 抽成独立函数后必须显式 return（块体函数不会像原内联 lambda 那样隐式返回末表达式）。
+        return try {
+            val batchKey = batch.sorted().joinToString(",")
+
+            val existingRequest = batchPendingRequests[batchKey]
+            if (existingRequest != null) {
+                // 复用别人的在飞请求：失败必须**照原样透出**并记进 lastBatchException。
+                // 若像以前那样直接 getOrElse { emptyMap() } 把失败吞成空结果，这个批次的
+                // 原始异常就丢了：下面 allResults.isEmpty() 分支因为拿不到批级异常，
+                // 会退化成符号级文案「未获取到股票数据」→ 上层源级熔断器把真·源级故障
+                // （超时 / 连接失败 / 403 限流）误判成「代码不支持」而**永不熔禁**——
+                // 恰恰是本函数上方注释要修掉的「饿死」问题，而且在并发去重路径上
+                // （手动刷新撞上后台 Worker）必然命中。
+                val shared = existingRequest.await()
+                shared.exceptionOrNull()?.let { err ->
+                    if (lastBatchException.get() == null) {
+                        lastBatchException.compareAndSet(null, err as? Exception ?: Exception(err))
+                    }
+                }
+                return shared.getOrElse { emptyMap() }
+            }
+
+            val request = CompletableDeferred<Result<Map<String, SinaStockData>>>()
+            batchPendingRequests[batchKey] = request
+
+            try {
+                val codeString = batch.joinToString(",")
+                val url = buildRealtimeUrl(codeString)
+
+                val httpRequest = Request.Builder()
+                    .url(url)
+                    .build()
+
+                val response = activeClient.newCall(httpRequest).execute()
+                reqUrl = httpRequest.url.toString()
+                response.use {
+                    if (!it.isSuccessful) {
+                        // 诊断增强：新浪偶发被限流/封禁时只给个 code 很难定位，
+                        // 这里把 URL 和响应体前 200 字一起记下来，方便区分
+                        // 「被墙/403 限流」与「真·源级故障」（上层源级熔断靠这个判断）。
+                        val bodyPeek = runCatching { it.body?.string()?.take(200) }.getOrNull().orEmpty()
+                        AppLogger.e("新浪行情 HTTP ${it.code} 非成功 | url=$reqUrl | 响应体前200=$bodyPeek", tag = TAG)
+                        if (it.code == 403) {
+                            throw IOException("API请求频率过高，请稍后再试")
+                        }
+                        throw IOException("API响应错误: ${it.code}")
+                    }
+
+                    val responseBody = it.body
+                    if (responseBody == null) {
+                        throw IOException("API返回空数据")
+                    }
+                    val bytes = responseBody.use { body -> body.bytes() }
+                    if (bytes.isEmpty()) {
+                        AppLogger.e("新浪行情返回空 body | url=$reqUrl", tag = TAG)
+                        throw IOException("API返回空数据")
+                    }
+                    val text = String(bytes, Charset.forName("GBK"))
+
+                    val suspended = mutableSetOf<String>()
+                    val batchResult = parseRealtimeData(text, batch, suspended)
+                    suspendedOut?.addAll(suspended)
+
+                    batchResult.forEach { (code, data) ->
+                        cacheData(code, data)
+                        if (context != null) {
+                            PriceCacheManager.cachePrice(code, data, "sina")
+                        }
+                    }
+
+                    request.complete(Result.success(batchResult))
+                    return@use batchResult
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                AppLogger.e("批次请求失败 url=$reqUrl: ${e.message}", e, TAG)
+                request.complete(Result.failure(e))
+                // 并发下多个批可能同时失败：只记第一个（CAS 保证），避免后面的异常覆盖先到的根因。
+                if (lastBatchException.get() == null) {
+                    lastBatchException.compareAndSet(null, e)
+                }
+                val partialResult = mutableMapOf<String, SinaStockData>()
+                batch.forEach { code ->
+                    getCachedData(code)?.let { partialResult[code] = it }
+                    context?.let {
+                        PriceCacheManager.getCachedPrice(code)?.let { partialResult[code] = it }
+                    }
+                }
+                partialResult
+            } finally {
+                batchPendingRequests.remove(batchKey)
+                // 取消路径（以及任何异常提前退出）必须把 deferred 收尾：
+                // CompletableDeferred 没有父 Job，**不会**随本协程取消而完成。
+                // 不显式 cancel，其它作用域里已经 await() 它的协程会永久挂起
+                // （典型：AssetSyncManager 看门狗超预算 cancel 了本轮，
+                //   而后台 Worker 的同步正 await 同一个批次键 → 卡到 WorkManager 超时）。
+                // 与 UnifiedPriceService 里的同一道保险对齐。
+                if (!request.isCompleted) {
+                    request.cancel()
+                }
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            AppLogger.e("批次请求异常 url=$reqUrl: ${e.message}", e, TAG)
+            if (lastBatchException.get() == null) {
+                lastBatchException.compareAndSet(null, e)
+            }
+            val partialResult = mutableMapOf<String, SinaStockData>()
+            batch.forEach { code ->
+                getCachedData(code)?.let { partialResult[code] = it }
+                context?.let {
+                    PriceCacheManager.getCachedPrice(code)?.let { partialResult[code] = it }
+                }
+            }
+            partialResult
+        }
+    }
+
     suspend fun getKLineData(stockCode: String, scale: Int = 240, ma: String = "5", dataLen: Int = 100): Result<List<KLineData>> {
         return withContext(Dispatchers.IO) {
             try {

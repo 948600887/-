@@ -542,7 +542,14 @@ object AssetSyncManager {
             // 随后每个标的的 getPrice 要么命中 batchResult 短路、要么命中门面 60s 缓存，
             // 完全不再逐标的打网络或读系统状态。批量失败 / 停牌 / 退市整理期的标的
             // batchResult 为 null，会落回逐标的的多源兜底，正确性不丢、也不会因此多烧请求。
-            val batchStockCodes = orderedAssets.mapNotNull { batchStockCode(it) }.distinct()
+            // 只把真正「股票」代码送进新浪批量：batchStockCode 会返回 STOCK 资产里
+            // 装着 ETF/场内基金代码的标的（5xxxxx/159/16/18 开头），新浪不支持它们，
+            // 送进去只会白占批槽位。滤掉后它们落到逐标的 getPrice → 腾讯路径，正确性不变，
+            // 还省掉白占的批槽位。reportBatchTotalMiss 的 hasPlainStock 检查仍只看到纯股票
+            // 代码，语义正确（不会把「整批都是场内基金」误判成源级故障）。
+            val batchStockCodes = orderedAssets.mapNotNull { batchStockCode(it) }
+                .filter { StockCodeManager.classifyCode(it) == StockCodeManager.CodeCategory.STOCK }
+                .distinct()
             val stockManager = StockDataManager.getInstance(context)
             val networkAvailable = stockManager.isNetworkAvailableNow()
             val batchPriceMap: Map<String, AssetPrice> = if (batchStockCodes.isNotEmpty()) {

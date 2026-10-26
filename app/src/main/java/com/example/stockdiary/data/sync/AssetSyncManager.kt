@@ -567,6 +567,31 @@ object AssetSyncManager {
                 stockManager.reportBatchTotalMiss(ApiManager.API_SINA, batchStockCodes)
             }
 
+            // 加密货币批量预取：与上面的 STOCK 批量同构——逐标的扇出**之前**只发
+            // ⌈N/60⌉ 次币安批量请求（真机一轮约 129 次单标的请求 → 2~3 次），
+            // 结果双写门面 60s 缓存并作为 batchResult 回填。
+            //
+            // getPrice 的 batchResult 短路位于 `when(type)` **之前**（UnifiedPriceService
+            // 第 108 行 `if (batchResult != null) return Result.success(batchResult)`），
+            // 已确认对 CRYPTO 分支同样生效，故无需改动 getPrice。
+            // 批量失败/取不到的标的 cryptoPriceMap 里没有，回落逐标的 getCryptoPrice 原路径，
+            // 正确性不丢、也不会因此多烧请求（见 prewarmCryptoPrices 的失败语义）。
+            val batchCryptoCodes = orderedAssets
+                .filter { it.type == AssetType.CRYPTO }
+                .mapNotNull { it.symbol }
+                .distinct()
+            val cryptoPriceMap: Map<String, AssetPrice> =
+                if (batchCryptoCodes.isNotEmpty() && networkAvailable) {
+                    UnifiedPriceService.prewarmCryptoPrices(batchCryptoCodes, forceRefresh)
+                        .getOrDefault(emptyMap())
+                } else {
+                    emptyMap()
+                }
+            AppLogger.i(
+                "批量预取加密货币 ${batchCryptoCodes.size} 个代码，命中 ${cryptoPriceMap.size} 个",
+                TAG
+            )
+
             val jobs = orderedAssets.map { asset ->
                 async {
                     semaphore.withPermit {
@@ -596,7 +621,7 @@ object AssetSyncManager {
                             errorTypes,
                             forceRefresh,
                             correctNames,
-                            batchResult = batchPriceMap[asset.symbol],
+                            batchResult = batchPriceMap[asset.symbol] ?: cryptoPriceMap[asset.symbol],
                             networkAvailable = networkAvailable,
                             onSkip = ::countSkip
                         )

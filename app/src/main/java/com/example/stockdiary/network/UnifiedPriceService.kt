@@ -16,8 +16,11 @@ import java.io.IOException
 import java.net.ConnectException
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
+import java.net.URLEncoder
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CancellationException
+import org.json.JSONArray
+import org.json.JSONObject
 
 /**
  * 行情统一入口（门面）。
@@ -215,6 +218,298 @@ object UnifiedPriceService {
                 Result.failure(IllegalStateException("行情结果尚未加载完成"))
         }
     }
+
+    /**
+     * 加密货币批量行情的单片符号数上限。
+     *
+     * 币安批量端点 `GET /ticker/24hr?symbols=["A","B",...]` 一次可取上百个交易对，
+     * 但 URL 不能无限长（过长会被中间节点拒 / HTTP 414）。取 60：真实组合 129 个加密标的
+     * → 2~3 次请求；即便上千标的也是十几次，远比逐标的划算。
+     */
+    private const val CRYPTO_BATCH_SYMBOLS = 60
+
+    /**
+     * 批量预取加密货币行情（走币安批量端点，N 个标的 ≈ ⌈N/[CRYPTO_BATCH_SYMBOLS]⌉ 次请求）。
+     *
+     * ## 为什么要有它
+     *
+     * 真机诊断（20261026_230142）：每轮同步为每个加密标的各发一次 `?symbol=XXXUSDT`，
+     * 单轮约 **129 次**币安请求、全轮约 230 次；而稳态单请求仅 152ms，786 条样本里慢请求
+     * 全是网络等待、无一例解析慢——瓶颈是**请求数 × 并发度 6**，不是解析。批量端点把
+     * 129 次压到 2~3 次，是这个头号耗时源最直接的提速点。
+     *
+     * ## 与 [prewarmStockPrices] 同构
+     *
+     * 刷新编排器在逐标的扇出**之前**调用一次：结果双写本门面 60s 缓存（[priceCache]），
+     * 并作为 `batchResult` 回填，使随后每个标的的 [getPrice] 命中
+     * **第 108 行的 batchResult 短路**（该短路在 `when(type)` 之前，对 CRYPTO 同样生效），
+     * 完全不再逐标的打网络。
+     *
+     * ## 归一化必须与 [getCryptoPrice] 完全一致
+     *
+     * 稳定币 → 1.0；LD 理财/锁仓 → [BinanceAPI.earnUnderlyingPair] 剥底层（底层是稳定币壳
+     * 如 LDUSDT → 1.0）；底层再走 [BinanceAPI.cryptoSymbolCandidates] + [BinanceAPI.toUsdtPair]。
+     * 结果一律按**原始 code** 建 map 与填 `CryptoData.code`（如 LDBNB，绝不能写成底层
+     * BNBUSDT）——理由见 [getCryptoPrice] 里那段注释。
+     *
+     * ## 失败语义（照抄 [prewarmStockPrices]）：绝不放大请求量
+     *
+     * 某片失败 / 非 2xx / 解析为空时，该片对应的 code **不进 map**，让它们回落逐标的
+     * [getCryptoPrice] 原路径；整体仍返回成功（partial 也算成功），且**不重试整片**
+     * ——重试会把请求量放大回去，与批量预取的目的相悖。
+     *
+     * ## 熔断口径（照抄 [getCryptoPrice]）：一次预取只记一次
+     *
+     * 451/403 → [FailureType.REGION_BLOCKED]，网络异常 → [FailureType.TRANSIENT]，全部成功 →
+     * [BinanceHostGate.onSuccess]；400/5xx/解析失败**不喂**熔断器（与 [getCryptoPrice] 同口径）。
+     * ⚠️ 一次预取**只调一次**熔断记账，绝不按片数、更不按片内标的数量重复记账——
+     * 否则一次批量超时就把阈值（8）打满，整机误熔。
+     *
+     * @param forceRefresh false 时跳过门面 60s 缓存里仍新鲜的标的（它们本就会命中缓存，
+     *   预取纯属浪费请求）；true 时全部回源。
+     * @param client 取价用的客户端，默认全局 [NetworkClient.binanceClient]；仅单测注入假
+     *   [okhttp3.Interceptor] 驱动不同 HTTP 语义（与 [getCryptoPrice] 同惯例）。
+     * @return `code -> AssetPrice.Crypto` 映射（仅含成功取回的代码）。
+     */
+    internal suspend fun prewarmCryptoPrices(
+        codes: List<String>,
+        forceRefresh: Boolean,
+        client: OkHttpClient = NetworkClient.binanceClient
+    ): Result<Map<String, AssetPrice>> = withContext(Dispatchers.IO) {
+        if (codes.isEmpty()) return@withContext Result.success(emptyMap())
+
+        val resultMap = LinkedHashMap<String, AssetPrice>()
+        /** 原 code -> 要查的交易对（多个 code 可能归一到同一交易对，如 BTC 与 BTCUSDT） */
+        val codeToPair = LinkedHashMap<String, String>()
+
+        for (rawCode in codes.distinct()) {
+            val code = rawCode.trim()
+            if (code.isEmpty()) continue
+            val codeNorm = code.uppercase()
+
+            // 稳定币锚定 1 美元：币安上没有自我交易对，查价必然空——直接按 1.0 计，不进批量请求
+            if (codeNorm in BINANCE_STABLECOINS) {
+                resultMap[code] = AssetPrice.Crypto(stableCoinData(codeNorm))
+                continue
+            }
+
+            val candidates: List<String> = if (BinanceAPI.isEarnProduct(code)) {
+                val underlying = BinanceAPI.earnUnderlyingPair(code)
+                if (underlying == null) {
+                    // 底层仍是稳定币壳（如 LDUSDT）：没有现货交易对，但锚定 1 美元，
+                    // 与现货稳定币同口径按 1.0 计（否则存量 LDUSDT 市值恒为 0）
+                    val stripped = codeNorm.removePrefix("LD")
+                    if (stripped in BINANCE_STABLECOINS) {
+                        resultMap[code] = AssetPrice.Crypto(stableCoinData(codeNorm))
+                    }
+                    // 其余无底层的理财壳：不进 map，回落逐标的（那里会抛 NonTradableAssetException）
+                    continue
+                }
+                BinanceAPI.cryptoSymbolCandidates(underlying)
+            } else {
+                BinanceAPI.cryptoSymbolCandidates(code)
+            }
+
+            // 批量端点一次查多个 symbols，无法像单只那样「首候选 400 再试兜底候选」
+            // （一个非法符号会拖累整片）。所以只取主候选；取不到的标的本轮不进 map，
+            // 回落逐标的 [getCryptoPrice]——那里会逐个试候选，正确性不丢。
+            val pricedPair = candidates.firstOrNull()
+                ?.let { BinanceAPI.toUsdtPair(it) }
+                ?.takeIf { it.isNotEmpty() }
+            if (pricedPair == null) continue
+
+            // 非强制刷新时跳过门面 60s 缓存里仍新鲜的标的：它们本就会命中缓存，
+            // 预取纯属浪费请求（这批不进 map，逐标的 getPrice 走缓存返回同一个价）。
+            if (!forceRefresh) {
+                val cached = priceCache["${AssetType.CRYPTO.name}_$code"]
+                if (cached != null && isFresh(cached)) continue
+            }
+            codeToPair[code] = pricedPair
+        }
+
+        // 交易对去重：BTC 与 BTCUSDT 归一到同一个 BTCUSDT，只查一次
+        val pairsToFetch = codeToPair.values.distinct()
+        if (pairsToFetch.isEmpty()) {
+            // 全是稳定币 / 不可交易 / 命中新鲜缓存：一次请求都不用发
+            writeCryptoPricesToCache(resultMap)
+            return@withContext Result.success(resultMap)
+        }
+
+        // 主机级熔断闸门：一次批量预取 = 一次主机探测（不按片、更不按标的重复记账）
+        if (!BinanceHostGate.tryAcquireProbe(System.currentTimeMillis())) {
+            AppLogger.d("币安主机熔断中，跳过加密货币批量预取（回落逐标的）", TAG)
+            writeCryptoPricesToCache(resultMap)
+            return@withContext Result.success(resultMap)
+        }
+
+        var sawRegionBlocked = false
+        var sawTransient = false
+
+        for (shard in pairsToFetch.chunked(CRYPTO_BATCH_SYMBOLS)) {
+            val fetched = fetchCryptoTickerShard(shard, client)
+            val quotes = fetched.quotes
+            if (quotes == null) {
+                // 本片失败：对应 code 不进 map，回落逐标的。不重试整片（见函数文档）。
+                when (fetched.failureType) {
+                    FailureType.REGION_BLOCKED -> sawRegionBlocked = true
+                    FailureType.TRANSIENT -> sawTransient = true
+                    null -> Unit // 400/5xx/解析失败：与 getCryptoPrice 同口径，不喂熔断器
+                }
+                continue
+            }
+            // 逐 code 回填：查不到报价的交易对（币安没返回）同样不进 map，回落逐标的
+            for ((code, pair) in codeToPair) {
+                val quote = quotes[pair.uppercase()] ?: continue
+                resultMap[code] = AssetPrice.Crypto(quote.toCryptoData(code))
+            }
+        }
+
+        // 整轮只记一次成败：地区封锁优先于瞬断（语义更重）
+        val now = System.currentTimeMillis()
+        when {
+            sawRegionBlocked -> BinanceHostGate.onNetworkFailure(now, FailureType.REGION_BLOCKED)
+            sawTransient -> BinanceHostGate.onNetworkFailure(now, FailureType.TRANSIENT)
+            else -> BinanceHostGate.onSuccess()
+        }
+
+        writeCryptoPricesToCache(resultMap)
+        AppLogger.i("加密货币批量预取 ${codes.distinct().size} 个代码，命中 ${resultMap.size} 个", TAG)
+        Result.success(resultMap)
+    }
+
+    /** 稳定币 / LD 稳定币壳的 1.0 美元锚定行情（与 [getCryptoPrice] 同口径） */
+    private fun stableCoinData(codeNorm: String): CryptoData =
+        CryptoData(code = codeNorm, name = codeNorm, price = 1.0, change = null, changePercent = null)
+
+    /** 双写门面 60s 缓存：即便 batchResult 短路没兜住，逐标的 [getPrice] 也能命中这里 */
+    private fun writeCryptoPricesToCache(priceMap: Map<String, AssetPrice>) {
+        if (priceMap.isEmpty()) return
+        priceMap.forEach { (code, price) ->
+            priceCache["${AssetType.CRYPTO.name}_$code"] = CacheEntry(price, System.currentTimeMillis())
+        }
+        trimPriceCacheIfNeeded()
+    }
+
+    /** 单条批量行情的原始报价（解析中间态，最终按原始 code 组装成 [CryptoData]） */
+    private data class CryptoQuote(
+        val price: Double,
+        val change: Double?,
+        val changePercent: Double?,
+        val high: Double?,
+        val low: Double?,
+        val volume: Long?
+    ) {
+        fun toCryptoData(code: String): CryptoData = CryptoData(
+            code = code,
+            name = code,
+            price = price,
+            change = change,
+            changePercent = changePercent,
+            high = high,
+            low = low,
+            volume = volume,
+            timestamp = System.currentTimeMillis()
+        )
+    }
+
+    /**
+     * 单片批量请求的结果。
+     *
+     * @param quotes 解析出的 `交易对 -> 报价`；null = 本片失败，对应 code 应回落逐标的
+     * @param failureType 失败时要喂给 [BinanceHostGate] 的类型；null = 不喂
+     *   （400 / 5xx / 解析为空，与 [getCryptoPrice] 同口径：只有地区封锁与网络异常才记账）
+     */
+    private data class ShardFetch(
+        val quotes: Map<String, CryptoQuote>?,
+        val failureType: FailureType?
+    )
+
+    /**
+     * 发一次批量行情请求（`?symbols=["A","B",...]`）并解析。
+     *
+     * 失败一律通过 [ShardFetch] 返回，**不抛异常**：调用方据此让该片回落逐标的，
+     * 而不是让整个预取失败。[CancellationException] 例外——协程取消必须向上传播。
+     */
+    private fun fetchCryptoTickerShard(shard: List<String>, client: OkHttpClient): ShardFetch {
+        val symbolsJson = shard.joinToString(",", prefix = "[", postfix = "]") { "\"${it.uppercase()}\"" }
+        val url = "${APIEndpoints.Binance.MARKET_DATA_BASE_URL}/ticker/24hr?symbols=" +
+            URLEncoder.encode(symbolsJson, "UTF-8")
+        val request = Request.Builder()
+            .url(url)
+            .addHeader("User-Agent", "Mozilla/5.0")
+            .build()
+        val startTime = System.currentTimeMillis()
+        return try {
+            client.newCall(request).execute().use { resp ->
+                val duration = System.currentTimeMillis() - startTime
+                AppLogger.api("GET /ticker/24hr (symbols=${shard.size})", resp.message, duration, TAG)
+                val body = resp.body?.string().orEmpty()
+                if (!resp.isSuccessful) {
+                    AppLogger.w(
+                        "加密货币批量行情 HTTP ${resp.code}（${shard.size} 个交易对），本片回落逐标的",
+                        TAG
+                    )
+                    // 451/403 = 地区封锁（主机可达但本用户用不了）；400/5xx 不喂熔断器
+                    val type = if (resp.code == 451 || resp.code == 403) FailureType.REGION_BLOCKED else null
+                    ShardFetch(null, type)
+                } else {
+                    val quotes = parseBinanceTickerArray(body)
+                    if (quotes.isEmpty()) {
+                        AppLogger.w(
+                            "加密货币批量行情解析为空（${shard.size} 个交易对），本片回落逐标的",
+                            TAG
+                        )
+                        ShardFetch(null, null)
+                    } else {
+                        ShardFetch(quotes, null)
+                    }
+                }
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            AppLogger.e("加密货币批量行情请求失败（${shard.size} 个交易对）", e, TAG)
+            ShardFetch(null, FailureType.TRANSIENT)
+        }
+    }
+
+    /**
+     * 解析币安批量行情的 JSON 数组（`[{symbol,lastPrice,...}, ...]`）。
+     *
+     * 与单只路径的 [parseBinanceCrypto]（正则抠字段）不同：批量响应是数组、字段值多为
+     * 字符串数字（`"67000.00000000"`），用 org.json 逐对象解析更稳，也避免正则跨对象串味。
+     */
+    private fun parseBinanceTickerArray(body: String): Map<String, CryptoQuote> {
+        val out = LinkedHashMap<String, CryptoQuote>()
+        return try {
+            val arr = JSONArray(body)
+            for (i in 0 until arr.length()) {
+                val obj = arr.optJSONObject(i) ?: continue
+                val symbol = obj.optString("symbol", "").uppercase()
+                if (symbol.isEmpty()) continue
+                val price = obj.optDouble("lastPrice", Double.NaN)
+                if (price.isNaN()) continue
+                out[symbol] = CryptoQuote(
+                    price = price,
+                    change = obj.optDoubleOrNull("priceChange"),
+                    changePercent = obj.optDoubleOrNull("priceChangePercent"),
+                    high = obj.optDoubleOrNull("highPrice"),
+                    low = obj.optDoubleOrNull("lowPrice"),
+                    volume = obj.optDoubleOrNull("volume")?.toLong()
+                )
+            }
+            out
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            AppLogger.e("解析加密货币批量行情失败", e, TAG)
+            emptyMap()
+        }
+    }
+
+    /** 取可空 double：字段缺失 / 显式 null / 非数字时返回 null（与单只路径的 null 语义对齐） */
+    private fun JSONObject.optDoubleOrNull(key: String): Double? =
+        if (has(key) && !isNull(key)) optDouble(key, Double.NaN).takeIf { !it.isNaN() } else null
 
     private suspend fun getFundPrice(code: String, forceRefresh: Boolean): Result<FundData> = withContext(Dispatchers.IO) {
         try {

@@ -422,6 +422,12 @@ object UnifiedPriceService {
             noteFailure(fetched.failureType)
         }
 
+        // 协程已取消（切后台等）：这一轮记账不算数，不喂熔断器，直接返回已采集的部分
+        if (!currentCoroutineContext().isActive) {
+            writeCryptoPricesToCache(resultMap)
+            return@withContext Result.success(resultMap)
+        }
+
         // 整轮只记一次成败：地区封锁优先于瞬断（语义更重）
         val now = System.currentTimeMillis()
         when {

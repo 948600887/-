@@ -10,6 +10,7 @@ import com.example.stockdiary.data.sync.AssetSyncManager
 import com.example.stockdiary.data.sync.saveTodaySnapshotIfEligible
 import com.example.stockdiary.data.dividend.DividendIncomeUseCase
 import com.example.stockdiary.data.dividend.DividendProgressCalculator
+import com.example.stockdiary.data.dividend.daysInCurrentYear
 import com.example.stockdiary.data.prefs.SortOrder
 import com.example.stockdiary.data.sync.SyncProgress
 import com.example.stockdiary.data.sync.SyncResult
@@ -211,7 +212,7 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
                 _uiState.update {
                     it.copy(
                         realAnnualIncome = lastValue,
-                        estimatedDailyDividend = lastValue / 365,
+                        estimatedDailyDividend = lastValue / daysInCurrentYear().toDouble(),
                         incomeCalculationStatus = null
                     )
                 }
@@ -235,7 +236,7 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
                 _uiState.update { state ->
                     state.copy(
                         realAnnualIncome = result.totalAnnualIncome,
-                        estimatedDailyDividend = result.totalAnnualIncome / 365,
+                        estimatedDailyDividend = result.totalAnnualIncome / daysInCurrentYear().toDouble(),
                         dividendProgress = withContext(Dispatchers.Default) {
                             DividendProgressCalculator.calculate(
                                 assets = assetsOnly,
@@ -362,7 +363,7 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
                 _uiState.update { state ->
                     state.copy(
                         realAnnualIncome = result.totalAnnualIncome,
-                        estimatedDailyDividend = result.totalAnnualIncome / 365,
+                        estimatedDailyDividend = result.totalAnnualIncome / daysInCurrentYear().toDouble(),
                         dividendProgress = withContext(Dispatchers.Default) {
                             DividendProgressCalculator.calculate(
                                 assets = assetsOnly,

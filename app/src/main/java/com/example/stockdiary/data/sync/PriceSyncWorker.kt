@@ -93,14 +93,8 @@ class PriceSyncWorker(
                 forceRefresh = false,
                 startTime = startTime,
                 timeLimitMs = WORKER_TIME_LIMIT_MS,
-            syncTrigger = "后台周期同步"
+                syncTrigger = "后台周期同步"
             )
-
-            // 同步在循环内部已对时间上限进行检查并提前返回；此处作为安全网兜底
-            if (result.truncatedByTimeLimit || isApproachingTimeLimit(startTime)) {
-                AppLogger.w("价格同步接近后台任务时间上限，本次重试", "PriceSyncWorker")
-                return handleFailure()
-            }
 
             // 通知只是附加反馈：失败不能把"成功的同步"判成失败，更不能让它穿透到 doWork
             // 的 catch 里导致走到 handleFailure 后无法自我续期。所以这里一律兜住。
@@ -162,10 +156,6 @@ class PriceSyncWorker(
         } catch (e: Exception) {
             AppLogger.w("发送通知失败（不影响同步结果）: ${e.message}", "PriceSyncWorker")
         }
-    }
-
-    private fun isApproachingTimeLimit(startTime: Long): Boolean {
-        return System.currentTimeMillis() - startTime > WORKER_TIME_LIMIT_MS
     }
 
     private suspend fun createOrReplaceTodaySnapshot(repository: AssetRepository) {

@@ -5,8 +5,14 @@ import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.utils.ExchangeRateManager
 import com.example.stockdiary.utils.totalValueCny
 import java.time.LocalDate
+import java.time.Year
 import kotlin.math.pow
 import kotlinx.coroutines.CancellationException
+
+/**
+ * 当前自然年天数（闰年 366、平年 365），与 [DividendProgressCalculator] 的自然年口径保持一致。
+ */
+fun daysInCurrentYear(): Int = java.time.Year.of(java.time.LocalDate.now().year).length()
 
 /**
  * 股息收益计算器
@@ -17,8 +23,9 @@ object DividendIncomeCalculator {
     /** 每万份收益的「万份」：日收益 = 持有份额 × 每万份收益 ÷ 10000 */
     private const val COPIES_PER_UNIT = 10_000.0
 
-    /** 年化用的天数。与 Dashboard 把年化收入 ÷365 估「每日分红」保持同一口径。 */
-    private const val DAYS_PER_YEAR = 365.0
+    /** 年化用的天数：取当前自然年天数（闰年 366、平年 365），与 DividendProgressCalculator 的自然年口径保持一致。 */
+    private val DAYS_PER_YEAR: Double
+        get() = daysInCurrentYear().toDouble()
 
     /**
      * 计算单个资产的年化收入（分红+利息）

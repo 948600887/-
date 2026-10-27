@@ -930,7 +930,9 @@ object AssetSyncManager {
                         result.onSuccess { price ->
                             when (price) {
                                 is AssetPrice.Stock -> {
-                                    priceWriter.write(PendingPriceWrite(symbol, price.data.price))
+                                    withContext(NonCancellable) {
+                                        priceWriter.write(PendingPriceWrite(symbol, price.data.price))
+                                    }
                                     if (correctNames) correctAssetName(asset, price.data.name, repository)
                                     isSuccess = true
                                 }
@@ -962,9 +964,11 @@ object AssetSyncManager {
                             fundResult.onSuccess { price ->
                                 when (price) {
                                     is AssetPrice.Fund -> {
-                                        priceWriter.write(
-                                            PendingPriceWrite(symbol, price.data.price, price.data.millionCopiesIncome)
-                                        )
+                                        withContext(NonCancellable) {
+                                            priceWriter.write(
+                                                PendingPriceWrite(symbol, price.data.price, price.data.millionCopiesIncome)
+                                            )
+                                        }
                                         isSuccess = true
                                     }
                                     else -> { lastError = IllegalStateException("返回类型不匹配") }
@@ -994,7 +998,9 @@ object AssetSyncManager {
                     result.onSuccess { price ->
                         when (price) {
                             is AssetPrice.Stock -> {
-                                priceWriter.write(PendingPriceWrite(stockSymbol, price.data.price))
+                                withContext(NonCancellable) {
+                                    priceWriter.write(PendingPriceWrite(stockSymbol, price.data.price))
+                                }
                                 if (correctNames) correctAssetName(asset, price.data.name, repository)
                                 isSuccess = true
                             }
@@ -1026,7 +1032,9 @@ object AssetSyncManager {
                     cryptoResult.onSuccess { price ->
                         when (price) {
                             is com.example.stockdiary.network.model.AssetPrice.Crypto -> {
-                                priceWriter.write(PendingPriceWrite(cryptoSymbol, price.data.price))
+                                withContext(NonCancellable) {
+                                    priceWriter.write(PendingPriceWrite(cryptoSymbol, price.data.price))
+                                }
                                 isSuccess = true
                             }
                             else -> { lastError = IllegalStateException("返回类型不匹配") }

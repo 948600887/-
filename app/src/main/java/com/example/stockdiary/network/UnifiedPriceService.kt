@@ -309,7 +309,10 @@ object UnifiedPriceService {
             val codeNorm = code.uppercase()
 
             // 稳定币锚定 1 美元：币安上没有自我交易对，查价必然空——直接按 1.0 计，不进批量请求
-            if (codeNorm in BINANCE_STABLECOINS) {
+            // 稳定币识别统一走 BinanceAPI.isLikelyStablecoin（白名单 + 命名兜底），
+            // 与导入路径口径一致——白名单外、命名疑似稳定币的币（如 NEWUSD/USDG）
+            // 也能按 1.0 美元计，不再退化成裸码查价 → 查不到 → 市值 0。
+            if (BinanceAPI.isLikelyStablecoin(codeNorm)) {
                 resultMap[code] = AssetPrice.Crypto(stableCoinData(codeNorm))
                 continue
             }
@@ -320,7 +323,7 @@ object UnifiedPriceService {
                     // 底层仍是稳定币壳（如 LDUSDT）：没有现货交易对，但锚定 1 美元，
                     // 与现货稳定币同口径按 1.0 计（否则存量 LDUSDT 市值恒为 0）
                     val stripped = codeNorm.removePrefix("LD")
-                    if (stripped in BINANCE_STABLECOINS) {
+                    if (BinanceAPI.isLikelyStablecoin(stripped)) {
                         resultMap[code] = AssetPrice.Crypto(stableCoinData(codeNorm))
                     }
                     // 其余无底层的理财壳：不进 map，回落逐标的（那里会抛 NonTradableAssetException）
@@ -645,8 +648,10 @@ object UnifiedPriceService {
     ): Result<CryptoData> = withContext(Dispatchers.IO) {
         val codeNorm = code.uppercase().trim()
 
-        // 稳定币锚定 1 美元，币安上没有 XXXUSDT 自我交易对，查价必然空——直接按 1.0 计
-        if (codeNorm in BINANCE_STABLECOINS) {
+        // 稳定币识别统一走 BinanceAPI.isLikelyStablecoin（白名单 + 命名兜底），
+        // 与导入路径口径一致——白名单外、命名疑似稳定币的币（如 NEWUSD/USDG）
+        // 也能按 1.0 美元计，不再退化成裸码查价 → 查不到 → 市值 0。
+        if (BinanceAPI.isLikelyStablecoin(codeNorm)) {
             AppLogger.d("稳定币 $code 按 1.0 美元计，跳过查价", TAG)
             return@withContext Result.success(
                 CryptoData(code = codeNorm, name = codeNorm, price = 1.0, change = null, changePercent = null)
@@ -667,7 +672,7 @@ object UnifiedPriceService {
                 // （用户看到的「USDT 价格默认为 0」正是这个）。earnUnderlyingPair
                 // 返回 null 当且仅当剥掉 LD 后底层是稳定币，所以这里判一次集合即可。
                 val stripped = codeNorm.removePrefix("LD")
-                if (stripped in BINANCE_STABLECOINS) {
+                if (BinanceAPI.isLikelyStablecoin(stripped)) {
                     AppLogger.d("理财/锁仓稳定币 $code 按 1.0 美元计", TAG)
                     return@withContext Result.success(
                         CryptoData(code = codeNorm, name = codeNorm, price = 1.0, change = null, changePercent = null)

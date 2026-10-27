@@ -58,6 +58,18 @@ class UnifiedPriceServiceTest {
         assertEquals(1.0, (price as AssetPrice.Crypto).data.price, 1e-9)
     }
 
+    @Test
+    fun 白名单外命名疑似稳定币_NEWUSD_同步路径也按1美元计_与导入口径一致() = runBlocking {
+        // NEWUSD 不在 BINANCE_STABLECOINS 白名单，但命名以 USD 结尾，由 isLikelyStablecoin
+        // 的命名兜底命中。此前同步路径只用白名单，会退化成裸码查价 → 查不到 → 市值恒 0；
+        // 现在同步路径统一走 isLikelyStablecoin，与导入路径口径一致，按 1.0 美元计。
+        val result = UnifiedPriceService.getPrice("NEWUSD", AssetType.CRYPTO)
+        assertTrue("NEWUSD 应被识别为稳定币并成功取价", result.isSuccess)
+        val price = result.getOrNull()
+        assertTrue(price is AssetPrice.Crypto)
+        assertEquals(1.0, (price as AssetPrice.Crypto).data.price, 1e-9)
+    }
+
     // ---------- 假 Interceptor：模拟币安 ticker/24hr 的各类「网络语义」 ----------
 
     /** 合法 200：含 lastPrice，能被 [UnifiedPriceService] 正常解析 */

@@ -48,6 +48,14 @@ object LogDiagnostics {
     const val DISPLAY_TAIL_LINES = 400
 
     /**
+     * 单份崩溃报告在**界面**上保留的堆栈行数。
+     *
+     * 一份完整堆栈几十 KB、几百~几千行，5 份全塞进 LazyColumn 会拖慢渲染；
+     * 界面上只留尾部若干行并标注「分享的是完整版」，完整堆栈始终通过分享出口流出。
+     */
+    const val DISPLAY_CRASH_STACK_LINES = 300
+
+    /**
      * 分享时带几份崩溃报告。
      *
      * 只带最近几份：一份完整堆栈就有几十 KB，50 份（[GlobalExceptionHandler] 的上限）
@@ -84,23 +92,10 @@ object LogDiagnostics {
      * 由调用方取好转交。
      */
     fun environmentInfo(context: Context): String {
+        // 复用 GlobalExceptionHandler.readAppVersionLabel：崩溃文件与诊断报告头部
+        // 同源，避免两处各自写一遍 PackageManager 取值逻辑。
         val version = try {
-            val packageInfo = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                context.packageManager.getPackageInfo(
-                    context.packageName,
-                    android.content.pm.PackageManager.PackageInfoFlags.of(0)
-                )
-            } else {
-                @Suppress("DEPRECATION")
-                context.packageManager.getPackageInfo(context.packageName, 0)
-            }
-            val versionCode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                packageInfo.longVersionCode.toInt()
-            } else {
-                @Suppress("DEPRECATION")
-                packageInfo.versionCode
-            }
-            "${packageInfo.versionName}($versionCode)"
+            readAppVersionLabel(context) ?: "Unknown"
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -206,17 +201,21 @@ object LogDiagnostics {
      * @param envInfo 环境信息（版本/机型/系统），由调用方经 [environmentInfo] 取好转交；
      *   空串则头部不显示该行（纯函数不碰 BuildConfig/Build，这是保可测性的代价）
      * @param tailLines app.log 保留的行数；传 [Int.MAX_VALUE] 就是不截断（分享用）
+     * @param crashMaxLines 单份崩溃报告在**界面**上保留的堆栈行数；
+     *   传 [Int.MAX_VALUE] 就是不截断（分享用）。界面传一个较小值避免长堆栈
+     *   拖垮 LazyColumn 渲染，分享出口始终传 [Int.MAX_VALUE] 保证完整。
      */
     internal fun composeReport(
         report: Report,
         envInfo: String = "",
-        tailLines: Int = DISPLAY_TAIL_LINES
+        tailLines: Int = DISPLAY_TAIL_LINES,
+        crashMaxLines: Int = Int.MAX_VALUE
     ): String {
         // 组件化拼装而不是一大段字符串模板：三段的存在与否相互独立，
         // 写成模板要处理 8 种组合，实际只有 3 段
         return buildList {
             add(headerOf(report, envInfo))
-            crashesSectionOf(report)?.let { add(it) }
+            crashesSectionOf(report, crashMaxLines)?.let { add(it) }
             add(appLogSectionOf(report, tailLines))
         }.joinToString("\n\n")
     }
@@ -238,17 +237,41 @@ object LogDiagnostics {
         }
     }
 
-    private fun crashesSectionOf(report: Report): String? {
+    private fun crashesSectionOf(report: Report, crashMaxLines: Int = Int.MAX_VALUE): String? {
         if (report.crashes.isEmpty()) return null
         return buildString {
             appendLine("--- 崩溃报告（新的在前）---")
             report.crashes.forEach { (name, content) ->
                 appendLine()
                 appendLine("########## $name ##########")
-                append(content.trimEnd())
+                append(truncateCrashForDisplay(content, crashMaxLines))
                 appendLine()
             }
         }.trimEnd()
+    }
+
+    /**
+     * 在**界面**上展示的单份崩溃报告：保留头部元数据（版本/机型/异常类，定位必看），
+     * 只截断后面的堆栈为尾部 [crashMaxLines] 行，并明确标注「分享的是完整版」。
+     *
+     * 不截断（[crashMaxLines] = [Int.MAX_VALUE]）则原样返回——分享出口走这条路径。
+     */
+    private fun truncateCrashForDisplay(content: String, crashMaxLines: Int): String {
+        if (crashMaxLines >= Int.MAX_VALUE) return content.trimEnd()
+        val lines = content.split('\n')
+        val sepIdx = lines.indexOfFirst { it.trim().startsWith("Stack Trace:") }
+        // 没有 "Stack Trace:" 分隔（或本身就短）：原样返回，不做破坏性截断
+        if (sepIdx < 0 || lines.size <= crashMaxLines) return content.trimEnd()
+
+        val header = lines.take(sepIdx + 1) // 含 "Stack Trace:" 行
+        val stack = lines.drop(sepIdx + 1).joinToString("\n")
+        val (keptStack, dropped) = tail(stack, crashMaxLines)
+        return buildString {
+            append(header.joinToString("\n"))
+            append('\n')
+            append(keptStack.trimEnd())
+            append("\n\n... 此崩溃报告的堆栈在界面上仅显示最后 $crashMaxLines 行（共省略 $dropped 行）；点「分享」出去的是完整堆栈 ...")
+        }
     }
 
     private fun appLogSectionOf(report: Report, tailLines: Int): String = buildString {

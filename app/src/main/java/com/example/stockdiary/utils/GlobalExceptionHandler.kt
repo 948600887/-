@@ -211,26 +211,9 @@ object GlobalExceptionHandler {
     }
     
     private fun getAppVersion(): String {
-        return try {
-            val context = appContext ?: return "Unknown"
-            val packageInfo = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
-                context.packageManager.getPackageInfo(context.packageName, android.content.pm.PackageManager.PackageInfoFlags.of(0))
-            } else {
-                @Suppress("DEPRECATION")
-                context.packageManager.getPackageInfo(context.packageName, 0)
-            }
-            val versionCode = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
-                packageInfo.longVersionCode.toInt()
-            } else {
-                @Suppress("DEPRECATION")
-                packageInfo.versionCode
-            }
-            versionCode.toString()
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            "Unknown"
-        }
+        // 复用 readAppVersionLabel：崩溃文件从前只记 versionCode，排查时看不到
+        // versionName；现在统一带 "versionName(versionCode)"，并和诊断报告头部同源。
+        return readAppVersionLabel(appContext) ?: "Unknown"
     }
     
     fun getCrashLogs(): List<Pair<String, String>> {
@@ -398,5 +381,40 @@ class CrashRecoveryManager private constructor() {
 inline fun <T> safeLet(vararg elements: T?, block: (List<T>) -> Unit) {
     if (elements.all { it != null }) {
         block(elements.filterNotNull())
+    }
+}
+
+/**
+ * 读取 App 版本标签 "versionName(versionCode)"。
+ *
+ * 崩溃文件（[GlobalExceptionHandler] 的 buildCrashInfo）和诊断报告头部
+ * （[LogDiagnostics.environmentInfo]）都要带它，统一走这一份，避免两处各自
+ * 写一遍 PackageManager 取值逻辑——从前崩溃文件只记 versionCode，排查时
+ * 看不到 versionName，反复来回问版本。取不到（或上下文为空）返回 null，
+ * 由调用方决定兜底文案。
+ */
+internal fun readAppVersionLabel(context: Context?): String? {
+    return try {
+        val ctx = context ?: return null
+        val packageInfo = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            ctx.packageManager.getPackageInfo(
+                ctx.packageName,
+                android.content.pm.PackageManager.PackageInfoFlags.of(0)
+            )
+        } else {
+            @Suppress("DEPRECATION")
+            ctx.packageManager.getPackageInfo(ctx.packageName, 0)
+        }
+        val versionCode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            packageInfo.longVersionCode.toInt()
+        } else {
+            @Suppress("DEPRECATION")
+            packageInfo.versionCode
+        }
+        "${packageInfo.versionName}($versionCode)"
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        null
     }
 }

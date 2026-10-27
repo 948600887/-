@@ -258,7 +258,11 @@ object BinanceAPI {
 
     /**
      * 稳定币的**兜底**识别：白名单 [BINANCE_STABLECOINS] 之外，原始资产名以
-     * `USD` / `EUR` 结尾的几乎都是锚定法币的稳定币（如 NEWUSD / USDG …）。
+     * `USD` 结尾的几乎都是锚定**美元**的稳定币（如 NEWUSD / USDG …）。
+     *
+     * ⚠️ 刻意**不收 `EUR` 结尾**（EURT / EURC / EURS…）：这里的语义是「按 1.0 **美元**计」，
+     * 而 1 欧元 ≈ 1.08 美元，按 1 美元算会系统性低估约 8%。欧元稳定币交给真实报价
+     * （EURTUSDT 等）去估值；没有报价时宁可显示「待更新」，也不编一个汇率。
      *
      * ## 只做「按 1.0 美元估」的召回增强，不参与交易对判定
      *
@@ -279,9 +283,8 @@ object BinanceAPI {
     internal fun isLikelyStablecoin(asset: String): Boolean {
         val s = asset.uppercase().trim()
         if (s in BINANCE_STABLECOINS) return true
-        // 欧元稳定币命名不统一（EURT/EURC/EURS…），这里只做「USD/EUR 收尾」的粗召回，
-        // 更精确的欧元币仍靠白名单补充；多收不致命（见上），少收也只退化到旧的查价路径。
-        return s.endsWith("USD") || s.endsWith("EUR")
+        // 只认「USD 收尾」：本函数的语义是按 1.0 **美元**估值，欧元稳定币不能套用（见上方 KDoc）
+        return s.endsWith("USD")
     }
 }
 

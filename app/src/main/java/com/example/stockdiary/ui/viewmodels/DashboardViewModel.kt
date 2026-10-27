@@ -11,6 +11,7 @@ import com.example.stockdiary.data.sync.saveTodaySnapshotIfEligible
 import com.example.stockdiary.data.dividend.DividendIncomeUseCase
 import com.example.stockdiary.data.dividend.DividendProgressCalculator
 import com.example.stockdiary.data.dividend.daysInCurrentYear
+import com.example.stockdiary.data.dividend.dividendInputFingerprint
 import com.example.stockdiary.data.prefs.SortOrder
 import com.example.stockdiary.data.sync.SyncProgress
 import com.example.stockdiary.data.sync.SyncResult
@@ -191,21 +192,24 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
      * - 之后按 forceRefresh=false 静默取一次（命中库缓存时不出网），
      *   只为补齐「收息进度」需要的明细记录，不占屏。
      *
-     * ## 为什么这里不比对「代码集合」来决定要不要取
+     * ## 缓存必须和「这批资产」口径一致才能用
      *
-     * 持仓页可以这么做是因为它每次传入的资产集合口径一致。但首页、持仓页、
-     * 以及持仓页的手动刷新，三者传入的资产范围**并不相同**（首页含全部非负债资产、
-     * 持仓页只含用户勾选可见的类型、手动刷新只含股票/基金）。
-     * 若各自拿自己的集合去比对并回写同一份缓存，就会互相覆盖、永远命中不了，
-     * 反而变成每次都重算。所以这里只取「有没有算过」这层判断，
-     * 值本身由后台那次静默取数负责校正。
+     * 首页、持仓页共用同一份持久化缓存，但两者传入的资产范围并不相同（首页含全部
+     * 非负债资产、持仓页只含用户勾选可见的类型）。从前这里只判「缓存非空」就把值摆出来，
+     * 于是从持仓页切回首页时会短暂显示**子集**的年化收入与每日预估（金额偏小）。
+     * 现在要求缓存的代码集合与本批资产完全一致才采用；不一致就等本轮静默取数算完再显示，
+     * 正确性优先于「不闪计算中」。
      */
     fun loadDividendIncome(assetsOnly: List<Asset>) {
         if (assetsOnly.isEmpty()) return
 
-        // 上次是否算过：有就先摆出来，别让「计算中」占屏
-        val lastValue = _preferences.value.annualDividendCache
-        val hasCached = _preferences.value.annualDividendSymbols.isNotEmpty()
+        val symbols = assetsOnly.mapNotNull { it.symbol }.toSet()
+        val fingerprint = dividendInputFingerprint(assetsOnly)
+        val cached = _preferences.value
+        // 只有缓存就是「这一批资产」算出来的才敢当全量展示（见上方 KDoc）。
+        // 指纹含数量与利率：加仓 / 改存款余额同样会让旧值作废，不能只看代码集合。
+        val hasCached = symbols.isNotEmpty() && cached.annualDividendFingerprint == fingerprint
+        val lastValue = cached.annualDividendCache
 
         viewModelScope.launch {
             if (hasCached) {
@@ -258,7 +262,8 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
                 val updated = preferencesManager.updatePreferences { prefs ->
                     prefs.copy(
                         annualDividendCache = result.totalAnnualIncome,
-                        annualDividendSymbols = assetsOnly.mapNotNull { it.symbol }.toSet()
+                        annualDividendSymbols = symbols,
+                        annualDividendFingerprint = fingerprint
                     )
                 }
                 _preferences.value = updated

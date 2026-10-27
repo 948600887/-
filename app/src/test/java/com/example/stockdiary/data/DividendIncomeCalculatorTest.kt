@@ -3,10 +3,13 @@ package com.example.stockdiary.data
 import com.example.stockdiary.data.dividend.DividendIncomeCalculator
 import com.example.stockdiary.data.dividend.DividendProgressCalculator
 import com.example.stockdiary.data.dividend.daysInCurrentYear
+import com.example.stockdiary.data.dividend.daysInYear
+import com.example.stockdiary.data.dividend.dividendInputFingerprint
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
 import java.time.LocalDate
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Test
 
 /**
@@ -211,5 +214,40 @@ class DividendIncomeCalculatorTest {
         val liability = Asset(name = "房贷", type = AssetType.MORTGAGE, symbol = null, account = "银行", balance = 90_000.0)
         val bySymbol = mapOf("600519" to 10.0)
         assertEquals(10.0, DividendIncomeCalculator.calculatePortfolioYield(listOf(stockAsset, liability), bySymbol), 0.001)
+    }
+
+    // ===== 自然年天数（闰年分支可测） =====
+
+    @Test
+    fun `自然年天数：平年365_闰年366`() {
+        assertEquals(365, daysInYear(LocalDate.of(2026, 1, 1)))
+        assertEquals(366, daysInYear(LocalDate.of(2028, 1, 1)))
+        // 整百年不闰、400 年又闰（Gregorian 规则）
+        assertEquals(365, daysInYear(LocalDate.of(2100, 6, 1)))
+        assertEquals(366, daysInYear(LocalDate.of(2000, 6, 1)))
+    }
+
+    // ===== 缓存指纹 =====
+
+    @Test
+    fun `分红输入指纹：加仓与改存款利率都会让缓存失效`() {
+        val base = listOf(stock("600519", 100.0), deposit(10_000.0, 2.0))
+        val afterBuy = listOf(stock("600519", 150.0), deposit(10_000.0, 2.0))
+        val afterRate = listOf(stock("600519", 100.0), deposit(10_000.0, 2.5))
+
+        val baseFp = dividendInputFingerprint(base)
+        assertNotEquals("加仓必须让缓存失效", baseFp, dividendInputFingerprint(afterBuy))
+        assertNotEquals("改存款利率必须让缓存失效", baseFp, dividendInputFingerprint(afterRate))
+    }
+
+    @Test
+    fun `分红输入指纹：资产顺序不影响结果`() {
+        val a = listOf(stock("600519", 100.0), deposit(10_000.0, 2.0))
+        val reversed = listOf(deposit(10_000.0, 2.0), stock("600519", 100.0))
+        assertEquals(
+            "同一批资产换顺序必须得到同一指纹，否则每次排序变化都会重算",
+            dividendInputFingerprint(a),
+            dividendInputFingerprint(reversed)
+        )
     }
 }

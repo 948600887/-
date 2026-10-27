@@ -11,15 +11,33 @@ import java.io.IOException
 import java.util.ArrayDeque
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
-import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledExecutorService
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CancellationException
 
 object AppLogger {
     private var isDebug = true
     private const val LOG_TAG = "GoldVault"
-    private val logQueue = ConcurrentLinkedQueue<String>()
+
+    /**
+     * 内存队列。
+     *
+     * 用 [ArrayDeque] + [queueLock] 而不是 ConcurrentLinkedQueue：失败回队需要
+     * 「插回队首 + 保持顺序」，无锁队列没有 addFirst，靠 clear 重建会与并发 offer 竞争丢日志。
+     * 锁内只有几十次内存操作、没有 IO，开销可忽略。
+     */
+    private val logQueue = ArrayDeque<String>()
+    private val queueLock = Any()
     private val isWriting = AtomicBoolean(false)
+
+    /** 延迟 flush 是否已排期（合并 2 秒窗口内的多次入队，避免每来一条日志就换一次线程） */
+    private val flushScheduled = AtomicBoolean(false)
+
+    /** 文件写入锁：后台 writer 与崩溃路径的 forceFlush / clearLog 必须串行，否则会写坏文件 */
+    private val fileLock = Any()
+
     /**
      * 内存队列上限。
      *
@@ -32,14 +50,29 @@ object AppLogger {
      */
     private const val MAX_QUEUE_SIZE = 1000
     private const val FLUSH_INTERVAL_MS = 2000L
+
+    /** 崩溃路径等待后台 flush 收尾的上限：够写完一两个批次，又不至于把闪退拖成 ANR */
+    private const val FORCE_FLUSH_WAIT_MS = 500L
+
     private val logTimestampFormatter = DateFormats.ISO_DATETIME_MILLIS_FORMATTER
-    
-    private var lastFlushTime = System.currentTimeMillis()
+
     private var appContext: Context? = null
 
     // 日志落盘专用后台线程：flush 含文件读写与截断，直接在主线程跑会掉帧
-    private val logExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+    private val logExecutor = Executors.newSingleThreadExecutor { r ->
         Thread(r, "AppLoggerWriter").apply { isDaemon = true }
+    }
+
+    /**
+     * 延迟 flush 定时器。
+     *
+     * 旧实现只在「下一条日志到来且距上次 flush > 2s」时才调度：最后一条日志之后如果
+     * 再没有日志，它就会一直躺在内存里，进程被杀时丢掉——而崩溃前最后几行恰恰最关键。
+     * 这里在每条日志入队时排一个 2 秒后的 flush（[flushScheduled] 合并窗口内多次入队），
+     * 保证不超过 2 秒必然落盘一次。
+     */
+    private val flushScheduler: ScheduledExecutorService = Executors.newSingleThreadScheduledExecutor { r ->
+        Thread(r, "AppLoggerTimer").apply { isDaemon = true }
     }
     
     fun init(context: Context, debug: Boolean = true) {
@@ -107,6 +140,15 @@ object AppLogger {
     internal fun sanitizeForLog(message: String): String =
         QUERY_IN_LOG_REGEX.replace(message, "").take(MAX_LOG_URL_LENGTH)
 
+    /**
+     * 只去 URL query、**不截断**的脱敏版（崩溃报告这类需要保留完整异常文案的场景）。
+     *
+     * 崩溃报告会被用户主动分享，异常 message 里可能带请求 URL（含 signature/token），
+     * 去掉 `?` 到空白之间的整段即可，其余信息一字不丢。
+     */
+    internal fun sanitizeMessage(message: String): String =
+        QUERY_IN_LOG_REGEX.replace(message, "")
+
     /** 匹配 URL 的 `?` 到下一个空白字符（日志行里 query 后面是空格/换行/协议尾巴） */
     private val QUERY_IN_LOG_REGEX = Regex("\\?[^\\s]*")
 
@@ -122,18 +164,21 @@ object AppLogger {
         try {
             val timestamp = LocalDateTime.now().format(logTimestampFormatter)
             val logLine = "[$timestamp] [$level/$tag] $message"
-            
+
             // 达到上限：丢弃最旧、保留最新（崩溃前后最新段最该保留），并立即落盘一次，
-            // 把「爆发期持续丢最早日志」的窗口压到最小——否则要等 2 秒周期 flush。
-            val reachedLimit = logQueue.size >= MAX_QUEUE_SIZE
-            if (reachedLimit) {
-                logQueue.poll()
+            // 把「爆发期持续丢最早日志」的窗口压到最小——否则要等 2 秒窗口。
+            val reachedLimit = synchronized(queueLock) {
+                val full = logQueue.size >= MAX_QUEUE_SIZE
+                if (full) logQueue.removeFirst()
+                logQueue.addLast(logLine)
+                full
             }
-            logQueue.offer(logLine)
-            
-            val overdue = System.currentTimeMillis() - lastFlushTime > FLUSH_INTERVAL_MS
-            if (overdue || level == "ERROR" || reachedLimit) {
+
+            // ERROR 与爆队列立即落盘；其余走 2 秒延迟窗口（每条日志都排一次，合并成一次 flush）
+            if (level == "ERROR" || reachedLimit) {
                 scheduleFlush()
+            } else {
+                scheduleFlushDelayed()
             }
         } catch (e: CancellationException) {
             throw e
@@ -143,7 +188,7 @@ object AppLogger {
     }
 
     /**
-     * 把积压日志提交给专用后台线程落盘。
+     * 把积压日志提交给专用后台线程立即落盘。
      * 执行器被拒绝（极端情况）只丢这次落盘，不影响调用方。
      */
     private fun scheduleFlush() {
@@ -153,49 +198,117 @@ object AppLogger {
             // 执行器被拒绝（极端情况）只丢这次落盘，不影响调用方
         }
     }
-    
-    private fun flushLogs() {
-        if (!isWriting.compareAndSet(false, true)) {
-            return
-        }
-        
+
+    /**
+     * 排一次 2 秒后的 flush。
+     *
+     * 用 [flushScheduled] 合并窗口：2 秒内来一万条日志也只排一次任务，不会把定时器打爆。
+     */
+    private fun scheduleFlushDelayed() {
+        if (!flushScheduled.compareAndSet(false, true)) return
         try {
-            val logsToWrite = mutableListOf<String>()
-            while (true) {
-                val log = logQueue.poll() ?: break
-                logsToWrite.add(log)
-            }
-            
-            if (logsToWrite.isEmpty()) {
-                return
-            }
-            
-            val logFile = getLogFileSafe()
-            if (logFile == null) {
-                return
-            }
-            
-            FileWriter(logFile, true).use { fileWriter ->
-                BufferedWriter(fileWriter).use { writer ->
-                    for (log in logsToWrite) {
-                        try {
-                            writer.write(log)
-                            writer.newLine()
-                        } catch (e: IOException) {
-                            break
-                        }
-                    }
+            flushScheduler.schedule(
+                {
+                    flushScheduled.set(false)
+                    flushLogs()
+                },
+                FLUSH_INTERVAL_MS,
+                TimeUnit.MILLISECONDS
+            )
+        } catch (e: Exception) {
+            // 定时器被拒绝（进程正在退出）：放弃这次延迟落盘，不影响调用方
+            flushScheduled.set(false)
+        }
+    }
+
+    /**
+     * 把队列里的日志写到 app.log。
+     *
+     * @return true = 抢到了写入资格（无论有没有内容可写）；false = 另一个线程正在写
+     *   （崩溃路径的 [forceFlush] 据此等待并补一次，而不是直接放弃）
+     *
+     * 失败语义：写文件失败 / 文件不可用时，**把没写下去的行放回队首**，等下一次 flush；
+     * 绝不静默丢弃（从前 `poll` 完就 return，一次磁盘异常等于整批日志蒸发）。
+     */
+    private fun flushLogs(): Boolean {
+        if (!isWriting.compareAndSet(false, true)) {
+            return false
+        }
+
+        // 这两项必须在 try 之外声明：意外异常时要把「还没写下去的行」放回队列，
+        // 否则一次非 IO 异常（如 OOM 之外的意外）就等于整批日志蒸发。
+        val logsToWrite = ArrayList<String>()
+        var written = 0
+        try {
+            synchronized(queueLock) {
+                while (logQueue.isNotEmpty()) {
+                    logsToWrite.add(logQueue.removeFirst())
                 }
             }
-            
-            lastFlushTime = System.currentTimeMillis()
-            trimLogFile(logFile)
+
+            if (logsToWrite.isEmpty()) {
+                return true
+            }
+
+            val logFile = getLogFileSafe()
+            if (logFile == null) {
+                requeue(logsToWrite, written = 0)
+                // 目录还没就绪（init 之前 / 外部存储暂不可用）：排一次重试，别等下一批日志
+                scheduleFlushDelayed()
+                return true
+            }
+
+            synchronized(fileLock) {
+                try {
+                    FileWriter(logFile, true).use { fileWriter ->
+                        BufferedWriter(fileWriter).use { writer ->
+                            for (log in logsToWrite) {
+                                writer.write(log)
+                                writer.newLine()
+                                written++
+                            }
+                            writer.flush()
+                        }
+                    }
+                } catch (e: IOException) {
+                    // 磁盘满 / 文件被占用：已写下去的保留，剩下的回队等下次
+                }
+                if (written < logsToWrite.size) {
+                    requeue(logsToWrite, written)
+                    // 写失败（磁盘满/文件被占用）也排一次重试：否则回队的行要等下一条日志才再尝试
+                    scheduleFlushDelayed()
+                }
+                if (written > 0) trimLogFile(logFile)
+            }
+            return true
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             Log.w(LOG_TAG, "日志刷新失败", e)
+            // 意外异常（非 IOException）：没写下去的照样回队，下一轮重试
+            requeue(logsToWrite, written)
+            return true
         } finally {
             isWriting.set(false)
+        }
+    }
+
+    /**
+     * 把没写下去的行放回队首，保持原有顺序。
+     *
+     * 回队也受 [MAX_QUEUE_SIZE] 约束：超限时丢最旧的（即这批里最靠前的），
+     * 与「保最新」策略一致，避免磁盘长期异常把内存撑爆。
+     */
+    private fun requeue(logs: List<String>, written: Int) {
+        val pending = logs.subList(written, logs.size)
+        if (pending.isEmpty()) return
+        synchronized(queueLock) {
+            for (i in pending.indices.reversed()) {
+                logQueue.addFirst(pending[i])
+            }
+            while (logQueue.size > MAX_QUEUE_SIZE) {
+                logQueue.removeFirst()
+            }
         }
     }
     
@@ -223,11 +336,13 @@ object AppLogger {
     /**
      * 截断预判的字节下限。
      *
-     * 5000 行常规日志（每行几十到一百多字节）不可能小于 250KB——没超过它就连读都不读。
-     * 从前每次 flush 都全量重读两遍（先数行数、超限再读一遍重写），5000 行的文件
-     * 每 2 秒白读约 500KB，纯浪费。file.length() 是一次 stat，微秒级。
+     * **必须大于「5000 行」的实际体积**（带时间戳/tag 的日志行约 90~130 字节，
+     * 5000 行约 450~650KB）。从前取 250KB：裁完仍是 400KB+、高于下限，于是**每次**
+     * flush 都全量读 + 重写整个文件（约 800KB I/O / 2 秒），把「廉价预判」做成了写放大。
+     * 取 1MB：文件长到 1MB 才裁一次，裁到约 500KB，之后有约 500KB 的余量再触发。
+     * file.length() 只是一次 stat，微秒级。
      */
-    private const val TRIM_CHECK_FLOOR_BYTES = 250_000L
+    private const val TRIM_CHECK_FLOOR_BYTES = 1_000_000L
 
     /**
      * 从行序列里保留最后 [maxLines] 行（单遍，内存上限 [maxLines] 行）。
@@ -275,8 +390,10 @@ object AppLogger {
             // .get() 阻塞到任务完成，保证调用方 reload 时文件已确实清空（同步语义）。
             logExecutor.submit {
                 try {
-                    logQueue.clear()
-                    getLogFileSafe()?.writeText("")
+                    synchronized(queueLock) { logQueue.clear() }
+                    // 文件写入同样要拿 fileLock：崩溃路径的 forceFlush 不走这个执行器，
+                    // 两者若只靠单线程排队串行，forceFlush 会和这里的 writeText("") 交错
+                    synchronized(fileLock) { getLogFileSafe()?.writeText("") }
                 } catch (e: Exception) {
                     Log.w(LOG_TAG, "清空日志失败", e)
                 }
@@ -288,7 +405,25 @@ object AppLogger {
         }
     }
     
+    /**
+     * 同步强制落盘——崩溃路径专用。
+     *
+     * 与后台 writer 竞争时的正确处理：CAS 失败说明对方正在写，**等它写完再补一次**，
+     * 而不是像从前那样直接 return。崩溃现场只有一次机会，最后几行丢了就永远没有。
+     * 等待上限 [FORCE_FLUSH_WAIT_MS]：宁可少几行，也不能把闪退拖成 ANR。
+     */
     fun forceFlush() {
+        if (flushLogs()) return
+        val deadline = System.currentTimeMillis() + FORCE_FLUSH_WAIT_MS
+        while (isWriting.get() && System.currentTimeMillis() < deadline) {
+            try {
+                Thread.sleep(10)
+            } catch (e: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return
+            }
+        }
+        // 后台那次 flush 已把队列抽干；这次补的是它写盘期间新入队的行
         flushLogs()
     }
 }

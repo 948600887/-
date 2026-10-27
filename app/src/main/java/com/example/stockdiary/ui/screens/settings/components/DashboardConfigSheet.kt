@@ -249,6 +249,7 @@ fun DashboardConfigSheet(
                             monthlyExpense = preferences.monthlyExpense,
                             annualDividendCache = preferences.annualDividendCache,
                             annualDividendSymbols = preferences.annualDividendSymbols,
+                            annualDividendFingerprint = preferences.annualDividendFingerprint,
                             defaultExpanded = preferences.defaultExpanded
                         )
                     )

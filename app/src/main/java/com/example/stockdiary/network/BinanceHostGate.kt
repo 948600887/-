@@ -32,13 +32,18 @@ internal enum class FailureType { TRANSIENT, REGION_BLOCKED }
  * @param phase 当前相位
  * @param blockedUntil OPEN 相位的冷却截止时间戳（epoch ms）；CLOSED 时为 0
  * @param probeUntil HALF_OPEN 相位的探测截止时间戳（epoch ms）；用于自愈「卡死的探测」
- * @param consecutiveFailures CLOSED 下的连续网络级失败计数（达到 [BinanceHostGate.FAIL_THRESHOLD] 触发熔断）
+ * @param consecutiveFailures CLOSED 下连续网络级失败总数（瞬断 + 地区封锁都算；达到
+ *   [BinanceHostGate.FAIL_THRESHOLD] 触发瞬断熔断）
+ * @param consecutiveRegionFailures CLOSED 下连续的地区封锁失败数——**独立计数**，
+ *   只累计 451/403。地区封锁用更小的阈值 [BinanceHostGate.REGION_BLOCKED_FAIL_THRESHOLD]，
+ *   若与上面的总数共用一个计数，1 次瞬断 + 1 次 451 就会凑满 2 直接粘死（见 [BinanceHostGate.onNetworkFailure]）。
  */
 private data class GateState(
     val phase: Phase,
     val blockedUntil: Long,
     val probeUntil: Long,
-    val consecutiveFailures: Int
+    val consecutiveFailures: Int,
+    val consecutiveRegionFailures: Int = 0
 )
 
 /**
@@ -241,14 +246,18 @@ internal object BinanceHostGate {
      *     换 IP 无效。一旦**据此熔断**（阈值到达 / 已在 OPEN·HALF_OPEN 下再失败），即打粘性
      *     [regionBlocked] 标记，[tryAcquireProbe] 此后永久拒探测，灭掉无限空探循环。
      *     注意：地区封锁走**独立的更小阈值** [REGION_BLOCKED_FAIL_THRESHOLD]=2（不是瞬断的
-     *     [FAIL_THRESHOLD]）——确定性故障没必要攒那么多轮。单发 451 仍只计数、不熔断
+     *     [FAIL_THRESHOLD]）——确定性故障没必要攒那么多轮。**两个阈值各用各的计数器**
+     *     （[GateState.consecutiveFailures] 是总数、[GateState.consecutiveRegionFailures]
+     *     只数 451/403）：共用一个计数时，1 次瞬断 + 1 次 451 就凑满 2、直接粘死，
+     *     等于单发 451 也会永久冻结。单发 451 仍只计数、不熔断
      *     （与既有契约 `getCryptoPrice 收到451…` 一致：UI 不显示暂不可达）。
      *
      * 各相位下（TRANSIENT 与 REGION_BLOCKED 共用同一套状态迁移，仅 REGION_BLOCKED 在
      * 成功 CAS 时额外置位 [regionBlocked]）：
      * - HALF_OPEN（探测失败）→ 主机仍不可达的确定证据，**立即重开冷却**（不等计数到阈值），打日志；
      * - OPEN（冷却期内迟来失败）→ 不顺延截止时间、不重复日志，只把计数压回阈值以下防越界；
-     * - CLOSED → 累计，达到 [FAIL_THRESHOLD] 时 CAS 转 OPEN（只熔断一次、日志只打一条）、
+     * - CLOSED → 累计，达到 [FAIL_THRESHOLD]（或地区封锁数达到
+     *   [REGION_BLOCKED_FAIL_THRESHOLD]）时 CAS 转 OPEN（只熔断一次、日志只打一条）、
      *   [blockCount] +1、计数清零。
      */
     fun onNetworkFailure(now: Long, type: FailureType = FailureType.TRANSIENT) {
@@ -257,7 +266,13 @@ internal object BinanceHostGate {
             when (s.phase) {
                 Phase.HALF_OPEN -> {
                     // 探测失败：主机仍不可达，立即重开冷却（不等阈值）
-                    val reopened = s.copy(phase = Phase.OPEN, blockedUntil = now + COOLDOWN_MS, probeUntil = 0L, consecutiveFailures = 0)
+                    val reopened = s.copy(
+                        phase = Phase.OPEN,
+                        blockedUntil = now + COOLDOWN_MS,
+                        probeUntil = 0L,
+                        consecutiveFailures = 0,
+                        consecutiveRegionFailures = 0
+                    )
                     if (state.compareAndSet(s, reopened)) {
                         // 若是地区封锁（探测也 451），打粘性标记，之后永久拒探测。
                         if (type == FailureType.REGION_BLOCKED) regionBlocked = true
@@ -274,38 +289,48 @@ internal object BinanceHostGate {
                     // 仍在冷却期：不顺延、不重复日志，只把计数压回阈值以下防越界。
                     // 期间若又撞到地区封锁，顺手把粘性标记打上（已 OPEN 不影响行为，但保证
                     // 即便本次冷却是瞬断触发的、后来才确认是地区封锁，之后也不会空探）。
-                    if (state.compareAndSet(s, s.copy(consecutiveFailures = FAIL_THRESHOLD - 1))) {
+                    val bounded = s.copy(
+                        consecutiveFailures = FAIL_THRESHOLD - 1,
+                        consecutiveRegionFailures = REGION_BLOCKED_FAIL_THRESHOLD - 1
+                    )
+                    if (state.compareAndSet(s, bounded)) {
                         if (type == FailureType.REGION_BLOCKED) regionBlocked = true
                         return
                     }
                 }
                 Phase.CLOSED -> {
-                    val failures = s.consecutiveFailures + 1
-                    // 地区封锁用**更小的阈值**：451/403 是确定性故障，主机可达但本用户被拒、
-                    // 换 IP 前不会自愈，没必要跟瞬断一样攒够 [FAIL_THRESHOLD] 才停手——
-                    // 那等于让地区封锁用户白打 8 轮（批量预取后一轮仍要 2~3 次请求）才熔断。
-                    val threshold = if (type == FailureType.REGION_BLOCKED) {
-                        REGION_BLOCKED_FAIL_THRESHOLD
-                    } else {
-                        FAIL_THRESHOLD
-                    }
-                    if (failures < threshold) {
-                        if (state.compareAndSet(s, s.copy(consecutiveFailures = failures))) return
-                        // CAS 失败，重读重试
-                    } else {
+                    val totalFailures = s.consecutiveFailures + 1
+                    // 地区封锁数独立累计：只有 451/403 才加，瞬断不碰它
+                    val regionFailures = s.consecutiveRegionFailures +
+                        if (type == FailureType.REGION_BLOCKED) 1 else 0
+                    // 两条触发路径：地区封锁数达 2（确定性故障，可粘死）；总失败数达 8（瞬断）。
+                    // 同时命中时按地区封锁处理（语义更重，要打粘性标记）。
+                    val regionHit = type == FailureType.REGION_BLOCKED &&
+                        regionFailures >= REGION_BLOCKED_FAIL_THRESHOLD
+                    val transientHit = totalFailures >= FAIL_THRESHOLD
+                    if (regionHit || transientHit) {
                         // 首次越界（或上一轮熔断已过期后的重新武装）：真正进入熔断
-                        val opened = GateState(Phase.OPEN, now + COOLDOWN_MS, 0L, 0)
+                        val opened = GateState(Phase.OPEN, now + COOLDOWN_MS, 0L, 0, 0)
                         if (state.compareAndSet(s, opened)) {
                             blockCount.incrementAndGet()
-                            // 地区封锁：据此熔断即粘死，永久拒探测（见 [regionBlocked]）。
-                            if (type == FailureType.REGION_BLOCKED) regionBlocked = true
+                            // 只有**地区封锁计数本身达阈值**才粘死：本次若是因为总失败数凑满
+                            // 瞬断阈值才熔断、而 451 只出现过 1 次，就不该永久冻结（见 [regionBlocked]）。
+                            if (regionHit) regionBlocked = true
                             AppLogger.w(
-                                "币安主机连续 $failures 次网络级失败，熔断 ${COOLDOWN_MS / 1000} 秒" +
+                                "币安主机连续 $totalFailures 次网络级失败" +
+                                    "（其中地区封锁 $regionFailures 次），熔断 ${COOLDOWN_MS / 1000} 秒" +
                                     "（至 ${Instant.ofEpochMilli(opened.blockedUntil)} 暂停访问）",
                                 TAG
                             )
                             return
                         }
+                        // CAS 失败，重读重试
+                    } else {
+                        val next = s.copy(
+                            consecutiveFailures = totalFailures,
+                            consecutiveRegionFailures = regionFailures
+                        )
+                        if (state.compareAndSet(s, next)) return
                         // CAS 失败，重读重试
                     }
                 }
@@ -322,6 +347,9 @@ internal object BinanceHostGate {
 
     /** 测试专用读数：当前连续失败计数 */
     internal fun consecutiveFailuresForTesting(): Int = state.get().consecutiveFailures
+
+    /** 测试专用读数：当前连续地区封锁计数（与总数独立，见 [GateState.consecutiveRegionFailures]） */
+    internal fun consecutiveRegionFailuresForTesting(): Int = state.get().consecutiveRegionFailures
 
     /** 测试专用读数：熔断截止时间戳（epoch ms） */
     internal fun blockedUntilForTesting(): Long = state.get().blockedUntil

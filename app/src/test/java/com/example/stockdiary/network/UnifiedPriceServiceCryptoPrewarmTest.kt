@@ -47,14 +47,18 @@ class UnifiedPriceServiceCryptoPrewarmTest {
     @Before
     fun setUp() {
         BinanceHostGate.resetForTesting()
+        // 预取会双写门面 60s 缓存：不清的话下一条用例可能直接命中上一条的价，
+        // 假 client 根本没被调用，断言「发了几次请求」就变成假绿
+        UnifiedPriceService.clearPriceCacheForTesting()
         requestCount.set(0)
         lastUrl.set("")
     }
 
     @After
     fun tearDown() {
-        // 与 @Before 对称：熔断状态不能漏给后续测试类
+        // 与 @Before 对称：熔断状态与价格缓存都不能漏给后续测试类
         BinanceHostGate.resetForTesting()
+        UnifiedPriceService.clearPriceCacheForTesting()
     }
 
     // ---------- 1. 请求数：N 个标的 1 次请求 ----------

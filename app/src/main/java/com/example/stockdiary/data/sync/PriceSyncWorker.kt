@@ -124,7 +124,9 @@ class PriceSyncWorker(
                 prefs.setLastSyncTimeMillis(System.currentTimeMillis())
                 prefs.setConsecutiveFailureCount(0)
                 prefs.setLastErrorType(null)
-                createOrReplaceTodaySnapshot(repository)
+                // 走统一策略：截断（时间预算跑满）的轮次不写快照——那会把「部分新价 + 部分旧价」
+                // 固化成当日净值。与手动刷新共用 [SyncSnapshotPolicy]，避免两处判定再次漂移。
+                saveTodaySnapshotIfEligible(repository, result, "PriceSyncWorker")
                 notifyTodayDividends(applicationContext, assets)
                 // 跑完一轮后按「此时是否交易时段」重排下一次间隔（15分钟 ↔ 4小时自适应），
                 // 否则间隔永远是上次 App 启动那一刻算出的值，智能间隔形同虚设
@@ -155,22 +157,6 @@ class PriceSyncWorker(
             throw e
         } catch (e: Exception) {
             AppLogger.w("发送通知失败（不影响同步结果）: ${e.message}", "PriceSyncWorker")
-        }
-    }
-
-    private suspend fun createOrReplaceTodaySnapshot(repository: AssetRepository) {
-        try {
-            val today = LocalDate.now().format(dateFormatter)
-            val snapshot = repository.replaceSnapshotForDate(today)
-            if (snapshot != null) {
-                AppLogger.i("价格同步后已刷新当日快照: ${snapshot.date}, 净资产: ¥${snapshot.netAssets}", "PriceSyncWorker")
-            } else {
-                AppLogger.w("价格同步后刷新当日快照失败", "PriceSyncWorker")
-            }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            AppLogger.e("刷新当日快照失败: ${e.message}", e, "PriceSyncWorker")
         }
     }
 

@@ -54,7 +54,15 @@ data class DashboardPreferences(
      * 代码集合用来判断缓存还有没有效：持仓一变，旧值立刻作废。
      */
     val annualDividendCache: Double = 0.0,
-    val annualDividendSymbols: Set<String> = emptySet()
+    val annualDividendSymbols: Set<String> = emptySet(),
+    /**
+     * 算这个缓存时的**输入指纹**（代码 + 持仓数量 + 存款利率，见
+     * [com.example.stockdiary.data.dividend.dividendInputFingerprint]）。
+     *
+     * 只比对 [annualDividendSymbols] 会漏掉「加仓」和「改存款余额/利率」：代码集合没变，
+     * 但年化收入已经变了，缓存却被当成仍然有效。空串表示旧版本写入的数据，一律视为失效。
+     */
+    val annualDividendFingerprint: String = ""
 )
 
 enum class SortOrder {
@@ -97,6 +105,7 @@ class DashboardPreferencesManager(context: Context) {
         private const val KEY_MONTHLY_EXPENSE = "monthly_expense"
         private const val KEY_ANNUAL_DIVIDEND_CACHE = "annual_dividend_cache"
         private const val KEY_ANNUAL_DIVIDEND_SYMBOLS = "annual_dividend_symbols"
+        private const val KEY_ANNUAL_DIVIDEND_FINGERPRINT = "annual_dividend_fingerprint"
         
         @Volatile
         private var instance: DashboardPreferencesManager? = null
@@ -151,7 +160,8 @@ class DashboardPreferencesManager(context: Context) {
             monthlyExpense = prefs.getString(KEY_MONTHLY_EXPENSE, "5000") ?: "5000",
             annualDividendCache = prefs.getFloat(KEY_ANNUAL_DIVIDEND_CACHE, 0f).toDouble(),
             annualDividendSymbols = prefs.getStringSet(KEY_ANNUAL_DIVIDEND_SYMBOLS, emptySet())?.toSet()
-                ?: emptySet()
+                ?: emptySet(),
+            annualDividendFingerprint = prefs.getString(KEY_ANNUAL_DIVIDEND_FINGERPRINT, "") ?: ""
         )
     }
     
@@ -181,6 +191,7 @@ class DashboardPreferencesManager(context: Context) {
             // Float 的 7 位有效数字仍够用，且这里只用于「先显示旧值、后台再校准」
             putFloat(KEY_ANNUAL_DIVIDEND_CACHE, preferences.annualDividendCache.toFloat())
             putStringSet(KEY_ANNUAL_DIVIDEND_SYMBOLS, preferences.annualDividendSymbols)
+            putString(KEY_ANNUAL_DIVIDEND_FINGERPRINT, preferences.annualDividendFingerprint)
             apply()
         }
     }

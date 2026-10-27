@@ -52,6 +52,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.example.stockdiary.utils.AppLogger
 import com.example.stockdiary.utils.LogDiagnostics
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -90,20 +91,28 @@ fun LogViewerDialog(onDismiss: () -> Unit) {
     fun reload() {
         scope.launch {
             loading = true
-            // 读文件 + 拼装都在 IO：app.log 被截到 5000 行，字符串处理在主线程会掉帧。
-            // 环境信息（版本/机型/系统）也在这里取——界面上看到的和分享出去的都带它
-            val collected = withContext(Dispatchers.IO) { LogDiagnostics.collect(context) }
-            val composed = withContext(Dispatchers.IO) {
-                LogDiagnostics.composeReport(
-                    collected,
-                    envInfo = LogDiagnostics.environmentInfo(context),
-                    // 界面只显示崩溃堆栈尾部，避免长堆栈拖垮渲染；分享出口传 MAX_VALUE 给完整版
-                    crashMaxLines = LogDiagnostics.DISPLAY_CRASH_STACK_LINES
-                )
+            try {
+                // 读文件 + 拼装都在 IO：app.log 被截到 5000 行，字符串处理在主线程会掉帧。
+                // 环境信息（版本/机型/系统）也在这里取——界面上看到的和分享出去的都带它
+                val collected = withContext(Dispatchers.IO) { LogDiagnostics.collect(context) }
+                val composed = withContext(Dispatchers.IO) {
+                    LogDiagnostics.composeReport(
+                        collected,
+                        envInfo = LogDiagnostics.environmentInfo(context),
+                        // 界面只显示崩溃堆栈尾部，避免长堆栈拖垮渲染；分享出口传 MAX_VALUE 给完整版
+                        crashMaxLines = LogDiagnostics.DISPLAY_CRASH_STACK_LINES
+                    )
+                }
+                report = collected
+                text = composed
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // 读文件失败（权限 / 存储不可用）不能让界面永远停在转圈：给出可读的错误
+                text = "读取日志失败：${e.message ?: e::class.java.simpleName}"
+            } finally {
+                loading = false
             }
-            report = collected
-            text = composed
-            loading = false
         }
     }
 
@@ -197,11 +206,16 @@ fun LogViewerDialog(onDismiss: () -> Unit) {
                             }
 
                             else -> {
-                                val allLines = text.orEmpty().split('\n')
-                                val visibleLines = if (levelFilter == LogLevelFilter.ALL) {
-                                    allLines
-                                } else {
-                                    allLines.filter { isLogLineVisible(it, levelFilter) }
+                                // 用 remember 缓存解析结果：split + 逐行正则过滤是 O(行数) 的全量扫描，
+                                // 放在组合期直接跑的话，每次重组（切 chip、loading 变化、父级刷状态）
+                                // 都会把几千行重扫一遍。只有文本或过滤级别变化时才需要重算。
+                                val visibleLines = remember(text, levelFilter) {
+                                    val allLines = text.orEmpty().split('\n')
+                                    if (levelFilter == LogLevelFilter.ALL) {
+                                        allLines
+                                    } else {
+                                        allLines.filter { isLogLineVisible(it, levelFilter) }
+                                    }
                                 }
                                 // 用 LazyColumn 替代单个巨型 Text：只布局可见项，
                                 // 几千行日志 / 长崩溃堆栈也不会一次性卡掉主线程

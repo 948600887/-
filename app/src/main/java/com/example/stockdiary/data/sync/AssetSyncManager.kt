@@ -580,10 +580,16 @@ object AssetSyncManager {
                 .filter { it.type == AssetType.CRYPTO }
                 .mapNotNull { it.symbol }
                 .distinct()
+            // 截止点必须传进去：预取阻塞在 OkHttp 里、看门狗要等它跑完才启动，
+            // 不传预算它可以把整轮刷新（70s 手动 / 9min 后台）吃光在请求超时上。
+            val cryptoDeadline = if (enforceTimeLimit) startTime + timeLimitMs else Long.MAX_VALUE
             val cryptoPriceMap: Map<String, AssetPrice> =
                 if (batchCryptoCodes.isNotEmpty() && networkAvailable) {
-                    UnifiedPriceService.prewarmCryptoPrices(batchCryptoCodes, forceRefresh)
-                        .getOrDefault(emptyMap())
+                    UnifiedPriceService.prewarmCryptoPrices(
+                        batchCryptoCodes,
+                        forceRefresh,
+                        deadlineMs = cryptoDeadline
+                    ).getOrDefault(emptyMap())
                 } else {
                     emptyMap()
                 }

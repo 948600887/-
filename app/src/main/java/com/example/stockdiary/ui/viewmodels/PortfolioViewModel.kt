@@ -9,6 +9,7 @@ import com.example.stockdiary.data.sync.AssetSyncManager
 import com.example.stockdiary.data.sync.saveTodaySnapshotIfEligible
 import com.example.stockdiary.data.prefs.DashboardPreferences
 import com.example.stockdiary.data.dividend.DividendIncomeUseCase
+import com.example.stockdiary.data.dividend.dividendInputFingerprint
 import com.example.stockdiary.data.prefs.SortOrder
 import com.example.stockdiary.data.sync.SyncProgress
 import com.example.stockdiary.data.sync.SyncResult
@@ -222,10 +223,13 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
         if (stockAssets.isEmpty()) return
 
         val symbols = stockAssets.mapNotNull { it.symbol }.toSet()
+        val fingerprint = dividendInputFingerprint(stockAssets)
         val cached = _preferences.value
 
-        // 缓存命中：直接用旧值，不抓
-        if (symbols == cached.annualDividendSymbols && symbols.isNotEmpty()) {
+        // 缓存命中：直接用旧值，不抓。
+        // 判据是指纹而不是代码集合：加仓 / 改存款利率时代码集合不变，但收入已变，
+        // 只看集合会让界面一直显示旧收入。
+        if (fingerprint == cached.annualDividendFingerprint && fingerprint.isNotEmpty()) {
             _uiState.update {
                 it.copy(
                     estimatedAnnualDividend = cached.annualDividendCache,
@@ -262,7 +266,8 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
                 persistPreferences { state ->
                     state.copy(
                         annualDividendCache = result.totalAnnualIncome,
-                        annualDividendSymbols = symbols
+                        annualDividendSymbols = symbols,
+                        annualDividendFingerprint = fingerprint
                     )
                 }
             } catch (e: CancellationException) {
@@ -347,10 +352,12 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
 
                 // 手动刷新说明用户想看最新数，抓到就更新缓存
                 val symbols = assetsOnly.mapNotNull { it.symbol }.toSet()
+                val fingerprint = dividendInputFingerprint(assetsOnly)
                 persistPreferences { state ->
                     state.copy(
                         annualDividendCache = result.totalAnnualIncome,
-                        annualDividendSymbols = symbols
+                        annualDividendSymbols = symbols,
+                        annualDividendFingerprint = fingerprint
                     )
                 }
             } catch (e: CancellationException) {

@@ -24,6 +24,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.state.ToggleableState
 import androidx.compose.ui.unit.dp
+import com.example.stockdiary.data.dividend.dividendInputFingerprint
 import com.example.stockdiary.data.prefs.DashboardPreferences
 import com.example.stockdiary.data.prefs.SortOrder
 import com.example.stockdiary.data.prefs.lowValueThreshold
@@ -300,20 +301,19 @@ fun PortfolioScreen(
     }
 
     /**
-     * 抓分红的触发条件：**持仓代码集合**，不是资产列表本身。
+     * 抓分红的触发条件：**代码 + 持仓数量 + 存款利率**（见 dividendInputFingerprint），
+     * 不是资产列表本身。
      *
      * 用列表做 key 的话，任何一次价格刷新都会让列表内容变化、效应重启、
-     * 分红重抓一遍——而分红跟价格半点关系都没有。代码集合不变就不该重抓。
+     * 分红重抓一遍——而分红跟价格半点关系都没有。
      *
-     * 注意 key 用「集合内容」而不是 [Set] 对象身份：每次 assetsOnly 变化都会新建一个
-     * Set，内容相同身份也不同，若用对象当 key，刷新时每写一个标的 LaunchedEffect 就重启一次
-     * loadDividendIncome，纯属空转。这里排序后拼成稳定字符串，内容不变就不动。
+     * 但只用代码集合也不够：年化收入 = 数量 × 每股分红，加仓不改代码集合；
+     * 银行存款 symbol=null，改余额/利率同样不改集合。两种情况都得重算，
+     * 所以 key 带上数量与利率（数组内容相同则指纹相同，价格刷新不会误触发）。
      */
-    val dividendSymbolsKey = remember(assetsOnly) {
-        assetsOnly.mapNotNull { it.symbol }.sorted().joinToString(",")
-    }
+    val dividendInputKey = remember(assetsOnly) { dividendInputFingerprint(assetsOnly) }
 
-    LaunchedEffect(dividendSymbolsKey) {
+    LaunchedEffect(dividendInputKey) {
         viewModel.loadDividendIncome(assetsOnly)
     }
 

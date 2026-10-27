@@ -87,12 +87,23 @@ fun TotalAssetCard(
                         // 统一走 formatMoney()：以前金额精度在本文件内就用了 2 位，
                         // 而持仓页的同一份"年度分红"用 0 位，两页切着看像算错了。
                         // 现在两处都由 formatMoney 决定位数（一律 2 位）
-                        value = if (dividendLoading) null else estimatedDailyDividend.coerceAtLeast(0.0).formatMoney(),
+                        // coerceAtLeast 挡不住 NaN（NaN 参与比较恒为 false，会原样穿过去），
+                        // 万份收益/利率一旦是 NaN 就会显示「¥NaN」。先判 isFinite 再取正。
+                        value = when {
+                            dividendLoading -> null
+                            estimatedDailyDividend.isFinite() ->
+                                estimatedDailyDividend.coerceAtLeast(0.0).formatMoney()
+                            else -> "—"
+                        },
                         loading = dividendLoading
                     )
                     MetricColumn(
                         label = "年化收入率",
-                        value = if (dividendLoading) null else "${realYield.format(2)}%",
+                        value = when {
+                            dividendLoading -> null
+                            realYield.isFinite() -> "${realYield.format(2)}%"
+                            else -> "—"
+                        },
                         loading = dividendLoading
                     )
                     if (showLiabilities) {

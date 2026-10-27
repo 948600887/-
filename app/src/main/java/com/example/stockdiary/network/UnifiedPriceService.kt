@@ -281,8 +281,9 @@ object UnifiedPriceService {
      *
      * ## 熔断口径（照抄 [getCryptoPrice]）：一次预取只记一次
      *
-     * 451/403 → [FailureType.REGION_BLOCKED]，网络异常 → [FailureType.TRANSIENT]，全部成功 →
-     * [BinanceHostGate.onSuccess]；400/5xx/解析失败**不喂**熔断器（与 [getCryptoPrice] 同口径）。
+     * 451/403 → [FailureType.REGION_BLOCKED]，网络异常 → [FailureType.TRANSIENT]；**确有分片取到
+     * 行情**才 [BinanceHostGate.onSuccess] 复位计数。400/5xx/429/解析失败既不喂失败、也不清零
+     * （与 [getCryptoPrice] 同口径）——否则一次机房 5xx 就把累计的瞬断计数洗白。
      * ⚠️ 一次预取**只调一次**熔断记账，绝不按片数、更不按片内标的数量重复记账——
      * 否则一次批量超时就把阈值（8）打满，整机误熔。
      *
@@ -290,12 +291,17 @@ object UnifiedPriceService {
      *   预取纯属浪费请求）；true 时全部回源。
      * @param client 取价用的客户端，默认全局 [NetworkClient.binanceClient]；仅单测注入假
      *   [okhttp3.Interceptor] 驱动不同 HTTP 语义（与 [getCryptoPrice] 同惯例）。
+     * @param deadlineMs 本轮同步的时间预算截止点（epoch ms，默认 [Long.MAX_VALUE] 表示不限）。
+     *   预取是**阻塞**在 OkHttp execute() 里的，协程取消打不断它；只有靠这个截止点
+     *   在片与片之间主动收手，否则整片超时会把刷新的时间预算吃光（见调用方
+     *   AssetSyncManager 的看门狗注释：看门狗在这段跑完之前还没启动）。
      * @return `code -> AssetPrice.Crypto` 映射（仅含成功取回的代码）。
      */
     internal suspend fun prewarmCryptoPrices(
         codes: List<String>,
         forceRefresh: Boolean,
-        client: OkHttpClient = NetworkClient.binanceClient
+        client: OkHttpClient = NetworkClient.binanceClient,
+        deadlineMs: Long = Long.MAX_VALUE
     ): Result<Map<String, AssetPrice>> = withContext(Dispatchers.IO) {
         if (codes.isEmpty()) return@withContext Result.success(emptyMap())
 
@@ -368,6 +374,8 @@ object UnifiedPriceService {
 
         var sawRegionBlocked = false
         var sawTransient = false
+        /** 本轮是否真有片取到行情：全是 5xx/400/解析空时**不能**当成功去复位熔断计数 */
+        var sawQuotes = false
 
         /**
          * 记一次片级失败。**只置标记、不直接调熔断器**——整轮结束时统一记一次
@@ -394,9 +402,21 @@ object UnifiedPriceService {
             }
         }
 
+        val context = currentCoroutineContext()
         for (shard in pairsToFetch.chunked(CRYPTO_BATCH_SYMBOLS)) {
+            // 取消 / 预算：预取阻塞在 execute() 里，取消打不断，只能在片与片之间主动收手。
+            // 这两种情况下**不做熔断记账**（不是主机不可达的证据），直接带着已取得的价返回。
+            if (!context.isActive || System.currentTimeMillis() >= deadlineMs) {
+                if (context.isActive) {
+                    AppLogger.w("加密货币批量预取已达时间预算，跳过剩余分片", TAG)
+                }
+                writeCryptoPricesToCache(resultMap)
+                return@withContext Result.success(resultMap)
+            }
+
             val fetched = fetchCryptoTickerShard(shard, client)
             if (fetched.quotes != null) {
+                sawQuotes = true
                 applyQuotes(fetched.quotes, shard.toHashSet())
                 continue
             }
@@ -410,8 +430,12 @@ object UnifiedPriceService {
                     TAG
                 )
                 for (subShard in shard.chunked(CRYPTO_BATCH_RETRY_SYMBOLS)) {
+                    // 切小重试同样受取消与预算约束：一个超时片再切 6 个子片，
+                    // 不拦的话单轮可再烧掉 6 × callTimeout
+                    if (!context.isActive || System.currentTimeMillis() >= deadlineMs) break
                     val subFetched = fetchCryptoTickerShard(subShard, client)
                     if (subFetched.quotes != null) {
+                        sawQuotes = true
                         applyQuotes(subFetched.quotes, subShard.toHashSet())
                     } else {
                         // 子片仍失败：直接回落逐标的，**不再往下切**（只切一层，不递归）
@@ -426,17 +450,20 @@ object UnifiedPriceService {
         }
 
         // 协程已取消（切后台等）：这一轮记账不算数，不喂熔断器，直接返回已采集的部分
-        if (!currentCoroutineContext().isActive) {
+        if (!context.isActive) {
             writeCryptoPricesToCache(resultMap)
             return@withContext Result.success(resultMap)
         }
 
-        // 整轮只记一次成败：地区封锁优先于瞬断（语义更重）
+        // 整轮只记一次成败：地区封锁优先于瞬断（语义更重）。
+        // ⚠️ 只有**真的取到行情**（sawQuotes）才复位计数：全片 5xx / 429 / 解析为空时
+        // 一律不喂熔断器，但也不能当成功去清零——否则一次机房故障就把累计的瞬断计数洗白。
         val now = System.currentTimeMillis()
         when {
             sawRegionBlocked -> BinanceHostGate.onNetworkFailure(now, FailureType.REGION_BLOCKED)
             sawTransient -> BinanceHostGate.onNetworkFailure(now, FailureType.TRANSIENT)
-            else -> BinanceHostGate.onSuccess()
+            sawQuotes -> BinanceHostGate.onSuccess()
+            else -> Unit
         }
 
         writeCryptoPricesToCache(resultMap)
@@ -853,6 +880,17 @@ object UnifiedPriceService {
         return pattern.find(json)?.groupValues?.getOrNull(1)?.trim()
     }
     
+    /**
+     * 测试专用：只清本门面的 60 秒缓存，不碰 FundAPI / CacheManager（它们在 JVM 单测里需要 Context）。
+     *
+     * 预取会把结果双写进 [priceCache]，用例之间不清就会命中上一条用例的价，
+     * 换了假 client 也拿不到「这次真的发了请求」的证据，出现假绿。
+     */
+    internal fun clearPriceCacheForTesting() {
+        priceCache.clear()
+        pendingRequests.clear()
+    }
+
     fun clearCache() {
         val sizeBefore = priceCache.size
         priceCache.clear()

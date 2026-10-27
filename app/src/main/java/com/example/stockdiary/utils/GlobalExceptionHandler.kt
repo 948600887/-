@@ -46,7 +46,14 @@ object GlobalExceptionHandler {
             return
         }
 
-        val crashInfo = buildCrashInfo(thread, throwable)
+        // 拼报告本身也要兜底：现场可能是 OOM / StackOverflow，构造字符串时再抛一次
+        // 会直接冲出 handler、连 invokeDefaultHandler 都执行不到（表现为 ANR/黑屏）。
+        val crashInfo = try {
+            buildCrashInfo(thread, throwable)
+        } catch (t: Throwable) {
+            "=== Crash Report ===\nException: ${throwable::class.java.name}\n" +
+                "(report build failed: ${t::class.java.name})"
+        }
         saveCrashLog(crashInfo)
 
         // 把完整堆栈写入崩溃恢复状态，下次启动的恢复弹窗直接展示（listener 只记录一句概述，定位不了问题）
@@ -99,7 +106,8 @@ object GlobalExceptionHandler {
             appendLine("Device: ${Build.MANUFACTURER} ${Build.MODEL}")
             appendLine()
             appendLine("Exception: ${throwable::class.java.name}")
-            appendLine("Message: ${throwable.message}")
+            // 崩溃报告会被用户主动分享：异常文案里的请求 URL 可能带 signature/token，先去 query 再落盘
+            appendLine("Message: ${throwable.message?.let { AppLogger.sanitizeMessage(it) } ?: "null"}")
             appendLine()
             appendLine("Stack Trace:")
             appendLine(writer.toString())
@@ -107,7 +115,7 @@ object GlobalExceptionHandler {
             throwable.cause?.let { cause ->
                 appendLine()
                 appendLine("Caused by: ${cause::class.java.name}")
-                appendLine("Message: ${cause.message}")
+                appendLine("Message: ${cause.message?.let { AppLogger.sanitizeMessage(it) } ?: "null"}")
                 val causeWriter = StringWriter()
                 cause.printStackTrace(PrintWriter(causeWriter))
                 appendLine(causeWriter.toString())

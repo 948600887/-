@@ -10,9 +10,30 @@ import kotlin.math.pow
 import kotlinx.coroutines.CancellationException
 
 /**
+ * 指定日期所在自然年的天数（闰年 366、平年 365）。
+ *
+ * 抽出来是为了让闰年分支**可测**：只暴露 `daysInCurrentYear()` 的话，测试只能在
+ * 当前年份上断言「实现调用了同一个函数」，平年跑 CI 时把实现改回常量 365 也照样通过。
+ */
+fun daysInYear(date: LocalDate): Int = Year.of(date.year).length()
+
+/**
  * 当前自然年天数（闰年 366、平年 365），与 [DividendProgressCalculator] 的自然年口径保持一致。
  */
-fun daysInCurrentYear(): Int = java.time.Year.of(java.time.LocalDate.now().year).length()
+fun daysInCurrentYear(): Int = daysInYear(LocalDate.now())
+
+/**
+ * 分红/利息收入的**输入指纹**：代码（存款无代码时用 id）+ 持仓数量 + 存款利率。
+ *
+ * 用来判断持久化缓存是否还代表「这一批资产」。只比对代码集合是不够的：
+ * 年化收入 = 持仓数量 × 每股分红，**加仓不会改变代码集合**，银行存款更是 `symbol = null`，
+ * 改余额/利率同样不改集合——缓存就会被当成仍然有效，界面上一直显示旧收入。
+ * 数组排序后再拼接，保证同一批资产无论顺序如何都得到同一个指纹。
+ */
+fun dividendInputFingerprint(assets: List<Asset>): String =
+    assets.map { asset ->
+        "${asset.symbol ?: "id:${asset.id}"}|${asset.balance}|${asset.interestRate ?: 0.0}"
+    }.sorted().joinToString(",")
 
 /**
  * 股息收益计算器

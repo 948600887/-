@@ -111,17 +111,23 @@ class DividendRepository private constructor(
      * 记一次抓取失败（所有数据源都没应答）。
      *
      * 与 [markFetched] 是**两个独立状态**：[markFetched] 记「源应答了，结论是没有
-     * 分红」（7 天有效），这里记「源没答上」（6 小时后重试）。混在一起就会把错误
-     * 固化成结论 —— 正是本次要修的东西。
+     * 分红」（7 天有效），这里记「源没答上」（按 [computeFailureBackoff] 指数退避：
+     * 首档 5 分钟、封顶 6 小时；从未成功过的标的 1 分钟起、封顶 1 小时）。
+     * 混在一起就会把错误固化成结论 —— 正是本次要修的东西。
      */
     private fun markFailed(symbol: String) {
         runCatching {
-            val countKey = FAILURE_COUNT_PREFIX + symbol
-            val newCount = fetchState.getInt(countKey, 0) + 1
-            fetchState.edit()
-                .putLong(FAILURE_KEY_PREFIX + symbol, System.currentTimeMillis())
-                .putInt(countKey, newCount)
-                .apply()
+            // 读-改-写必须原子：资产页与持仓页可能同时抓同一只标的，
+            // 两个线程各自读到旧值再各自 +1，会把失败次数少记一次、退避档位涨不上去。
+            // 锁在 SharedPreferences 实例上（同进程同 name 只有一个实例），不引入额外字段。
+            synchronized(fetchState) {
+                val countKey = FAILURE_COUNT_PREFIX + symbol
+                val newCount = fetchState.getInt(countKey, 0) + 1
+                fetchState.edit()
+                    .putLong(FAILURE_KEY_PREFIX + symbol, System.currentTimeMillis())
+                    .putInt(countKey, newCount)
+                    .apply()
+            }
         }
     }
 
@@ -1344,21 +1350,6 @@ internal fun shouldReuseEmptyResult(
 }
 
 /**
- * 上一轮抓取**没问到**（网络失败 / 限流）之后，这一轮该不该先歇一会儿。
- *
- * **纯函数**，不碰 Context / Room / 网络，便于单测。
- *
- * 「失败」与「确实没有分红」必须分开记。写成 [shouldReuseEmptyResult] 那种结论，
- * 一次网络抖动就被固化成「这只没有分红」最长 7 天且界面静默；但干脆不记也不行 ——
- * 场外基金没有批量入口（天天基金每基金一个页面），上百只标的每轮各重打一次失败
- * 的接口就是请求风暴。所以失败只压一个指数退避窗（见 [computeFailureBackoff]）
- * ，过期自动重试，用户手动刷新（forceRefresh）随时可以绕过。
- *
- * @param lastFailedAt 上次失败的时间戳；null 表示没失败过
- * @param now 当前时间戳
- * @param ttl 退避窗长度
- */
-/**
  * 失败退避窗长度（指数退避）。
  *
  * 按**连续失败次数** `count` 指数增长：`base × 2^(count-1)`，封顶 `max`。
@@ -1379,6 +1370,21 @@ internal fun computeFailureBackoff(count: Int, everSucceeded: Boolean): Long {
     return (base.toLong() shl shift).coerceAtMost(max.toLong())
 }
 
+/**
+ * 上一轮抓取**没问到**（网络失败 / 限流）之后，这一轮该不该先歇一会儿。
+ *
+ * **纯函数**，不碰 Context / Room / 网络，便于单测。
+ *
+ * 「失败」与「确实没有分红」必须分开记。写成 [shouldReuseEmptyResult] 那种结论，
+ * 一次网络抖动就被固化成「这只没有分红」最长 7 天且界面静默；但干脆不记也不行 ——
+ * 场外基金没有批量入口（天天基金每基金一个页面），上百只标的每轮各重打一次失败
+ * 的接口就是请求风暴。所以失败只压一个指数退避窗（见 [computeFailureBackoff]）
+ * ，过期自动重试，用户手动刷新（forceRefresh）随时可以绕过。
+ *
+ * @param lastFailedAt 上次失败的时间戳；null 表示没失败过
+ * @param now 当前时间戳
+ * @param ttl 退避窗长度
+ */
 internal fun shouldSkipAfterFailure(lastFailedAt: Long?, now: Long, ttl: Long): Boolean {
     val failed = lastFailedAt ?: return false
     if (failed <= 0L) return false

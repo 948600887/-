@@ -390,6 +390,41 @@ class BinanceHostGateTest {
         assertFalse(BinanceHostGate.regionBlockedForTesting())
     }
 
+    /**
+     * 瞬断与地区封锁**各用各的计数**：1 次瞬断 + 1 次 451 不能凑满地区阈值 2。
+     *
+     * 共用计数时这一序列会让 `failures` 从 1 直接到 2（≥ 地区阈值），
+     * 于是「单发 451」也变成熔断 + 粘死——正是本次修复的回归点。
+     */
+    @Test
+    fun `瞬断与地区封锁各用各的计数_一次瞬断加一次451不熔断`() {
+        BinanceHostGate.onNetworkFailure(base, FailureType.TRANSIENT)
+        BinanceHostGate.onNetworkFailure(base, FailureType.REGION_BLOCKED)
+
+        assertEquals("1 次瞬断 + 1 次 451 远未到瞬断阈值，不应熔断", Phase.CLOSED, BinanceHostGate.phaseForTesting())
+        assertFalse("地区封锁计数只有 1，不应粘死", BinanceHostGate.regionBlockedForTesting())
+        assertEquals(1, BinanceHostGate.consecutiveRegionFailuresForTesting())
+        assertEquals(2, BinanceHostGate.consecutiveFailuresForTesting())
+
+        // 第二次 451 才该熔断并粘死
+        BinanceHostGate.onNetworkFailure(base, FailureType.REGION_BLOCKED)
+        assertEquals(Phase.OPEN, BinanceHostGate.phaseForTesting())
+        assertTrue(BinanceHostGate.regionBlockedForTesting())
+    }
+
+    /** 瞬断累计到阈值时照常熔断，但**不能**因为中间夹过 451 而被误粘死 */
+    @Test
+    fun `瞬断累计到阈值熔断_不因夹过一次451而粘死`() {
+        repeat(BinanceHostGate.FAIL_THRESHOLD - 1) {
+            BinanceHostGate.onNetworkFailure(base, FailureType.TRANSIENT)
+        }
+        // 中间夹一次地区封锁：总数凑满 8，但地区计数只有 1
+        BinanceHostGate.onNetworkFailure(base, FailureType.REGION_BLOCKED)
+
+        assertEquals("总失败数达到瞬断阈值，应正常熔断", Phase.OPEN, BinanceHostGate.phaseForTesting())
+        assertFalse("地区封锁只出现 1 次，不该打粘性标记", BinanceHostGate.regionBlockedForTesting())
+    }
+
     /** [resetForTesting] 必须清除 regionBlocked，否则会漏给别的测试类造成误判 */
     @Test
     fun `resetForTesting 清除 regionBlocked 标记`() {

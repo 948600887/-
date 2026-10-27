@@ -391,6 +391,25 @@ internal fun filterDustByValue(
 }
 
 /**
+ * 资产归组键：把理财壳（LDUSDT/LDPAXG）与它的底层币（USDT/PAXG）看成同一个资产。
+ *
+ * 为什么必须归一：`/api/v3/account` 把 Simple Earn 的活期持仓以 **LD 壳**形式返回
+ * （LDUSDT、LDPAXG…），而 simple-earn 的 position 接口返回的是**底层币**
+ * （USDT、PAXG…）。两边按原样名称匹配永远对不上——这正是「对账单 Earn 有
+ * 141.02 USDT、App 里怎么导都只有 124.35」的根因：定期部分补不进来，
+ * 底层币还会被当成「理财独有资产」再插一行，活期那笔等于记两遍。
+ *
+ * 归一后 LDPAXG 与 PAXG 同键，合并规则（取较大值）才对两者都成立。
+ * LD 与底层 1:1 可赎回（见 [BinanceAPI.earnUnderlyingPair]），归一是等价的。
+ *
+ * `LDO` 这类只是恰好以 LD 开头的真实现货由 [BinanceAPI.isEarnProduct] 排除，不受影响。
+ */
+internal fun earnMergeKey(asset: String): String {
+    val key = asset.uppercase().trim()
+    return if (BinanceAPI.isEarnProduct(key)) key.removePrefix("LD") else key
+}
+
+/**
  * 把理财持仓（活期 + 定期）合并进现货余额。
  *
  * ## 合并规则：同资产取 **较大值**，不是相加
@@ -402,6 +421,17 @@ internal fun filterDustByValue(
  *
  * - 理财已包含在现货里（两者相等或现货更大）→ 值不变，不会重复计；
  * - 现货只有一部分 / 完全没有（这部分理财不在现货口径里）→ 用理财的完整数量补齐。
+ *
+ * ## 匹配用 [earnMergeKey]，不是原始资产名
+ *
+ * 现货侧的 Simple Earn 活期持仓是 LD 壳（LDPAXG），理财接口给的是底层币（PAXG）。
+ * 按原名匹配的话两者互不相识，max 规则形同虚设（见 [earnMergeKey]）。
+ *
+ * ## 每个底层资产只让**一行**承载理财总量
+ *
+ * 库里可能同时有 `LDPAXG`（活期壳）和 `PAXG`（现货）。若两行都拿理财总量去 max，
+ * 活期那笔会被记两遍。因此按归组键选出唯一的承载行：优先 LD 壳（它本身就是
+ * 理财在现货里的容器），没有壳时退回第一条。其余行原样保留。
  *
  * 代价：若同一资产在两个来源里是**互不重叠的两笔**（如现货 57 + 定期 34.5），
  * max 会漏掉小的那笔。宁可少记也不能虚高——虚高会让总资产凭空多出一笔钱，
@@ -419,17 +449,29 @@ internal fun mergeEarnIntoBalances(
 
     val earnTotals = linkedMapOf<String, Double>()
     for (position in earn) {
-        val key = position.asset.uppercase().trim()
+        val key = earnMergeKey(position.asset)
         if (key.isEmpty() || position.amount <= 0.0) continue
         earnTotals[key] = (earnTotals[key] ?: 0.0) + position.amount
     }
     if (earnTotals.isEmpty()) return balances
 
+    // 每个归组键挑唯一的承载行：LD 壳优先（它就是理财在现货里的容器），
+    // 没有壳时退回第一条（现货行 / 同名现货）。
+    val carrierIndex = mutableMapOf<String, Int>()
+    balances.forEachIndexed { index, balance ->
+        val key = earnMergeKey(balance.asset)
+        val current = carrierIndex[key]
+        val carrierIsEarnShell = current != null && BinanceAPI.isEarnProduct(balances[current].asset)
+        if (current == null || (!carrierIsEarnShell && BinanceAPI.isEarnProduct(balance.asset))) {
+            carrierIndex[key] = index
+        }
+    }
+
     var raised = 0
-    val merged = balances.map { balance ->
-        val key = balance.asset.uppercase().trim()
+    val merged = balances.mapIndexed { index, balance ->
+        val key = earnMergeKey(balance.asset)
         val earnAmount = earnTotals[key]
-        if (earnAmount != null && earnAmount > balance.total) {
+        if (earnAmount != null && carrierIndex[key] == index && earnAmount > balance.total) {
             raised++
             // 用理财数量覆盖：free 存合并值、locked 归零（理财侧不再区分可用/冻结）
             BinanceBalance(asset = balance.asset, free = earnAmount, locked = 0.0)
@@ -438,7 +480,8 @@ internal fun mergeEarnIntoBalances(
         }
     }.toMutableList()
 
-    val known = balances.map { it.asset.uppercase().trim() }.toSet()
+    // known 同样按归组键判重：已有 LDPAXG 时，理财的 PAXG 不该再插一行
+    val known = balances.map { earnMergeKey(it.asset) }.toSet()
     var added = 0
     earnTotals.forEach { (asset, amount) ->
         if (asset !in known) {

@@ -650,4 +650,58 @@ class BinanceImportServiceTest {
         )
         assertEquals(40.0, merged[0].total, 1e-9)
     }
+
+    // ---------- 理财壳（LD 前缀）与底层币必须匹配得上 ----------
+
+    @Test
+    fun 理财壳用底层币的理财总量补齐() {
+        // 实测账户：现货接口只给 LDUSDT 124.3460405（活期壳），
+        // 对账单/理财接口的 USDT 总量是 141.023539（活期 + 定期）→ 壳必须补到 141.02
+        val merged = mergeEarnIntoBalances(
+            balances = listOf(balance("LDUSDT", free = 124.3460405)),
+            earn = listOf(earn("USDT", 141.023539))
+        )
+        assertEquals(1, merged.size)
+        assertEquals("LDUSDT", merged[0].asset)
+        assertEquals(141.023539, merged[0].total, 1e-9)
+    }
+
+    @Test
+    fun 理财壳已存在时不再重复插入底层币() {
+        // 壳与底层归一后是同一条，绝不能一边保留 LDUSDT 124.35、一边又插一行 USDT 141.02
+        val merged = mergeEarnIntoBalances(
+            balances = listOf(balance("LDPAXG", free = 0.00007908)),
+            earn = listOf(earn("PAXG", 0.002474))
+        )
+        assertEquals(1, merged.size)
+        assertEquals("LDPAXG", merged[0].asset)
+        assertEquals(0.002474, merged[0].total, 1e-12)
+    }
+
+    @Test
+    fun 壳与底层现货同时存在时只让壳承载理财总量() {
+        // 两行同底层：壳（活期 0.00007908）+ 现货（0.0005），理财总量 0.002474。
+        // 只允许壳被补齐，现货行保持原值——否则活期那笔会被记两遍。
+        val merged = mergeEarnIntoBalances(
+            balances = listOf(
+                balance("LDPAXG", free = 0.00007908),
+                balance("PAXG", free = 0.0005)
+            ),
+            earn = listOf(earn("PAXG", 0.002474))
+        )
+        assertEquals(2, merged.size)
+        assertEquals(0.002474, merged.first { it.asset == "LDPAXG" }.total, 1e-12)
+        assertEquals(0.0005, merged.first { it.asset == "PAXG" }.total, 1e-12)
+    }
+
+    @Test
+    fun LDO不是理财壳_按原资产名匹配() {
+        // Lido DAO 的现货代号是 LDO，不能被当成「LD + O」的理财壳剥掉前缀
+        val merged = mergeEarnIntoBalances(
+            balances = listOf(balance("LDO", free = 10.0)),
+            earn = listOf(earn("LDO", 20.0))
+        )
+        assertEquals(1, merged.size)
+        assertEquals(20.0, merged[0].total, 1e-9)
+    }
 }

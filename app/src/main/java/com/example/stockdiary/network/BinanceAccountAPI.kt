@@ -51,6 +51,33 @@ data class BinanceEarnPosition(
 )
 
 /**
+ * 理财持仓的拉取结果：拿到多少条，以及哪些接口没拉成。
+ *
+ * ## 为什么要把失败带出来
+ *
+ * 两个理财接口都需要 API Key 开通 Simple Earn 读取权限，额度/权限/网络随时可能不满足。
+ * 从前失败一律降级成空列表，用户看到的只是「持仓比官方对账单少了一大块」（实测
+ * 2026-10-22 对账单：Earn 209.86 USD，现货口径只导到 ~125 USD），却完全不知道原因，
+ * 只能怀疑 App 算错。现在把失败原因带进预览页，用户能直接看到该去开哪个权限。
+ *
+ * @param positions 成功拉到的持仓（活期 + 定期；失败的那半边为空）
+ * @param failures  失败的人话原因（如「活期：币安拒绝请求（-2015）：…」）；空 = 全部成功
+ */
+data class BinanceEarnFetch(
+    val positions: List<BinanceEarnPosition>,
+    val failures: List<String>
+) {
+    /** 给用户看的一句话；全部拉取成功时为 null */
+    val warning: String?
+        get() = if (failures.isEmpty()) {
+            null
+        } else {
+            "理财持仓没拉全（${failures.joinToString("；")}）。本次只导入现货，总资产会少算；" +
+                "请确认 API Key 已勾选「读取 / Enable Reading」、IP 白名单与地区限制都放行后重新拉取。"
+        }
+}
+
+/**
  * 币安**签名账户接口**客户端（只读）。
  *
  * 与 [BinanceAPI] 的分工：那个是公开行情（ticker/klines，无需密钥）；
@@ -247,15 +274,16 @@ object BinanceAccountAPI {
      * 是现货口径，两者并不相等（实测导入后比币安自己的总资产少 ~34.5 USD）。
      * 理财持仓要走签名接口单独取。
      *
-     * ## 失败一律降级，绝不中断导入
+     * ## 失败依然不打断导入，但**不再假装成功**
      *
-     * 这两个接口需要 API Key 开通相应读取权限，权限不足/接口调整/网络失败都是常态。
-     * **任何失败都返回空列表**（只导入现货），比抛异常把整个导入打回去好——
-     * 余额才是关键数据，理财只是补齐。失败原因记日志（币安的 code+msg，不含密钥）。
+     * 这两个接口需要 API Key 开通相应读取权限，权限不足/接口调整/网络失败都是常态，
+     * 因此失败仍降级成「只用现货」，绝不把整个导入打回去——余额才是关键数据。
+     * 但失败原因会随 [BinanceEarnFetch.failures] 一起返回，由预览页明确告诉用户
+     * 「理财没拉全、总资产会少算」，而不是让它静默地少一块。
      *
-     * @return 活期 + 定期持仓；失败返回空列表
+     * @return 活期 + 定期持仓，以及各接口的失败原因（全部成功时为空）
      */
-    suspend fun getEarnPositions(apiKey: String, apiSecret: String): List<BinanceEarnPosition> =
+    suspend fun getEarnPositions(apiKey: String, apiSecret: String): BinanceEarnFetch =
         getEarnPositions(apiKey, apiSecret, client)
 
     /** internal 重载：允许单测注入假 client，与 [getAccount] 同惯例 */
@@ -263,30 +291,55 @@ object BinanceAccountAPI {
         apiKey: String,
         apiSecret: String,
         httpClient: OkHttpClient
-    ): List<BinanceEarnPosition> = withContext(Dispatchers.IO) {
-        // 两个接口互不依赖，并发取省一次串行往返；各自失败互不影响
+    ): BinanceEarnFetch = withContext(Dispatchers.IO) {
+        // 两个接口互不依赖，并发取省一次串行往返；各自失败互不影响。
+        // 不用 runCatching：它会连 CancellationException 一起吞掉（项目铁律：取消不吞）。
         val flexible = async {
-            runCatching {
-                fetchEarnPage(EARN_FLEXIBLE_URL, apiKey, apiSecret, httpClient, locked = false)
-            }.onFailure { e ->
-                warnEarnFailure("活期", e)
-            }.getOrDefault(emptyList())
+            fetchEarnOrFailure(EARN_FLEXIBLE_URL, apiKey, apiSecret, httpClient, locked = false)
         }
         val lockedPositions = async {
-            runCatching {
-                fetchEarnPage(EARN_LOCKED_URL, apiKey, apiSecret, httpClient, locked = true)
-            }.onFailure { e ->
-                warnEarnFailure("定期", e)
-            }.getOrDefault(emptyList())
+            fetchEarnOrFailure(EARN_LOCKED_URL, apiKey, apiSecret, httpClient, locked = true)
         }
-        flexible.await() + lockedPositions.await()
+        val flexibleResult = flexible.await()
+        val lockedResult = lockedPositions.await()
+
+        BinanceEarnFetch(
+            positions = flexibleResult.getOrDefault(emptyList()) +
+                lockedResult.getOrDefault(emptyList()),
+            failures = buildList {
+                flexibleResult.exceptionOrNull()?.let { add("活期：${it.message ?: "拉取失败"}") }
+                lockedResult.exceptionOrNull()?.let { add("定期：${it.message ?: "拉取失败"}") }
+            }
+        )
     }
+
+    /**
+     * 拉一个理财接口，把异常收成 [Result]（失败不抛给调用方，但保留原因）。
+     *
+     * 取消必须原样重抛：横竖都不能把「用户关掉弹窗」记成一次权限失败。
+     */
+    private suspend fun fetchEarnOrFailure(
+        url: String,
+        apiKey: String,
+        apiSecret: String,
+        httpClient: OkHttpClient,
+        locked: Boolean
+    ): Result<List<BinanceEarnPosition>> =
+        try {
+            Result.success(fetchEarnPage(url, apiKey, apiSecret, httpClient, locked))
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            warnEarnFailure(if (locked) "定期" else "活期", e)
+            Result.failure(e)
+        }
 
     /**
      * 拉一页理财持仓。
      *
-     * 非 2xx（未开通权限 / 接口下线 / 被地区限制）记一条警告后返回空——**不抛**，
-     * 由 [getEarnPositions] 降级成「只用现货」。
+     * 非 2xx（未开通权限 / 接口下线 / 被地区限制）与空响应都**抛异常**，由
+     * [fetchEarnOrFailure] 收成 Result 并把原因带回预览页——绝不在这里静默返回空列表，
+     * 那等于把「少算一块」伪装成「本来就没有」。
      */
     private suspend fun fetchEarnPage(
         url: String,
@@ -308,15 +361,11 @@ object BinanceAccountAPI {
 
         val response = httpClient.newCall(request).execute()
         response.use { resp ->
-            val body = resp.body?.string() ?: return emptyList()
+            val body = resp.body?.string()
+                ?: throw IOException("币安返回了空响应")
             if (!resp.isSuccessful) {
-                // 币安的 msg 说明原因（权限不足/参数错），不含密钥，可以记
-                AppLogger.w(
-                    "拉取币安${if (locked) "定期" else "活期"}理财持仓失败：${binanceError(body, resp.code).message}，" +
-                        "本次导入只用现货",
-                    "BinanceAccountAPI"
-                )
-                return emptyList()
+                // 币安的 msg 说明原因（权限不足/参数错），不含密钥，可以带出去
+                throw binanceError(body, resp.code)
             }
             return parseEarnPositions(body, locked)
         }

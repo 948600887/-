@@ -67,7 +67,15 @@ open class BinanceImportViewModel(
         /** 本次拉取用到的交易对最新价，供预览行估算市值 */
         val prices: Map<String, Double> = emptyMap(),
         /** 本次拉取因市值低于阈值被过滤掉的资产数量 */
-        val filteredCount: Int = 0
+        val filteredCount: Int = 0,
+        /**
+         * 理财（Simple Earn）接口没拉全时的提示。
+         *
+         * 非 null 表示这次导入只拿到了现货口径，总资产会比币安账户少一块
+         * （定期/锁仓都在 Earn 里，现货账户看不到）。必须在预览页明示，
+         * 否则用户只能看到「数字比对账单少」却不知道为什么。
+         */
+        val earnWarning: String? = null
     ) {
         /** 密钥都填了才能拉取 */
         val canFetch: Boolean
@@ -163,6 +171,7 @@ open class BinanceImportViewModel(
             // 6.6702（比真实价低约 6%），导入是用户主动触发的低频动作，值得多打这一次请求。
             val spotPriceMap: Map<String, Double>
             val mergedBalances: List<BinanceBalance>
+            val earnWarning: String?
             coroutineScope {
                 val refreshDeferred = async(Dispatchers.IO) { ExchangeRateManager.refresh(force = true) }
                 val earnDeferred = async(Dispatchers.IO) {
@@ -173,7 +182,9 @@ open class BinanceImportViewModel(
                 refreshDeferred.await()
                 val earn = earnDeferred.await()
                 spotPriceMap = pricesDeferred.await()
-                mergedBalances = mergeEarnIntoBalances(balances, earn)
+                mergedBalances = mergeEarnIntoBalances(balances, earn.positions)
+                // 理财没拉全 = 总资产会少算，必须带到预览页说清楚（不能静默降级）
+                earnWarning = earn.warning
             }
 
             // 理财独有的资产在上面那批取价时还不知道，补一次小额批量请求（通常个位数）。
@@ -204,10 +215,14 @@ open class BinanceImportViewModel(
             if (preview.items.isEmpty()) {
                 // 滤完一条不剩：账户为空、只剩dust、或全被市值阈值挡掉。
                 // 停在 INPUT 说清楚原因，别给个空预览页让用户以为出错了
-                val hint = if (filteredCount > 0) {
-                    "有 $filteredCount 项市值低于 ¥${current.minValueCny.toInt()} 被过滤，可调低阈值重试。"
-                } else {
-                    "可能账户为空或只剩dust零头。"
+                val hint = buildString {
+                    if (filteredCount > 0) {
+                        append("有 $filteredCount 项市值低于 ¥${current.minValueCny.toInt()} 被过滤，可调低阈值重试。")
+                    } else {
+                        append("可能账户为空或只剩dust零头。")
+                    }
+                    // 理财没拉全时，'账户为空' 很可能只是现货为空（钱都在 Earn 里），必须点明
+                    if (earnWarning != null) append(earnWarning)
                 }
                 updateState { state ->
                     state.copy(
@@ -227,7 +242,8 @@ open class BinanceImportViewModel(
                     step = Step.PREVIEW,
                     preview = preview,
                     filteredCount = filteredCount,
-                    prices = priceMap
+                    prices = priceMap,
+                    earnWarning = earnWarning
                 )
             }
         }

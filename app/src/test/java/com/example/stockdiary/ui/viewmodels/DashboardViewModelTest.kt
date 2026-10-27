@@ -6,6 +6,7 @@ import com.example.stockdiary.data.prefs.DashboardPreferences
 import com.example.stockdiary.data.prefs.DashboardPreferencesManager
 import com.example.stockdiary.data.dividend.DividendIncomeLoader
 import com.example.stockdiary.data.dividend.DividendIncomeUseCase
+import com.example.stockdiary.data.dividend.daysInCurrentYear
 import com.example.stockdiary.data.sync.SyncResult
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
@@ -126,7 +127,9 @@ class DashboardViewModelTest {
             // 必须连 dividendLoading 一起等：它在 finally 里复位，比收入赋值晚一步
             waitUntil { latest().realAnnualIncome == 1234.5 && !latest().dividendLoading }
             assertEquals(1234.5, latest().realAnnualIncome, 0.001)
-            assertEquals(1234.5 / 365.0, latest().estimatedDailyDividend, 1e-6)
+            // 修复点：ViewModel 的每日预估改用 daysInCurrentYear()（闰年 366 / 平年 365），
+            // 断言必须同步动态化，否则闰年会假失败（原 hardcoded /365.0）。
+            assertEquals(1234.5 / daysInCurrentYear().toDouble(), latest().estimatedDailyDividend, 1e-6)
             assertFalse(latest().dividendLoading)
         } finally {
             trackJob.cancel()

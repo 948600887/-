@@ -1,8 +1,11 @@
 package com.example.stockdiary.data
 
 import com.example.stockdiary.data.dividend.DividendIncomeCalculator
+import com.example.stockdiary.data.dividend.DividendProgressCalculator
+import com.example.stockdiary.data.dividend.daysInCurrentYear
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
+import java.time.LocalDate
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
@@ -85,12 +88,36 @@ class DividendIncomeCalculatorTest {
     }
 
     @Test
-    fun `货币基金年化收入按每日万份收益乘365`() {
-        // 10000 份 × 每万份收益 1.0 ÷ 10000 = 1 元/天 → 年化 = 1 × 365 = 365
+    fun `货币基金年化收入按当前自然年天数动态计算`() {
+        // 10000 份 × 每万份收益 1.0 ÷ 10000 = 1 元/天 → 年化 = 1 × 当前自然年天数（闰年 366 / 平年 365）
+        // 注意：必须按 daysInCurrentYear() 动态断言，不能硬编码 365，否则闰年会假失败。
         assertEquals(
-            365.0,
+            daysInCurrentYear().toDouble(),
             DividendIncomeCalculator.calculateAnnualIncome(moneyFund("519518", 10_000.0, 1.0)),
-            0.001
+            1e-9
+        )
+    }
+
+    @Test
+    fun `货币基金年化按自然年天数且与收息进度计算器同源`() {
+        // 验证修复点：货基年化改用「当前自然年天数」（闰年 366 / 平年 365），
+        // 且必须与 DividendProgressCalculator.naturalYearAnnualIncome 对同只货基给出同一数字，
+        // 否则「年化收入」与收息进度的「全年预计」会同屏自相矛盾。
+        val asset = moneyFund("519518", 10_000.0, 1.0) // 份额 × 万份收益 ÷ 10000 = 1 元/天
+        val expected = 10_000.0 * 1.0 / 10_000.0 * daysInCurrentYear()
+
+        val calc = DividendIncomeCalculator.calculateAnnualIncome(asset)
+        assertEquals(
+            "货币基金年化必须按当前自然年天数（闰年 366 / 平年 365）",
+            expected, calc, 1e-9
+        )
+
+        val progress = DividendProgressCalculator.naturalYearAnnualIncome(
+            listOf(asset), emptyMap(), LocalDate.now()
+        )
+        assertEquals(
+            "货基年化口径必须与收息进度计算器一致",
+            expected, progress, 1e-9
         )
     }
 
@@ -98,10 +125,11 @@ class DividendIncomeCalculatorTest {
     fun `货币基金没有分红记录也照样计入年化收入`() {
         // 关键：货币基金根本不派「每十股分红」，dividendPerShare 传 0 也要算出钱来。
         // 改之前这里返回 0，会让「年化收入」与收息进度的「全年预计」对同一只货基给出两个数。
+        // 年化 = 20000 × 1.0 ÷ 10000 × 当前自然年天数（闰年 366 / 平年 365），动态断言避免跨年 flaky。
         assertEquals(
-            730.0,
+            20_000.0 * 1.0 / 10_000.0 * daysInCurrentYear(),
             DividendIncomeCalculator.calculateAnnualIncome(moneyFund("004972", 20_000.0, 1.0), 0.0),
-            0.001
+            1e-9
         )
     }
 
@@ -114,11 +142,15 @@ class DividendIncomeCalculatorTest {
     @Test
     fun `组合年化总收入包含货币基金`() {
         val assets = listOf(
-            moneyFund("519518", 10_000.0, 1.0),  // 年化 365
+            moneyFund("519518", 10_000.0, 1.0),  // 年化 = 当前自然年天数（闰年 366 / 平年 365）
             stock("600519", 1000.0)              // 分红 1000
         )
         val bySymbol = mapOf("600519" to 10.0)
-        assertEquals(1365.0, DividendIncomeCalculator.calculateTotalAnnualIncome(assets, bySymbol), 0.001)
+        assertEquals(
+            daysInCurrentYear() + 1000.0,
+            DividendIncomeCalculator.calculateTotalAnnualIncome(assets, bySymbol),
+            1e-9
+        )
     }
 
     @Test

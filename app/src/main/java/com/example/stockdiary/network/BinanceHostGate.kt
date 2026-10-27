@@ -90,6 +90,19 @@ internal object BinanceHostGate {
     const val FAIL_THRESHOLD = 8
 
     /**
+     * 地区封锁（451/403）**专用**的熔断阈值，远小于瞬断的 [FAIL_THRESHOLD]。
+     *
+     * 451/403 是**确定性**故障：主机可达但本用户被地区拒绝，换 IP / 换节点前不会自愈。
+     * 让它跟瞬断一样攒够 [FAIL_THRESHOLD]=8 才停手，等于让地区封锁用户白打 8 轮请求
+     * （批量预取后一轮仍要 2~3 次）才熔断——纯粹的浪费。
+     *
+     * 取 2（**不取 1**）：[regionBlocked] 一旦置位是**进程内粘死**的（要重启 App 才重新
+     * 评估），一条 451 就永久冻结全部加密货币价格，误判代价太大；连续两条则几乎可以确定
+     * 是真封锁。单发 451 仍只计数不熔断，与既有契约一致（见 UnifiedPriceServiceTest 那条）。
+     */
+    const val REGION_BLOCKED_FAIL_THRESHOLD = 2
+
+    /**
      * 熔断冷却时长（毫秒）。
      *
      * 取 5 分钟（原为 10 分钟）：配合半开探测，恢复成本从「全量重打再烧一轮 20s」降到
@@ -227,8 +240,9 @@ internal object BinanceHostGate {
      *   - [FailureType.REGION_BLOCKED]：451/403 地区封锁 / 访问被拒——主机可达但本用户用不了，
      *     换 IP 无效。一旦**据此熔断**（阈值到达 / 已在 OPEN·HALF_OPEN 下再失败），即打粘性
      *     [regionBlocked] 标记，[tryAcquireProbe] 此后永久拒探测，灭掉无限空探循环。
-     *     注意：单发地区封锁仍只计数、不立即粘死（与现有契约 `getCryptoPrice 收到451…` 一致：
-     *     单发 451 不熔断、UI 不显示暂不可达），要凑满 [FAIL_THRESHOLD] 才粘死。
+     *     注意：地区封锁走**独立的更小阈值** [REGION_BLOCKED_FAIL_THRESHOLD]=2（不是瞬断的
+     *     [FAIL_THRESHOLD]）——确定性故障没必要攒那么多轮。单发 451 仍只计数、不熔断
+     *     （与既有契约 `getCryptoPrice 收到451…` 一致：UI 不显示暂不可达）。
      *
      * 各相位下（TRANSIENT 与 REGION_BLOCKED 共用同一套状态迁移，仅 REGION_BLOCKED 在
      * 成功 CAS 时额外置位 [regionBlocked]）：
@@ -267,7 +281,15 @@ internal object BinanceHostGate {
                 }
                 Phase.CLOSED -> {
                     val failures = s.consecutiveFailures + 1
-                    if (failures < FAIL_THRESHOLD) {
+                    // 地区封锁用**更小的阈值**：451/403 是确定性故障，主机可达但本用户被拒、
+                    // 换 IP 前不会自愈，没必要跟瞬断一样攒够 [FAIL_THRESHOLD] 才停手——
+                    // 那等于让地区封锁用户白打 8 轮（批量预取后一轮仍要 2~3 次请求）才熔断。
+                    val threshold = if (type == FailureType.REGION_BLOCKED) {
+                        REGION_BLOCKED_FAIL_THRESHOLD
+                    } else {
+                        FAIL_THRESHOLD
+                    }
+                    if (failures < threshold) {
                         if (state.compareAndSet(s, s.copy(consecutiveFailures = failures))) return
                         // CAS 失败，重读重试
                     } else {

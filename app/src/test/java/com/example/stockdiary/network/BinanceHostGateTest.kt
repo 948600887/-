@@ -355,6 +355,41 @@ class BinanceHostGateTest {
         assertFalse(BinanceHostGate.tryAcquireProbe(afterCooldown + BinanceHostGate.COOLDOWN_MS * 100))
     }
 
+    /**
+     * 地区封锁走**独立的更小阈值** [BinanceHostGate.REGION_BLOCKED_FAIL_THRESHOLD]=2，
+     * 远快于瞬断的 [BinanceHostGate.FAIL_THRESHOLD]=8。
+     *
+     * 451/403 是确定性故障（换 IP 前不会自愈），让它攒够 8 次才停手 = 白打 8 轮请求。
+     * 但仍**不是 1 次**：[regionBlocked] 是进程内粘死的（要重启 App 才重评），
+     * 一条 451 就永久冻结全部加密价格的误判代价太大。
+     */
+    @Test
+    fun `连续2次地区封锁即熔断粘死_远快于瞬断阈值`() {
+        val regionThreshold = BinanceHostGate.REGION_BLOCKED_FAIL_THRESHOLD
+        assertTrue(
+            "地区封锁阈值必须小于瞬断阈值，否则确定性故障要白打太多轮",
+            regionThreshold < BinanceHostGate.FAIL_THRESHOLD
+        )
+        assertTrue("地区封锁阈值不能是 1（粘死代价太大）", regionThreshold > 1)
+
+        // 第 1 次：只计数
+        BinanceHostGate.onNetworkFailure(base, FailureType.REGION_BLOCKED)
+        assertEquals(Phase.CLOSED, BinanceHostGate.phaseForTesting())
+        assertFalse(BinanceHostGate.regionBlockedForTesting())
+
+        // 第 2 次：熔断 + 粘死
+        BinanceHostGate.onNetworkFailure(base, FailureType.REGION_BLOCKED)
+        assertEquals(Phase.OPEN, BinanceHostGate.phaseForTesting())
+        assertTrue(BinanceHostGate.regionBlockedForTesting())
+        assertEquals(1, BinanceHostGate.blockCountForTesting())
+
+        // 对照：同样的 2 次**瞬断**还远不到阈值，不该熔断
+        BinanceHostGate.resetForTesting()
+        repeat(regionThreshold) { BinanceHostGate.onNetworkFailure(base, FailureType.TRANSIENT) }
+        assertEquals("同等次数的瞬断不该熔断（阈值更高）", Phase.CLOSED, BinanceHostGate.phaseForTesting())
+        assertFalse(BinanceHostGate.regionBlockedForTesting())
+    }
+
     /** [resetForTesting] 必须清除 regionBlocked，否则会漏给别的测试类造成误判 */
     @Test
     fun `resetForTesting 清除 regionBlocked 标记`() {

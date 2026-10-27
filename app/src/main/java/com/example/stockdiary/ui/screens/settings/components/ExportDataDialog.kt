@@ -27,8 +27,8 @@ import com.example.stockdiary.database.Transaction
 
 @Composable
 fun ExportDataDialog(
-    snapshots: List<AssetSnapshot>,
-    transactions: List<Transaction>,
+    snapshotCount: Int,
+    transactionCount: Int,
     isExporting: Boolean,
     onExportText: () -> Unit,
     onExportCsvAssets: () -> Unit,
@@ -68,7 +68,7 @@ fun ExportDataDialog(
                     Text("导出资产 (.csv)")
                 }
 
-                if (transactions.isNotEmpty()) {
+                if (transactionCount > 0) {
                     Spacer(modifier = Modifier.height(8.dp))
 
                     OutlinedButton(
@@ -78,11 +78,11 @@ fun ExportDataDialog(
                     ) {
                         Icon(Icons.AutoMirrored.Filled.ReceiptLong, contentDescription = null)
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text("导出交易对账单 (${transactions.size}条)")
+                        Text("导出交易对账单 (${transactionCount}条)")
                     }
                 }
 
-                if (snapshots.isNotEmpty()) {
+                if (snapshotCount > 0) {
                     Spacer(modifier = Modifier.height(8.dp))
 
                     OutlinedButton(
@@ -92,7 +92,7 @@ fun ExportDataDialog(
                     ) {
                         Icon(Icons.Default.History, contentDescription = null)
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text("导出历史快照 (${snapshots.size}条)")
+                        Text("导出历史快照 (${snapshotCount}条)")
                     }
                 }
 

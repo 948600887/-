@@ -49,7 +49,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.example.stockdiary.data.sync.PriceSyncScheduler
+
 import com.example.stockdiary.di.AppContainer
 import com.example.stockdiary.ui.screens.settings.components.AboutDialog
 import com.example.stockdiary.ui.screens.settings.components.BinanceImportDialog
@@ -70,7 +70,7 @@ import com.example.stockdiary.ui.theme.rememberThemeMode
 import com.example.stockdiary.ui.theme.ThemeManager
 import com.example.stockdiary.ui.viewmodels.HoldingSnapshotViewModel
 import com.example.stockdiary.ui.viewmodels.SettingsViewModel
-import com.example.stockdiary.utils.ExchangeRateManager
+
 import com.example.stockdiary.utils.format
 import kotlinx.coroutines.launch
 
@@ -106,11 +106,23 @@ fun SettingsScreen(
     val reminderError = uiState.reminderError
     val currentTheme = rememberThemeMode()
 
-    // 当前生效的美元汇率与上次刷新时间。汇率刷新会改变全 App 的 CNY 折算
-    // 数值，用户有权看见用的是哪个汇率、新不新。getRate 是一次 map 查找，
-    // 组合期直接读，无需状态提升
-    val usdRate = ExchangeRateManager.getRate("USD")
-    val usdRateUpdatedAt = ExchangeRateManager.getLastRefreshTimeMillis()
+    // 当前生效的美元汇率与上次刷新时间：从 UiState 读（刷新后要能重组），
+    // 不再直接读单例——直接读时刷新完值变了、界面却不更新。
+    val usdRate = uiState.usdRate
+    val usdRateUpdatedAt = uiState.usdRateUpdatedAt
+    val isRefreshingRate = uiState.isRefreshingRate
+
+    // 通知权限当前是否可用：被拒后开关仍可打开，但到期不会有任何提示，必须让用户看见。
+    // 用可变状态而不是 remember 常量：应用内申请结果回来时要立刻更新提示。
+    var notificationsGranted by remember {
+        mutableStateOf(
+            Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+                ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.POST_NOTIFICATIONS
+                ) == PackageManager.PERMISSION_GRANTED
+        )
+    }
 
     var showThemeDialog by remember { mutableStateOf(false) }
     var showClearDataDialog by remember { mutableStateOf(false) }
@@ -132,6 +144,7 @@ fun SettingsScreen(
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { isGranted ->
+        notificationsGranted = isGranted
         if (!isGranted) {
             val message = when (pendingPermissionReason) {
                 "每日查看提醒" -> "已开启每日查看提醒，但通知权限被拒绝，到点不会弹出通知"
@@ -142,18 +155,15 @@ fun SettingsScreen(
         pendingPermissionReason = null
     }
 
-    val assets = uiState.assets
-    val snapshots = uiState.snapshots
-    // 资产数量仍用于「清除所有数据」确认框的提示文案
-    val assetCount = assets.size
+    // 只保留计数，不常驻整表（快照/交易只在导出时按需查库）
+    val assetCount = uiState.assetCount
+    val snapshotCount = uiState.snapshotCount
+    val transactionCount = uiState.transactionCount
 
-    // 每次进入「我的」页都从磁盘重读同步/提醒快照：
-    // 后台任务或系统设置改过状态后，页面要能反映真实值
+    // 每次进入「我的」页从磁盘重读一次：同步/提醒快照 + 仪表盘偏好 + 汇率，
+    // 合并为一次 IO（原先两个方法各自一次 IO、一次重组）。
     LaunchedEffect(Unit) {
-        viewModel.refreshPriceSyncState()
-        // 偏好副本只在 VM 构造时读过一次：从持仓页改完排序切过来时，
-        // 不重读就会把旧 sortOrder/defaultPeriod 写回去。
-        viewModel.reloadDashboardPreferences()
+        viewModel.refreshOnEnter()
     }
 
     LaunchedEffect(uiState.errorMessage) {
@@ -216,7 +226,13 @@ fun SettingsScreen(
         reminderHour,
         reminderMinute,
         usdRate,
-        usdRateUpdatedAt
+        usdRateUpdatedAt,
+        isRefreshingRate,
+        notificationsGranted,
+        uiState.dataSourceHealthSummary,
+        assetCount,
+        snapshotCount,
+        transactionCount
     ) {
         listOf(
             SettingsSectionData("外观", listOf(
@@ -250,7 +266,7 @@ fun SettingsScreen(
                 add(SettingsItemData(
                     icon = Icons.Default.Download,
                     title = "导出数据",
-                    subtitle = "导出为 CSV 或文本文件",
+                    subtitle = "资产 $assetCount · 快照 $snapshotCount · 交易 $transactionCount",
                     onClick = { showExportDialog = true }
                 ))
                 add(SettingsItemData(
@@ -260,7 +276,7 @@ fun SettingsScreen(
                     // 某个源连续失败由数据源级熔断器自动短期禁用并降级，不再提供手动切换
                     // （原「行情数据源」选择入口已去除，见 ApiManager 注释）。
                     // 这里保留体检入口：点进去可看每个源当前通不通、熔断状态。
-                    subtitle = "全自动选择，失败自动切换",
+                    subtitle = uiState.dataSourceHealthSummary ?: "全自动选择，失败自动切换",
                     onClick = {
                         viewModel.checkDataSourceHealth()
                         showDataSourceDialog = true
@@ -271,28 +287,32 @@ fun SettingsScreen(
                     title = "自动刷新价格与分红",
                     // 实际策略是 SyncStrategy：交易时段 15 分钟一次、非交易时段 4 小时一次，
                     // 文案不能写"每日 17:15"，那会让人以为一天只更新一次。
-                    subtitle = when {
-                        !autoPriceSyncEnabled -> "已关闭"
-                        lastPriceSyncTime > 0 -> "交易时段每 ${SyncStrategy.TRADING_INTERVAL_MINUTES} 分钟、其余时段每 ${SyncStrategy.NON_TRADING_INTERVAL_HOURS} 小时 · 上次: ${formatPriceSyncTime(lastPriceSyncTime)}"
-                        else -> "交易时段每 ${SyncStrategy.TRADING_INTERVAL_MINUTES} 分钟、其余时段每 ${SyncStrategy.NON_TRADING_INTERVAL_HOURS} 小时 · 尚未同步"
+                    subtitle = buildString {
+                        append(
+                            when {
+                                !autoPriceSyncEnabled -> "已关闭"
+                                lastPriceSyncTime > 0 -> "交易时段每 ${SyncStrategy.TRADING_INTERVAL_MINUTES} 分钟、其余时段每 ${SyncStrategy.NON_TRADING_INTERVAL_HOURS} 小时 · 上次: ${formatPriceSyncTime(lastPriceSyncTime)}"
+                                else -> "交易时段每 ${SyncStrategy.TRADING_INTERVAL_MINUTES} 分钟、其余时段每 ${SyncStrategy.NON_TRADING_INTERVAL_HOURS} 小时 · 尚未同步"
+                            }
+                        )
+                        if (autoPriceSyncEnabled && !notificationsGranted) {
+                            append(" · 通知权限未开启，结果不会提醒")
+                        }
                     },
                     isSwitch = true,
                     switchChecked = autoPriceSyncEnabled,
                     onSwitchCheckedChange = { enabled ->
+                        // 调度/取消已收敛到 ViewModel；这里只负责在开启时补一次通知权限申请
                         viewModel.setAutoPriceSyncEnabled(enabled)
-                        if (enabled) {
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-                                ContextCompat.checkSelfPermission(
-                                    context,
-                                    Manifest.permission.POST_NOTIFICATIONS
-                                ) != PackageManager.PERMISSION_GRANTED
-                            ) {
-                                pendingPermissionReason = "自动同步"
-                                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-                            }
-                            PriceSyncScheduler.scheduleDailySync(context)
-                        } else {
-                            PriceSyncScheduler.cancelDailySync(context)
+                        if (enabled &&
+                            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                            ContextCompat.checkSelfPermission(
+                                context,
+                                Manifest.permission.POST_NOTIFICATIONS
+                            ) != PackageManager.PERMISSION_GRANTED
+                        ) {
+                            pendingPermissionReason = "自动同步"
+                            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
                         }
                     }
                 ))
@@ -308,9 +328,8 @@ fun SettingsScreen(
                         isSwitch = true,
                         switchChecked = stockIntradaySyncEnabled,
                         onSwitchCheckedChange = { enabled ->
+                            // 重排周期由 ViewModel 内部处理（仅在总开关开启时）
                             viewModel.setStockIntradaySyncEnabled(enabled)
-                            // 仅在自动同步已开时重排周期；总开关关着时只存偏好，等开启再生效
-                            if (autoPriceSyncEnabled) PriceSyncScheduler.scheduleDailySync(context)
                         }
                     ))
                     add(SettingsItemData(
@@ -324,7 +343,6 @@ fun SettingsScreen(
                         switchChecked = cryptoAutoSyncEnabled,
                         onSwitchCheckedChange = { enabled ->
                             viewModel.setCryptoAutoSyncEnabled(enabled)
-                            if (autoPriceSyncEnabled) PriceSyncScheduler.scheduleDailySync(context)
                         }
                     ))
                 }
@@ -332,35 +350,34 @@ fun SettingsScreen(
                     icon = Icons.Default.CurrencyExchange,
                     title = "汇率",
                     subtitle = buildString {
-                        append("1 美元 ≈ ¥")
-                        append(usdRate.format(2))
+                        if (usdRate > 0.0) {
+                            append("1 美元 ≈ ¥")
+                            append(usdRate.format(2))
+                        } else {
+                            append("汇率获取中（未连上汇率源时用内置默认）")
+                        }
                         if (usdRateUpdatedAt > 0) {
                             append(" · 更新于 ")
                             append(formatPriceSyncTime(usdRateUpdatedAt))
-                        } else {
+                        } else if (usdRate > 0.0) {
                             append(" · 内置默认汇率")
                         }
+                        append(" · 点此刷新")
                     },
-                    onClick = { },
-                    // 纯展示行：不置灰会被渲染成可点击，误导用户
-                    enabled = false
-                ))
-                add(SettingsItemData(
-                    icon = Icons.Default.DeleteForever,
-                    title = "清除所有数据",
-                    subtitle = "删除所有资产和历史快照",
-                    onClick = { showClearDataDialog = true },
-                    isDestructive = true
+                    // 汇率有 6 小时 TTL：看到旧值时用户应该能自己刷一次，
+                    // 而不是只能等后台回源（原先这行是 enabled=false 的纯展示行）
+                    onClick = { viewModel.refreshExchangeRate() },
+                    enabled = !isRefreshingRate
                 ))
             }),
             SettingsSectionData("应用", listOf(
                 SettingsItemData(
                     icon = Icons.Default.Notifications,
                     title = "每日查看提醒",
-                    subtitle = if (reminderEnabled) {
-                        "每天 ${reminderHour.toString().padStart(2, '0')}:${reminderMinute.toString().padStart(2, '0')} 提醒查看资产"
-                    } else {
-                        "已关闭"
+                    subtitle = when {
+                        !reminderEnabled -> "已关闭"
+                        !notificationsGranted -> "每天 ${reminderHour.toString().padStart(2, '0')}:${reminderMinute.toString().padStart(2, '0')} 提醒（通知权限未开启，不会弹出）"
+                        else -> "每天 ${reminderHour.toString().padStart(2, '0')}:${reminderMinute.toString().padStart(2, '0')} 提醒查看资产"
                     },
                     isSwitch = true,
                     switchChecked = reminderEnabled,
@@ -399,6 +416,17 @@ fun SettingsScreen(
                     subtitle = "金库 v$versionName",
                     onClick = { showAboutDialog = true }
                 )
+            )),
+            // 危险操作沉到页面最底部独立分区：原先夹在「数据」分区中部，
+            // 滚动列表时容易误触（有二次确认，但少一次惊吓）
+            SettingsSectionData("危险操作", listOf(
+                SettingsItemData(
+                    icon = Icons.Default.DeleteForever,
+                    title = "清除所有数据",
+                    subtitle = "删除所有资产和历史快照",
+                    onClick = { showClearDataDialog = true },
+                    isDestructive = true
+                )
             ))
         )
     }
@@ -423,7 +451,9 @@ fun SettingsScreen(
                 item {
                     SettingsSection(title = section.title)
                 }
-                items(section.items, key = { it.title }) { item ->
+                // key 必须**跨分区全局唯一**：LazyColumn 的 key 作用域是整个列表，
+                // 只拿 title 当 key，将来两个分区出现同名项会直接抛 Duplicate key
+                items(section.items, key = { "${section.title}/${it.title}" }) { item ->
                     SettingsItem(
                         icon = item.icon,
                         title = item.title,
@@ -464,8 +494,8 @@ fun SettingsScreen(
 
     if (showExportDialog) {
         ExportDataDialog(
-            snapshots = snapshots,
-            transactions = uiState.transactions,
+            snapshotCount = snapshotCount,
+            transactionCount = transactionCount,
             isExporting = uiState.isExporting,
             onExportText = {
                 viewModel.exportData(context, SettingsViewModel.ExportType.TEXT)

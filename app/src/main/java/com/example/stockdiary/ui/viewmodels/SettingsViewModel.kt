@@ -25,12 +25,14 @@ import com.example.stockdiary.utils.AppLogger
 import com.example.stockdiary.utils.DataSourceHealth
 import com.example.stockdiary.utils.DataSourceHealthChecker
 import com.example.stockdiary.utils.NotificationHelper
-import com.example.stockdiary.utils.isDisplayEquivalentTo
+import com.example.stockdiary.utils.ExchangeRateManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -67,13 +69,26 @@ class SettingsViewModel(
      *   与 UiState 其余字段（一次性动作驱动）语义不同，混在一起只会让「谁改了什么」更难读。
      */
     data class UiState(
-        val assets: List<Asset> = emptyList(),
-        val snapshots: List<AssetSnapshot> = emptyList(),
-        val transactions: List<Transaction> = emptyList(),
+        /**
+         * 只保留计数，不保留整表。
+         *
+         * 设置页真正只需要「清除数据」确认框里的资产条数；导出时再按需查库。
+         * 原先把 assets/snapshots/transactions 三张全量表常驻在这里，
+         * 老用户（几百天快照、上千条交易）会白占内存、且每次发信整页重组。
+         */
+        val assetCount: Int = 0,
+        val snapshotCount: Int = 0,
+        val transactionCount: Int = 0,
         val isExporting: Boolean = false,
         val isDeleting: Boolean = false,
         val isCheckingHealth: Boolean = false,
         val dataSourceHealth: List<DataSourceHealth>? = null,
+        /** 体检结果摘要（列表行 subtitle 用）；未体检时为 null */
+        val dataSourceHealthSummary: String? = null,
+        /** 汇率快照：放大后的可观察状态，刷新后界面才会重组（原先直接读单例，刷新不反映） */
+        val usdRate: Double = 0.0,
+        val usdRateUpdatedAt: Long = 0L,
+        val isRefreshingRate: Boolean = false,
         val exportResult: Result<String>? = null,
         val deleteResult: Result<Unit>? = null,
         val errorMessage: String? = null,
@@ -100,7 +115,9 @@ class SettingsViewModel(
             cryptoAutoSyncEnabled = priceSyncPreferencesManager.isCryptoAutoSyncEnabled(),
             reminderEnabled = NotificationHelper.isReminderEnabled(appContext),
             reminderHour = NotificationHelper.getReminderTime(appContext).first,
-            reminderMinute = NotificationHelper.getReminderTime(appContext).second
+            reminderMinute = NotificationHelper.getReminderTime(appContext).second,
+            usdRate = ExchangeRateManager.getRate("USD"),
+            usdRateUpdatedAt = ExchangeRateManager.getLastRefreshTimeMillis()
         )
     )
     val uiState: StateFlow<UiState> = _uiState.asStateFlow()
@@ -174,43 +191,42 @@ class SettingsViewModel(
 
     init {
         // Room Flow 在数据库异常时会向收集者抛错，不兜住会让 viewModelScope 崩溃
+        // 只收集计数，不把整表塞进 UiState（见 UiState.assetCount 的 KDoc）。
+        // Room 仍会发全量列表，但 map 成 Int 后立刻丢弃，不跨重组持有。
         viewModelScope.launch {
             try {
                 assetRepository.getAllAssets()
-                    .distinctUntilChanged { a, b -> a.isDisplayEquivalentTo(b) }
-                    .collect { assets ->
-                    _uiState.update { state -> state.copy(assets = assets) }
-                }
+                    .map { it.size }
+                    .distinctUntilChanged()
+                    .collect { count -> _uiState.update { state -> state.copy(assetCount = count) } }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                AppLogger.e("资产流收集异常: ${e.message}", e, "SettingsVM")
+                AppLogger.e("资产计数流收集异常: ${e.message}", e, "SettingsVM")
             }
         }
         viewModelScope.launch {
             try {
                 snapshotDao.getAllSnapshots()
+                    .map { it.size }
                     .distinctUntilChanged()
-                    .collect { snapshots ->
-                    _uiState.update { state -> state.copy(snapshots = snapshots) }
-                }
+                    .collect { count -> _uiState.update { state -> state.copy(snapshotCount = count) } }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                AppLogger.e("快照流收集异常: ${e.message}", e, "SettingsVM")
+                AppLogger.e("快照计数流收集异常: ${e.message}", e, "SettingsVM")
             }
         }
         viewModelScope.launch {
             try {
                 transactionDao.getAllFlow()
+                    .map { it.size }
                     .distinctUntilChanged()
-                    .collect { transactions ->
-                    _uiState.update { state -> state.copy(transactions = transactions) }
-                }
+                    .collect { count -> _uiState.update { state -> state.copy(transactionCount = count) } }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                AppLogger.e("交易流收集异常: ${e.message}", e, "SettingsVM")
+                AppLogger.e("交易计数流收集异常: ${e.message}", e, "SettingsVM")
             }
         }
     }
@@ -228,13 +244,16 @@ class SettingsViewModel(
         viewModelScope.launch(Dispatchers.IO) {
             _uiState.update { state -> state.copy(isExporting = true, exportResult = null) }
             try {
-                val currentState = _uiState.value
+                // 导出时才查库：设置页平时只保留计数，不常驻三张全量表
+                val assets = assetRepository.getAllAssets().first()
+                val snapshots = snapshotDao.getAllSnapshotsSync()
+                val transactions = transactionDao.getAllFlow().first()
                 val uri = when (type) {
-                    ExportType.TEXT -> dataExporter.exportToText(currentState.assets)
-                    ExportType.CSV_ASSETS -> dataExporter.exportAssetsToCSV(currentState.assets)
-                    ExportType.CSV_SNAPSHOTS -> dataExporter.exportSnapshotsToCSV(currentState.snapshots)
-                    ExportType.CSV_TRANSACTIONS -> dataExporter.exportTransactionsToCSV(currentState.assets, currentState.transactions)
-                    ExportType.CSV_STATEMENT -> dataExporter.exportStatementCSV(currentState.assets, currentState.transactions, currentState.snapshots)
+                    ExportType.TEXT -> dataExporter.exportToText(assets)
+                    ExportType.CSV_ASSETS -> dataExporter.exportAssetsToCSV(assets)
+                    ExportType.CSV_SNAPSHOTS -> dataExporter.exportSnapshotsToCSV(snapshots)
+                    ExportType.CSV_TRANSACTIONS -> dataExporter.exportTransactionsToCSV(assets, transactions)
+                    ExportType.CSV_STATEMENT -> dataExporter.exportStatementCSV(assets, transactions, snapshots)
                     ExportType.CSV_DIVIDENDS -> dataExporter.exportDividendsToCSV(assetRepository.getAllDividends())
                 }
                 if (uri != null) {
@@ -354,7 +373,19 @@ class SettingsViewModel(
             _uiState.update { state -> state.copy(isCheckingHealth = true) }
             try {
                 val health = dataSourceHealthChecker.checkAllHealth()
-                _uiState.update { state -> state.copy(isCheckingHealth = false, dataSourceHealth = health) }
+                // 结果摘要回流到列表行的 subtitle：不点开弹窗也能看到当前几个源可用
+                val summary = when {
+                    health.isEmpty() -> "未获取到数据源状态"
+                    health.all { it.isAvailable } -> "全部正常（${health.size} 个源）"
+                    else -> "${health.count { it.isAvailable }}/${health.size} 个源可用，其余已降级"
+                }
+                _uiState.update { state ->
+                    state.copy(
+                        isCheckingHealth = false,
+                        dataSourceHealth = health,
+                        dataSourceHealthSummary = summary
+                    )
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -377,25 +408,6 @@ class SettingsViewModel(
 
     fun clearErrorMessage() {
         _uiState.update { state -> state.copy(errorMessage = null) }
-    }
-
-    /**
-     * 从磁盘重读一遍仪表盘偏好。
-     *
-     * 本 VM 挂 Activity 作用域、偏好副本只在**构造期**加载一次；用户先去持仓页改了排序、
-     * 再切到设置页拨开关时，sheet 拿到的是旧副本，会把刚改的 `sortOrder/defaultPeriod`
-     * 一起写回旧值（表现为「排序莫名其妙被还原」）。每次进入设置页时调一次即可。
-     */
-    fun reloadDashboardPreferences() {
-        viewModelScope.launch(Dispatchers.IO) {
-            try {
-                _dashboardPreferences.value = dashboardPreferencesManager.loadPreferences()
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                AppLogger.e("重读仪表盘偏好失败: ${e.message}", e, "SettingsVM")
-            }
-        }
     }
 
     /**
@@ -454,6 +466,12 @@ class SettingsViewModel(
                     priceSyncPreferencesManager.setConsecutiveFailureCount(0)
                 }
                 _uiState.update { it.copy(autoPriceSyncEnabled = enabled) }
+                // 调度收敛到 VM：UI 只管拨开关，避免以后新增入口忘了重排/取消后台任务
+                if (enabled) {
+                    PriceSyncScheduler.scheduleDailySync(appContext)
+                } else {
+                    PriceSyncScheduler.cancelDailySync(appContext)
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -468,6 +486,10 @@ class SettingsViewModel(
             try {
                 priceSyncPreferencesManager.setStockIntradaySyncEnabled(enabled)
                 _uiState.update { it.copy(stockIntradaySyncEnabled = enabled) }
+                // 仅在总开关开启时重排周期；总开关关着只存偏好，等开启再生效
+                if (_uiState.value.autoPriceSyncEnabled) {
+                    PriceSyncScheduler.scheduleDailySync(appContext)
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -482,6 +504,9 @@ class SettingsViewModel(
             try {
                 priceSyncPreferencesManager.setCryptoAutoSyncEnabled(enabled)
                 _uiState.update { it.copy(cryptoAutoSyncEnabled = enabled) }
+                if (_uiState.value.autoPriceSyncEnabled) {
+                    PriceSyncScheduler.scheduleDailySync(appContext)
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -502,17 +527,81 @@ class SettingsViewModel(
      */
     fun refreshPriceSyncState() {
         viewModelScope.launch(Dispatchers.IO) {
-            val reminderTime = NotificationHelper.getReminderTime(appContext)
-            _uiState.update { state ->
-                state.copy(
-                    autoPriceSyncEnabled = priceSyncPreferencesManager.isAutoSyncEnabled(),
-                    lastPriceSyncTime = priceSyncPreferencesManager.getLastSyncTimeMillis(),
-                    stockIntradaySyncEnabled = priceSyncPreferencesManager.isStockIntradaySyncEnabled(),
-                    cryptoAutoSyncEnabled = priceSyncPreferencesManager.isCryptoAutoSyncEnabled(),
-                    reminderEnabled = NotificationHelper.isReminderEnabled(appContext),
-                    reminderHour = reminderTime.first,
-                    reminderMinute = reminderTime.second
-                )
+            try {
+                readSettingsSnapshot()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                AppLogger.e("重读设置快照失败: ${e.message}", e, "SettingsVM")
+            }
+        }
+    }
+
+    /**
+     * 进入页面时一次性重读所有「磁盘镜像」：价格同步/提醒 + 仪表盘偏好 + 汇率。
+     *
+     * 原先分成 refreshPriceSyncState + reloadDashboardPreferences 两次 launch、两次 IO、
+     * 两次 update ⇒ 设置页要重组两遍。这里合并成一次 IO、两次写入（UiState 与偏好流各一次，
+     * 两个流本来就分属不同消费方）。
+     */
+    fun refreshOnEnter() {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                _dashboardPreferences.value = dashboardPreferencesManager.loadPreferences()
+                readSettingsSnapshot()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                AppLogger.e("进入设置页重读状态失败: ${e.message}", e, "SettingsVM")
+            }
+        }
+    }
+
+    /** 同一次 IO 内读齐所有磁盘镜像，一次 update 写回（含汇率快照） */
+    private suspend fun readSettingsSnapshot() {
+        val reminderTime = NotificationHelper.getReminderTime(appContext)
+        val rate = ExchangeRateManager.getRate("USD")
+        val rateAt = ExchangeRateManager.getLastRefreshTimeMillis()
+        _uiState.update { state ->
+            state.copy(
+                autoPriceSyncEnabled = priceSyncPreferencesManager.isAutoSyncEnabled(),
+                lastPriceSyncTime = priceSyncPreferencesManager.getLastSyncTimeMillis(),
+                stockIntradaySyncEnabled = priceSyncPreferencesManager.isStockIntradaySyncEnabled(),
+                cryptoAutoSyncEnabled = priceSyncPreferencesManager.isCryptoAutoSyncEnabled(),
+                reminderEnabled = NotificationHelper.isReminderEnabled(appContext),
+                reminderHour = reminderTime.first,
+                reminderMinute = reminderTime.second,
+                usdRate = rate,
+                usdRateUpdatedAt = rateAt
+            )
+        }
+    }
+
+    /**
+     * 手动刷新汇率（6 小时 TTL，用户看到旧值时能自己刷）。
+     *
+     * 汇率是单例里的普通字段，界面原先直接 `ExchangeRateManager.getRate()` 读——
+     * 刷新后值变了但没有任何可观察状态，页面不会重组。这里把结果写回 UiState。
+     */
+    fun refreshExchangeRate() {
+        if (_uiState.value.isRefreshingRate) return
+        _uiState.update { it.copy(isRefreshingRate = true) }
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                ExchangeRateManager.refresh(force = true)
+                _uiState.update {
+                    it.copy(
+                        isRefreshingRate = false,
+                        usdRate = ExchangeRateManager.getRate("USD"),
+                        usdRateUpdatedAt = ExchangeRateManager.getLastRefreshTimeMillis()
+                    )
+                }
+            } catch (e: CancellationException) {
+                _uiState.update { it.copy(isRefreshingRate = false) }
+                throw e
+            } catch (e: Exception) {
+                AppLogger.e("刷新汇率失败: ${e.message}", e, "SettingsVM")
+                _uiState.update { it.copy(isRefreshingRate = false) }
             }
         }
     }

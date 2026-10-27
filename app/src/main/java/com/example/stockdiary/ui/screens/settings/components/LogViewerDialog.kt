@@ -11,8 +11,12 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material3.FilterChip
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.Refresh
@@ -81,6 +85,7 @@ fun LogViewerDialog(onDismiss: () -> Unit) {
     var loading by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf<String?>(null) }
     var askClear by remember { mutableStateOf(false) }
+    var levelFilter by remember { mutableStateOf(LogLevelFilter.ALL) }
 
     fun reload() {
         scope.launch {
@@ -89,7 +94,12 @@ fun LogViewerDialog(onDismiss: () -> Unit) {
             // 环境信息（版本/机型/系统）也在这里取——界面上看到的和分享出去的都带它
             val collected = withContext(Dispatchers.IO) { LogDiagnostics.collect(context) }
             val composed = withContext(Dispatchers.IO) {
-                LogDiagnostics.composeReport(collected, envInfo = LogDiagnostics.environmentInfo(context))
+                LogDiagnostics.composeReport(
+                    collected,
+                    envInfo = LogDiagnostics.environmentInfo(context),
+                    // 界面只显示崩溃堆栈尾部，避免长堆栈拖垮渲染；分享出口传 MAX_VALUE 给完整版
+                    crashMaxLines = LogDiagnostics.DISPLAY_CRASH_STACK_LINES
+                )
             }
             report = collected
             text = composed
@@ -164,28 +174,53 @@ fun LogViewerDialog(onDismiss: () -> Unit) {
                     }
                 }
             ) { padding ->
-                Box(modifier = Modifier.fillMaxSize().padding(padding)) {
-                    when {
-                        loading || text == null -> {
-                            CircularProgressIndicator(modifier = Modifier.align(Alignment.Center))
+                Column(modifier = Modifier.fillMaxSize().padding(padding)) {
+                    // 级别过滤：只过滤带 [LEVEL/TAG] 前缀的 app.log 行；
+                    // 头部（=== ...）、崩溃段、分隔行没有该前缀，始终保留，不会被误删
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        enumValues<LogLevelFilter>().forEach { f ->
+                            FilterChip(
+                                selected = levelFilter == f,
+                                onClick = { levelFilter = f },
+                                label = { Text(f.label) },
+                                modifier = Modifier.weight(1f)
+                            )
                         }
+                    }
+                    Box(modifier = Modifier.fillMaxSize().weight(1f)) {
+                        when {
+                            loading || text == null -> {
+                                CircularProgressIndicator(modifier = Modifier.align(Alignment.Center))
+                            }
 
-                        else -> {
-                            SelectionContainer {
-                                // 用 Monospace 而不是等宽以外的字体：堆栈里的缩进和
-                                // `at a.b.C(D.java:12)` 对齐关系全靠等宽才看得出来
-                                Text(
-                                    text = text.orEmpty(),
-                                    style = MaterialTheme.typography.bodySmall.copy(
-                                        fontFamily = FontFamily.Monospace,
-                                        fontSize = 11.sp,
-                                        lineHeight = 15.sp
-                                    ),
-                                    modifier = Modifier
-                                        .fillMaxSize()
-                                        .verticalScroll(rememberScrollState())
-                                        .padding(12.dp)
-                                )
+                            else -> {
+                                val allLines = text.orEmpty().split('\n')
+                                val visibleLines = if (levelFilter == LogLevelFilter.ALL) {
+                                    allLines
+                                } else {
+                                    allLines.filter { isLogLineVisible(it, levelFilter) }
+                                }
+                                // 用 LazyColumn 替代单个巨型 Text：只布局可见项，
+                                // 几千行日志 / 长崩溃堆栈也不会一次性卡掉主线程
+                                SelectionContainer {
+                                    LazyColumn(
+                                        modifier = Modifier.fillMaxSize().padding(12.dp)
+                                    ) {
+                                        items(visibleLines) { line ->
+                                            Text(
+                                                text = line,
+                                                style = MaterialTheme.typography.bodySmall.copy(
+                                                    fontFamily = FontFamily.Monospace,
+                                                    fontSize = 11.sp,
+                                                    lineHeight = 15.sp
+                                                )
+                                            )
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -229,4 +264,31 @@ fun LogViewerDialog(onDismiss: () -> Unit) {
             confirmButton = { TextButton(onClick = { message = null }) { Text("知道了") } }
         )
     }
+}
+
+/** 日志行级别 → 优先级，用于界面级别过滤。未知级别按可见处理。 */
+private val LOG_LEVEL_PRIORITY = mapOf(
+    "DEBUG" to 0, "INFO" to 1, "API" to 1, "DB" to 1, "WARN" to 2, "ERROR" to 3
+)
+
+/** 匹配 app.log 行的 `[LEVEL/TAG]` 前缀，提取 LEVEL。 */
+private val LOG_LINE_LEVEL_REGEX = Regex("^\\[[^\\]]*\\]\\[([A-Z]+)/")
+
+private enum class LogLevelFilter(val label: String, val minPriority: Int) {
+    ALL("全部", 0),
+    INFO("INFO+", 1),
+    WARN("WARN+", 2),
+    ERROR("ERROR", 3)
+}
+
+/**
+ * 级别过滤：只隐藏低于所选阈值的 app.log 行。
+ * 头部（=== ...）、崩溃段、分隔行没有 `[LEVEL/TAG]` 前缀，[LOG_LINE_LEVEL_REGEX] 匹配不到，
+ * 始终返回 true（可见），不会被误删。
+ */
+private fun isLogLineVisible(line: String, filter: LogLevelFilter): Boolean {
+    if (filter == LogLevelFilter.ALL) return true
+    val m = LOG_LINE_LEVEL_REGEX.find(line) ?: return true
+    val prio = LOG_LEVEL_PRIORITY[m.groupValues[1]] ?: return true
+    return prio >= filter.minPriority
 }

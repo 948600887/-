@@ -8,6 +8,7 @@ import java.io.File
 import java.io.FileWriter
 import java.io.BufferedWriter
 import java.io.IOException
+import java.util.ArrayDeque
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 import java.util.concurrent.ConcurrentLinkedQueue
@@ -19,7 +20,17 @@ object AppLogger {
     private const val LOG_TAG = "GoldVault"
     private val logQueue = ConcurrentLinkedQueue<String>()
     private val isWriting = AtomicBoolean(false)
-    private const val MAX_QUEUE_SIZE = 100
+    /**
+     * 内存队列上限。
+     *
+     * 从前是 100：一次全量同步（几百个标的、每个标的一段 DEBUG/INFO 日志）在 2 秒
+     * flush 窗口内可以轻松超过 100 条，于是队列持续满、最旧的日志被 poll 掉——
+     * 排障最想看的「崩溃前那几百行」恰恰在同步爆发期被静默丢弃。
+     * 提到 1000：把窗口内的丢失概率压到极低；每条日志几十~一百多字节，
+     * 1000 条约百 KB，内存完全可接受。仍保留「超上限丢最旧、保最新」策略，
+     * 因为崩溃前后最新那段日志才是定位问题的关键。
+     */
+    private const val MAX_QUEUE_SIZE = 1000
     private const val FLUSH_INTERVAL_MS = 2000L
     private val logTimestampFormatter = DateFormats.ISO_DATETIME_MILLIS_FORMATTER
     
@@ -112,22 +123,34 @@ object AppLogger {
             val timestamp = LocalDateTime.now().format(logTimestampFormatter)
             val logLine = "[$timestamp] [$level/$tag] $message"
             
-            if (logQueue.size >= MAX_QUEUE_SIZE) {
+            // 达到上限：丢弃最旧、保留最新（崩溃前后最新段最该保留），并立即落盘一次，
+            // 把「爆发期持续丢最早日志」的窗口压到最小——否则要等 2 秒周期 flush。
+            val reachedLimit = logQueue.size >= MAX_QUEUE_SIZE
+            if (reachedLimit) {
                 logQueue.poll()
             }
             logQueue.offer(logLine)
             
-            if (System.currentTimeMillis() - lastFlushTime > FLUSH_INTERVAL_MS || level == "ERROR") {
-                try {
-                    logExecutor.execute { flushLogs() }
-                } catch (e: Exception) {
-                    // 执行器被拒绝（极端情况）只丢这次落盘，不影响调用方
-                }
+            val overdue = System.currentTimeMillis() - lastFlushTime > FLUSH_INTERVAL_MS
+            if (overdue || level == "ERROR" || reachedLimit) {
+                scheduleFlush()
             }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             Log.w(LOG_TAG, "队列日志写入失败", e)
+        }
+    }
+
+    /**
+     * 把积压日志提交给专用后台线程落盘。
+     * 执行器被拒绝（极端情况）只丢这次落盘，不影响调用方。
+     */
+    private fun scheduleFlush() {
+        try {
+            logExecutor.execute { flushLogs() }
+        } catch (e: Exception) {
+            // 执行器被拒绝（极端情况）只丢这次落盘，不影响调用方
         }
     }
     
@@ -206,35 +229,33 @@ object AppLogger {
      */
     private const val TRIM_CHECK_FLOOR_BYTES = 250_000L
 
+    /**
+     * 从行序列里保留最后 [maxLines] 行（单遍，内存上限 [maxLines] 行）。
+     *
+     * 用定长 [ArrayDeque] 滑动窗口：每读一行 addLast，超过 [maxLines] 就 removeFirst。
+     * 一次遍历完成，不需要先数总行数再读第二遍（旧实现最坏读两遍文件）。
+     */
+    internal fun trimToLastLines(lines: Sequence<String>, maxLines: Int): String {
+        if (maxLines <= 0) return ""
+        val window = ArrayDeque<String>(maxLines)
+        for (line in lines) {
+            window.addLast(line)
+            if (window.size > maxLines) window.removeFirst()
+        }
+        // 末尾补一个换行：否则裁剪后文件最后一行缺 \n，下次追加的第一条日志会
+        // 接在最后一行屁股后面造成粘连（日志持续超上限时每次 flush 都触发裁剪，累积成片）。
+        // 空集合时 joinToString 仍会追加 postfix，需特判返回空串。
+        return if (window.isEmpty()) "" else window.joinToString("\n", postfix = "\n")
+    }
+
     private fun trimLogFile(file: File, maxLines: Int = 5000) {
         try {
             // 廉价预判：没超字节下限直接返回，一次内容读都不做
             if (file.length() < TRIM_CHECK_FLOOR_BYTES) return
-            // 按行数截断，避免一次性读取大文件导致 OOM
-            var lineCount = 0
-            file.bufferedReader().use { reader ->
-                while (reader.readLine() != null) {
-                    lineCount++
-                    if (lineCount > maxLines * 2) break
-                }
-            }
-            if (lineCount > maxLines) {
-                val linesToKeep = mutableListOf<String>()
-                var skipped = 0
-                val keepCount = lineCount - maxLines
-                file.bufferedReader().use { reader ->
-                    reader.forEachLine { line ->
-                        if (skipped < keepCount) {
-                            skipped++
-                        } else {
-                            linesToKeep.add(line)
-                        }
-                    }
-                }
-                // 末尾补一个换行：否则裁剪后文件最后一行缺 \n，下次追加的第一条日志会
-                // 接在最后一行屁股后面造成粘连（日志持续超上限时每次 flush 都触发裁剪，累积成片）。
-                file.writeText(linesToKeep.joinToString("\n", postfix = "\n"))
-            }
+            // 流式单遍截断：useLines 逐行喂给 trimToLastLines，只保留最后 maxLines 行，
+            // 内存峰值=maxLines 行，避免先数行再整段读两遍。
+            val kept = file.useLines { trimToLastLines(it, maxLines) }
+            file.writeText(kept)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -248,9 +269,18 @@ object AppLogger {
     
     fun clearLog() {
         try {
-            val logFile = getLogFileSafe()
-            logFile?.writeText("")
-            logQueue.clear()
+            // 必须和 flushLogs 串行：二者都在 logExecutor 单线程上跑，submit 排队执行，
+            // 避免「flush 的 append」与「这里 writeText("")」交错覆盖
+            // —— 否则可能把刚落盘的日志又清空，或清空后又被 append 覆盖成非空。
+            // .get() 阻塞到任务完成，保证调用方 reload 时文件已确实清空（同步语义）。
+            logExecutor.submit {
+                try {
+                    logQueue.clear()
+                    getLogFileSafe()?.writeText("")
+                } catch (e: Exception) {
+                    Log.w(LOG_TAG, "清空日志失败", e)
+                }
+            }.get()
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {

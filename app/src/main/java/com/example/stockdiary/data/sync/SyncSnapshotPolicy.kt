@@ -72,3 +72,35 @@ suspend fun saveTodaySnapshotIfEligible(
         AppLogger.e("刷新当日快照失败（不影响刷新结果）: ${e.message}", e, tag)
     }
 }
+
+/**
+ * 导入落库（+ 导入后行情同步）之后刷新当日快照。
+ *
+ * 为什么需要它：导入改变了资产集合，首页/持仓/日历都会随 Room 自动更新，但历史页只读快照，
+ * 不写的话「今天」这个点还停在导入前。导入后的同步（[syncedCount] > 0）已经给新资产补了价，
+ * 此刻库里的资产/价格与页面显示完全一致，是写快照最合适的时机。
+ *
+ * 与 [saveTodaySnapshotIfEligible] 的区别：那不是一轮完整同步（只同步了导入的标的），
+ * 不能用 [SyncResult] 的截断口径判定；这里只以「同步确实有成功项」为门槛，
+ * 同步失败则不动快照，避免把 0 价固化。
+ */
+suspend fun refreshTodaySnapshotAfterImport(
+    repository: AssetRepository,
+    syncedCount: Int,
+    tag: String
+) {
+    if (syncedCount <= 0) return
+    try {
+        val today = LocalDate.now().format(SNAPSHOT_DATE_FORMATTER)
+        val snapshot = repository.replaceSnapshotForDate(today)
+        if (snapshot != null) {
+            AppLogger.i("导入后已刷新当日快照: ${snapshot.date}, 净资产: ¥${snapshot.netAssets}", tag)
+        } else {
+            AppLogger.w("导入后刷新当日快照失败（不影响导入结果）", tag)
+        }
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        AppLogger.e("导入后刷新当日快照失败（不影响导入结果）: ${e.message}", e, tag)
+    }
+}

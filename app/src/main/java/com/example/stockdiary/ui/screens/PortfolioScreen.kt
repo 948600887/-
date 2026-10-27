@@ -181,6 +181,10 @@ fun PortfolioScreen(
         onDispose { portfolioLifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
+    // 底栏切 Tab 不触发 ON_RESUME：从设置页改完开关直接切回来时再补一次磁盘重读，
+    // 否则内存副本仍是构造期的旧值，表现为「设置改了没反应」。
+    LaunchedEffect(Unit) { viewModel.reloadPreferences() }
+
     // 资产列表已从资产页并入这里：股票/基金/虚拟货币/银行存款 + 负债，一页看全。
     // 显示开关沿用「设置 → 仪表盘显示」，关掉某类就整类不出现。
     val visibleAssetTypes = remember(preferences) {
@@ -311,10 +315,14 @@ fun PortfolioScreen(
      * 银行存款 symbol=null，改余额/利率同样不改集合。两种情况都得重算，
      * 所以 key 带上数量与利率（数组内容相同则指纹相同，价格刷新不会误触发）。
      */
-    val dividendInputKey = remember(assetsOnly) { dividendInputFingerprint(assetsOnly) }
+    // 输入范围必须是**全量非负债资产**，与首页/详情页同源：
+    // 用 displayAssets 算的话，用户关掉「显示银行存款」后年度分红会凭空变少，
+    // 刷新时又按全量算回来——同一个标签两个数字，来回跳变。
+    // 显示开关的语义是「列表里看不看」，不该改变我的收入。
+    val dividendInputKey = remember(allAssetsOnly) { dividendInputFingerprint(allAssetsOnly) }
 
     LaunchedEffect(dividendInputKey) {
-        viewModel.loadDividendIncome(assetsOnly)
+        viewModel.loadDividendIncome(allAssetsOnly)
     }
 
     // 所有「可展开分组」的 key：市场大区 + 账户。

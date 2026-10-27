@@ -60,6 +60,10 @@ fun HistoryScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     var showSaveDialog by remember { mutableStateOf(false) }
 
+    // 每次进入历史页重读「默认历史周期」：VM 常驻、默认周期只在构造时读一次，
+    // 设置页改完不重进应用的话本页永远用旧周期。
+    LaunchedEffect(Unit) { viewModel.reloadDefaultPeriod() }
+
     LaunchedEffect(uiState.errorMessage) {
         uiState.errorMessage?.let { message ->
             snackbarHostState.showSnackbar(message)

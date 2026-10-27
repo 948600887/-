@@ -296,6 +296,9 @@ class SettingsViewModel(
                 // （createSnapshot 不判空），历史净值曲线会多出一串净资产为 0 的点。
                 SnapshotScheduler.cancelDailySnapshot(appContext)
                 NotificationHelper.cancelReminder(appContext)
+                // 磁盘已清，本 VM 内存里的偏好副本也要立刻回默认：
+                // 否则设置页仍按旧副本渲染，再拨任何一个开关就会把「已清除的旧偏好」写回磁盘。
+                _dashboardPreferences.value = DashboardPreferences()
                 refreshPriceSyncState()
                 _uiState.update { state -> state.copy(isDeleting = false, deleteResult = Result.success(Unit)) }
             } catch (e: CancellationException) {
@@ -374,6 +377,25 @@ class SettingsViewModel(
 
     fun clearErrorMessage() {
         _uiState.update { state -> state.copy(errorMessage = null) }
+    }
+
+    /**
+     * 从磁盘重读一遍仪表盘偏好。
+     *
+     * 本 VM 挂 Activity 作用域、偏好副本只在**构造期**加载一次；用户先去持仓页改了排序、
+     * 再切到设置页拨开关时，sheet 拿到的是旧副本，会把刚改的 `sortOrder/defaultPeriod`
+     * 一起写回旧值（表现为「排序莫名其妙被还原」）。每次进入设置页时调一次即可。
+     */
+    fun reloadDashboardPreferences() {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                _dashboardPreferences.value = dashboardPreferencesManager.loadPreferences()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                AppLogger.e("重读仪表盘偏好失败: ${e.message}", e, "SettingsVM")
+            }
+        }
     }
 
     /**

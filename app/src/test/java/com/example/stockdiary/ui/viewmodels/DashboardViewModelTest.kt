@@ -262,7 +262,10 @@ class DashboardViewModelTest {
             // 事件经测试调度器确定性送达（见 UiStateCollectExt 同款 trackIn 机制）
             val event = async(start = CoroutineStart.UNDISPATCHED) { vm.syncDone.first() }
             vm.refresh()
-            val result = withTimeout(5000) { event.await() }
+            // 不要用 withTimeout 包：refresh 内部走真实的 Dispatchers.IO，runTest 的虚拟时钟
+            // 会在调度器空转时把 5s 直接推完，偶发 TimeoutCancellationException（假失败）。
+            // 直接 await，未发射时由 runTest 自身的 60s 超时兜底。
+            val result = event.await()
             assertEquals(expected, result)
             assertEquals(null, latest().errorMessage)
             trackJob.cancel()

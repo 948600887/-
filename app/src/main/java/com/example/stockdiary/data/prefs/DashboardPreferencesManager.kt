@@ -104,6 +104,8 @@ class DashboardPreferencesManager(context: Context) {
         private const val KEY_DEFAULT_PERIOD = "default_period"
         private const val KEY_MONTHLY_EXPENSE = "monthly_expense"
         private const val KEY_ANNUAL_DIVIDEND_CACHE = "annual_dividend_cache"
+        /** 分红缓存的新存储：SharedPreferences 没有 putDouble，旧实现用 Float 会丢精度（约 1 分） */
+        private const val KEY_ANNUAL_DIVIDEND_CACHE_V2 = "annual_dividend_cache_v2"
         private const val KEY_ANNUAL_DIVIDEND_SYMBOLS = "annual_dividend_symbols"
         private const val KEY_ANNUAL_DIVIDEND_FINGERPRINT = "annual_dividend_fingerprint"
         
@@ -158,7 +160,10 @@ class DashboardPreferencesManager(context: Context) {
             sortOrder = sortOrderOf(prefs.getString(KEY_SORT_ORDER, null)),
             defaultPeriod = prefs.getString(KEY_DEFAULT_PERIOD, "1M") ?: "1M",
             monthlyExpense = prefs.getString(KEY_MONTHLY_EXPENSE, "5000") ?: "5000",
-            annualDividendCache = prefs.getFloat(KEY_ANNUAL_DIVIDEND_CACHE, 0f).toDouble(),
+            // 优先读字符串版（精度完整）；旧安装只有 Float 版，回退读取，下次写入即升级
+            annualDividendCache = prefs.getString(KEY_ANNUAL_DIVIDEND_CACHE_V2, null)
+                ?.toDoubleOrNull()
+                ?: prefs.getFloat(KEY_ANNUAL_DIVIDEND_CACHE, 0f).toDouble(),
             annualDividendSymbols = prefs.getStringSet(KEY_ANNUAL_DIVIDEND_SYMBOLS, emptySet())?.toSet()
                 ?: emptySet(),
             annualDividendFingerprint = prefs.getString(KEY_ANNUAL_DIVIDEND_FINGERPRINT, "") ?: ""
@@ -187,9 +192,10 @@ class DashboardPreferencesManager(context: Context) {
             putString(KEY_SORT_ORDER, preferences.sortOrder.name)
             putString(KEY_DEFAULT_PERIOD, preferences.defaultPeriod)
             putString(KEY_MONTHLY_EXPENSE, preferences.monthlyExpense)
-            // 用 Float 存：SharedPreferences 没有 putDouble。分红金额到百万级时
-            // Float 的 7 位有效数字仍够用，且这里只用于「先显示旧值、后台再校准」
-            putFloat(KEY_ANNUAL_DIVIDEND_CACHE, preferences.annualDividendCache.toFloat())
+            // 用字符串存 Double：SharedPreferences 没有 putDouble，Float 只有 7 位有效数字，
+            // 首页与持仓页对同一份缓存会差 1 分。旧 Float 键保留不删（老版本回退用），
+            // 读侧优先新键（见 loadPreferences）。
+            putString(KEY_ANNUAL_DIVIDEND_CACHE_V2, preferences.annualDividendCache.toString())
             putStringSet(KEY_ANNUAL_DIVIDEND_SYMBOLS, preferences.annualDividendSymbols)
             putString(KEY_ANNUAL_DIVIDEND_FINGERPRINT, preferences.annualDividendFingerprint)
             apply()
@@ -211,6 +217,7 @@ class DashboardPreferencesManager(context: Context) {
      * 从而保证「只动我改的字段、其余原样保留」。所有写者都走这里，就能从根上消除
      * 「共享整块偏好互相踩踏」这一类 bug，而不必每个 VM 各写一遍 reload+merge、漏一个就出事。
      */
+    @Synchronized
     fun updatePreferences(mutate: (DashboardPreferences) -> DashboardPreferences): DashboardPreferences {
         val fresh = loadPreferences()
         val updated = mutate(fresh)

@@ -13,6 +13,7 @@ import com.example.stockdiary.data.importer.filterDustByValue
 import com.example.stockdiary.data.importer.mergeEarnIntoBalances
 import com.example.stockdiary.data.importer.priceKeyFor
 import com.example.stockdiary.data.sync.AssetSyncManager
+import com.example.stockdiary.data.sync.refreshTodaySnapshotAfterImport
 import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.di.AppContainer
 import com.example.stockdiary.network.BinanceAccountAPI
@@ -306,6 +307,8 @@ open class BinanceImportViewModel(
                 "币安导入后行情同步：成功 ${result.successCount}，失败 ${result.failedCount}",
                 "BinanceImportVM"
             )
+            // 导入改了资产集合：历史页只读快照，不刷新的话「今天」还停在导入前
+            refreshTodaySnapshotAfterImport(repository, result.successCount, "BinanceImportVM")
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {

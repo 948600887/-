@@ -151,6 +151,9 @@ fun SettingsScreen(
     // 后台任务或系统设置改过状态后，页面要能反映真实值
     LaunchedEffect(Unit) {
         viewModel.refreshPriceSyncState()
+        // 偏好副本只在 VM 构造时读过一次：从持仓页改完排序切过来时，
+        // 不重读就会把旧 sortOrder/defaultPeriod 写回去。
+        viewModel.reloadDashboardPreferences()
     }
 
     LaunchedEffect(uiState.errorMessage) {

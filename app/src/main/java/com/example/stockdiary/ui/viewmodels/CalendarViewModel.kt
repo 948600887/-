@@ -52,7 +52,16 @@ class CalendarViewModel(
         val calendarData: Map<LocalDate, Double> = emptyMap(),
         val dividendDates: Set<LocalDate> = emptySet(),
         val dividends: List<Pair<String, List<DividendRecord>>> = emptyList(),
+        /** 日历/分红用的资产（只含股票、基金、存款——它们才可能有分红/利息） */
         val assets: List<Asset> = emptyList(),
+        /**
+         * FIRE 计算器用的**全量资产**（含加密货币与负债）。
+         *
+         * 不能复用 [assets]：那份被裁成 STOCK/FUND/BANK_DEPOSIT，传给 FIRE 会漏掉负债
+         * （负债恒 0）和加密货币，净资产、收入率、目标全错。按需加载（进页/打开计算器时），
+         * 不参与日历签名去重，避免每次价格跳动都重组整页。
+         */
+        val fireAssets: List<Asset> = emptyList(),
         val isLoading: Boolean = true,
         /**
          * 手动刷新中（顶栏刷新按钮转圈、按钮置灰）。
@@ -125,6 +134,7 @@ class CalendarViewModel(
                 val nextMidnight = LocalDate.now().plusDays(1).atStartOfDay()
                 delay(Duration.between(now, nextMidnight).toMillis() + 1000)
                 if (generatedOnDate == LocalDate.now()) continue
+                rollMonthIfFollowingToday()
                 generateCalendarData(_uiState.value.assets)
             }
         }
@@ -136,21 +146,82 @@ class CalendarViewModel(
      * 保证用户切回日历页看到的第一眼就是新一天的数。
      */
     fun onScreenResumed() {
+        // 先把「今天」格刷成当前实时值：日历数据是按实时价生成后被签名去重冻结的，
+        // 别页刷新落了新价，回前台/回 Tab 时这里必须跟上，否则今天格与首页差一截。
+        refreshLiveAssets()
         if (generatedOnDate != null && generatedOnDate != LocalDate.now()) {
+            rollMonthIfFollowingToday()
             viewModelScope.launch { generateCalendarData(_uiState.value.assets) }
         }
     }
 
     /**
-     * 日历输出真正依赖的资产字段签名：symbol（取哪些分红）、balance（收支日历折算金额）、
-     * currency（外币换算）。**不含 currentPrice/lastSyncTime 等实时字段**——它们变了不触发重算
-     * （见 init 里的 distinctUntilChanged）：一次全量刷新会让 Room 流重发 20+ 次，每轮重算都要
-     * 预热分红缓存，纯属浪费。代价是「今天」一格的实时净值以最后一次重算为准，价格抖动后可能
-     * 短暂落后于资产页；切 Tab / 切月 / 下拉刷新都会按最新价重算补齐（今日实时口径见
-     * [buildAssetCalendarMonth]）。
+     * 跨月午夜：如果用户看的就是「生成那天所在的月份」，自动翻到新的当月。
+     *
+     * 否则 10/31 挂机到 11/1，页面还停在 10 月，11/1 那格永远是「暂无数据」；
+     * 用户手动翻去看历史月份时不能动他的视图，所以只在「当前月 = 旧今天所在月」时翻。
      */
-    private fun calendarSignature(assets: List<Asset>): List<Triple<String?, Double, String>> =
-        assets.map { Triple(it.symbol, it.balance, it.currency) }
+    private fun rollMonthIfFollowingToday() {
+        val generated = generatedOnDate ?: return
+        val nowMonth = YearMonth.now()
+        val state = _uiState.value
+        if (state.currentMonth == YearMonth.from(generated) && state.currentMonth != nowMonth) {
+            _uiState.update { it.copy(currentMonth = nowMonth, selectedDate = null) }
+        }
+    }
+
+    /**
+     * 拉一次**全量资产**（含加密货币与负债），供 FIRE 与「今天」格使用。
+     *
+     * 两件事：
+     * 1. 填 [UiState.fireAssets]——FIRE 不能拿裁剪后的日历资产，否则负债恒 0、加密不计；
+     * 2. 用实时净资产覆盖当前月的「今天」格——日历签名去重不含价格，别页同步落价后，
+     *    本页常驻进程里今天格不会自己更新（切 Tab 也只是重跑生成，价格仍是签名外的旧值）。
+     *
+     * 只查一次 Room、只改今天一个格子，不触发分红抓取，开销可以忽略。
+     */
+    fun refreshLiveAssets() {
+        viewModelScope.launch {
+            try {
+                val all = withContext(Dispatchers.IO) { assetRepository.getAllAssets().first() }
+                val liveNetAssets = all.filter { !it.type.isLiability }.sumOf { it.totalValueCny } -
+                    all.filter { it.type.isLiability }.sumOf { it.totalValueCny }
+                val today = LocalDate.now()
+                _uiState.update { state ->
+                    val todayInView = today.year == state.currentMonth.year &&
+                        today.monthValue == state.currentMonth.monthValue
+                    val data = if (state.selectedTab == "资产日历" &&
+                        todayInView &&
+                        state.calendarData.isNotEmpty()
+                    ) {
+                        state.calendarData + (today to liveNetAssets)
+                    } else {
+                        state.calendarData
+                    }
+                    state.copy(fireAssets = all, calendarData = data)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                AppLogger.e("刷新日历实时资产失败: ${e.message}", e, "CalendarVM")
+            }
+        }
+    }
+
+    /**
+     * 日历输出真正依赖的资产字段签名：symbol（取哪些分红）、type、balance（收支日历折算金额）、
+     * currency（外币换算）、interestRate / millionCopiesIncome（FIRE 的年化收入来自这里）。
+     *
+     * **不含 currentPrice/lastSyncTime 等实时字段**——它们变了不触发整轮重算
+     * （见 init 里的 distinctUntilChanged）：一次全量刷新会让 Room 流重发 20+ 次，每轮重算都要
+     * 预热分红缓存，纯属浪费。今天那格的实时价改由 [refreshLiveAssets] 单独补，开销只有一次
+     * Room 查询。
+     */
+    private fun calendarSignature(assets: List<Asset>): String =
+        assets.sortedBy { it.id }.joinToString(";") { asset ->
+            "${asset.symbol}|${asset.type}|${asset.balance}|${asset.currency}|" +
+                "${asset.interestRate}|${asset.millionCopiesIncome}"
+        }
 
     private fun loadDividendIncome(assets: List<Asset>) {
         if (assets.isEmpty()) return

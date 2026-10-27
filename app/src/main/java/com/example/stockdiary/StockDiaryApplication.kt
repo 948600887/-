@@ -3,6 +3,7 @@ package com.example.stockdiary
 import android.app.Application
 import com.example.stockdiary.data.sync.PriceSyncScheduler
 import com.example.stockdiary.data.sync.SnapshotScheduler
+import com.example.stockdiary.data.sync.shouldCreateAutoSnapshot
 import com.example.stockdiary.di.AppContainer
 import com.example.stockdiary.network.FundAPI
 import com.example.stockdiary.network.UnifiedPriceService
@@ -15,6 +16,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import java.time.LocalDate
 import java.time.temporal.ChronoUnit
@@ -210,6 +212,21 @@ class StockDiaryApplication : Application() {
     private suspend fun fillMissingSnapshots() {
         try {
             val repository = container.assetRepository
+            // 冷启动补快照也要过「价格新鲜度」门槛，与 SnapshotWorker 同一套规则：
+            // 刚导入、刚改过持仓而行情还没刷时，当前价可能是 0/旧的——无条件建今日快照
+            // 会把这组值固化进历史，而 SnapshotWorker 见「今天已有」又会跳过修正。
+            val assets = repository.getAllAssets().first()
+            if (assets.none { !it.type.isLiability }) {
+                AppLogger.i("无持仓，跳过补快照", "StockDiaryApplication")
+                return
+            }
+            if (!shouldCreateAutoSnapshot(assets, System.currentTimeMillis())) {
+                AppLogger.i(
+                    "多数标的价格不新鲜（未同步/刚导入），跳过补今日快照，避免固化旧价",
+                    "StockDiaryApplication"
+                )
+                return
+            }
             // 只读最新一条快照（按 timestamp DESC LIMIT 1），而不是把整张快照表都 load 进内存
             // —— 冷启动时这张表可能已有数百行，只为拿「最后一条日期」而全表读取纯属浪费。
             val latestSnapshot = repository.getLatestSnapshot()

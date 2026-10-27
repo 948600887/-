@@ -9,6 +9,7 @@ import androidx.lifecycle.viewmodel.viewModelFactory
 import androidx.lifecycle.viewModelScope
 import com.example.stockdiary.data.repository.AssetRepository
 import com.example.stockdiary.data.sync.AssetSyncManager
+import com.example.stockdiary.data.sync.refreshTodaySnapshotAfterImport
 import com.example.stockdiary.data.importer.FundEStatementParser
 import com.example.stockdiary.data.importer.FundSnapshotParser
 import com.example.stockdiary.data.importer.HoldingSnapshotParser
@@ -349,6 +350,8 @@ open class HoldingSnapshotViewModel(
                     if (result.truncatedByTimeLimit) append("（已到时间上限，剩下的下次再同步）")
                 }
                 updateState { state -> state.copy(syncing = false, syncMessage = message) }
+                // 导入改了资产集合：历史页只读快照，这里补一次当日快照，避免「今天」停在导入前
+                refreshTodaySnapshotAfterImport(repository, result.successCount, "HoldingSnapshotVM")
             } catch (e: CancellationException) {
                 // 取消（退后台 onStop / VM 销毁）时 rethrow 会跳出本 try，而本方法没有 finally，
                 // syncing 会卡在 true、导入页同步态永久转圈——补一次复位（铁律：取消照旧重抛，不做吞）

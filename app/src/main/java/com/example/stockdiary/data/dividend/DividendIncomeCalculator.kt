@@ -23,17 +23,27 @@ fun daysInYear(date: LocalDate): Int = Year.of(date.year).length()
 fun daysInCurrentYear(): Int = daysInYear(LocalDate.now())
 
 /**
- * 分红/利息收入的**输入指纹**：代码（存款无代码时用 id）+ 持仓数量 + 存款利率。
+ * 分红/利息收入的**输入指纹**：代码（存款无代码时用 id）+ 持仓数量 + 存款利率 +
+ * 货币基金万份收益 + 币种 + **当前年份**。
  *
  * 用来判断持久化缓存是否还代表「这一批资产」。只比对代码集合是不够的：
  * 年化收入 = 持仓数量 × 每股分红，**加仓不会改变代码集合**，银行存款更是 `symbol = null`，
  * 改余额/利率同样不改集合——缓存就会被当成仍然有效，界面上一直显示旧收入。
+ *
+ * 补上后面三项，是因为它们都能单独改变年化金额：
+ * - `millionCopiesIncome`：货基的万份收益每天会变，缺了它货基收入永远停在旧值；
+ * - `currency`：外币标的换汇后金额变化；
+ * - 年份：年化天数按自然年取（365/366），跨年时缓存必须作废。
+ *
  * 数组排序后再拼接，保证同一批资产无论顺序如何都得到同一个指纹。
  */
-fun dividendInputFingerprint(assets: List<Asset>): String =
-    assets.map { asset ->
-        "${asset.symbol ?: "id:${asset.id}"}|${asset.balance}|${asset.interestRate ?: 0.0}"
+fun dividendInputFingerprint(assets: List<Asset>): String {
+    val year = LocalDate.now().year
+    return assets.map { asset ->
+        "${asset.symbol ?: "id:${asset.id}"}|${asset.balance}|${asset.interestRate ?: 0.0}|" +
+            "${asset.millionCopiesIncome ?: 0.0}|${asset.currency}|$year"
     }.sorted().joinToString(",")
+}
 
 /**
  * 股息收益计算器

@@ -62,11 +62,11 @@ class PriceSyncWorker(
             val inTradingHours = SyncStrategy.isInTradingHours()
             val stockIntradaySync = prefs.isStockIntradaySyncEnabled()
             val cryptoAutoSync = prefs.isCryptoAutoSyncEnabled()
-            val assets = repository.getAllAssets().first()
-                .filter {
-                    (it.type == AssetType.STOCK || it.type == AssetType.FUND || it.type == AssetType.CRYPTO) &&
-                        SyncStrategy.shouldAutoSyncType(it.type, inTradingHours, stockIntradaySync, cryptoAutoSync)
-                }
+            val allAssets = repository.getAllAssets().first()
+            val assets = allAssets.filter {
+                (it.type == AssetType.STOCK || it.type == AssetType.FUND || it.type == AssetType.CRYPTO) &&
+                    SyncStrategy.shouldAutoSyncType(it.type, inTradingHours, stockIntradaySync, cryptoAutoSync)
+            }
 
             if (assets.isEmpty()) {
                 // 本轮被偏好/时段全部过滤掉（典型：盘中 + 两个开关都关）：正常跳过，
@@ -76,6 +76,9 @@ class PriceSyncWorker(
                         "（交易时段=$inTradingHours, 盘中同步股票=$stockIntradaySync, 自动同步加密=$cryptoAutoSync）",
                     "PriceSyncWorker"
                 )
+                // 分红到账提醒是独立提醒，不该被「盘中不刷股票」这类价格同步开关连坐：
+                // 交易日白天到账的分红，原先要等到收盘后才通知。用同一份全量资产再判一次。
+                notifyTodayDividends(applicationContext, allAssets)
                 rescheduleIfEnabled()
                 return Result.success()
             }
@@ -127,7 +130,8 @@ class PriceSyncWorker(
                 // 走统一策略：截断（时间预算跑满）的轮次不写快照——那会把「部分新价 + 部分旧价」
                 // 固化成当日净值。与手动刷新共用 [SyncSnapshotPolicy]，避免两处判定再次漂移。
                 saveTodaySnapshotIfEligible(repository, result, "PriceSyncWorker")
-                notifyTodayDividends(applicationContext, assets)
+                // 用全量资产判分红：assets 已被价格同步开关过滤，拿它判会漏掉当天的派息提醒
+                notifyTodayDividends(applicationContext, allAssets)
                 // 跑完一轮后按「此时是否交易时段」重排下一次间隔（15分钟 ↔ 4小时自适应），
                 // 否则间隔永远是上次 App 启动那一刻算出的值，智能间隔形同虚设
                 rescheduleIfEnabled()

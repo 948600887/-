@@ -129,6 +129,11 @@ fun DashboardScreen(
         onDispose { dashboardLifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
+    // 底栏切 Tab 不会触发 Activity 的 ON_RESUME，只靠上面的 DisposableEffect 会漏掉
+    // 「设置页改完开关直接切回首页」这条路径（内存副本还是构造期那份）。
+    // 这里在每次进入该页面（重新组合）时再拉一次磁盘偏好。
+    LaunchedEffect(Unit) { viewModel.reloadPreferences() }
+
     // 刷新完成一次性事件：用 SharedFlow 收尾，不再依赖会被清掉的持久字段，
     // 连点刷新 / 离开页面再回来都不会重复弹或丢弹（见 DashboardViewModel.syncDone）。
     // replay=0 保证新进场收不到历史事件，extraBufferCapacity=1 让「正在弹时又刷完一次」排队不丢

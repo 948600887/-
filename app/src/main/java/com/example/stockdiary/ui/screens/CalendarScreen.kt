@@ -104,6 +104,10 @@ fun CalendarScreen(
     val dividendWarning by viewModel.dividendWarning.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
 
+    // 进页补一次全量实时资产：FIRE 需要负债/加密货币（日历那份资产被裁过），
+    // 「今天」格需要最新价（日历签名去重不含价格）。只查一次 Room，不触发分红抓取。
+    LaunchedEffect(Unit) { viewModel.refreshLiveAssets() }
+
     // 天天基金限流提示：手动刷新撞 514 时，部分场外基金分红没抓全，给个非阻塞 Snackbar + 可稍后重试。
     // 与下面的 errorMessage（ErrorMessagCard，代表「同步失败」）分开，避免混淆。
     LaunchedEffect(dividendWarning) {
@@ -159,7 +163,11 @@ fun CalendarScreen(
                 isRefreshing = uiState.isRefreshing,
                 canRefresh = !isLoading,
                 onRefresh = viewModel::refresh,
-                onFireClick = { showFireDialog = true }
+                // 打开计算器前再拉一次全量资产，保证按当前价/当前负债算
+                onFireClick = {
+                    viewModel.refreshLiveAssets()
+                    showFireDialog = true
+                }
             )
 
             CalendarCard(
@@ -202,7 +210,8 @@ fun CalendarScreen(
 
     if (showFireDialog) {
         FireCalculationDialog(
-            assets = assets,
+            // FIRE 必须用全量资产（含负债与加密货币）；刚进页尚未加载完时先退回日历资产
+            assets = uiState.fireAssets.ifEmpty { assets },
             realAnnualIncome = realAnnualIncome,
             monthlyExpense = monthlyExpense,
             onDismiss = { showFireDialog = false },

@@ -35,7 +35,7 @@ import java.time.format.DateTimeFormatter
 
 class HistoryViewModel(
     private val assetRepository: AssetRepository,
-    dashboardPreferencesManager: DashboardPreferencesManager
+    private val dashboardPreferencesManager: DashboardPreferencesManager
 ) : ViewModel() {
 
     companion object {
@@ -75,6 +75,9 @@ class HistoryViewModel(
     val uiState: StateFlow<UiState> = _uiState.asStateFlow()
 
     private val _selectedPeriod = MutableStateFlow(defaultPeriod)
+
+    /** 用户是否在本次会话内手动选过周期；选过就不再被「默认周期」覆盖（见 [reloadDefaultPeriod]） */
+    private var periodChosenByUser = false
 
     private val dateFormatter = DateFormats.ISO_DATE_FORMATTER
 
@@ -120,7 +123,31 @@ class HistoryViewModel(
     }
 
     fun selectPeriod(period: String) {
+        // 用户在本页手动选过周期后，本次会话内不再被「默认周期」覆盖
+        periodChosenByUser = true
         _selectedPeriod.value = period
+    }
+
+    /**
+     * 重读设置页的「默认历史周期」。
+     *
+     * 本 VM 挂 Activity 作用域、默认周期只在构造时读一次；用户在设置里改了默认周期后，
+     * 进历史页仍是旧值，必须杀进程才生效。每次进入历史页调一次即可。
+     * 用户已经在本次会话内手动点过周期 chip 的，不覆盖他的选择。
+     */
+    fun reloadDefaultPeriod() {
+        if (periodChosenByUser) return
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val period = dashboardPreferencesManager.loadPreferences().defaultPeriod
+                    .takeIf { it in VALID_PERIODS } ?: "1M"
+                if (!periodChosenByUser) _selectedPeriod.value = period
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                AppLogger.e("重读默认历史周期失败: ${e.message}", e, "HistoryVM")
+            }
+        }
     }
 
     fun saveSnapshot() {

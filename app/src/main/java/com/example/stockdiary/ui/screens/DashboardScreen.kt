@@ -252,6 +252,7 @@ fun DashboardScreen(
                             totalLiabilities = totalLiabilities,
                             netAssets = netAssets,
                             realAnnualIncome = realAnnualIncome,
+                            estimatedDailyDividend = uiState.estimatedDailyDividend,
                             dividendLoading = dividendLoading,
                             incomeCalculationStatus = incomeCalculationStatus
                         )

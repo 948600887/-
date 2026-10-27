@@ -42,10 +42,10 @@ fun TotalAssetCard(
     totalLiabilities: Double,
     netAssets: Double,
     realAnnualIncome: Double,
+    estimatedDailyDividend: Double,
     dividendLoading: Boolean,
     incomeCalculationStatus: String? = null
 ) {
-    val estimatedDailyDividend = realAnnualIncome / 365
     val realYield = if (totalAssets > 0) (realAnnualIncome / totalAssets) * 100 else 0.0
 
     Card(

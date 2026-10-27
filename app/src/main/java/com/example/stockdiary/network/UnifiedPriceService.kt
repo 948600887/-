@@ -226,7 +226,22 @@ object UnifiedPriceService {
      * 但 URL 不能无限长（过长会被中间节点拒 / HTTP 414）。取 60：真实组合 129 个加密标的
      * → 2~3 次请求；即便上千标的也是十几次，远比逐标的划算。
      */
-    private const val CRYPTO_BATCH_SYMBOLS = 60
+    internal const val CRYPTO_BATCH_SYMBOLS = 60
+
+    /**
+     * 整片返回 400 时的**切小重试**子片大小。
+     *
+     * 400 = 非法符号，且币安对「含任一非法 symbol」的整批直接 400——于是用户组合里
+     * 长期存在的填错 symbol（LDSHIB2 / LD1MBBDOGE…）会让它所在的整片（最多 60 个）
+     * **每轮**都被打回逐标的，批量预取的收益被长期吃掉一块。
+     *
+     * 故整片 400 时按本常量切成子片重试**一层**：把「一个坏码拖累 60 个」降级成
+     * 「只拖累它所在子片（最多 10 个）」。取 10 是请求数与连带损失的折中——
+     * 再小（如 1）请求数会退回逐标的数量级，失去批量意义。
+     *
+     * ⚠️ 只切**一层**、不递归：子片再失败就直接回落逐标的（见 [prewarmCryptoPrices]）。
+     */
+    internal const val CRYPTO_BATCH_RETRY_SYMBOLS = 10
 
     /**
      * 批量预取加密货币行情（走币安批量端点，N 个标的 ≈ ⌈N/[CRYPTO_BATCH_SYMBOLS]⌉ 次请求）。
@@ -255,8 +270,14 @@ object UnifiedPriceService {
      * ## 失败语义（照抄 [prewarmStockPrices]）：绝不放大请求量
      *
      * 某片失败 / 非 2xx / 解析为空时，该片对应的 code **不进 map**，让它们回落逐标的
-     * [getCryptoPrice] 原路径；整体仍返回成功（partial 也算成功），且**不重试整片**
-     * ——重试会把请求量放大回去，与批量预取的目的相悖。
+     * [getCryptoPrice] 原路径；整体仍返回成功（partial 也算成功）。
+     *
+     * **唯一例外是 HTTP 400**：币安对「含任一非法 symbol」的整批直接 400，而用户组合里
+     * 填错的 symbol（LDSHIB2 / LD1MBBDOGE…）是长期存在的，会让它所在的整片（最多
+     * [CRYPTO_BATCH_SYMBOLS] 个）**每轮**都被打回逐标的、长期吃掉批量收益。故整片 400 时
+     * 按 [CRYPTO_BATCH_RETRY_SYMBOLS] 个一片**切小重试一层**，把「一个坏码拖累 60 个」
+     * 降级成「只拖累它所在子片（最多 10 个）」。子片再失败就回落，**不递归**。
+     * 5xx / 451 / 429 / 网络异常一律不重试——那是源或网络层面的问题，重试只会放大请求量。
      *
      * ## 熔断口径（照抄 [getCryptoPrice]）：一次预取只记一次
      *
@@ -345,23 +366,60 @@ object UnifiedPriceService {
         var sawRegionBlocked = false
         var sawTransient = false
 
+        /**
+         * 记一次片级失败。**只置标记、不直接调熔断器**——整轮结束时统一记一次
+         * （见下方 when），保证「一次预取只记一次成败」的语义不被重试打破。
+         */
+        fun noteFailure(type: FailureType?) {
+            when (type) {
+                FailureType.REGION_BLOCKED -> sawRegionBlocked = true
+                FailureType.TRANSIENT -> sawTransient = true
+                null -> Unit // 400/5xx/解析失败：与 getCryptoPrice 同口径，不喂熔断器
+            }
+        }
+
+        /**
+         * 把一片的报价回填到 [resultMap]，只处理 [scope]（本次请求的交易对）内的 code。
+         * 查不到报价的交易对（币安没返回）不进 map，回落逐标的。
+         */
+        fun applyQuotes(quotes: Map<String, CryptoQuote>, scope: Set<String>) {
+            for ((code, pair) in codeToPair) {
+                val p = pair.uppercase()
+                if (p !in scope) continue
+                val quote = quotes[p] ?: continue
+                resultMap[code] = AssetPrice.Crypto(quote.toCryptoData(code))
+            }
+        }
+
         for (shard in pairsToFetch.chunked(CRYPTO_BATCH_SYMBOLS)) {
             val fetched = fetchCryptoTickerShard(shard, client)
-            val quotes = fetched.quotes
-            if (quotes == null) {
-                // 本片失败：对应 code 不进 map，回落逐标的。不重试整片（见函数文档）。
-                when (fetched.failureType) {
-                    FailureType.REGION_BLOCKED -> sawRegionBlocked = true
-                    FailureType.TRANSIENT -> sawTransient = true
-                    null -> Unit // 400/5xx/解析失败：与 getCryptoPrice 同口径，不喂熔断器
+            if (fetched.quotes != null) {
+                applyQuotes(fetched.quotes, shard.toHashSet())
+                continue
+            }
+
+            // 整片失败。只有 **400（非法符号）** 值得切小重试——5xx/451/429/网络异常
+            // 是源或网络层面的问题，重试只会放大请求量，一律不重试。
+            if (fetched.httpCode == 400) {
+                AppLogger.w(
+                    "加密货币批量行情整片 400（${shard.size} 个交易对），" +
+                        "按 $CRYPTO_BATCH_RETRY_SYMBOLS 个一片切小重试一次",
+                    TAG
+                )
+                for (subShard in shard.chunked(CRYPTO_BATCH_RETRY_SYMBOLS)) {
+                    val subFetched = fetchCryptoTickerShard(subShard, client)
+                    if (subFetched.quotes != null) {
+                        applyQuotes(subFetched.quotes, subShard.toHashSet())
+                    } else {
+                        // 子片仍失败：直接回落逐标的，**不再往下切**（只切一层，不递归）
+                        noteFailure(subFetched.failureType)
+                    }
                 }
                 continue
             }
-            // 逐 code 回填：查不到报价的交易对（币安没返回）同样不进 map，回落逐标的
-            for ((code, pair) in codeToPair) {
-                val quote = quotes[pair.uppercase()] ?: continue
-                resultMap[code] = AssetPrice.Crypto(quote.toCryptoData(code))
-            }
+
+            // 非 400 的整片失败：对应 code 不进 map，回落逐标的，不重试
+            noteFailure(fetched.failureType)
         }
 
         // 整轮只记一次成败：地区封锁优先于瞬断（语义更重）
@@ -418,10 +476,13 @@ object UnifiedPriceService {
      * @param quotes 解析出的 `交易对 -> 报价`；null = 本片失败，对应 code 应回落逐标的
      * @param failureType 失败时要喂给 [BinanceHostGate] 的类型；null = 不喂
      *   （400 / 5xx / 解析为空，与 [getCryptoPrice] 同口径：只有地区封锁与网络异常才记账）
+     * @param httpCode 失败时的 HTTP 状态码；null = 网络异常或解析为空。
+     *   **只有 400 才值得切小重试**（见 [prewarmCryptoPrices]），故单独带出来。
      */
     private data class ShardFetch(
         val quotes: Map<String, CryptoQuote>?,
-        val failureType: FailureType?
+        val failureType: FailureType?,
+        val httpCode: Int? = null
     )
 
     /**
@@ -451,7 +512,7 @@ object UnifiedPriceService {
                     )
                     // 451/403 = 地区封锁（主机可达但本用户用不了）；400/5xx 不喂熔断器
                     val type = if (resp.code == 451 || resp.code == 403) FailureType.REGION_BLOCKED else null
-                    ShardFetch(null, type)
+                    ShardFetch(null, type, resp.code)
                 } else {
                     val quotes = parseBinanceTickerArray(body)
                     if (quotes.isEmpty()) {

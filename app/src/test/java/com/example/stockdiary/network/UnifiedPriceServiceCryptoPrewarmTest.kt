@@ -201,6 +201,69 @@ class UnifiedPriceServiceCryptoPrewarmTest {
         assertEquals(67000.0, single.getOrNull()!!.price, 1e-9)
     }
 
+    // ---------- 5. 整片 400：切小重试一层 ----------
+
+    @Test
+    fun `整片400时切成子片重试_合法标的仍从子片拿到价`() = runBlocking {
+        // 10 个合法 + 1 个非法（放最后，使其单独落在一个子片里）。
+        // 币安对「含任一非法 symbol」的整批直接 400：若不重试，10 个合法标的会被这一个
+        // 坏码拖累、全部回落逐标的；切小重试后它们照常拿到价。
+        val valid = (1..10).map { "TOK$it" }
+        val invalidCode = "LDSHIB2"            // 库里存的 symbol（理财壳 + 填错的码）
+        val invalidPair = "SHIB2USDT"          // 归一化后实际要查的交易对
+        val client = recordingClient { req ->
+            val asked = symbolsOf(req.url.toString())
+            if (invalidPair in asked) {
+                respond(400, """{"code":-1121,"msg":"Invalid symbol."}""", req)
+            } else {
+                respond(200, tickers(*asked.map { it to "100" }.toTypedArray()), req)
+            }
+        }
+
+        val map = UnifiedPriceService.prewarmCryptoPrices(
+            valid + invalidCode,
+            forceRefresh = true,
+            client = client
+        ).getOrNull()!!
+
+        // 10 个合法标的全部从子片拿到价（不再被整片拖累）
+        assertEquals(10, map.size)
+        valid.forEach { assertEquals("$it 应拿到价", 100.0, priceOf(map, it), 1e-9) }
+        assertTrue("非法 symbol 不应进 map（回落逐标的）", invalidCode !in map)
+        // 1 次整片 + 2 次子片（10 + 1）
+        assertEquals("整片 400 应切成 2 个子片重试：共 3 次请求", 3, requestCount.get())
+    }
+
+    @Test
+    fun `重试只切一层不递归_请求次数有硬上限`() = runBlocking {
+        // 60 个**全部非法**的 symbol：整片 400 → 切 6 个子片 → 子片全部 400 后直接回落。
+        // 若哪天被改成递归二分，请求数会炸到几十上百；这里钉死上限 = 1 + ⌈60/10⌉ = 7。
+        val codes = (1..60).map { "BAD$it" }
+        val client = recordingClient { req -> respond(400, """{"code":-1121,"msg":"Invalid symbol."}""", req) }
+
+        val map = UnifiedPriceService.prewarmCryptoPrices(codes, forceRefresh = true, client = client)
+            .getOrNull()!!
+
+        assertTrue("全部非法时不应有任何标的进 map", map.isEmpty())
+        // 常量声明在 object UnifiedPriceService 内部，跨文件引用必须带对象限定名
+        val retrySize = UnifiedPriceService.CRYPTO_BATCH_RETRY_SYMBOLS
+        val upperBound = 1 + (codes.size + retrySize - 1) / retrySize
+        val actual = requestCount.get()
+        assertEquals("请求数应为 1 次整片 + 6 次子片", upperBound, actual)
+        val withinBudget: Boolean = actual <= upperBound
+        assertTrue(
+            "请求数必须收敛在「1 + 子片数」以内，不得递归爆炸：实际 $actual > $upperBound",
+            withinBudget
+        )
+    }
+
+    /** 从批量请求 URL 里解出本次请求的 symbols 列表 */
+    private fun symbolsOf(url: String): List<String> {
+        val decoded = URLDecoder.decode(url, "UTF-8")
+        val json = decoded.substringAfter("symbols=", "").substringBefore("&")
+        return Regex("\"([A-Za-z0-9]+)\"").findAll(json).map { it.groupValues[1] }.toList()
+    }
+
     // ---------- helpers ----------
 
     /** 记录请求次数与最后一次 URL 的假客户端 */

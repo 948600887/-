@@ -172,4 +172,51 @@ class LogDiagnosticsTest {
         assertEquals("", kept)
         assertEquals(0, dropped)
     }
+
+    // ---------- 崩溃段 UI 截断：长堆栈不能拖垮渲染 ----------
+
+    private fun longCrash(stackLines: Int = 500): String {
+        val stack = (1..stackLines).joinToString("\n") { "at pkg.Class.method(File.java:$it)" }
+        return "=== Crash Report ===\nTime: t\nApp Version: 1.0.0(11)\nDevice: x\n\nException: X\n\nStack Trace:\n$stack"
+    }
+
+    @Test
+    fun 崩溃段UI截断_保留头部元数据_只截堆栈尾部() {
+        // 界面传较小 crashMaxLines，长堆栈只留尾部，但版本/机型等元数据必须还在
+        val text = LogDiagnostics.composeReport(
+            report(crashes = listOf("crash_001.log" to longCrash())),
+            crashMaxLines = 300
+        )
+        assertTrue("头部元数据要保留: $text", text.contains("=== Crash Report ==="))
+        assertTrue("版本信息要保留: $text", text.contains("App Version: 1.0.0(11)"))
+        assertTrue("Stack Trace 分隔要保留: $text", text.contains("Stack Trace:"))
+        // 堆栈头部（line1）被截掉，尾部（line500）保留
+        assertTrue("堆栈头部该被截掉: $text", !text.contains("File.java:1)"))
+        assertTrue("堆栈尾部要保留: $text", text.contains("File.java:500)"))
+        // 必须明确标注「分享才是完整版、界面只显示尾部」：用稳定的「共省略」「完整堆栈」子串验证
+        assertTrue("要标注截断+完整版: $text", text.contains("共省略") && text.contains("完整堆栈"))
+    }
+
+    @Test
+    fun 崩溃段无StackTrace分隔时不截断() {
+        // 没有 "Stack Trace:" 分隔（或本身就短）：原样返回，不做破坏性截断
+        val crash = "=== Crash Report ===\nTime: t\nShort message"
+        val text = LogDiagnostics.composeReport(
+            report(crashes = listOf("crash_001.log" to crash)),
+            crashMaxLines = 300
+        )
+        assertTrue(text.contains("Short message"))
+        assertTrue("不该出现省略标注: $text", !text.contains("分享出去的是完整堆栈"))
+    }
+
+    @Test
+    fun 分享出口不传crashMaxLines_完整保留() {
+        // 不传 crashMaxLines → 默认 Int.MAX_VALUE，分享出去必须是完整堆栈
+        val text = LogDiagnostics.composeReport(
+            report(crashes = listOf("crash_001.log" to longCrash()))
+        )
+        assertTrue("堆栈头部要完整: $text", text.contains("File.java:1)"))
+        assertTrue("堆栈尾部要完整: $text", text.contains("File.java:500)"))
+        assertTrue("分享路径不该截断标注: $text", !text.contains("分享出去的是完整堆栈"))
+    }
 }

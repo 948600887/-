@@ -415,12 +415,18 @@ class AssetRepository private constructor(
     suspend fun createSnapshot(date: String): AssetSnapshot? {
         return try {
             StockDatabase.getInstance(context).withTransaction {
-                snapshotDao.deleteSnapshotsByDate(date)
+                // 先取持仓、确认非空，才删同日旧行。
+                //
+                // 顺序反过来的后果很隐蔽：从前是先 deleteSnapshotsByDate 再判空，而这里的
+                // return@withTransaction null 只是让 lambda 正常返回、**不会回滚事务**，删除照旧提交
+                // —— 于是清仓后点「保存快照」，当天原本正常的快照被静默抹掉，用户只看到
+                // 「创建快照失败」，历史曲线白白少一个点。
                 val assets = assetDao.getAllAssets().first()
                 if (assets.none { !it.type.isLiability }) {
-                    AppLogger.i("无持仓，不创建快照（避免 0 值空快照污染统计）: $date", "AssetRepository")
+                    AppLogger.i("无持仓，跳过创建快照（不删当天已有行）: $date", "AssetRepository")
                     return@withTransaction null
                 }
+                snapshotDao.deleteSnapshotsByDate(date)
                 val previousSnapshot = snapshotDao.getLatestSnapshot()
                 val snapshot = AssetSnapshot.fromAssets(assets, date, previousSnapshot)
                 val snapshotId = snapshotDao.insertSnapshot(snapshot)

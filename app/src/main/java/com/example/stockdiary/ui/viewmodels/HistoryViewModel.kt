@@ -155,7 +155,10 @@ class HistoryViewModel(
             _uiState.update { it.copy(isSaving = true, saveResult = null, errorMessage = null) }
             val result = runCatching {
                 val today = LocalDate.now().format(dateFormatter)
-                assetRepository.createSnapshot(today) ?: error("创建快照失败")
+                // createSnapshot 在「无持仓」时返回 null 表示**主动跳过**（不再删任何东西），
+                // 文案要说出真实原因，而不是笼统的「创建快照失败」让用户以为系统出错、
+                // 反复重试。真正的失败走 catch，不会走到这里。
+                assetRepository.createSnapshot(today) ?: error("当天没有持仓，未保存快照")
             }.map { }
             // runCatching 会把协程取消也吞掉，必须重新抛出保证取消语义
             result.onFailure { if (it is CancellationException) throw it }

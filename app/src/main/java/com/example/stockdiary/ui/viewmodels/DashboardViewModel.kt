@@ -201,7 +201,24 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
      * 正确性优先于「不闪计算中」。
      */
     fun loadDividendIncome(assetsOnly: List<Asset>) {
-        if (assetsOnly.isEmpty()) return
+        if (assetsOnly.isEmpty()) {
+            // 删光非负债资产（或只剩负债）时必须把收入类数字**清掉**，而不是留着上一批资产的值：
+            // 顶部总资产已经是 0，下面却还挂着旧资产的年化收入 / 每日预估 / 收息进度，
+            // 三个数字互相矛盾。从前这里是直接 return，什么都不写。
+            viewModelScope.launch {
+                _uiState.update {
+                    it.copy(
+                        realAnnualIncome = 0.0,
+                        estimatedDailyDividend = 0.0,
+                        dividendProgress = DividendProgressCalculator.EMPTY,
+                        incomeCalculationStatus = "暂无分红/利息数据",
+                        hasInterestData = false,
+                        dividendLoading = false
+                    )
+                }
+            }
+            return
+        }
 
         val symbols = assetsOnly.mapNotNull { it.symbol }.toSet()
         val fingerprint = dividendInputFingerprint(assetsOnly)

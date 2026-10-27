@@ -14,6 +14,7 @@ import okhttp3.ResponseBody
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -117,15 +118,21 @@ class FundDividendApiServiceFhspBreakerTest {
     fun `fhsp 退避封顶10min`() {
         val t0 = 1_000_000L
         repeat(5) { FundDividendApiService.fhspOnFailure(t0) }
-        // 反复重探失败，把档位推到远超封顶所需的次数
+        // 反复重探失败，把档位推到远超封顶所需的次数；逐次记录「本次实际应用的退避」
         var t = FundDividendApiService.fhspBlockedUntil + 1_000L
+        var lastBackoff = 0L
         repeat(20) {
             FundDividendApiService.fhspOnFailure(t)
+            // 本次 fhspOnFailure 把 blockedUntil 推到 now(=t) + backoff，
+            // 故本次退避 = blockedUntil - t（在更新 t 之前量）。
+            lastBackoff = FundDividendApiService.fhspBlockedUntil - t
             t = FundDividendApiService.fhspBlockedUntil + 1_000L
         }
         // 高档位时单次退避应封顶在 10min + 30% 抖动以内
-        val lastBackoff = FundDividendApiService.fhspBlockedUntil - (t - 1_000L)
         assertTrue("退避应封顶在 10min 内（含抖动）", lastBackoff <= 600_000L + 600_000L / 10 * 3 + 2_000L)
+        // 钉死 #2 溢出回归：旧实现用 `Int shl shift`，shift 较大时溢出为负，
+        // blockedUntil 落到过去、熔断冷却形同虚设。退避必须严格为正。
+        assertTrue("退避必须为正（防 Int 溢出变负，否则熔断失效）", lastBackoff > 0)
     }
 
     @Test
@@ -191,6 +198,21 @@ class FundDividendApiServiceFhspBreakerTest {
         // 成功即自愈：相位回到 CLOSED、降级解除（证明 getFundDividendHistory 确实喂了 fhspOnSuccess）
         assertEquals(false, FundDividendApiService.fhspIsOpenForTesting())
         assertFalse(FundDividendApiService.fhspDegraded)
+        assertEquals(0, FundDividendApiService.fhspConsecutiveForTesting())
+    }
+
+    @Test
+    fun `getFundDividendHistory 命中404按无分红返回_不计入整源熔断`() = runBlocking {
+        // 404 = 该基金代码在天天基金没有 fhsp 页（确定性结论，非源健康度问题）。
+        // 修正 #4 后必须：按无分红成功返回空列表，且绝不把整源熔断相位翻成 OPEN。
+        service.client = okHttpClientReturning(404, "")
+        val result = service.getFundDividendHistory("110011")
+        assertTrue("404 应视为无分红（成功空列表）", result.isSuccess)
+        val list = result.getOrNull()
+        assertNotNull("成功结果不应为 null", list)
+        assertTrue("404 按无分红处理应为空列表", list!!.isEmpty())
+        // 404 是确定性「无此页」，绝不能计入整源熔断
+        assertEquals(false, FundDividendApiService.fhspIsOpenForTesting())
         assertEquals(0, FundDividendApiService.fhspConsecutiveForTesting())
     }
 }

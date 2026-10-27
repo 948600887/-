@@ -37,6 +37,15 @@ import java.io.IOException
 //            §7 写入 §8 旧批量预取 §9 文件级纯函数辅助。
 // ==========================================================================
 
+/**
+ * 分红抓取失败退避窗（指数退避，见 [computeFailureBackoff]）。
+ * 定义为文件级 private，使类内成员与文件级纯函数 [shouldSkipAfterFailure]/[computeFailureBackoff] 均可访问。
+ */
+private const val FAILURE_BACKOFF_BASE_MS = 5L * 60 * 1000            // 首档 5 分钟
+private const val FAILURE_BACKOFF_MAX_MS = 6L * 60 * 60 * 1000        // 封顶 6 小时
+private const val FAILURE_BACKOFF_BASE_MS_NEVER = 1L * 60 * 1000      // 从未成功：首档 1 分钟
+private const val FAILURE_BACKOFF_MAX_MS_NEVER = 1L * 60 * 60 * 1000   // 从未成功：封顶 1 小时
+
 class DividendRepository private constructor(
     private val context: Context
 ) {
@@ -107,19 +116,33 @@ class DividendRepository private constructor(
      */
     private fun markFailed(symbol: String) {
         runCatching {
-            fetchState.edit().putLong(FAILURE_KEY_PREFIX + symbol, System.currentTimeMillis()).apply()
+            val countKey = FAILURE_COUNT_PREFIX + symbol
+            val newCount = fetchState.getInt(countKey, 0) + 1
+            fetchState.edit()
+                .putLong(FAILURE_KEY_PREFIX + symbol, System.currentTimeMillis())
+                .putInt(countKey, newCount)
+                .apply()
         }
     }
 
-    /** 抓取成功即清除失败标记，让它立刻回到正常的 TTL 节奏 */
+    /** 抓取成功即清除失败标记与连续失败计数，让它立刻回到正常的 TTL 节奏 */
     private fun clearFailure(symbol: String) {
-        runCatching { fetchState.edit().remove(FAILURE_KEY_PREFIX + symbol).apply() }
+        runCatching {
+            fetchState.edit()
+                .remove(FAILURE_KEY_PREFIX + symbol)
+                .remove(FAILURE_COUNT_PREFIX + symbol)
+                .apply()
+        }
     }
 
     private fun lastFailedAt(symbol: String): Long? {
         val value = runCatching { fetchState.getLong(FAILURE_KEY_PREFIX + symbol, 0L) }.getOrDefault(0L)
         return value.takeIf { it > 0L }
     }
+
+    /** 该 symbol 连续抓取失败的次数（成功一次即清零） */
+    private fun failureCount(symbol: String): Int =
+        runCatching { fetchState.getInt(FAILURE_COUNT_PREFIX + symbol, 0) }.getOrDefault(0)
 
 // ==========================================================================
 // §3 预取入口 prefetchDividends（批量抓取，冷启动/后台主力路径）
@@ -520,10 +543,9 @@ class DividendRepository private constructor(
          * 每轮各重打一次失败的接口就是请求风暴。所以给失败单独一个短窗：
          * 窗内不重打，过期自动重试；用户点刷新（forceRefresh）随时可以绕过。
          */
-        private const val FAILURE_BACKOFF_TTL = 6L * 60 * 60 * 1000
-
         /** 失败时间戳与「抓过」时间戳共用一份 SP，靠前缀区分，避免多一个文件 */
         private const val FAILURE_KEY_PREFIX = "failed_"
+        private const val FAILURE_COUNT_PREFIX = "failedcnt_"
 
     /**
      * 冷启动允许使用的过期数据上限。
@@ -629,7 +651,10 @@ class DividendRepository private constructor(
             if (shouldSkipAfterFailure(
                     lastFailedAt = lastFailedAt(normalizedSymbol),
                     now = System.currentTimeMillis(),
-                    ttl = FAILURE_BACKOFF_TTL
+                    ttl = computeFailureBackoff(
+                        count = failureCount(normalizedSymbol),
+                        everSucceeded = lastFetchedAt(normalizedSymbol) != null
+                    )
                 )
             ) {
                 return cache[normalizedSymbol]?.data
@@ -684,7 +709,7 @@ class DividendRepository private constructor(
             // 所有数据源都没应答：只记失败退避，**不写** markFetched —— 那会把一次
             // 网络抖动固化成「这只没有分红」最长 7 天，界面还一声不吭
             AppLogger.w(
-                "分红数据源未应答[$normalizedSymbol]，${FAILURE_BACKOFF_TTL / 3_600_000} 小时内不再重打: ${e.message}",
+                "分红数据源未应答[$normalizedSymbol]，退避中不再重打: ${e.message}",
                 "DividendRepository"
             )
             markFailed(normalizedSymbol)
@@ -1326,13 +1351,34 @@ internal fun shouldReuseEmptyResult(
  * 「失败」与「确实没有分红」必须分开记。写成 [shouldReuseEmptyResult] 那种结论，
  * 一次网络抖动就被固化成「这只没有分红」最长 7 天且界面静默；但干脆不记也不行 ——
  * 场外基金没有批量入口（天天基金每基金一个页面），上百只标的每轮各重打一次失败
- * 的接口就是请求风暴。所以失败只压一个短退避窗（[FAILURE_BACKOFF_TTL]）
+ * 的接口就是请求风暴。所以失败只压一个指数退避窗（见 [computeFailureBackoff]）
  * ，过期自动重试，用户手动刷新（forceRefresh）随时可以绕过。
  *
  * @param lastFailedAt 上次失败的时间戳；null 表示没失败过
  * @param now 当前时间戳
  * @param ttl 退避窗长度
  */
+/**
+ * 失败退避窗长度（指数退避）。
+ *
+ * 按**连续失败次数** `count` 指数增长：`base × 2^(count-1)`，封顶 `max`。
+ * 偶发抖动（count 小）很快自愈，持续失败的源不会无限放大请求量。
+ * `everSucceeded = false`（历史上从未成功过，可能是刚加的、其实有效的标的）
+ * 用更短的档位，让它更快重试，避免被当成「永久失败」长时间屏蔽。
+ *
+ * 用 `Long` 运算 + `shift` 上限 30，防止 `2^shift` 溢出 `Int`；`coerceAtMost(max)`
+ * 封顶，`base > 0` 保证结果非负。
+ *
+ * @param count 连续失败次数（≥1）
+ * @param everSucceeded 该 symbol 历史上是否成功抓取过
+ */
+internal fun computeFailureBackoff(count: Int, everSucceeded: Boolean): Long {
+    val base = if (everSucceeded) FAILURE_BACKOFF_BASE_MS else FAILURE_BACKOFF_BASE_MS_NEVER
+    val max = if (everSucceeded) FAILURE_BACKOFF_MAX_MS else FAILURE_BACKOFF_MAX_MS_NEVER
+    val shift = (count - 1).coerceAtLeast(0).coerceAtMost(30)
+    return (base.toLong() shl shift).coerceAtMost(max.toLong())
+}
+
 internal fun shouldSkipAfterFailure(lastFailedAt: Long?, now: Long, ttl: Long): Boolean {
     val failed = lastFailedAt ?: return false
     if (failed <= 0L) return false

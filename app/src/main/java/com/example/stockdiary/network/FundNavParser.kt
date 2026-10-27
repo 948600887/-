@@ -88,7 +88,11 @@ object FundNavParser {
 
         val rawNav = datas.optString("DWJZ", "").trim()
         val nav = rawNav.toDoubleOrNull()
-        if (nav == null || !nav.isFinite() || nav <= 0.0) return null
+        if (nav == null || !nav.isFinite()) return null
+        // 货币基金 DWJZ 是「每万份收益」而非单位净值，当天无收益时合法为 0；
+        // 其单位净值恒为 1.0（下方 isMoneyFund 分支处理），故不在此按 <=0 拒绝，
+        // 否则货币基金偶发 0 收益会被整条剔除、退化到 legacy 路径。
+        if (!isMoneyFund(datas) && nav <= 0.0) return null
 
         val code = datas.optString("FCODE", "").trim().ifEmpty { fundCode }
 

@@ -125,7 +125,9 @@ class FundDividendApiService {
                         // 重新熔断，退避档位 +1（指数增长），给源更长的喘息。
                         val hits = fhspBackoffHits.incrementAndGet()
                         val shift = (hits - 1).coerceAtMost(31)
-                        val exp = (FHSP_BACKOFF_BASE_MS shl shift).coerceAtMost(FHSP_BACKOFF_MAX_MS)
+                        // 用 Long 运算防止 shl 在 shift 较大时溢出 Int 变负
+                        // （负 exp 会让 blockedUntil 落到过去、熔断冷却形同虚设）；coerceAtMost 只钳上界。
+                        val exp = (FHSP_BACKOFF_BASE_MS.toLong() shl shift).coerceAtMost(FHSP_BACKOFF_MAX_MS.toLong()).toInt()
                         val jitter = (Math.random() * exp * 0.3).toLong()  // 最多 +30% 抖动
                         val backoff = exp + jitter
                         val reopened = FhspGateState(FhspPhase.OPEN, now + backoff)
@@ -147,7 +149,9 @@ class FundDividendApiService {
                         // 达阈值：首次熔断，退避档位从 1 起（指数增长），+ 抖动
                         val hits = fhspBackoffHits.incrementAndGet()
                         val shift = (hits - 1).coerceAtMost(31)
-                        val exp = (FHSP_BACKOFF_BASE_MS shl shift).coerceAtMost(FHSP_BACKOFF_MAX_MS)
+                        // 用 Long 运算防止 shl 在 shift 较大时溢出 Int 变负
+                        // （负 exp 会让 blockedUntil 落到过去、熔断冷却形同虚设）；coerceAtMost 只钳上界。
+                        val exp = (FHSP_BACKOFF_BASE_MS.toLong() shl shift).coerceAtMost(FHSP_BACKOFF_MAX_MS.toLong()).toInt()
                         val jitter = (Math.random() * exp * 0.3).toLong()  // 最多 +30% 抖动
                         val backoff = exp + jitter
                         val opened = FhspGateState(FhspPhase.OPEN, now + backoff)
@@ -296,6 +300,12 @@ class FundDividendApiService {
                     AppLogger.w("天天基金返回的页面不像分红页（可能是反爬页），换 Jsoup 重试", TAG)
                 } else {
                     AppLogger.w("OkHttp HTTP 请求失败: ${response.code}", TAG)
+                    // 404 = 该基金代码在天天基金没有 fhsp 页（确定性结论，非源健康度问题）：
+                    // 不重试 Jsoup（同 URL 必再 404），也不计入整源熔断，直接按无分红返回。
+                    if (response.code == 404) {
+                        AppLogger.w("天天基金 fhsp 页不存在(404)，按无分红处理: $url", TAG)
+                        return Result.success(emptyList())
+                    }
                     // 限流（514/429）：设置退避窗口并直接失败，绝不再用 Jsoup 对同一个被限流
                     // 主机补刀——那只会让限流窗口更久。其它非 2xx 仍保留降级到 Jsoup 的机会。
                     // 注意：514/429 由 rateLimitedUntil 单独处理，**不计入整源熔断**（见 fhspOnFailure）。
@@ -333,15 +343,23 @@ class FundDividendApiService {
             AppLogger.d("Jsoup HTML长度: ${html.length}, 是否包含分红表格: ${html.contains("每10份分红") || html.contains("每份分红")}", TAG)
             val records = parseDividendHtml(html, fundCode)
             AppLogger.d("Jsoup 解析到 ${records.size} 条基金分红记录", TAG)
-            if (records.isNotEmpty()) {
+            // 与 OkHttp 路径对齐：用 isRealDividendPage 判成功（0 条记录的真页面也算成功）。
+            // 否则「确实没分红」的基金一旦降级走 Jsoup 就会被 isNotEmpty() 判成失败，
+            // 一轮里凑满阈值即触发整源熔断，静默屏蔽全部场外基金分红抓取。
+            if (isRealDividendPage(html)) {
                 fhspOnSuccess()
                 return Result.success(records)
             }
         } catch (e: CancellationException) {
             throw e
         } catch (e: HttpStatusException) {
+            // 404：页不存在，确定性无数据，不重试、不计入熔断。
+            if (e.statusCode == 404) {
+                AppLogger.w("天天基金 fhsp 页不存在(404, Jsoup)，按无分红处理: $url", TAG)
+                return Result.success(emptyList())
+            }
             // 限流（514/429）：同样设置退避窗口并直接失败，不再继续走最终的兜底失败逻辑
-            // 或重复对限流主机发请求。其它 HttpStatusException（如 404/503）仍按普通异常处理。
+            // 或重复对限流主机发请求。其它 HttpStatusException（如 503）仍按普通异常处理。
             // 514/429 由 rateLimitedUntil 单独处理，**不计入整源熔断**。
             if (e.statusCode == 514 || e.statusCode == 429) {
                 rateLimitedUntil = System.currentTimeMillis() + RATE_LIMIT_BACKOFF_MS

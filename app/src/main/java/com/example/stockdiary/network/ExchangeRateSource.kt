@@ -85,7 +85,11 @@ class SinaExchangeRateSource : RateSource {
         val result = HashMap<String, Double>()
         for (match in QUOTE_REGEX.findAll(text)) {
             val code = match.groupValues[1].uppercase()
-            val price = match.groupValues[2].split(',').getOrNull(1)?.trim()?.toDoubleOrNull()
+            // 取时间字段（index 0）之后的第一个数值字段作为行情价，避免依赖固定下标：
+            // 新浪若改字段顺序，固定 index 1 会把名称/时间当价格，导致 USD 等币种被静默跳过。
+            val price = match.groupValues[2].split(',')
+                .drop(1)
+                .firstNotNullOfOrNull { it.trim().toDoubleOrNull() }
             if (price != null) {
                 result[code] = price
             }

@@ -339,7 +339,7 @@ class AssetSyncManagerTest {
             account = "币安", balance = 1.0
         )
         coEvery {
-            UnifiedPriceService.getPrice("BTCUSDT", AssetType.CRYPTO, any())
+            UnifiedPriceService.getPrice("BTCUSDT", AssetType.CRYPTO, any(), any(), any())
         } returns Result.failure(BinanceHostUnavailableException("币安接口连续失败，已暂停访问 300 秒"))
 
         val result = AssetSyncManager.syncAllAssets(

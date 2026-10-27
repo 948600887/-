@@ -148,6 +148,22 @@ class FundNavParserTest {
         assertEquals(0.2812, info.millionCopiesIncome!!, 0.000001)
     }
 
+    @Test
+    fun 货币基金_DWJZ为0_当天无收益仍解析_单位净值1每万份收益0() {
+        // 货币基金 DWJZ 是「每万份收益」，当天无收益时合法为 0。修复 #low 后，
+        // 货币基金的 DWJZ=0 不再被 `nav <= 0` 整条拒绝，而是返回单位净值恒为 1.0、
+        // 每万份收益 = 0 的结果（非货币基金 DWJZ=0 仍按原语义返回 null，见上方
+        // 净值为空值或占位符_返回null 用例）。
+        val json = """
+            {"Datas":{"FCODE":"004972","SHORTNAME":"某货币","FTYPE":"货币型-普通货币",
+            "FUNDTYPE":"005","FSRQ":"2026-10-18","RZDF":"--","DWJZ":"0"}}
+        """.trimIndent()
+        val info = FundNavParser.parseBasicInfo(json, "004972")
+        assertNotNull("货币基金 DWJZ=0 不应被剔除", info)
+        assertEquals(1.0, info!!.price, 0.000001)
+        assertEquals(0.0, info.millionCopiesIncome!!, 0.000001)
+    }
+
     // ==================== 无效报文一律 null（触发回退） ====================
 
     @Test

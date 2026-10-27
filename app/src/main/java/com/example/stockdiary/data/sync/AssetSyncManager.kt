@@ -1018,7 +1018,9 @@ object AssetSyncManager {
                     val cryptoResult = UnifiedPriceService.getPrice(
                         cryptoSymbol,
                         AssetType.CRYPTO,
-                        forceRefresh = forceRefresh
+                        forceRefresh = forceRefresh,
+                        batchResult = batchResult,
+                        networkAvailable = networkAvailable
                     )
 
                     cryptoResult.onSuccess { price ->

@@ -54,6 +54,13 @@ class CalendarViewModel(
         val dividends: List<Pair<String, List<DividendRecord>>> = emptyList(),
         val assets: List<Asset> = emptyList(),
         val isLoading: Boolean = true,
+        /**
+         * 手动刷新中（顶栏刷新按钮转圈、按钮置灰）。
+         *
+         * 与 [isLoading] 分开：isLoading 也覆盖首次加载/切月/切 Tab，那些场景下按钮该禁用但
+         * **不该转圈**——转圈是「我按了刷新正在跑」的反馈，与资产页/持仓页同一套语义。
+         */
+        val isRefreshing: Boolean = false,
         val errorMessage: String? = null,
         val monthlyExpense: String = "5000",
         val realAnnualIncome: Double = 0.0
@@ -191,7 +198,9 @@ class CalendarViewModel(
 
     fun selectMonth(month: YearMonth) {
         if (_uiState.value.currentMonth == month) return
-        _uiState.update { state -> state.copy(currentMonth = month) }
+        // 顺手清掉选中日期：它是「上一张月历里的某一天」，翻月后详情卡会显示一个
+        // 当前月根本不存在的日期（金额取不到 → 「暂无数据」，收支明细也是无关的）。
+        _uiState.update { state -> state.copy(currentMonth = month, selectedDate = null) }
         viewModelScope.launch {
             generateCalendarData(_uiState.value.assets)
         }
@@ -201,12 +210,25 @@ class CalendarViewModel(
         _uiState.update { state -> state.copy(selectedDate = date) }
     }
 
+    /**
+     * 顶栏刷新：强制重抓分红 + 按最新实时价重算「今天」那格。
+     *
+     * 与资产页/持仓页同一套交互（按钮置灰 + 转圈），也是本页唯一能主动触发
+     * `forceRefresh=true` 的入口——没有它，分红缓存过期后只能靠切 Tab / 切月，
+     * 今天那格也只能等跨天才会跟上最新价。
+     */
     fun refresh() {
+        if (_uiState.value.isRefreshing) return
+        _uiState.update { it.copy(isRefreshing = true) }
         viewModelScope.launch {
-            generateCalendarData(_uiState.value.assets, forceRefresh = true)
-            // 手动刷新撞过天天基金限流（514/429）→ 提示「部分场外基金分红没抓全」（非阻塞）
-            if (dividendRepository.consumeOtcRateLimitWarning()) {
-                _dividendWarning.value = "今日部分场外基金分红因天天基金限流未能抓取完整，可稍后手动重试"
+            try {
+                generateCalendarData(_uiState.value.assets, forceRefresh = true)
+                // 手动刷新撞过天天基金限流（514/429）→ 提示「部分场外基金分红没抓全」（非阻塞）
+                if (dividendRepository.consumeOtcRateLimitWarning()) {
+                    _dividendWarning.value = "今日部分场外基金分红因天天基金限流未能抓取完整，可稍后手动重试"
+                }
+            } finally {
+                _uiState.update { it.copy(isRefreshing = false) }
             }
         }
     }
@@ -541,3 +563,19 @@ internal fun buildAssetCalendarMonth(
     }
     return data
 }
+
+/**
+ * 分红明细用的「代码 → 资产」索引：**同代码多账户先把数量合并**。
+ *
+ * 日历金额是逐条资产累加的（同一只股票在两个账户各有一笔，两笔都该计入），
+ * 而详情卡要靠持仓数量反查金额。若直接 `associateBy`，只会留下最后一条，
+ * 明细金额就会比格子/月汇总少一个账户。这里按代码分组、balance 求和；
+ * 名称/币种取第一条（同一代码这两个属性一致）。
+ */
+internal fun aggregateAssetsBySymbol(assets: List<Asset>): Map<String, Asset> =
+    assets.mapNotNull { asset -> asset.symbol?.let { it to asset } }
+        .groupBy({ it.first }, { it.second })
+        .mapValues { (_, group) ->
+            val first = group.first()
+            if (group.size == 1) first else first.copy(balance = group.sumOf { it.balance })
+        }

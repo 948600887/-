@@ -28,7 +28,7 @@ import java.time.LocalDate
 fun DividendDayDetail(
     date: LocalDate,
     dividends: List<Pair<String, List<DividendRecord>>>,
-    assetMap: Map<String?, Asset>
+    assetMap: Map<String, Asset>
 ) {
     // 按**到账日**匹配选中日，与 CalendarViewModel 打「分」标记同一口径：
     // 除息日只决定资格，钱 1~4 周后才到账；拿除息日比对会点开一个并没进钱的日子
@@ -67,6 +67,16 @@ fun DividendDayDetail(
         fontSize = 24.sp,
         fontWeight = FontWeight.Bold,
         color = AppTheme.colors.lossRed
+    )
+
+    Spacer(modifier = Modifier.height(4.dp))
+    // 说清口径：分红记录只存「每十份派息」，没有存派息当天的持仓数量，
+    // 所以这里（以及日历格子的金额）都是按**当前持仓**折算的。卖出后回看历史分红会变小/消失，
+    // 这不是算错，是模型没有历史持仓——界面必须讲明白，别让用户以为数据丢了。
+    Text(
+        "金额按当前持仓估算，不回溯历史买卖",
+        fontSize = 11.sp,
+        color = AppTheme.colors.onSurfaceVariant
     )
 
     HorizontalDivider(

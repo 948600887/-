@@ -1,5 +1,7 @@
 package com.example.stockdiary.ui.viewmodels
 
+import com.example.stockdiary.database.Asset
+import com.example.stockdiary.database.AssetType
 import org.junit.Assert.assertEquals
 import org.junit.Test
 import java.time.LocalDate
@@ -62,5 +64,46 @@ class CalendarMonthTest {
             today = LocalDate.of(2026, 11, 1)
         )
         assertEquals(0.0, data[LocalDate.of(2026, 10, 15)]!!, 1e-9)
+    }
+
+    // ---------- 分红明细的资产索引（同代码多账户合并） ----------
+
+    private fun stock(symbol: String, balance: Double, account: String = "默认") = Asset(
+        name = symbol,
+        type = AssetType.STOCK,
+        symbol = symbol,
+        account = account,
+        balance = balance
+    )
+
+    @Test
+    fun `同代码多账户合并数量_明细折算与日历格子一致`() {
+        val a = stock("600900", 1000.0, account = "A")
+        val b = stock("600900", 500.0, account = "B")
+
+        val map = aggregateAssetsBySymbol(listOf(a, b))
+
+        assertEquals(1, map.size)
+        // 日历金额是两账户之和，明细必须按合计持仓折算，否则会比格子少一个账户
+        assertEquals(1500.0, map.getValue("600900").balance, 1e-9)
+        // 名称/类型等属性取第一条，不被合并改写
+        assertEquals("600900", map.getValue("600900").name)
+        assertEquals(AssetType.STOCK, map.getValue("600900").type)
+    }
+
+    @Test
+    fun `不同代码各自保留_无代码资产不进入索引`() {
+        val a = stock("600900", 1000.0)
+        val b = stock("600519", 300.0)
+        val deposit = Asset(
+            name = "存款", type = AssetType.BANK_DEPOSIT, symbol = null,
+            account = "银行", balance = 50_000.0
+        )
+
+        val map = aggregateAssetsBySymbol(listOf(a, b, deposit))
+
+        assertEquals(2, map.size)
+        assertEquals(1000.0, map.getValue("600900").balance, 1e-9)
+        assertEquals(300.0, map.getValue("600519").balance, 1e-9)
     }
 }

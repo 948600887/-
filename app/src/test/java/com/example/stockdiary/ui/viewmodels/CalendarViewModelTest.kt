@@ -159,6 +159,19 @@ class CalendarViewModelTest {
     }
 
     @Test
+    fun `翻月会清空选中日期`() = runBlocking {
+        // 回归：选中日期属于「上一张月历」，翻月后详情卡不该继续显示一个当前月不存在的日子
+        val vm = buildVm()
+        waitUntil { vm.uiState.value.assets.isNotEmpty() }
+        val selected = vm.uiState.value.currentMonth.atDay(10)
+        vm.selectDate(selected)
+        assertEquals(selected, vm.uiState.value.selectedDate)
+
+        vm.selectMonth(vm.uiState.value.currentMonth.minusMonths(1))
+        assertNull("翻月后必须清空选中日期", vm.uiState.value.selectedDate)
+    }
+
+    @Test
     fun `更新月度生活费写入 uiState 并持久化`() = runBlocking {
         val vm = buildVm()
         waitUntil { vm.uiState.value.assets.isNotEmpty() }

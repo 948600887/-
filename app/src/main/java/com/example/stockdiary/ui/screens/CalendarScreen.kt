@@ -17,6 +17,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Calculate
 import androidx.compose.material.icons.filled.CalendarMonth
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -62,6 +63,7 @@ import com.example.stockdiary.ui.screens.calendar.components.StatColumn
 import com.example.stockdiary.ui.screens.calendar.components.TabButton
 import com.example.stockdiary.ui.theme.AppTheme
 import com.example.stockdiary.ui.viewmodels.CalendarViewModel
+import com.example.stockdiary.ui.viewmodels.aggregateAssetsBySymbol
 import com.example.stockdiary.utils.format
 import com.example.stockdiary.utils.profitColor
 import java.time.LocalDate
@@ -152,6 +154,11 @@ fun CalendarScreen(
             CalendarHeader(
                 selectedTab = uiState.selectedTab,
                 onTabSelected = { viewModel.selectTab(it) },
+                // 与资产页/持仓页同一套刷新交互：按钮置灰 + 转圈；切月/首载期间也禁用，
+                // 避免手动刷新与自动重算并发跑两轮
+                isRefreshing = uiState.isRefreshing,
+                canRefresh = !isLoading,
+                onRefresh = viewModel::refresh,
                 onFireClick = { showFireDialog = true }
             )
 
@@ -244,6 +251,9 @@ private fun EmptyCalendarContent(
 private fun CalendarHeader(
     selectedTab: String,
     onTabSelected: (String) -> Unit,
+    isRefreshing: Boolean,
+    canRefresh: Boolean,
+    onRefresh: () -> Unit,
     onFireClick: () -> Unit
 ) {
     Column(
@@ -278,12 +288,28 @@ private fun CalendarHeader(
                 }
             }
 
-            IconButton(onClick = onFireClick) {
-                Icon(
-                    imageVector = Icons.Filled.Calculate,
-                    contentDescription = "FIRE 计算器",
-                    tint = AppTheme.colors.primary
-                )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                // 刷新：与资产页/持仓页同一个 IconButton + 转圈语义。
+                // 该页的分红与「今天」一格的实时值都需要手动强制刷新，从前没有入口，
+                // refresh() 与它下面的限流提示整条链路都是死代码。
+                IconButton(onClick = onRefresh, enabled = !isRefreshing && canRefresh) {
+                    if (isRefreshing) {
+                        CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                    } else {
+                        Icon(
+                            imageVector = Icons.Filled.Refresh,
+                            contentDescription = "刷新",
+                            tint = AppTheme.colors.primary
+                        )
+                    }
+                }
+                IconButton(onClick = onFireClick) {
+                    Icon(
+                        imageVector = Icons.Filled.Calculate,
+                        contentDescription = "FIRE 计算器",
+                        tint = AppTheme.colors.primary
+                    )
+                }
             }
         }
     }
@@ -318,7 +344,9 @@ private fun SelectedDateDetail(
             )
         }
     }
-    val assetMap = remember(assetSignature) { assets.associateBy { it.symbol } }
+    // 按代码分组并合并数量：同一代码在多个账户各有一笔时，日历金额是两笔之和，
+    // 明细也必须按「合计持仓」折算才与格子/月汇总一致（associateBy 只会留最后一条）
+    val assetMap = remember(assetSignature) { aggregateAssetsBySymbol(assets) }
 
     Card(
         modifier = Modifier

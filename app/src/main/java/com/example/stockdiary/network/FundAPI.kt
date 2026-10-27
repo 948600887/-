@@ -223,13 +223,15 @@ object FundAPI {
             val today = LocalDate.now()
             val todayStr = today.toString()
             val dayOfWeek = today.dayOfWeek
+            val hourOfDay = LocalTime.now().hour
             val persisted = readPersistentNav(fundCode)?.takeIf { isUsableNavRow(it) }
 
             if (persisted != null &&
                 shouldReusePersistentNav(
                     navDate = persisted.navDate,
                     today = todayStr,
-                    dayOfWeek = dayOfWeek
+                    dayOfWeek = dayOfWeek,
+                    hourOfDay = hourOfDay
                 )
             ) {
                 val reused = persisted.toFundInfo()
@@ -254,7 +256,7 @@ object FundAPI {
                 shouldThrottleNavDownload(
                     today = todayStr,
                     dayOfWeek = dayOfWeek,
-                    hourOfDay = LocalTime.now().hour,
+                    hourOfDay = hourOfDay,
                     fetchedAt = persisted.fetchedAt,
                     nowMillis = now
                 )
@@ -612,6 +614,14 @@ private const val NAV_THROTTLE_WINDOW_MS = 30 * 60 * 1000L
 private const val NAV_THROTTLE_END_HOUR = 16
 
 /**
+ * 当日净值公布时点（约 20:00，场外基金 T+1、收盘后才出数）。
+ *
+ * 在此时点**之前**，「上一个交易日」的那份净值就是当前客观能拿到的**最新**值——
+ * 今天的新净值还没产生，下载也只会拿回一模一样的东西。见 [shouldReusePersistentNav] 的 T2。
+ */
+private const val NAV_PUBLISH_HOUR = 20
+
+/**
  * 库里这条**持久化**净值能不能直接复用（一次网络都不打）。
  *
  * 纯函数：`today` 与 `dayOfWeek` 都是入参，内部不读时钟、不碰 Context，
@@ -638,7 +648,8 @@ private const val NAV_THROTTLE_END_HOUR = 16
 internal fun shouldReusePersistentNav(
     navDate: String?,
     today: String,
-    dayOfWeek: DayOfWeek
+    dayOfWeek: DayOfWeek,
+    hourOfDay: Int
 ): Boolean {
     val navDay = parseNavDateOrNull(navDate) ?: return false
     val todayDay = parseNavDateOrNull(today) ?: return false
@@ -648,13 +659,42 @@ internal fun shouldReusePersistentNav(
     // 未来日期：解析出来的脏数据，不认
     if (navDay.isAfter(todayDay)) return false
 
-    // T2：周末净值不变新，4 天内都认
+    // T2：工作日但还没到净值公布时点 —— 今天的新净值客观上还没产生。
+    //
+    // 场外基金净值是 T+1：当日净值要等收盘后（约 [NAV_PUBLISH_HOUR]）才公布。所以在
+    // 公布时点之前，「上一个交易日」那份就是当前能拿到的**最新**值，此时下载只会拿回
+    // 一模一样的东西。
+    //
+    // 实测（诊断 20261026_230142）：周一 10:32 那轮把 93 只基金全部重下了一遍，拿回的
+    // 仍是周五的 navDate；而同样「无新净值可拿」的周末却因为下面的 T3 分支被复用了 ——
+    // **工作日上午反而成了唯一的重灾区**，这正是这条规则要补的洞。
+    if (!isWeekend(dayOfWeek) &&
+        hourOfDay < NAV_PUBLISH_HOUR &&
+        navDay == latestTradingDayBefore(todayDay)
+    ) {
+        return true
+    }
+
+    // T3：周末净值不变新，4 天内都认
     if (isWeekend(dayOfWeek)) {
         return ChronoUnit.DAYS.between(navDay, todayDay) <= WEEKEND_REUSE_MAX_AGE_DAYS
     }
 
-    // T3：工作日且不是今天的净值
+    // T4：工作日、已过公布时点、且不是今天的净值 → 可能有新净值，该下就下
     return false
+}
+
+/**
+ * 今天之前最近的**交易日**（不含节假日）：周一 → 上周五，周二~周五 → 昨天。
+ *
+ * 只按周末回退，**不认法定节假日**：长假期间实际最新净值可能停更一周以上，此时本函数
+ * 算出的日期会偏新，[shouldReusePersistentNav] 的 T2 因此不命中、退化成「每轮下载一次」
+ * —— 这与修复前的行为一致，不引入新问题；真要覆盖节假日需要引入交易日历，收益不划算。
+ */
+private fun latestTradingDayBefore(day: LocalDate): LocalDate {
+    var d = day.minusDays(1)
+    while (isWeekend(d.dayOfWeek)) d = d.minusDays(1)
+    return d
 }
 
 /**

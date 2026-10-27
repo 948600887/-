@@ -101,13 +101,13 @@ class FundNavCachePolicyTest {
 
     @Test
     fun `T1_工作日库里已是今日净值_复用零下载`() {
-        assertTrue(shouldReusePersistentNav("2026-10-14", "2026-10-14", wednesday))
+        assertTrue(shouldReusePersistentNav("2026-10-14", "2026-10-14", wednesday, 21))
     }
 
     @Test
     fun `T1_周末库里已是今日净值_同样复用`() {
-        assertTrue(shouldReusePersistentNav("2026-10-17", "2026-10-17", saturday))
-        assertTrue(shouldReusePersistentNav("2026-10-18", "2026-10-18", sunday))
+        assertTrue(shouldReusePersistentNav("2026-10-17", "2026-10-17", saturday, 21))
+        assertTrue(shouldReusePersistentNav("2026-10-18", "2026-10-18", sunday, 21))
     }
 
     @Test
@@ -125,7 +125,8 @@ class FundNavCachePolicyTest {
             shouldReusePersistentNav(
                 navDate = row.navDate,
                 today = row.navDate,
-                dayOfWeek = wednesday
+                dayOfWeek = wednesday,
+                hourOfDay = 21
             )
         )
     }
@@ -134,62 +135,101 @@ class FundNavCachePolicyTest {
 
     @Test
     fun `T2_周六复用昨天周五的净值`() {
-        assertTrue(shouldReusePersistentNav("2026-10-16", "2026-10-17", saturday))
+        assertTrue(shouldReusePersistentNav("2026-10-16", "2026-10-17", saturday, 21))
     }
 
     @Test
     fun `T2_周日复用两天前周五的净值`() {
-        assertTrue(shouldReusePersistentNav("2026-10-16", "2026-10-18", sunday))
+        assertTrue(shouldReusePersistentNav("2026-10-16", "2026-10-18", sunday, 21))
     }
 
     @Test
     fun `T2_窗口边界_4 天内认_第 5 天不认`() {
-        assertTrue(shouldReusePersistentNav("2026-10-13", "2026-10-17", saturday)) // 4 天
-        assertFalse(shouldReusePersistentNav("2026-10-12", "2026-10-17", saturday)) // 5 天
-        assertFalse(shouldReusePersistentNav("2026-10-09", "2026-10-17", saturday)) // 8 天
+        assertTrue(shouldReusePersistentNav("2026-10-13", "2026-10-17", saturday, 21)) // 4 天
+        assertFalse(shouldReusePersistentNav("2026-10-12", "2026-10-17", saturday, 21)) // 5 天
+        assertFalse(shouldReusePersistentNav("2026-10-09", "2026-10-17", saturday, 21)) // 8 天
     }
 
     // ==================== T3：工作日非今日 → 必须下载 ====================
 
     @Test
     fun `T3_工作日且库里是昨天的净值_不复用必须重下`() {
-        assertFalse(shouldReusePersistentNav("2026-10-13", "2026-10-14", wednesday))
+        assertFalse(shouldReusePersistentNav("2026-10-13", "2026-10-14", wednesday, 21))
     }
 
     @Test
     fun `T3_工作日且库里是更早的净值_同样不复用`() {
-        assertFalse(shouldReusePersistentNav("2026-10-09", "2026-10-14", wednesday))
-        assertFalse(shouldReusePersistentNav("2026-09-30", "2026-10-14", wednesday))
+        assertFalse(shouldReusePersistentNav("2026-10-09", "2026-10-14", wednesday, 21))
+        assertFalse(shouldReusePersistentNav("2026-09-30", "2026-10-14", wednesday, 21))
     }
 
     @Test
     fun `T3_周末那条宽容规则绝不能漏到工作日`() {
         // 同一份「4 天前的净值」（2026-10-13）：周六刷新认，周三刷新不认。
         // 把周末的宽容窗口误用到工作日，用户整周都会看到上周的净值。
-        assertTrue(shouldReusePersistentNav("2026-10-13", "2026-10-17", saturday))
-        assertFalse(shouldReusePersistentNav("2026-10-10", "2026-10-14", wednesday))
+        assertTrue(shouldReusePersistentNav("2026-10-13", "2026-10-17", saturday, 21))
+        assertFalse(shouldReusePersistentNav("2026-10-10", "2026-10-14", wednesday, 21))
+    }
+
+    // ==================== T2：工作日、未到净值公布时点 → 上一交易日即最新 ====================
+    //
+    // 这条是 2026-10-26 真机诊断后补的：日志显示周一 10:32 那轮把 93 只基金全部重下了一遍，
+    // 拿回的仍是周五的 navDate —— 因为旧逻辑只要「工作日 + 库里不是今天」就一律下载，
+    // 而场外基金净值 T+1、收盘后才出，下载根本拿不到更新的数。
+    // 反讽的是：同样「无新净值可拿」的周末走 T3 分支被复用了，工作日上午反而成了唯一重灾区。
+
+    @Test
+    fun `T2_工作日未到公布时点_库里是上一交易日净值_复用零下载`() {
+        // 周三 10 点，库里是周二（上一交易日）的净值 = 当前客观最新，不该下载
+        assertTrue(shouldReusePersistentNav("2026-10-13", "2026-10-14", wednesday, 10))
+    }
+
+    @Test
+    fun `T2_周一未到公布时点_库里是上周五净值_复用零下载`() {
+        // 周一 10 点，上一交易日要跨过周末回退到上周五
+        assertTrue(shouldReusePersistentNav("2026-10-16", "2026-10-19", DayOfWeek.MONDAY, 10))
+    }
+
+    @Test
+    fun `T2_未到公布时点但库里更早_仍不复用_得下`() {
+        // 周三 10 点，库里是 10-09（不是上一交易日 10-13）→ 中间缺了净值，必须下载
+        assertFalse(shouldReusePersistentNav("2026-10-09", "2026-10-14", wednesday, 10))
+    }
+
+    @Test
+    fun `T2_同一份净值_未到公布时点复用_过了就不复用`() {
+        // 同一份「周二净值 + 周三刷新」：10 点复用（周三的还没出），21 点必须下载
+        assertTrue(shouldReusePersistentNav("2026-10-13", "2026-10-14", wednesday, 10))
+        assertFalse(shouldReusePersistentNav("2026-10-13", "2026-10-14", wednesday, 21))
+    }
+
+    @Test
+    fun `T2_周末不受公布时点影响_仍走周末窗口`() {
+        // 周末本来就命中 T3 的 4 天窗口，公布时点那条规则只对工作人生效
+        assertTrue(shouldReusePersistentNav("2026-10-16", "2026-10-17", saturday, 10))
+        assertTrue(shouldReusePersistentNav("2026-10-16", "2026-10-17", saturday, 21))
     }
 
     // ==================== 脏数据一律不复用 ====================
 
     @Test
     fun `空值_空白_格式不符_一律不复用_连周末也不复用`() {
-        assertFalse(shouldReusePersistentNav(null, "2026-10-17", saturday))
-        assertFalse(shouldReusePersistentNav("", "2026-10-17", saturday))
-        assertFalse(shouldReusePersistentNav("   ", "2026-10-17", saturday))
-        assertFalse(shouldReusePersistentNav("2026/10/17", "2026-10-17", saturday))
-        assertFalse(shouldReusePersistentNav("--", "2026-10-17", saturday))
+        assertFalse(shouldReusePersistentNav(null, "2026-10-17", saturday, 21))
+        assertFalse(shouldReusePersistentNav("", "2026-10-17", saturday, 21))
+        assertFalse(shouldReusePersistentNav("   ", "2026-10-17", saturday, 21))
+        assertFalse(shouldReusePersistentNav("2026/10/17", "2026-10-17", saturday, 21))
+        assertFalse(shouldReusePersistentNav("--", "2026-10-17", saturday, 21))
     }
 
     @Test
     fun `未来日期不复用_解析出来的脏数据`() {
-        assertFalse(shouldReusePersistentNav("2026-10-19", "2026-10-18", sunday))
-        assertFalse(shouldReusePersistentNav("2027-01-01", "2026-10-14", wednesday))
+        assertFalse(shouldReusePersistentNav("2026-10-19", "2026-10-18", sunday, 21))
+        assertFalse(shouldReusePersistentNav("2027-01-01", "2026-10-14", wednesday, 21))
     }
 
     @Test
     fun `today 本身格式不对也不复用_不把异常输入当成可判定`() {
-        assertFalse(shouldReusePersistentNav("2026-10-14", "2026/10/14", wednesday))
+        assertFalse(shouldReusePersistentNav("2026-10-14", "2026/10/14", wednesday, 21))
     }
 
     // ==================== 下载节流（少下载，不是把旧值当新值） ====================

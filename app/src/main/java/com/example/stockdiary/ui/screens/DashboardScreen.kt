@@ -217,7 +217,12 @@ fun DashboardScreen(
         },
         modifier = modifier
     ) { padding ->
-        if (assets.isEmpty()) {
+        // Room 首帧到达前 assetsFlow 的初值是 emptyList；此时若渲染空态卡片，
+        // 会让资产并不为空的老用户每次冷启动都闪一下「还没有添加任何资产」。
+        // 首帧未到 → 占位；首帧到了 → 才按 assets.isEmpty() 判空。
+        if (!uiState.assetsFrameReady && assets.isEmpty()) {
+            Box(modifier = Modifier.fillMaxSize()) { /* 首帧占位：不做任何误导性渲染 */ }
+        } else if (assets.isEmpty()) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()

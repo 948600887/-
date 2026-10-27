@@ -30,6 +30,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -98,6 +99,11 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
         val dividendWarning: String? = null,
         val dividendProgress: DividendProgressCalculator.Progress = DividendProgressCalculator.EMPTY,
         val hasInterestData: Boolean = false,
+        /**
+         * Room 首帧是否已到。false 时 [assets] 还是初值 emptyList，页面不能据此判空，
+         * 否则每次冷启动都会闪一下「还没有添加任何资产」的空态（老用户资产并不为空）。
+         */
+        val assetsFrameReady: Boolean = false,
     )
 
     private val _uiState = MutableStateFlow(DashboardUiState())
@@ -110,17 +116,28 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
      * 因为进场时 `syncResult` 仍在状态里）。改用 [syncDone] 事件流后，刷新完成不再写持久字段、
      * 也不再需要「弹完清掉」，天然不残留、不重叠。
      * 改成 SharedFlow 一次性事件：每次 refresh 收尾只发射一次，屏幕侧
-     * `LaunchedEffect(Unit)` 收集，天然不残留、不重叠。replay=0 保证新进场不会收到历史事件，
+     * `LaunchedEffect(Unit)` 收集，天然不残留、不重叠。replay=1 让刷新期间切走 Tab（收集协程被取消）后回到首页仍能收到这一次结果
+     * ——replay=0 时事件直接消失，刷新明明跑完了却永远看不到「刷新完成：成功 N」的提示；
      * extraBufferCapacity=1 让「正在弹 Snackbar 时又刷完一次」也能排上队、不丢。
      */
-    private val _syncDone = MutableSharedFlow<SyncResult>(extraBufferCapacity = 1)
+    private val _syncDone = MutableSharedFlow<SyncResult>(
+        replay = 1,
+        extraBufferCapacity = 1
+    )
     val syncDone: SharedFlow<SyncResult> = _syncDone.asSharedFlow()
 
     // Room 每次写库都会重发整表；而落价往往只改 lastSyncTime/lastUpdateTime，
     // 界面其实不用重画。不去重 = 一次同步上百次整屏重组。
     // 口径见 Extensions.isDisplayEquivalentTo（含 currentPrice，故现价/市值照常刷新）
+    // 「Room 首帧是否已到」：[assetsFlow] 的初值是 emptyList，而页面是按 assets.isEmpty() 判空的，
+    // 于是每次冷启动（Room 首帧还没到）老用户也会闪一下「还没有添加任何资产」的空态卡片。
+    // 到位前由 DashboardScreen 渲染占位而不是空态。
+    private val _assetsFrameReady = MutableStateFlow(false)
+    val assetsFrameReady: StateFlow<Boolean> = _assetsFrameReady.asStateFlow()
+
     private val assetsFlow: StateFlow<List<Asset>> = repository.getAllAssets()
         .distinctUntilChanged { a, b -> a.isDisplayEquivalentTo(b) }
+        .onEach { _assetsFrameReady.value = true }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     // 「资产增值」卡片的基准数据：净资产要和本月/今年之前的快照对比。
@@ -137,7 +154,12 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val uiState: StateFlow<DashboardUiState> = combine(assetsFlow, snapshotsFlow, _uiState) { assets, snapshots, state ->
-        state.copy(assets = assets, snapshots = snapshots)
+        // assetsFrameReady：onEach 在 stateIn 之前把标志位置 true，故这里的读一定已经是最新的
+        state.copy(
+            assets = assets,
+            snapshots = snapshots,
+            assetsFrameReady = _assetsFrameReady.value
+        )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), DashboardUiState())
 
     private val _preferences = MutableStateFlow(preferencesManager.loadPreferences())
@@ -296,6 +318,12 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
                             estimatedDailyDividend = 0.0,
                             incomeCalculationStatus = "计算失败"
                         )
+                    }
+                } else {
+                    // 有缓存值时从前是完全静默的：界面摆的是旧缓存却被当成最新值，
+                    // 用户完全看不出「这一次其实没算成」。
+                    _uiState.update {
+                        it.copy(incomeCalculationStatus = "本次计算失败，显示的是上次结果")
                     }
                 }
             } finally {

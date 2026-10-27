@@ -238,6 +238,10 @@ object DividendProgressCalculator {
         // 今年预计 = 自然年口径的年度收入（单一数据源）：与 DividendIncomeLoader.totalAnnualIncome
         // 同源，保证「收息进度今年预计」与「预计年度收入/年度分红/年收入」两个头条数字严格一致。
         // 循环里只算过 yearReceived / 月度柱图 / nextPayout，yearProjected 在此一次性算出。
+        // 已知口径张力（待产品决策，故行为保持不变）：分母含银行存款利息，而分子 yearReceived
+        // 只累加股票/基金的除息记录 —— 有息存款时进度条走不到 100%。
+        // 它是 NaturalYearIncomeTest / DividendProgressCalculatorTest 两条现有用例钉住的口径，
+        // 任何一边改口径都必须连同这两条用例一起改，不能单边悄悄翻。
         yearProjected = naturalYearAnnualIncome(assets, recordsBySymbol, today)
 
         return Progress(

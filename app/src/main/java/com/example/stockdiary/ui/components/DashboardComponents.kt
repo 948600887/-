@@ -47,12 +47,13 @@ fun TotalAssetCard(
     incomeCalculationStatus: String? = null
 ) {
     // 分母用**净资产**，与 FIRE 计算器的「年化收入率」同义：
-    // 有负债时用总资产会让同一份收入算出两个百分比；净资产 ≤ 0 时不显示收益率。
-    // NaN 也要拦（realAnnualIncome 可能来自万份收益/利率的脏数据）。
+    // 有负债时用总资产会让同一份收入算出两个百分比；净资产 ≤ 0 时不显示收益率（返回 NaN，
+    // UI 走「—」分支，而不是显示一个误导性的 0.00%）。
+    // 收入非 finite（可能来自万份收益/利率的脏数据）同样不显示。
     val realYield = if (netAssets > 0 && realAnnualIncome.isFinite()) {
         (realAnnualIncome / netAssets) * 100
     } else {
-        0.0
+        Double.NaN
     }
 
     Card(
@@ -236,7 +237,7 @@ fun DistributionItem(label: String, value: Double, percent: Double, isDebt: Bool
         Text(text = label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Spacer(modifier = Modifier.height(4.dp))
         Text(
-            text = "¥${if (value >= 10000) "${(value / 10000).format(1)}万" else value.format(0)}",
+            text = "¥${if (kotlin.math.abs(value) >= 10000) "${(value / 10000).format(1)}万" else value.format(0)}",
             style = MaterialTheme.typography.labelMedium,
             fontWeight = FontWeight.Medium,
             color = if (isDebt) AppTheme.colors.lossRed else MaterialTheme.colorScheme.onSurface

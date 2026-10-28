@@ -420,7 +420,9 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
                                 recordsBySymbol = result.recordsBySymbol
                             )
                         },
-                        incomeCalculationStatus = null
+                        // 刷新成功后若确实没有分红/利息收入，恢复「暂无」文案，
+                        // 否则无条件清空会让「暂无分红/利息数据」在刷新后凭空消失。
+                        incomeCalculationStatus = if (result.totalAnnualIncome == 0.0) "暂无分红/利息数据" else null
                     )
                 }
             } catch (e: CancellationException) {

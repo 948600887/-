@@ -85,7 +85,10 @@ class PortfolioViewModelTest {
         return cond()
     }
 
-    private fun buildVm(initialPrefs: DashboardPreferences = DashboardPreferences()): PortfolioViewModel {
+    private fun buildVm(
+        initialPrefs: DashboardPreferences = DashboardPreferences(),
+        initialAssets: List<Asset> = emptyList()
+    ): PortfolioViewModel {
         every { container.assetRepository } returns assetRepo
         every { container.dividendIncomeUseCase } returns useCase
         every { container.dashboardPreferencesManager } returns prefsMgr
@@ -101,7 +104,7 @@ class PortfolioViewModelTest {
             prefsMgr.savePreferences(updated)
             updated
         }
-        every { assetRepo.getAllAssets() } returns flowOf(emptyList())
+        every { assetRepo.getAllAssets() } returns flowOf(initialAssets)
         coEvery { assetRepo.getAllAccounts() } returns emptyList()
         coEvery { useCase.load(any(), any(), any(), any()) } returns DividendIncomeLoader.IncomeResult(
             dividendsBySymbol = emptyMap(),
@@ -179,7 +182,7 @@ class PortfolioViewModelTest {
                 AssetSyncManager.syncAllAssets(any(), any(), any(), any(), any(), any(), any(), any(), any())
             } returns SyncResult(successCount = 2, failedCount = 0, truncatedByTimeLimit = true)
 
-            val vm = buildVm()
+            val vm = buildVm(initialAssets = listOf(stockAsset))
             val (trackJob, latest) = vm.uiState.trackIn(this)
             try {
                 vm.refresh()
@@ -205,7 +208,7 @@ class PortfolioViewModelTest {
                 AssetSyncManager.syncAllAssets(any(), any(), any(), any(), any(), any(), any(), any(), any())
             } returns expected
 
-            val vm = buildVm()
+            val vm = buildVm(initialAssets = listOf(stockAsset))
             val (trackJob, latest) = vm.uiState.trackIn(this)
             // UNDISPATCHED：让 first() 在 refresh() 前就同步完成订阅，确保一次性事件被捕获；
             // 事件经测试调度器确定性送达（见 UiStateCollectExt 同款 trackIn 机制）
@@ -229,7 +232,7 @@ class PortfolioViewModelTest {
                 AssetSyncManager.syncAllAssets(any(), any(), any(), any(), any(), any(), any(), any(), any())
             } throws RuntimeException("网络挂了")
 
-            val vm = buildVm()
+            val vm = buildVm(initialAssets = listOf(stockAsset))
             val (trackJob, latest) = vm.uiState.trackIn(this)
             val event = async(start = CoroutineStart.UNDISPATCHED) { vm.syncDone.first() }
             vm.refresh()

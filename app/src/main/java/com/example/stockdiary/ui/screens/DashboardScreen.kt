@@ -84,7 +84,10 @@ fun DashboardScreen(
     val netAssets = totalAssets - totalLiabilities
 
     val snapshots = uiState.snapshots
-    val growth = remember(snapshots, netAssets) {
+    // 基准日 = 今天：跨零点/跨年后 today 变化，必须进 remember key 让增长重算，
+    // 否则基准日滞留旧日期、跨天不更新（净值曲线/涨跌幅显示过期）。
+    val today = java.time.LocalDate.now()
+    val growth = remember(snapshots, netAssets, today) {
         AssetGrowthCalculator.fromSnapshots(snapshots = snapshots, currentNetAssets = netAssets)
     }
 

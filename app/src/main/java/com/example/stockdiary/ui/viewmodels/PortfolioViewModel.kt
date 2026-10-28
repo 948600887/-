@@ -283,6 +283,13 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
     fun refresh() {
         viewModelScope.launch(refreshExceptionHandler) {
             _uiState.update { it.copy(isRefreshing = true, errorMessage = null) }
+            // 首帧 Room 尚未发射、或确实没有任何资产时 assets 为空：此时价格同步 0 个标的、
+            // 分红计算也会把缓存覆盖成 0（把「暂无资产」当成「年度分红 0」），提示还误导成
+            // 「成功 0」。直接短路，既避免污染分红缓存，也给明确反馈。
+            if (uiState.value.assets.isEmpty()) {
+                _uiState.update { it.copy(isRefreshing = false, errorMessage = "暂无资产可同步") }
+                return@launch
+            }
             // 两个范围，别混（与资产页 DashboardViewModel 同一套规则）：
             // - priceAssets 用于同步，只含有行情的类型。原先只含 STOCK+FUND，
             //   把加密货币漏了——而持仓页是显示加密货币的，于是在本页点刷新，

@@ -4,6 +4,7 @@ import com.example.stockdiary.database.AssetSnapshot
 import com.example.stockdiary.utils.toLocalDate
 import java.time.Instant
 import java.time.LocalDate
+import java.time.Year
 import java.time.YearMonth
 import java.time.ZoneId
 import java.time.temporal.ChronoUnit
@@ -51,8 +52,12 @@ data class SnapshotStats(
     val avgDailyReturnPercent: Double?,
     /** 日均增值额：(末净值 - 首净值) / 覆盖天数 */
     val avgDailyReturnAmount: Double,
-    /** 年化波动率（百分比）：每期收益率样本标准差 × sqrt(365 / 平均间隔天数) */
-    val volatility: Double,
+    /**
+     * 年化波动率（百分比）：每期收益率样本标准差 × sqrt(实际年天数 / 平均间隔天数)。
+     * 样本不足（期间收益率 < 2 个，或平均间隔为 0）时无法年化，为 null（界面显示「—」），
+     * 而不是给 0%——0.00% 会被读成「零波动」，与实际「算不出」矛盾。
+     */
+    val volatility: Double?,
     val coveredDays: Int,
     val avgIntervalDays: Double
 )
@@ -141,8 +146,11 @@ object SnapshotAnalyzer {
         val volatility = if (periodReturns.size >= 2 && avgIntervalDays > 0) {
             val mean = periodReturns.average()
             val variance = periodReturns.sumOf { (it - mean) * (it - mean) } / (periodReturns.size - 1)
-            sqrt(variance) * sqrt(365.0 / avgIntervalDays) * 100
-        } else 0.0
+            // 年化因子按「实际年天数」而非固定 365：跨闰年边界时端点年份取平均，
+            // 单年区间直接取该年天数（闰年 366），避免 -365 天式的一天偏差
+            val daysInYear = (Year.of(firstDate.year).length() + Year.of(lastDate.year).length()) / 2.0
+            sqrt(variance) * sqrt(daysInYear / avgIntervalDays) * 100
+        } else null
 
         return SnapshotStats(
             maxValue = maxValue,

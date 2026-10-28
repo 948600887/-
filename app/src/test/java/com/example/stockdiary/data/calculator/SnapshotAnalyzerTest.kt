@@ -3,6 +3,7 @@ package com.example.stockdiary.data.calculator
 import com.example.stockdiary.database.AssetSnapshot
 import com.example.stockdiary.utils.toTimestamp
 import java.time.LocalDate
+import java.time.Year
 import java.time.YearMonth
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -104,12 +105,11 @@ class SnapshotAnalyzerTest {
         assertEquals(10.5, stats.avgDailyReturnAmount, 1e-6)
         // (121/100)^(1/2) - 1 = 10%
         assertEquals(10.0, stats.avgDailyReturnPercent!!, 1e-6)
-        // 全同期 → 平均间隔 0 → 年化无定义，给 0 而不是 NaN/Infinity
+        // 全同期 → 平均间隔 0 → 年化无定义，给 null（界面显示「—」）而不是 0%/NaN/Infinity
         assertEquals(0.0, stats.avgIntervalDays, 1e-9)
-        assertEquals(0.0, stats.volatility, 1e-9)
+        assertNull(stats.volatility)
         assertFalse(stats.avgDailyReturnAmount.isNaN())
         assertFalse(stats.avgDailyReturnPercent?.isNaN() ?: false)
-        assertFalse(stats.volatility.isNaN())
     }
 
     @Test
@@ -141,10 +141,12 @@ class SnapshotAnalyzerTest {
 
         assertEquals(10.0, stats.avgIntervalDays, 1e-6)
         // 样本标准差：sqrt(((0.1-0)^2 + (-0.1-0)^2) / (2-1)) = sqrt(0.02)
-        val expected = sqrt(0.02) * sqrt(365.0 / 10.0) * 100
-        assertEquals(expected, stats.volatility, 1e-9)
+        // 年化因子按实际年天数：3 条快照都在 2024（闰年），端点年份平均 = 366
+        val daysInYear = (Year.of(2024).length() + Year.of(2024).length()) / 2.0
+        val expected = sqrt(0.02) * sqrt(daysInYear / 10.0) * 100
+        assertEquals(expected, stats.volatility!!, 1e-9)
         // 对照旧口径：未年化的期间标准差只有 10%（population stddev of ±10%）
-        assertTrue(stats.volatility > 80.0)
+        assertTrue(stats.volatility!! > 80.0)
     }
 
     @Test

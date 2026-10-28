@@ -20,6 +20,7 @@ import com.example.stockdiary.utils.isDisplayEquivalentTo
 import com.example.stockdiary.utils.toLocalDate
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -198,10 +199,16 @@ class HistoryViewModel(
         period: String,
         clearError: Boolean = false
     ) {
-        val filtered = filterSnapshots(sortedSnapshots, period)
-        // 统计口径全部委托 SnapshotAnalyzer：按真实天数归一，缺快照的日子不再被当成连续数据处理
-        val monthlyReturns = SnapshotAnalyzer.calculateMonthlyReturns(filtered)
-        val stats = SnapshotAnalyzer.analyze(filtered)
+        // 过滤 + 统计是 O(n) 计算（排序、波动率、最大回撤），挪到 Default 线程，
+        // 不在主线程跑——历史页快照多时主线程会卡顿掉帧（#15）
+        val (filtered, monthlyReturns, stats) = withContext(Dispatchers.Default) {
+            val f = filterSnapshots(sortedSnapshots, period)
+            Triple(
+                f,
+                SnapshotAnalyzer.calculateMonthlyReturns(f),
+                SnapshotAnalyzer.analyze(f)
+            )
+        }
         val today = LocalDate.now().format(dateFormatter)
         val hasToday = sortedSnapshots.any { it.date == today }
         _uiState.update { current ->

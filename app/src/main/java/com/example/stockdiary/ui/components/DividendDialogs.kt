@@ -1,6 +1,7 @@
 package com.example.stockdiary.ui.components
 
 import com.example.stockdiary.common.DateFormats
+import java.time.LocalDate
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
@@ -157,10 +158,11 @@ fun DividendDetailDialog(
                     //
                     // 改成近 12 个月：与持仓页「年度分红」同口径，有实际参考意义。
                     // yyyy-MM-dd 的字典序就是时间序，字符串直接比即可
+                    // 近 12 个月用「减 1 年」而非「减 365 天」：后者在闰年前一天会差一天，
+                    // 跨年边界对不齐（2024-02-29 减 365 天落到 2023-03-01，减 1 年才正确落 2023-02-28）。
+                    // 日期是 yyyy-MM-dd，字典序即时间序，字符串直接比即可。
                     val oneYearAgo = remember {
-                        val calendar = java.util.Calendar.getInstance()
-                        calendar.add(java.util.Calendar.DAY_OF_YEAR, -365)
-                        java.text.SimpleDateFormat(DateFormats.ISO_DATE, java.util.Locale.US).format(calendar.time)
+                        LocalDate.now().minusYears(1).format(DateFormats.ISO_DATE_FORMATTER)
                     }
                     val recentRecords = records.filter { it.date >= oneYearAgo }
                     val recentAmount = perTenSharesToAmount(

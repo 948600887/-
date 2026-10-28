@@ -234,7 +234,7 @@ fun LazyListScope.historyRiskCard(stats: SnapshotStats?) {
             ) {
                 // 最大回撤是「下跌」的度量，按国内惯例绿=跌，用 profitGreen 语义正确，勿改
                 RiskMetric(Modifier.weight(1f), "最大回撤", "${s.maxDrawdown.format(2)}%", AppTheme.colors.profitGreen)
-                RiskMetric(Modifier.weight(1f), "年化波动率", "${s.volatility.format(2)}%", AppTheme.colors.onSurface)
+                RiskMetric(Modifier.weight(1f), "年化波动率", "${s.volatility?.format(2) ?: "—"}%", AppTheme.colors.onSurface)
                 // 首期净资产 ≤0 时增长率为 null，显示「—」：0.00% 会被读成零增长，
                 // 与旁边的正日均增值额自相矛盾（与期间增值卡同一处理）
                 RiskMetric(

@@ -9,7 +9,6 @@ import com.example.stockdiary.data.sync.AssetSyncManager
 import com.example.stockdiary.data.dividend.DividendRecord
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
-import com.example.stockdiary.database.Transaction
 import com.example.stockdiary.di.AppContainer
 import com.example.stockdiary.utils.AppLogger
 import com.example.stockdiary.utils.StockCodeManager
@@ -24,30 +23,29 @@ class AssetDetailViewModel(private val container: AppContainer, private val asse
 
     private val repository = container.assetRepository
     private val dividendRepository = container.dividendRepository
-    private val transactionDao = container.database.transactionDao()
 
     /**
      * 资产详情页状态机：一次「进场加载 / 下拉刷新 / 编辑 / 加减仓」先后推进哪些字段，全在这里。
      *
-     * 此前是 7 个各自为政的 MutableStateFlow（资产、分红记录、交易流水、首屏 loading、
+     * 合并前是各自为政的 MutableStateFlow（资产、分红记录、首屏 loading、
      * 分红 loading、错误、刷新态），写入点散落在 loadAssetData / loadDividendData /
-     * loadTransactionData / refreshData / 异常处理里；UI 同层 collect 六条流，
-     * 任一个发射都整体重组。合并不损失重组粒度，只是少六次订阅，
-     * 且「加载到底改了什么」一处可答。
+     * refreshData / 异常处理里；UI 同层 collect，任一个发射都整体重组。
+     * 合并不损失重组粒度，只是少几次订阅，且「加载到底改了什么」一处可答。
      *
-     * 七个字段全部由一次性加载/刷新动作驱动（本 VM 没有 Room 派生流：
-     * 资产走 getAssetById、流水走 transactionDao.getBySymbol、分红走
-     * dividendRepository.getDividendsBySymbol，都是一次性 suspend 查询），
-     * 因此用纯 MutableStateFlow 承载，不强行 combine。
+     * 字段全部由一次性加载/刷新动作驱动（本 VM 没有 Room 派生流：
+     * 资产走 getAssetById、分红走 dividendRepository.getDividendsBySymbol，
+     * 都是一次性 suspend 查询），因此用纯 MutableStateFlow 承载，不强行 combine。
      *
      * 注意 [isLoading] 初值为 true：进场即首屏加载中；其余字段的初始值与
-     * 迁移前各流初值逐一对应（asset=null、两个列表为空、两个 loading=false、
+     * 合并前各流初值逐一对应（asset=null、列表为空、两个 loading=false、
      * errorMessage=null、isRefreshing=false）。
+     *
+     * 说明：交易流水（transactions）此前在此页加载却从未被任何 UI 消费，属于死代码，
+     * 已整体移除（#18）。删除后本页只关心资产本身 + 分红，不再触碰 transactions 表。
      */
     data class AssetDetailUiState(
         val asset: Asset? = null,
         val dividends: List<DividendRecord> = emptyList(),
-        val transactions: List<Transaction> = emptyList(),
         val isLoading: Boolean = true,
         val isDividendLoading: Boolean = false,
         val errorMessage: String? = null,
@@ -68,7 +66,6 @@ class AssetDetailViewModel(private val container: AppContainer, private val asse
                 _uiState.update { it.copy(asset = foundAsset, errorMessage = null) }
                 if (foundAsset != null) {
                     loadDividendData(forceRefresh = forceRefreshDividend)
-                    loadTransactionData(foundAsset)
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -100,17 +97,6 @@ class AssetDetailViewModel(private val container: AppContainer, private val asse
             AppLogger.e("加载分红数据异常: ${e.message}", tag = "AssetDetailVM")
         } finally {
             _uiState.update { it.copy(isDividendLoading = false) }
-        }
-    }
-
-    private suspend fun loadTransactionData(asset: Asset) {
-        val symbol = asset.symbol ?: return
-        try {
-            _uiState.update { it.copy(transactions = transactionDao.getBySymbol(symbol)) }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            AppLogger.e("加载交易记录异常: ${e.message}", tag = "AssetDetailVM")
         }
     }
 

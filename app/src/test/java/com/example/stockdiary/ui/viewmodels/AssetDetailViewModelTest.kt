@@ -4,7 +4,6 @@ import com.example.stockdiary.data.repository.AssetRepository
 import com.example.stockdiary.data.repository.DividendRepository
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
-import com.example.stockdiary.database.TransactionDao
 import com.example.stockdiary.di.AppContainer
 import io.mockk.coEvery
 import io.mockk.coVerify
@@ -51,13 +50,11 @@ class AssetDetailViewModelTest {
 
     private val assetRepo = mockk<AssetRepository>(relaxed = true)
     private val divRepo = mockk<DividendRepository>(relaxed = true)
-    private val txnDao = mockk<TransactionDao>(relaxed = true)
     private val container = mockk<AppContainer>(relaxed = true)
 
     private fun buildVm(assetId: Long = 1L, current: Asset? = null): AssetDetailViewModel {
         every { container.assetRepository } returns assetRepo
         every { container.dividendRepository } returns divRepo
-        every { container.database } returns mockk { every { transactionDao() } returns txnDao }
         every { container.context } returns mockk(relaxed = true)
         if (current != null) {
             // getAssetById 是 suspend，录桩要用 coEvery（every 的录制 lambda 不在 coroutine 中）

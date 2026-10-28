@@ -586,7 +586,13 @@ class AssetRepository private constructor(
         dueDate: String? = null,
         notes: String? = null,
         interestRate: Double? = null,
-        currentPrice: Double? = null
+        currentPrice: Double? = null,
+        /**
+         * 是否同步写入一笔 BUY 交易记录。默认 true（加仓/补仓路径应记交易）。
+         * 手动「添加资产」路径传 false：否则补录一笔历史持仓会被记成「今天按市价买入」，
+         * 误导导出对账单与交易流水（#5）。加密货币走 [upsertCryptoAsset] 本身就不记交易。
+         */
+        recordTransaction: Boolean = true
     ): Asset {
         val now = System.currentTimeMillis()
         // 存储边界强制统一代码形态：全项目约定存库的一律是 normalizeSymbol 的结果
@@ -636,8 +642,12 @@ class AssetRepository private constructor(
                 newAsset.copy(id = newId)
             }
 
-            // 在同一事务中写入交易记录，失败时整体回滚
-            recordTransactionInternal(normalizedSymbol, name, TransactionType.BUY.value, balance, price, fee)
+            // 在同一事务中写入交易记录，失败时整体回滚。
+            // recordTransaction 默认 true（加仓/补仓记交易）；手动「添加」路径传 false，
+            // 否则补录历史持仓会被记成「今天按市价买入」，误导对账单（#5）。
+            if (recordTransaction) {
+                recordTransactionInternal(normalizedSymbol, name, TransactionType.BUY.value, balance, price, fee)
+            }
             resultAsset
         }
     }

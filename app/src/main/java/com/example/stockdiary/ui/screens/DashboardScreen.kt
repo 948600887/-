@@ -344,6 +344,7 @@ fun DashboardScreen(
         AddAssetDialog(
             onDismiss = { showAddDialog = false },
             existingAccounts = existingAccounts,
+            existingAssets = assets,
             // 保存失败也必须关掉弹窗并告诉用户：异常会让下面那行关闭语句根本执行不到，
             // 而弹窗内的 isSaving 没有任何复位路径 —— "添加"按钮会变成永久转圈。
             onConfirm = { asset ->

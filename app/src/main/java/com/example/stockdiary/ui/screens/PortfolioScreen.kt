@@ -755,6 +755,7 @@ fun PortfolioScreen(
         AddAssetDialog(
             onDismiss = { showAddDialog = false },
             existingAccounts = existingAccounts,
+            existingAssets = assets,
             onConfirm = { asset ->
                 // 保存失败也要关闭并提示，否则异常让关闭语句执行不到，
                 // 弹窗里的 isSaving 又没人复位 —— 按钮会一直转圈

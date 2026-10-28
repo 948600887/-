@@ -8,10 +8,14 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
@@ -36,6 +40,7 @@ import com.example.stockdiary.ui.components.DialogSectionHeader
 import com.example.stockdiary.utils.StockCodeManager
 import com.example.stockdiary.utils.StockCodeManager.CodeCategory
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
 
 /**
  * 添加资产弹窗。
@@ -50,7 +55,12 @@ import kotlinx.coroutines.CancellationException
 fun AddAssetDialog(
     onDismiss: () -> Unit,
     onConfirm: (Asset) -> Unit,
-    existingAccounts: List<String> = emptyList()
+    existingAccounts: List<String> = emptyList(),
+    /**
+     * 现有资产列表，用于检测「该账户已有同名持仓」并提示累加/覆盖语义（#2）。
+     * 不阻断保存，只给一句提醒，避免用户无意识地重复建仓。
+     */
+    existingAssets: List<Asset> = emptyList()
 ) {
     var selectedType by remember { mutableStateOf(AssetType.STOCK) }
     var name by remember { mutableStateOf("") }
@@ -73,6 +83,14 @@ fun AddAssetDialog(
     // 用户是否手动选过类型：一旦手动选过，就不再用代码自动识别去覆盖他的选择——
     // 否则选了「股票」输入 ETF 代码会被自动改回「基金」，用户明明想手动指定却总被改（#21）。
     var userPickedType by remember { mutableStateOf(false) }
+    // 用户是否手动改过币种：切类型时只在「没手动改过」时给币种默认值，否则保留用户选择（#14）。
+    var currencyTouched by remember { mutableStateOf(false) }
+    // 行情自动回填标记：记录最近一次行情填进 name/purchasePrice 的值。
+    // 代码变化时只清「仍等于自动填值、用户没手动改过」的那一项，保留用户手填/手改的（#1/#10）。
+    var autoFilledName by remember { mutableStateOf<String?>(null) }
+    var autoFilledPrice by remember { mutableStateOf<String?>(null) }
+    // 退出确认：表单非空时误触关闭要先确认，避免十几项白填（#8）。
+    var showExitConfirm by remember { mutableStateOf(false) }
 
     // 焦点链：让键盘「下一步」能一路走到最后一个字段，而不是每填一项都要手点屏幕。
     val nameFocus = remember { FocusRequester() }
@@ -128,6 +146,17 @@ fun AddAssetDialog(
         }.requestFocus()
     }
 
+    /** 表单是否已填过内容：决定是否在关闭时弹「放弃填写」确认（#8） */
+    fun isFormDirty(): Boolean =
+        name.isNotBlank() || symbol.isNotBlank() || account.isNotBlank() ||
+            balance.isNotBlank() || notes.isNotBlank() || interestRate.isNotBlank() ||
+            dueDate != null
+
+    /** 关闭请求：非空则先确认，否则直接关（#8） */
+    fun requestDismiss() {
+        if (isFormDirty()) showExitConfirm = true else onDismiss()
+    }
+
     // 自动识别代码类别
     val detectedCategory by remember {
         derivedStateOf {
@@ -135,10 +164,26 @@ fun AddAssetDialog(
         }
     }
 
+    /** 把行情结果回填到 name/price，仅在「字段空 或 仍等于上次自动填值」时覆盖，并记录自动填值标记（#1/#10）。 */
+    fun applyAutoFill(fetchedName: String?, fetchedPrice: Double?) {
+        if (fetchedName != null && fetchedName.isNotBlank()) {
+            if (name.isBlank() || name == autoFilledName) {
+                name = fetchedName
+                autoFilledName = fetchedName
+            }
+        }
+        if (fetchedPrice != null && fetchedPrice > 0) {
+            val priceStr = fetchedPrice.toString()
+            if (purchasePrice.isBlank() || purchasePrice == autoFilledPrice) {
+                purchasePrice = priceStr
+                autoFilledPrice = priceStr
+            }
+        }
+    }
+
     // 股票/场内基金代码 → 行情回显：统一走行情门面 [UnifiedPriceService]
     // （60s TTL 内存缓存 + 单飞去重 + 多源容错），不再直连任何单个 API。
     // 返回 false 表示没取到，由调用方决定提示文案或降级路径。
-    // （必须先于 tryFundAPI 定义：后者内部要调它做兜底）
     suspend fun tryStockAPI(formattedCode: String): Boolean {
         val result = UnifiedPriceService.getPrice(formattedCode, AssetType.STOCK)
         if (result.isSuccess) {
@@ -146,10 +191,7 @@ fun AddAssetDialog(
             stockInfo = info
             fundInfo = null
             loadError = null
-            info?.let { stock ->
-                if (name.isBlank()) name = stock.name
-                if (purchasePrice.isBlank()) purchasePrice = stock.price.toString()
-            }
+            applyAutoFill(info?.name, info?.price)
             return true
         }
         return false
@@ -172,10 +214,7 @@ fun AddAssetDialog(
                 )
                 stockInfo = null
                 loadError = null
-                if (name.isBlank()) name = fundApiResult.name
-                if (purchasePrice.isBlank() && fundApiResult.price > 0) {
-                    purchasePrice = fundApiResult.price.toString()
-                }
+                applyAutoFill(fundApiResult.name, fundApiResult.price)
                 return
             }
 
@@ -186,12 +225,7 @@ fun AddAssetDialog(
                 fundInfo = info
                 stockInfo = null
                 loadError = null
-                if (info != null) {
-                    if (name.isBlank()) name = info.name
-                    if (purchasePrice.isBlank() && info.price > 0) {
-                        purchasePrice = info.price.toString()
-                    }
-                }
+                if (info != null) applyAutoFill(info.name, info.price)
             } else {
                 // 两个基金API都失败，走行情门面兜底（股票/场内基金行情）
                 try {
@@ -211,10 +245,10 @@ fun AddAssetDialog(
         }
     }
 
-    // 自动识别并查询。
-    // key 里带上 selectedType：否则切类型时只会把行情卡片清空却不重查 ——
-    // 用户会看到「输完代码、行情没了」，以为没查到。
+    // 自动识别并查询，带防抖（#6）：连续输入只在最后一次停下 500ms 后才真正发请求，
+    // 避免「600519」逐字符触发 4~6 次网络、弱网下卡片与圈一直闪。
     LaunchedEffect(symbol, selectedType) {
+        // 立即清掉旧代码的行情显示，避免残留上一条代码的卡片
         fundInfo = null
         stockInfo = null
         loadError = null
@@ -223,6 +257,10 @@ fun AddAssetDialog(
         if (!symbolVisible || symbol.isBlank()) {
             return@LaunchedEffect
         }
+
+        // 防抖：连续输入时 effect 会反复重启（symbol 变化），delay 被打断不查；
+        // 只有停手 500ms 后这一轮才会真正走到下面的查询。
+        delay(SYMBOL_DEBOUNCE_MS)
 
         val cat = detectedCategory
         if (cat == null || cat == CodeCategory.UNKNOWN) {
@@ -303,16 +341,49 @@ fun AddAssetDialog(
     // 「碰过」的字段才报错。否则一打开弹窗，空的必填项全红，
     // 用户还没输入就被判错，体验等于打了脸。
     var touched by remember { mutableStateOf(setOf<String>()) }
-    fun markTouched(field: String) { touched = touched + field }
+    fun markTouched(field: String) {
+        touched = touched + field
+        // 用户改了任意字段就把底部旧汇总提示撤掉，避免「字段已修好底部还挂旧错」（#11）
+        saveError = null
+    }
 
     val allFields = setOf("name", "account", "balance", "symbol", "price", "rate")
     /** 只在该字段已经被碰过时显示红字 */
     fun errorFor(field: String, error: FieldError?): String? =
         if (field in touched) error?.message else null
 
+    // 重复持仓提示（#2）：同 (symbol, account, type) 已存在时，提示追加/覆盖语义。
+    // 仅作提醒，不阻断保存；加密货币走覆盖、其它有行情类型走累加。
+    val duplicateWarning by remember(symbol, account, selectedType, existingAssets) {
+        derivedStateOf {
+            if (symbol.isBlank() || account.isBlank()) return@derivedStateOf null
+            val normalized = when (selectedType) {
+                AssetType.STOCK, AssetType.FUND -> StockCodeManager.normalizeSymbol(symbol)
+                AssetType.CRYPTO -> symbol.uppercase().filter { it.isLetterOrDigit() }
+                else -> symbol
+            }
+            val exists = existingAssets.any {
+                it.symbol?.equals(normalized, ignoreCase = true) == true &&
+                    it.account.equals(account.trim(), ignoreCase = true) &&
+                    it.type == selectedType
+            }
+            if (!exists) null
+            else if (selectedType == AssetType.CRYPTO) {
+                "该账户已有此加密货币，保存将覆盖原持仓（不记交易）"
+            } else {
+                "该账户已有此持仓，保存将累加数量并记一笔买入"
+            }
+        }
+    }
+
     Dialog(
-        onDismissRequest = onDismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false)
+        onDismissRequest = { requestDismiss() },
+        // 禁用点窗外/返回键直接关闭：表单十几项填到一半误触就没了，且没有确认（#8）
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            dismissOnClickOutside = false,
+            dismissOnBackPress = false
+        )
     ) {
         Card(
             modifier = Modifier
@@ -326,7 +397,7 @@ fun AddAssetDialog(
                 modifier = Modifier.fillMaxSize()
             ) {
                 // 头部
-                AssetFormHeader(title = "添加资产", onDismiss = onDismiss)
+                AssetFormHeader(title = "添加资产", onDismiss = { requestDismiss() })
 
                 // 内容区域
                 Column(
@@ -343,8 +414,9 @@ fun AddAssetDialog(
                             selectedType = type
                             // 用户手动选过类型：后续代码自动识别不再覆盖（#21）
                             userPickedType = true
-                            // 切类型时按类型给币种一个合理默认（加密→USD，其余→CNY）
-                            currency = defaultCurrencyForType(type)
+                            // 切类型时按类型给币种一个合理默认——但只在用户没手动改过币种时
+                            // 才覆盖，否则用户精心选好的 USD 点一下别的类型就被打回 CNY（#14）
+                            if (!currencyTouched) currency = defaultCurrencyForType(type)
                             fundInfo = null
                             stockInfo = null
                             loadError = null
@@ -356,7 +428,12 @@ fun AddAssetDialog(
 
                     AssetNameField(
                         name = name,
-                        onNameChange = { name = it; markTouched("name") },
+                        onNameChange = {
+                            name = it
+                            markTouched("name")
+                            // 用户手动改了名称 → 不再是行情自动填的
+                            if (name != autoFilledName) autoFilledName = null
+                        },
                         error = errorFor("name", errors.name),
                         focusRequester = nameFocus,
                         onNext = { focusAfter("name") }
@@ -365,7 +442,20 @@ fun AddAssetDialog(
                     if (symbolVisible) {
                         AssetSymbolField(
                             symbol = symbol,
-                            onSymbolChange = { symbol = it; markTouched("symbol") },
+                            onSymbolChange = {
+                                symbol = it
+                                markTouched("symbol")
+                                // 代码变化：清掉由行情自动填入、且用户没手动改过的名称/单价（#1）。
+                                // 用户手填或手改过的值保留，避免「换代码后名称/单价还留着上一只标的」。
+                                if (autoFilledName != null && name == autoFilledName) {
+                                    name = ""
+                                    autoFilledName = null
+                                }
+                                if (autoFilledPrice != null && purchasePrice == autoFilledPrice) {
+                                    purchasePrice = ""
+                                    autoFilledPrice = null
+                                }
+                            },
                             selectedType = selectedType,
                             isLoading = isLoading,
                             error = errorFor("symbol", errors.symbol),
@@ -407,13 +497,29 @@ fun AddAssetDialog(
                         onNext = { focusAfter("account") }
                     )
 
+                    // 重复持仓提醒（#2）：填完代码+账户即可看到
+                    duplicateWarning?.let { warning ->
+                        Column(
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            HorizontalDivider()
+                            Text(
+                                text = "⚠ $warning",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.padding(top = 8.dp)
+                            )
+                        }
+                    }
+
                     // 交易信息
                     DialogSectionHeader("交易信息")
 
                     AssetBalanceField(
                         balance = balance,
                         onBalanceChange = {
-                            balance = sanitizeDecimalInput(it)
+                            // 加密货币允许负余额（借币/欠币，Asset.kt 已放开），其它类型不允许（#12）
+                            balance = sanitizeDecimalInput(it, selectedType == AssetType.CRYPTO)
                             markTouched("balance")
                         },
                         selectedType = selectedType,
@@ -425,12 +531,15 @@ fun AddAssetDialog(
                     // 币种：所有类型都显示（决定市值换算口径，加密默认 USD）
                     AssetCurrencyField(
                         currency = currency,
-                        onCurrencyChange = { currency = it }
+                        onCurrencyChange = {
+                            currency = it
+                            currencyTouched = true
+                        }
                     )
 
                     if (showPrice) {
                         val autoPrice = when {
-                            fundInfo?.price != null && fundInfo?.price ?: 0.0 > 0 -> fundInfo?.price
+                            fundInfo?.price != null && (fundInfo?.price ?: 0.0) > 0 -> fundInfo?.price
                             stockInfo?.price != null -> stockInfo?.price
                             else -> null
                         }
@@ -439,8 +548,12 @@ fun AddAssetDialog(
                             onPriceChange = {
                                 purchasePrice = sanitizeDecimalInput(it)
                                 markTouched("price")
+                                // 用户手动改了价格 → 不再是自动填，提示撤掉（#10）
+                                if (purchasePrice != autoFilledPrice) autoFilledPrice = null
                             },
                             autoPrice = autoPrice,
+                            // 仅当价格仍等于行情自动填值时才显示"已按行情价自动填充"（#10）
+                            isAutoFilled = autoFilledPrice != null && purchasePrice == autoFilledPrice,
                             error = errorFor("price", errors.price),
                             focusRequester = priceFocus,
                             onNext = { focusAfter("price") }
@@ -479,7 +592,7 @@ fun AddAssetDialog(
 
                 // 底部按钮
                 AssetFormActions(
-                    onDismiss = onDismiss,
+                    onDismiss = { requestDismiss() },
                     onConfirmClick = {
                         if (isSaving) return@AssetFormActions
                         // 点保存时把所有字段标记为"已碰过"：否则按钮直接灰着、
@@ -524,5 +637,30 @@ fun AddAssetDialog(
                 )
             }
         }
+
+        // 退出确认：表单已填内容时误触关闭要先确认（#8）
+        if (showExitConfirm) {
+            AlertDialog(
+                onDismissRequest = { showExitConfirm = false },
+                title = { Text("放弃填写？") },
+                text = { Text("已填写的内容将不会保存。") },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            showExitConfirm = false
+                            onDismiss()
+                        }
+                    ) { Text("放弃") }
+                },
+                dismissButton = {
+                    TextButton(
+                        onClick = { showExitConfirm = false }
+                    ) { Text("继续编辑") }
+                }
+            )
+        }
     }
 }
+
+/** 代码查询防抖时长（毫秒）：连续输入只在停手这么久后才真正发请求（#6）。 */
+private const val SYMBOL_DEBOUNCE_MS = 500L

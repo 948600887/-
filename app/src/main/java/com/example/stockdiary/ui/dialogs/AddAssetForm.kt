@@ -37,6 +37,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.key
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -60,6 +61,7 @@ import com.example.stockdiary.network.model.StockData
 import com.example.stockdiary.ui.components.DialogSectionHeader
 import com.example.stockdiary.ui.components.DialogTypeChip
 import com.example.stockdiary.ui.theme.AppTheme
+import com.example.stockdiary.utils.ExchangeRateManager
 import com.example.stockdiary.utils.StockCodeManager
 import com.example.stockdiary.utils.StockCodeManager.CodeCategory
 
@@ -144,14 +146,52 @@ internal fun AssetTypePicker(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            listOf(AssetType.CRYPTO, AssetType.CREDIT_CARD, AssetType.LOAN).forEach { type ->
-                DialogTypeChip(
-                    type = type,
-                    selected = selectedType == type,
-                    onClick = { onSelectType(type) },
-                    modifier = Modifier.weight(1f)
-                )
-            }
+            DialogTypeChip(
+                type = AssetType.CRYPTO,
+                selected = selectedType == AssetType.CRYPTO,
+                onClick = { onSelectType(AssetType.CRYPTO) },
+                modifier = Modifier.weight(1f)
+            )
+            DialogTypeChip(
+                type = AssetType.CREDIT_CARD,
+                selected = selectedType == AssetType.CREDIT_CARD,
+                onClick = { onSelectType(AssetType.CREDIT_CARD) },
+                modifier = Modifier.weight(1f)
+            )
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            DialogTypeChip(
+                type = AssetType.LOAN,
+                selected = selectedType == AssetType.LOAN,
+                onClick = { onSelectType(AssetType.LOAN) },
+                modifier = Modifier.weight(1f)
+            )
+            DialogTypeChip(
+                type = AssetType.MORTGAGE,
+                selected = selectedType == AssetType.MORTGAGE,
+                onClick = { onSelectType(AssetType.MORTGAGE) },
+                modifier = Modifier.weight(1f)
+            )
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            DialogTypeChip(
+                type = AssetType.CAR_LOAN,
+                selected = selectedType == AssetType.CAR_LOAN,
+                onClick = { onSelectType(AssetType.CAR_LOAN) },
+                modifier = Modifier.weight(1f)
+            )
+            DialogTypeChip(
+                type = AssetType.OTHER_LIABILITY,
+                selected = selectedType == AssetType.OTHER_LIABILITY,
+                onClick = { onSelectType(AssetType.OTHER_LIABILITY) },
+                modifier = Modifier.weight(1f)
+            )
         }
     }
 }
@@ -387,7 +427,12 @@ internal fun AssetPriceField(
     autoPrice: Double?,
     error: String?,
     focusRequester: FocusRequester,
-    onNext: () -> Unit
+    onNext: () -> Unit,
+    /**
+     * 是否真的由行情自动填充且用户还没改。仅当 [purchasePrice] 仍等于 [autoPrice] 时为 true，
+     * 否则（用户手动改过 / 清空了）就不显示"已按行情价自动填充"，避免误导（#10）。
+     */
+    isAutoFilled: Boolean = false
 ) {
     OutlinedTextField(
         value = purchasePrice,
@@ -405,10 +450,11 @@ internal fun AssetPriceField(
         singleLine = true,
         isError = error != null,
         // 自动填充价原先写在 placeholder 里：用户一填值提示就消失了，等于白给。
-        // 改到 supportingText 常驻，且让位于错误提示。
+        // 改到 supportingText 常驻，且让位于错误提示。仅在价格仍等于行情自动填充值时
+        // 才提示，用户改过/清空后提示消失（#10）。
         supportingText = when {
             error != null -> { { Text(error) } }
-            autoPrice != null && autoPrice > 0 -> {
+            isAutoFilled -> {
                 {
                     Text(
                         "已按行情价 $autoPrice 自动填充，可手动修改",
@@ -452,21 +498,22 @@ internal fun AssetInterestRateField(
 
 @OptIn(ExperimentalMaterial3Api::class)
 /**
- * 币种选择：CNY / USD / HKD 三选一。
+ * 币种选择。
  *
  * 一一对应改造新增：Asset 本就有 currency 字段（默认 CNY），但添加/编辑页一直没暴露，
  * 于是加密货币（美元价）、港股（港币价）的市值被按人民币口径算，totalValueCny 全错。
+ *
+ * 币种列表直接对齐 [ExchangeRateManager.supportedCurrencies]（内置 10 种汇率），
+ * 不再硬编码 CNY/USD/HKD —— 否则日元/欧元等资产只能选 CNY，被按 1:1 折算，
+ * 总资产凭空虚高（如 100 万日元按人民币算）。下拉展示「代码 + 中文名」。
  */
 @Composable
 internal fun AssetCurrencyField(
     currency: String,
     onCurrencyChange: (String) -> Unit
 ) {
-    val options = listOf(
-        "CNY" to "¥ 人民币",
-        "USD" to "$ 美元",
-        "HKD" to "HK$ 港币"
-    )
+    val options = remember { ExchangeRateManager.supportedCurrencies() }
+    var expanded by remember { mutableStateOf(false) }
     Column {
         Text(
             text = "币种",
@@ -474,13 +521,35 @@ internal fun AssetCurrencyField(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(bottom = 6.dp)
         )
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            options.forEach { (code, label) ->
-                FilterChip(
-                    selected = currency == code,
-                    onClick = { onCurrencyChange(code) },
-                    label = { Text(label) }
-                )
+        ExposedDropdownMenuBox(
+            expanded = expanded,
+            onExpandedChange = { expanded = it }
+        ) {
+            OutlinedTextField(
+                value = "$currency  ${ExchangeRateManager.getDisplayName(currency)}",
+                onValueChange = {},
+                readOnly = true,
+                label = { Text("币种") },
+                trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .menuAnchor(),
+                singleLine = true
+            )
+            ExposedDropdownMenu(
+                expanded = expanded,
+                onDismissRequest = { expanded = false }
+            ) {
+                options.forEach { code ->
+                    DropdownMenuItem(
+                        text = { Text("$code  ${ExchangeRateManager.getDisplayName(code)}") },
+                        onClick = {
+                            onCurrencyChange(code)
+                            expanded = false
+                        },
+                        contentPadding = ExposedDropdownMenuDefaults.ItemContentPadding
+                    )
+                }
             }
         }
     }
@@ -506,7 +575,12 @@ internal fun AssetDueDateField(
             }.getOrNull()
         }
     }
-    val pickerState = rememberDatePickerState(initialSelectedDateMillis = initialMillis)
+    // 关键：用 dueDate 作为组合 key 重建选择器状态。否则清掉日期后 pickerState 里的
+    // 选中值还在，再点「确定」会把刚清掉的日期原样写回（#9）。
+    // rememberDatePickerState 本身不接受 key 参数，必须用 key() 强制重建子树。
+    val pickerState = key(dueDate ?: "NONE") {
+        rememberDatePickerState(initialSelectedDateMillis = initialMillis)
+    }
 
     OutlinedTextField(
         value = dueDate ?: "",
@@ -667,7 +741,21 @@ fun buildAssetFromInput(
     currency: String = "CNY",
     dueDate: String? = null
 ): Asset {
-    val normalizedSymbol = when (selectedType) {
+    // 类型与代码号段自洽校正（#7/#21）：手动选了「证券(STOCK)」却填了基金号段代码，
+    // 归一化后会落成 fund_ 形态，但 type 仍是 STOCK 会与「基金」语义矛盾。这里把
+    // STOCK + 基金号段 校正为 FUND，与「证券」chip 统涵盖股票/基金的本意一致。
+    // （FUND + 股票代码、CRYPTO + 股票/基金代码这类真正矛盾的组合由校验层拦截，见
+    //  AssetInputValidation 的 typeSymbolMismatch。）
+    val effectiveType = if (selectedType == AssetType.STOCK) {
+        when (StockCodeManager.classifyCode(symbol)) {
+            CodeCategory.ETF, CodeCategory.LOF,
+            CodeCategory.EXCHANGE_FUND, CodeCategory.OTC_FUND -> AssetType.FUND
+            else -> selectedType
+        }
+    } else {
+        selectedType
+    }
+    val normalizedSymbol = when (effectiveType) {
         AssetType.STOCK, AssetType.FUND -> StockCodeManager.normalizeSymbol(symbol)
         // 加密货币：占位符写的是「例如：BTC/USDT」，用户照抄就把斜杠原样落库；
         // cryptoTradingPairFor 不剥离 '/'，于是 ?symbol=BTC/USDT 币安直接返回 400，
@@ -677,24 +765,26 @@ fun buildAssetFromInput(
         else -> symbol
     }
     return Asset(
-        name = name,
-        type = selectedType,
+        // 名称/账户/备注统一 trim（#13）：账户尾随空格会让 (symbol+account) 精确匹配失效，
+        // 同一账户被当成两个、加仓不合并、分组也分家。
+        name = name.trim(),
+        type = effectiveType,
         symbol = normalizedSymbol.takeIf { it.isNotBlank() },
-        account = account,
+        account = account.trim(),
         balance = balance.toDoubleOrNull() ?: 0.0,
         // 存款的「单价」没有意义，恒定为 1，让 totalValue 直接等于本金
-        purchasePrice = if (selectedType == AssetType.BANK_DEPOSIT) {
+        purchasePrice = if (effectiveType == AssetType.BANK_DEPOSIT) {
             1.0
         } else {
             purchasePrice.toDoubleOrNull() ?: fundPrice ?: stockPrice ?: 0.0
         },
-        currentPrice = if (selectedType == AssetType.BANK_DEPOSIT) {
+        currentPrice = if (effectiveType == AssetType.BANK_DEPOSIT) {
             1.0
         } else {
             fundPrice ?: stockPrice ?: purchasePrice.toDoubleOrNull()
         },
         // 利率：存款与贷款都可能有；存款新增时必填（由校验保证），贷款可选
-        interestRate = if (selectedType == AssetType.BANK_DEPOSIT || selectedType == AssetType.LOAN) {
+        interestRate = if (effectiveType == AssetType.BANK_DEPOSIT || effectiveType == AssetType.LOAN) {
             interestRate.toDoubleOrNull()
         } else {
             null
@@ -702,7 +792,7 @@ fun buildAssetFromInput(
         // 币种 / 到期日：一一对应改造新增写入（原本 Asset 有这两字段但表单没暴露）
         currency = currency,
         dueDate = dueDate?.takeIf { it.isNotBlank() },
-        notes = notes.takeIf { it.isNotBlank() }
+        notes = notes.trim().takeIf { it.isNotBlank() }
     )
 }
 

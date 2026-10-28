@@ -10,6 +10,7 @@ import com.example.stockdiary.ui.theme.AppTheme
 import java.math.RoundingMode
 import java.text.DecimalFormat
 import java.text.DecimalFormatSymbols
+import java.util.Locale
 import java.time.Instant
 import java.time.LocalDate
 import java.time.LocalDateTime
@@ -91,8 +92,11 @@ private fun createDecimalFormat(digits: Int): DecimalFormat =
         roundingMode = RoundingMode.HALF_UP
         // 与 String.format 一致：不带千分位（pattern 里没有 ","，这里再显式关一次免得将来被误改）
         isGroupingUsed = false
-        // 小数分隔符跟随系统 FORMAT locale，与 String.format 取的是同一套 Locale.Category
-        decimalFormatSymbols = DecimalFormatSymbols.getInstance()
+        // 小数分隔符固定为 '.'（Locale.US），**不能**跟随系统 FORMAT locale：
+        // 德语/法语等设备的小数分隔符是 ','，同一个金额会显示成 ¥1.234,56，
+        // 既看着像算错，也让 formatTrim 的 trimEnd(sep) 按 ',' 截断错字。
+        // 全 App 只有一个金额格式化入口，这里锁死口径即可全局一致。
+        decimalFormatSymbols = DecimalFormatSymbols(Locale.US)
     }
 
 /**
@@ -162,7 +166,8 @@ fun quantityPrecisionFor(type: AssetType, symbol: String?): Int =
  */
 fun Double.formatTrim(digits: Int): String {
     val s = format(digits)
-    val sep = DecimalFormatSymbols.getInstance().decimalSeparator
+    // 与 createDecimalFormat 同一口径（固定 '.'），否则德语设备 format 出 ',' 而这里按 '.' 截
+    val sep = DecimalFormatSymbols(Locale.US).decimalSeparator
     return s.trimEnd('0').trimEnd(sep)
 }
 

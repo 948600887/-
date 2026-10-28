@@ -50,7 +50,10 @@ class EastmoneyDividendApiService(private val context: Context) {
     suspend fun getDividendHistory(stockCode: String, marketPrefix: String?): Result<List<DividendData>> {
         val code = StockCodeManager.extractDigits(stockCode)
         val securityCode = if (marketPrefix != null) {
-            "${marketPrefix}.${code}"
+            // 东财 SECURITY_CODE 的标准形态是「市场前缀+代码」（如 SH510050），**不带点**。
+            // 带点的 SH.510050 在这个 filter 上可能一条都匹配不到 —— 返回空被当成"确实没分红"，
+            // 分红被静默丢掉且不会被失败计数捕获。这里统一拼成无点形态。
+            "$marketPrefix$code"
         } else {
             code
         }

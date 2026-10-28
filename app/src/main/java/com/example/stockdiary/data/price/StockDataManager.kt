@@ -269,7 +269,13 @@ class StockDataManager(
                     trimCacheIfNeeded()
                     
                     // 同时更新PriceCacheManager持久化缓存
-                    val prevClose = stockData.yesterdayClose ?: 0.0
+                    //
+                    // 昨收缺失时**不能**直接落成 0.0：离线读回会拿 prevClose=0 去算涨跌，
+                    // 涨跌额等于整价（看上去像涨了 100%）。先沿用磁盘缓存里已有的非零昨收
+                    // （?: 是惰性的，只有 yesterdayClose 真的缺失才会去读一次缓存）。
+                    val prevClose = stockData.yesterdayClose?.takeIf { it > 0.0 }
+                        ?: PriceCacheManager.getCachedPrice(symbol)?.prevClose?.takeIf { it > 0.0 }
+                        ?: 0.0
                     val sinaData = SinaStockData(
                         name = stockData.name,
                         code = stockData.code,
@@ -278,6 +284,8 @@ class StockDataManager(
                         changePercent = if (prevClose > 0)
                             (stockData.price - prevClose) / prevClose * 100 else 0.0,
                         open = stockData.open ?: 0.0,
+                        // prevClose 必须显式传进来：漏传会让缓存里恒为 0，离线取价的涨跌全错
+                        prevClose = prevClose,
                         high = stockData.high ?: 0.0,
                         low = stockData.low ?: 0.0,
                         volume = stockData.volume ?: 0L

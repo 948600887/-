@@ -231,9 +231,9 @@ fun SettingsScreen(
 
     LaunchedEffect(uiState.exportResult) {
         uiState.exportResult?.let { result ->
-            if (result.isError) {
-                snackbarHostState.showSnackbar(result.exceptionOrNull()?.message ?: "导出失败")
-            }
+            // 成功也提示：文件名是用户取消分享面板后唯一能追踪导出结果的信息
+            val message = result.getOrNull() ?: result.exceptionOrNull()?.message ?: "导出失败"
+            snackbarHostState.showSnackbar(message)
             viewModel.clearExportResult()
         }
     }
@@ -254,7 +254,8 @@ fun SettingsScreen(
         uiState.dataSourceHealthSummary,
         assetCount,
         snapshotCount,
-        transactionCount
+        transactionCount,
+        uiState.isExporting
     ) {
         listOf(
             SettingsSectionData("外观", listOf(
@@ -288,7 +289,11 @@ fun SettingsScreen(
                 add(SettingsItemData(
                     icon = Icons.Default.Download,
                     title = "导出数据",
-                    subtitle = "资产 $assetCount · 快照 $snapshotCount · 交易 $transactionCount",
+                    subtitle = buildString {
+                        append("资产 $assetCount · 快照 $snapshotCount · 交易 $transactionCount")
+                        // 导出没有对话框内的进度（点完即关），用这一行告诉用户还在写文件
+                        if (uiState.isExporting) append(" · 导出中…")
+                    },
                     onClick = { showExportDialog = true }
                 ))
                 add(SettingsItemData(
@@ -518,6 +523,7 @@ fun SettingsScreen(
         ExportDataDialog(
             snapshotCount = snapshotCount,
             transactionCount = transactionCount,
+            dividendCount = uiState.dividendCount,
             isExporting = uiState.isExporting,
             onExportText = {
                 viewModel.exportData(context, SettingsViewModel.ExportType.TEXT)

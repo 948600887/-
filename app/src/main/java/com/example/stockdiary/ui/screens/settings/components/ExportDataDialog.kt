@@ -22,13 +22,12 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import com.example.stockdiary.database.AssetSnapshot
-import com.example.stockdiary.database.Transaction
 
 @Composable
 fun ExportDataDialog(
     snapshotCount: Int,
     transactionCount: Int,
+    dividendCount: Int,
     isExporting: Boolean,
     onExportText: () -> Unit,
     onExportCsvAssets: () -> Unit,
@@ -112,12 +111,16 @@ fun ExportDataDialog(
 
                 OutlinedButton(
                     onClick = onExportCsvDividends,
-                    enabled = !isExporting,
+                    // 没有分红记录时禁用：否则会导出一个只写着「暂无分红记录」的空文件
+                    enabled = !isExporting && dividendCount > 0,
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Icon(Icons.Filled.Savings, contentDescription = null)
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text("导出分红明细 (.csv)")
+                    Text(
+                        if (dividendCount > 0) "导出分红明细 (${dividendCount}条)"
+                        else "导出分红明细 (暂无分红记录)"
+                    )
                 }
             }
         },

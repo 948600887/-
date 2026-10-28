@@ -9,6 +9,8 @@ import com.example.stockdiary.data.repository.AssetRepository
 import com.example.stockdiary.data.sync.PriceSyncPreferencesManager
 import com.example.stockdiary.data.sync.PriceSyncScheduler
 import com.example.stockdiary.data.sync.SnapshotScheduler
+import com.example.stockdiary.common.Result
+import com.example.stockdiary.database.DividendDao
 import com.example.stockdiary.database.SnapshotDao
 import com.example.stockdiary.database.TransactionDao
 import com.example.stockdiary.utils.AppLogger
@@ -71,6 +73,7 @@ class SettingsViewModelTest {
     private val assetRepository = mockk<AssetRepository>(relaxed = true)
     private val snapshotDao = mockk<SnapshotDao>(relaxed = true)
     private val transactionDao = mockk<TransactionDao>(relaxed = true)
+    private val dividendDao = mockk<DividendDao>(relaxed = true)
     private val dataExporter = mockk<DataExporter>(relaxed = true)
     private val dashboardPreferencesManager = mockk<DashboardPreferencesManager>(relaxed = true)
     private val dataSourceHealthChecker = mockk<DataSourceHealthChecker>(relaxed = true)
@@ -101,12 +104,15 @@ class SettingsViewModelTest {
         every { assetRepository.getAllAssets() } returns flowOf(emptyList())
         every { snapshotDao.getAllSnapshots() } returns flowOf(emptyList())
         every { transactionDao.getAllFlow() } returns flowOf(emptyList())
+        every { dividendDao.getAllFlow() } returns flowOf(emptyList())
+        coEvery { dividendDao.getAllSync() } returns emptyList()
 
         vm = SettingsViewModel(
             appContext = appContext,
             assetRepository = assetRepository,
             snapshotDao = snapshotDao,
             transactionDao = transactionDao,
+            dividendDao = dividendDao,
             dataExporter = dataExporter,
             dashboardPreferencesManager = dashboardPreferencesManager,
             dataSourceHealthChecker = dataSourceHealthChecker,
@@ -132,12 +138,12 @@ class SettingsViewModelTest {
     @Test
     fun `导出分红明细走 exportDividendsToCSV 分支`() = runBlocking {
         val fakeUri = mockk<android.net.Uri>(relaxed = true)
-        every { dataExporter.exportDividendsToCSV(any()) } returns fakeUri
+        every { dataExporter.exportDividendsToCSV(any()) } returns Result.success(fakeUri)
 
         vm.exportData(mockk(relaxed = true), SettingsViewModel.ExportType.CSV_DIVIDENDS)
         waitUntil { vm.uiState.value.exportResult != null }
 
-        coVerify { assetRepository.getAllDividends() }
+        coVerify { dividendDao.getAllSync() }
         verify { dataExporter.exportDividendsToCSV(any()) }
         assertTrue(vm.uiState.value.exportResult?.isSuccess == true)
     }
@@ -145,7 +151,7 @@ class SettingsViewModelTest {
     @Test
     fun `导出资产报告走 exportToText 分支`() = runBlocking {
         val fakeUri = mockk<android.net.Uri>(relaxed = true)
-        every { dataExporter.exportToText(any()) } returns fakeUri
+        every { dataExporter.exportToText(any()) } returns Result.success(fakeUri)
 
         vm.exportData(mockk(relaxed = true), SettingsViewModel.ExportType.TEXT)
         waitUntil { vm.uiState.value.exportResult != null }
@@ -273,6 +279,7 @@ class SettingsViewModelTest {
             assetRepository = assetRepository,
             snapshotDao = snapshotDao,
             transactionDao = transactionDao,
+            dividendDao = dividendDao,
             dataExporter = dataExporter,
             dashboardPreferencesManager = dashboardPreferencesManager,
             dataSourceHealthChecker = dataSourceHealthChecker,

@@ -1,7 +1,9 @@
 package com.example.stockdiary.ui.viewmodels
 
+import android.content.ClipData
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewmodel.initializer
@@ -17,6 +19,7 @@ import com.example.stockdiary.data.sync.PriceSyncScheduler
 import com.example.stockdiary.data.sync.SnapshotScheduler
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetSnapshot
+import com.example.stockdiary.database.DividendDao
 import com.example.stockdiary.database.SnapshotDao
 import com.example.stockdiary.database.Transaction
 import com.example.stockdiary.database.TransactionDao
@@ -44,6 +47,7 @@ class SettingsViewModel(
     private val assetRepository: AssetRepository,
     private val snapshotDao: SnapshotDao,
     private val transactionDao: TransactionDao,
+    private val dividendDao: DividendDao,
     private val dataExporter: DataExporter,
     private val dashboardPreferencesManager: DashboardPreferencesManager,
     private val dataSourceHealthChecker: DataSourceHealthChecker,
@@ -79,6 +83,8 @@ class SettingsViewModel(
         val assetCount: Int = 0,
         val snapshotCount: Int = 0,
         val transactionCount: Int = 0,
+        /** 分红条数：导出对话框用它决定「分红明细」是否可点（空库不该导出一个空文件） */
+        val dividendCount: Int = 0,
         val isExporting: Boolean = false,
         val isDeleting: Boolean = false,
         val isCheckingHealth: Boolean = false,
@@ -229,6 +235,18 @@ class SettingsViewModel(
                 AppLogger.e("交易计数流收集异常: ${e.message}", e, "SettingsVM")
             }
         }
+        viewModelScope.launch {
+            try {
+                dividendDao.getAllFlow()
+                    .map { it.size }
+                    .distinctUntilChanged()
+                    .collect { count -> _uiState.update { state -> state.copy(dividendCount = count) } }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                AppLogger.e("分红计数流收集异常: ${e.message}", e, "SettingsVM")
+            }
+        }
     }
 
     enum class ExportType {
@@ -241,48 +259,53 @@ class SettingsViewModel(
     }
 
     fun exportData(context: Context, type: ExportType) {
+        // 导出中再次点击（比如分享面板取消后立刻重试）直接忽略，避免两份并发落盘、状态互相覆盖。
+        // 标记必须在 launch 之前同步置位，否则连点两下时第二个调用还看不到 true，守卫形同虚设。
+        if (_uiState.value.isExporting) return
+        _uiState.update { state -> state.copy(isExporting = true, exportResult = null) }
         viewModelScope.launch(Dispatchers.IO) {
-            _uiState.update { state -> state.copy(isExporting = true, exportResult = null) }
             try {
-                // 导出时才查库：设置页平时只保留计数，不常驻三张全量表
-                val assets = assetRepository.getAllAssets().first()
-                val snapshots = snapshotDao.getAllSnapshotsSync()
-                val transactions = transactionDao.getAllFlow().first()
-                val uri = when (type) {
-                    ExportType.TEXT -> dataExporter.exportToText(assets)
-                    ExportType.CSV_ASSETS -> dataExporter.exportAssetsToCSV(assets)
-                    ExportType.CSV_SNAPSHOTS -> dataExporter.exportSnapshotsToCSV(snapshots)
-                    ExportType.CSV_TRANSACTIONS -> dataExporter.exportTransactionsToCSV(assets, transactions)
-                    ExportType.CSV_STATEMENT -> dataExporter.exportStatementCSV(assets, transactions, snapshots)
-                    ExportType.CSV_DIVIDENDS -> dataExporter.exportDividendsToCSV(assetRepository.getAllDividends())
+                // 按类型只查需要的表：原先不管导哪种都读 assets + snapshots + transactions 三张全表，
+                // 老用户（几千条快照、上万条交易）导出「资产」时会白读两遍无关数据。
+                val result = when (type) {
+                    ExportType.TEXT -> dataExporter.exportToText(assetRepository.getAllAssets().first())
+                    ExportType.CSV_ASSETS -> dataExporter.exportAssetsToCSV(assetRepository.getAllAssets().first())
+                    ExportType.CSV_SNAPSHOTS ->
+                        dataExporter.exportSnapshotsToCSV(snapshotDao.getAllSnapshotsSync())
+                    ExportType.CSV_TRANSACTIONS -> dataExporter.exportTransactionsToCSV(
+                        assetRepository.getAllAssets().first(),
+                        transactionDao.getAllFlow().first()
+                    )
+                    ExportType.CSV_STATEMENT -> dataExporter.exportStatementCSV(
+                        assetRepository.getAllAssets().first(),
+                        transactionDao.getAllFlow().first(),
+                        snapshotDao.getAllSnapshotsSync(),
+                        dividendDao.getAllSync()
+                    )
+                    ExportType.CSV_DIVIDENDS -> dataExporter.exportDividendsToCSV(dividendDao.getAllSync())
                 }
-                if (uri != null) {
-                    withContext(Dispatchers.Main) {
-                        val title = when (type) {
-                            ExportType.TEXT -> "资产报告"
-                            ExportType.CSV_ASSETS -> "资产数据"
-                            ExportType.CSV_SNAPSHOTS -> "历史快照"
-                            ExportType.CSV_TRANSACTIONS -> "交易对账单"
-                            ExportType.CSV_STATEMENT -> "综合对账单"
-                            ExportType.CSV_DIVIDENDS -> "分红明细"
-                        }
-                        val shareIntent = Intent(Intent.ACTION_SEND).apply {
-                            setType(
-                                when {
-                                    uri.toString().contains(".csv") -> "text/csv"
-                                    uri.toString().contains(".txt") -> "text/plain"
-                                    else -> "application/octet-stream"
-                                }
+                result.fold(
+                    onSuccess = { uri ->
+                        withContext(Dispatchers.Main) { shareExport(context, uri, exportTitle(type)) }
+                        // 成功也给一条提示：此前只弹分享面板，用户取消后不知道文件在哪儿
+                        _uiState.update { state ->
+                            state.copy(
+                                isExporting = false,
+                                exportResult = Result.success(
+                                    "已生成 ${uri.lastPathSegment?.substringAfterLast('/') ?: "导出文件"}"
+                                )
                             )
-                            putExtra(Intent.EXTRA_STREAM, uri)
-                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                         }
-                        context.startActivity(Intent.createChooser(shareIntent, title))
+                    },
+                    onFailure = { e ->
+                        _uiState.update { state ->
+                            state.copy(
+                                isExporting = false,
+                                exportResult = Result.failure(e.message ?: "导出失败")
+                            )
+                        }
                     }
-                    _uiState.update { state -> state.copy(isExporting = false, exportResult = Result.success("导出成功")) }
-                } else {
-                    _uiState.update { state -> state.copy(isExporting = false, exportResult = Result.failure("导出失败")) }
-                }
+                )
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -290,6 +313,33 @@ class SettingsViewModel(
                 _uiState.update { state -> state.copy(isExporting = false, exportResult = Result.failure(e)) }
             }
         }
+    }
+
+    private fun exportTitle(type: ExportType): String = when (type) {
+        ExportType.TEXT -> "资产报告"
+        ExportType.CSV_ASSETS -> "资产数据"
+        ExportType.CSV_SNAPSHOTS -> "历史快照"
+        ExportType.CSV_TRANSACTIONS -> "交易对账单"
+        ExportType.CSV_STATEMENT -> "综合对账单"
+        ExportType.CSV_DIVIDENDS -> "分红明细"
+    }
+
+    /**
+     * 拉起系统分享面板。
+     *
+     * [ClipData] 与 `EXTRA_STREAM` 必须同时给：部分接收方（旧版微信、邮件客户端）只读
+     * ClipData，只设 EXTRA_STREAM 时面板里选得中却发不出附件。
+     */
+    private fun shareExport(context: Context, uri: Uri, title: String) {
+        val mime = context.contentResolver.getType(uri)
+            ?: if (uri.lastPathSegment?.endsWith(".txt") == true) "text/plain" else "text/csv"
+        val shareIntent = Intent(Intent.ACTION_SEND).apply {
+            type = mime
+            putExtra(Intent.EXTRA_STREAM, uri)
+            clipData = ClipData.newUri(context.contentResolver, title, uri)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        context.startActivity(Intent.createChooser(shareIntent, title))
     }
 
     /** 跳转系统设置开启精确闹钟权限（SCHEDULE_EXACT_ALARM 无法用弹窗请求，只能手动开） */
@@ -618,6 +668,7 @@ class SettingsViewModel(
                     assetRepository = container.assetRepository,
                     snapshotDao = container.database.snapshotDao(),
                     transactionDao = container.database.transactionDao(),
+                    dividendDao = container.database.dividendDao(),
                     dataExporter = container.dataExporter,
                     dashboardPreferencesManager = container.dashboardPreferencesManager,
                     dataSourceHealthChecker = DataSourceHealthChecker,

@@ -7,6 +7,7 @@ import androidx.lifecycle.viewmodel.viewModelFactory
 import androidx.lifecycle.viewModelScope
 import com.example.stockdiary.data.repository.AssetRepository
 import com.example.stockdiary.data.prefs.DashboardPreferencesManager
+import com.example.stockdiary.data.prefs.DEFAULT_MONTHLY_EXPENSE
 import com.example.stockdiary.data.dividend.DividendIncomeUseCase
 import com.example.stockdiary.data.dividend.DividendRecord
 import com.example.stockdiary.data.dividend.cashDateOrNull
@@ -71,7 +72,7 @@ class CalendarViewModel(
          */
         val isRefreshing: Boolean = false,
         val errorMessage: String? = null,
-        val monthlyExpense: String = "5000",
+        val monthlyExpense: String = DEFAULT_MONTHLY_EXPENSE,
         val realAnnualIncome: Double = 0.0
     )
 
@@ -184,8 +185,7 @@ class CalendarViewModel(
         viewModelScope.launch {
             try {
                 val all = withContext(Dispatchers.IO) { assetRepository.getAllAssets().first() }
-                val liveNetAssets = all.filter { !it.type.isLiability }.sumOf { it.totalValueCny } -
-                    all.filter { it.type.isLiability }.sumOf { it.totalValueCny }
+                val liveNetAssets = computeLiveNetAssets(all)
                 val today = LocalDate.now()
                 _uiState.update { state ->
                     val todayInView = today.year == state.currentMonth.year &&
@@ -207,6 +207,16 @@ class CalendarViewModel(
             }
         }
     }
+
+    /**
+     * 实时净资产：全部非负债资产 totalValueCny 合计 − 负债合计。
+     * 与资产页/首页完全同口径，日历「今天」格与 FIRE 都依赖它。
+     * 抽出共用，避免 [refreshLiveAssets] 与 [generateAssetCalendarData] 两处各写一遍、
+     * 将来改口径时只改一处漏改另一处（今天格就与首页对不上）。
+     */
+    private fun computeLiveNetAssets(assets: List<Asset>): Double =
+        assets.filter { !it.type.isLiability }.sumOf { it.totalValueCny } -
+            assets.filter { it.type.isLiability }.sumOf { it.totalValueCny }
 
     /**
      * 日历输出真正依赖的资产字段签名：symbol（取哪些分红）、type、balance（收支日历折算金额）、
@@ -261,7 +271,9 @@ class CalendarViewModel(
 
     fun selectTab(tab: String) {
         if (_uiState.value.selectedTab == tab) return
-        _uiState.update { state -> state.copy(selectedTab = tab) }
+        // 与 selectMonth 一致：清掉选中日期。它是「上一个 Tab 里的某一天」，切 Tab 后详情卡
+        // 会落到另一套口径的 calendarData（资产日历 vs 收支日历），取到意外的值或无关明细。
+        _uiState.update { state -> state.copy(selectedTab = tab, selectedDate = null) }
         viewModelScope.launch {
             generateCalendarData(_uiState.value.assets)
         }
@@ -324,8 +336,14 @@ class CalendarViewModel(
         // 顶层兜底：内部虽返回 Result，但 withContext 链路上的意外异常不能让 viewModelScope 崩溃
         val result = try {
             withContext(Dispatchers.IO) {
+                // 复用全量资产（含负债/加密）：资产日历「今天」格的实时净资产需要它，而 fireAssets
+                // 已被 refreshLiveAssets 加载过（进页即触发），切月/切 Tab 时直接复用，省一次 Room
+                // 全表查询。仅在尚未加载时降级查一次。
+                val allAssets = _uiState.value.fireAssets.ifEmpty {
+                    assetRepository.getAllAssets().first()
+                }
                 if (requestState.selectedTab == "资产日历") {
-                    generateAssetCalendarData(requestState.currentMonth, assets, forceRefresh)
+                    generateAssetCalendarData(requestState.currentMonth, assets, forceRefresh, allAssets)
                 } else {
                     generateIncomeCalendarData(requestState.currentMonth, assets, forceRefresh)
                 }
@@ -371,7 +389,8 @@ class CalendarViewModel(
     private suspend fun generateAssetCalendarData(
         month: YearMonth,
         assets: List<Asset>,
-        forceRefresh: Boolean
+        forceRefresh: Boolean,
+        allAssets: List<Asset>
     ): Result<CalendarResult> = try {
         Result.success(withContext(Dispatchers.IO) {
             if (assets.isEmpty()) {
@@ -415,11 +434,10 @@ class CalendarViewModel(
             // 加密货币价（默认不自动同步）再动、或同步被时间预算截断而不存快照，资产页早已
             // 换成新值，日历还挂着旧快照——用户实测同一天两页差 0.01 元，根因就在这里。
             // 过去的日子仍用快照：历史记录的本职就是定格那一天。只看当月才算，翻旧月不白查全表。
+            // 直接复用传入的 allAssets（含负债/加密），不再重复查 Room——从前这里每次切月/
+            // 切 Tab 都发一次全表查询，纯属浪费 IO；算法与 [computeLiveNetAssets] 共用，防漂移。
             val liveNetAssetsToday = if (viewingCurrentMonth) {
-                assetRepository.getAllAssets().first().let { current ->
-                    current.filter { !it.type.isLiability }.sumOf { it.totalValueCny } -
-                        current.filter { it.type.isLiability }.sumOf { it.totalValueCny }
-                }
+                computeLiveNetAssets(allAssets)
             } else {
                 0.0
             }

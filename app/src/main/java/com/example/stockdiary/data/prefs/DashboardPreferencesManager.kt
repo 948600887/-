@@ -4,6 +4,14 @@ import android.content.Context
 import android.content.SharedPreferences
 import com.example.stockdiary.utils.AppLogger
 
+/**
+ * 月度生活费的默认值（人民币字符串）。**单一来源**：[DashboardPreferences.monthlyExpense]
+ * 的默认值、[DashboardPreferencesManager.loadPreferences] 的读回退、以及
+ * `CalendarViewModel` 的 UiState 默认值都引用它，避免散在三处硬编码、改一处漏改另一处
+ * 导致 FIRE 计算口径漂移。
+ */
+const val DEFAULT_MONTHLY_EXPENSE = "5000"
+
 data class DashboardPreferences(
     val showTotalAssets: Boolean = false,
     val showNetAssets: Boolean = true,
@@ -45,7 +53,7 @@ data class DashboardPreferences(
     val defaultExpanded: Set<String> = emptySet(),
     val sortOrder: SortOrder = SortOrder.BY_TYPE,
     val defaultPeriod: String = "1M",
-    val monthlyExpense: String = "5000",
+    val monthlyExpense: String = DEFAULT_MONTHLY_EXPENSE,
     /**
      * 上次算出的年度分红，以及算它时的持仓代码集合。
      *
@@ -159,7 +167,7 @@ class DashboardPreferencesManager(context: Context) {
             defaultExpanded = prefs.getStringSet(KEY_DEFAULT_EXPANDED, emptySet()) ?: emptySet(),
             sortOrder = sortOrderOf(prefs.getString(KEY_SORT_ORDER, null)),
             defaultPeriod = prefs.getString(KEY_DEFAULT_PERIOD, "1M") ?: "1M",
-            monthlyExpense = prefs.getString(KEY_MONTHLY_EXPENSE, "5000") ?: "5000",
+            monthlyExpense = prefs.getString(KEY_MONTHLY_EXPENSE, DEFAULT_MONTHLY_EXPENSE) ?: DEFAULT_MONTHLY_EXPENSE,
             // 优先读字符串版（精度完整）；旧安装只有 Float 版，回退读取，下次写入即升级
             annualDividendCache = prefs.getString(KEY_ANNUAL_DIVIDEND_CACHE_V2, null)
                 ?.toDoubleOrNull()

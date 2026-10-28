@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
@@ -31,9 +32,13 @@ fun DividendDayDetail(
     assetMap: Map<String, Asset>
 ) {
     // 按**到账日**匹配选中日，与 CalendarViewModel 打「分」标记同一口径：
-    // 除息日只决定资格，钱 1~4 周后才到账；拿除息日比对会点开一个并没进钱的日子
-    val dayDividendDetails = dividends.flatMap { (sym, records) ->
-        records.filter { it.cashDateOrNull() == date }.map { sym to it }
+    // 除息日只决定资格，钱 1~4 周后才到账；拿除息日比对会点开一个并没进钱的日子。
+    // remember(date, dividends)：选中日期后页面任意重组（例如上方净资产卡片重算）都不重跑
+    // flatMap+filter，避免无谓计算（#E）。
+    val dayDividendDetails = remember(date, dividends) {
+        dividends.flatMap { (sym, records) ->
+            records.filter { it.cashDateOrNull() == date }.map { sym to it }
+        }
     }
 
     if (dayDividendDetails.isEmpty()) {

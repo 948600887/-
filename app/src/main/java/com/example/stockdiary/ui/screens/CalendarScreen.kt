@@ -119,10 +119,11 @@ fun CalendarScreen(
 
     var showFireDialog by remember { mutableStateOf(false) }
 
-    // 空状态：无资产
+    // 空状态：无日历资产（日历只认股票/基金/存款；用户若只有加密货币或负债，不算"无资产"）
     if (!isLoading && assets.isEmpty()) {
         EmptyCalendarContent(
             modifier = modifier,
+            hasOtherAssets = uiState.fireAssets.isNotEmpty(),
             onNavigateToAssets = onNavigateToAssets
         )
         return
@@ -185,6 +186,9 @@ fun CalendarScreen(
                 SelectedDateDetail(
                     date = selectedDate,
                     value = calendarData[selectedDate] ?: 0.0,
+                    // 用「当天是否在日历数据中」判定有无数据，而不是 value > 0：否则今天净资产
+                    // 为负（负债>资产）时会被误判成「暂无数据」，漏显真实负值（#A）。
+                    hasData = calendarData.containsKey(selectedDate),
                     isAssetCalendar = uiState.selectedTab == "资产日历",
                     dividends = dividends,
                     assets = assets
@@ -223,6 +227,7 @@ fun CalendarScreen(
 @Composable
 private fun EmptyCalendarContent(
     modifier: Modifier = Modifier,
+    hasOtherAssets: Boolean = false,
     onNavigateToAssets: () -> Unit
 ) {
     Column(
@@ -240,9 +245,22 @@ private fun EmptyCalendarContent(
             modifier = Modifier.size(48.dp)
         )
         Spacer(modifier = Modifier.height(16.dp))
-        Text("暂无资产", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.onSurface)
+        Text(
+            if (hasOtherAssets) "暂无日历资产" else "暂无资产",
+            fontSize = 18.sp,
+            fontWeight = FontWeight.Bold,
+            color = AppTheme.colors.onSurface
+        )
         Spacer(modifier = Modifier.height(8.dp))
-        Text("请先在资产页面添加股票、基金或银行存款", fontSize = 13.sp, color = AppTheme.colors.onSurfaceVariant)
+        Text(
+            if (hasOtherAssets) {
+                "日历仅展示股票、基金、银行存款的净值与分红；当前持仓为加密货币或负债，不在此页显示"
+            } else {
+                "请先在资产页面添加股票、基金或银行存款"
+            },
+            fontSize = 13.sp,
+            color = AppTheme.colors.onSurfaceVariant
+        )
         Spacer(modifier = Modifier.height(20.dp))
         Button(
             onClick = onNavigateToAssets,
@@ -336,6 +354,7 @@ private data class DividendAssetSignature(
 private fun SelectedDateDetail(
     date: LocalDate,
     value: Double,
+    hasData: Boolean,
     isAssetCalendar: Boolean,
     dividends: List<Pair<String, List<DividendRecord>>>,
     assets: List<Asset>
@@ -391,10 +410,10 @@ private fun SelectedDateDetail(
                 Text("当日净资产", fontSize = 13.sp, color = AppTheme.colors.onSurfaceVariant)
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    text = if (value > 0) "¥${value.format(2)}" else "暂无数据",
+                    text = if (hasData) "¥${value.format(2)}" else "暂无数据",
                     fontSize = 24.sp,
                     fontWeight = FontWeight.Bold,
-                    color = if (value > 0) AppTheme.colors.onSurface else AppTheme.colors.onSurfaceVariant
+                    color = if (hasData) AppTheme.colors.onSurface else AppTheme.colors.onSurfaceVariant
                 )
             }
 
@@ -411,7 +430,12 @@ private data class MonthlyAggregates(
     val snapshotDays: Int,
     val noDataDays: Int,
     val latestValue: Double,
-    val monthlyTotal: Double,
+    /**
+     * 月度分红总额——**仅收支日历**使用。资产日历下这一累计值无意义（净资产不能跨天相加），
+     * 大字显示的是 [latestValue]，本字段不被消费，故命名改为 monthlyIncome 以免读代码误以为
+     * 资产日历大字显示的是「月度净资产总和」。
+     */
+    val monthlyIncome: Double,
     val positiveDays: Int,
     val zeroDays: Int
 )
@@ -429,7 +453,7 @@ private fun MonthlySummary(
         var noDataDays = 0
         var latestDate: LocalDate? = null
         var latestValue = 0.0
-        var monthlyTotal = 0.0
+        var monthlyIncome = 0.0
         var positiveDays = 0
         var zeroDays = 0
 
@@ -447,14 +471,15 @@ private fun MonthlySummary(
                 noDataDays++
                 zeroDays++
             } else {
-                monthlyTotal += value
+                // 仅收支日历消费此值；资产日历下不累加也无害（大字显示 latestValue）。
+                monthlyIncome += value
             }
         }
         MonthlyAggregates(
             snapshotDays = snapshotDays,
             noDataDays = noDataDays,
             latestValue = latestValue,
-            monthlyTotal = monthlyTotal,
+            monthlyIncome = monthlyIncome,
             positiveDays = positiveDays,
             zeroDays = zeroDays
         )
@@ -462,7 +487,7 @@ private fun MonthlySummary(
     val snapshotDays = aggregates.snapshotDays
     val noDataDays = aggregates.noDataDays
     val latestValue = aggregates.latestValue
-    val monthlyTotal = aggregates.monthlyTotal
+    val monthlyIncome = aggregates.monthlyIncome
     val positiveDays = aggregates.positiveDays
     val zeroDays = aggregates.zeroDays
 
@@ -486,13 +511,13 @@ private fun MonthlySummary(
             Text(
                 text = when {
                     isAssetCalendar && latestValue > 0 -> "¥${latestValue.format(2)}"
-                    monthlyTotal >= 0 -> "+¥${monthlyTotal.format(2)}"
-                    else -> "-¥${(-monthlyTotal).format(2)}"
+                    monthlyIncome >= 0 -> "+¥${monthlyIncome.format(2)}"
+                    else -> "-¥${(-monthlyIncome).format(2)}"
                 },
                 fontSize = 20.sp,
                 fontWeight = FontWeight.Bold,
                 color = if (isAssetCalendar) AppTheme.colors.onSurface
-                else if (monthlyTotal >= 0) AppTheme.colors.lossRed else AppTheme.colors.profitGreen
+                else if (monthlyIncome >= 0) AppTheme.colors.lossRed else AppTheme.colors.profitGreen
             )
 
             Spacer(modifier = Modifier.height(12.dp))

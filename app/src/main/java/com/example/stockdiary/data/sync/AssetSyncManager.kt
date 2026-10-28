@@ -122,7 +122,13 @@ object AssetSyncManager {
      * 超时截断、只零星更新几个标的」的僵尸轮。退后台时主动取消在途手动同步，换来的是
      * 不再有这种僵尸轮——用户下次下拉刷新即可重新同步。
      */
-    @Volatile private var activeManualSyncJob: Job? = null
+    /**
+     * 在途的**手动**同步 job 集合（不是单字段：连点「刷新」会同时有「正在跑 + 排队」多个
+     * 在途 job，退后台要把它们**全部**取消，单字段会漏掉排队那一轮，见 [cancelActiveManualSync]）。
+     *
+     * Worker 路径(startTime>0)从不登记，所以不受影响。
+     */
+    private val manualSyncJobs = ConcurrentHashMap.newKeySet<Job>()
 
     /**
      * 场外基金下载的专属并发上限 —— **按数据源分两档**。
@@ -325,13 +331,15 @@ object AssetSyncManager {
             if (manualSyncMutex.isLocked) {
                 AppLogger.i("另一次刷新正在进行，本次刷新排队等待", TAG)
             }
-            manualSyncMutex.withLock {
-                // 登记当前手动同步的 job，供 MainActivity.onStop 退后台取消（见 [cancelActiveManualSync]）。
-                // withLock 块是 suspend 的，可安全读 currentCoroutineContext().job（= 调用方
-                // viewModelScope 那个 job，取消它会一路取消到 runSync）。finally 清空，避免
-                // 泄漏一个已结束的 job 引用、或让下次取消误伤。
-                activeManualSyncJob = currentCoroutineContext()[Job]
-                try {
+            // 进入 withLock 之前就登记本次手动同步的 job（用集合而非单字段：连点时会有
+            // 「正在跑 + 排队」多个 job 同时在途，onStop 退后台要把它们全部取消）。
+            // 关键点：登记在 withLock 之前，排队等待期间本 job 也处于「在途」状态——
+            // 这样退后台取消才能打断等待中的那一轮，不会再等到它拿到锁后在后台跑完整轮
+            // （最多 70s 网络请求），与「退后台即取消」的约定相反。
+            val thisJob = currentCoroutineContext()[Job]
+            thisJob?.let { manualSyncJobs.add(it) }
+            try {
+                manualSyncMutex.withLock {
                     // 预算从真正开跑那一刻起算：在锁上排队的时间不能算进本次刷新，
                     // 否则第二次刷新拿到的是被第一次吃掉大半的残预算
                     runSync(
@@ -345,9 +353,9 @@ object AssetSyncManager {
                         correctNames = correctNames,
                         syncTrigger = syncTrigger
                     )
-                } finally {
-                    activeManualSyncJob = null
                 }
+            } finally {
+                thisJob?.let { manualSyncJobs.remove(it) }
             }
         } else {
             runSync(
@@ -377,18 +385,21 @@ object AssetSyncManager {
      *  finally 里复位，不会弹错误提示也不会永久转圈。
      */
     fun cancelActiveManualSync(reason: String) {
-        val job = activeManualSyncJob ?: return
-        AppLogger.i("取消进行中的手动同步：$reason", TAG)
-        job.cancel()
+        if (manualSyncJobs.isEmpty()) return
+        AppLogger.i("取消进行中的手动同步：$reason（${manualSyncJobs.size} 个在途）", TAG)
+        // 取消集合里的每一个：正在跑的那一轮立即收尾，排队等待的那一轮在 withLock 挂起处
+        // 抛 CancellationException、不会进入 runSync。toList 先快照，避免 cancel 触发
+        // 协程树收尾时 finally 里的 remove 在遍历途中改集合。
+        manualSyncJobs.toList().forEach { it.cancel() }
     }
 
     /** 测试专用复位：清掉在途手动同步句柄（object 是进程内单例，用例之间必须清状态） */
     internal fun resetForTesting() {
-        activeManualSyncJob = null
+        manualSyncJobs.clear()
     }
 
-    /** 测试专用读数：当前登记的在途手动同步句柄（无则 null），供取消用例断言登记/清空 */
-    internal fun activeManualSyncJobForTesting(): Job? = activeManualSyncJob
+    /** 测试专用读数：当前是否还有登记的在途手动同步 job（供取消用例断言登记/清空） */
+    internal fun activeManualSyncJobForTesting(): Job? = manualSyncJobs.firstOrNull()
 
     /**
      * 该资产是否走 STOCK/场内基金行情批量取价路径，返回用于批量取价的代码；

@@ -102,7 +102,13 @@ private sealed interface PortfolioRow {
          * 默认取 "market:xxx"，与账户名不会撞车；负债区必须显式传
          * [LIABILITY_GROUP_KEY]——否则它会和「其他」市场共用 OTHER，两处会一起展开/收起。
          */
-        val expandKey: String = "market:${market.name}"
+        val expandKey: String = "market:${market.name}",
+        /**
+         * 覆盖标题：负债区借用 [HoldingsMarket.OTHER] 的枚举值（排序/分组逻辑复用它），
+         * 但标题不能也叫「其他」——和无市场归属的资产（存款等）撞名，列表会出现两个「其他」。
+         * 这里显式覆盖成「负债」。
+         */
+        val displayLabel: String? = null
     ) : PortfolioRow {
         override val key: String get() = "header:$expandKey"
     }
@@ -297,7 +303,8 @@ fun PortfolioScreen(
                         market = HoldingsMarket.OTHER,
                         assetCount = liabilities.size,
                         totalValue = liabilities.sumOf { it.totalValueCny },
-                        expandKey = LIABILITY_GROUP_KEY
+                        expandKey = LIABILITY_GROUP_KEY,
+                        displayLabel = "负债"
                     )
                 )
                 if (LIABILITY_GROUP_KEY in expandedAccounts) {
@@ -668,7 +675,7 @@ fun PortfolioScreen(
                 items(rows, key = { it.key }, contentType = { it::class.qualifiedName }) { row ->
                     when (row) {
                         is PortfolioRow.MarketHeader -> MarketHeaderCard(
-                            label = row.market.label,
+                            label = row.displayLabel ?: row.market.label,
                             assetCount = row.assetCount,
                             totalValue = row.totalValue,
                             isExpanded = expandedAccounts.contains(row.expandKey),

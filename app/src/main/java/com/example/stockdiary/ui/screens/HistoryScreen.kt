@@ -77,6 +77,12 @@ fun HistoryScreen(
             if (result.isSuccess) {
                 snackbarHostState.showSnackbar("保存成功")
                 showSaveDialog = false
+            } else {
+                // 失败时也要关闭对话框：失败原因写在 uiState.errorMessage 里、由上面的
+                // errorMessage effect 弹 Snackbar；若对话框仍开着，它的模态遮罩会盖住
+                // Snackbar，用户只看到「保存」按钮点了没反应、反复重试。关掉遮罩后
+                // 真实原因（如「当天没有持仓，未保存快照」）才能正常显示。
+                showSaveDialog = false
             }
             viewModel.clearSaveResult()
         }

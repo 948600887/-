@@ -422,13 +422,17 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
     // 「设置 → 仪表盘显示」里把某类资产全关掉后，这里会整片空白，
     // 而开关只在设置页 —— 必须给一个就地恢复的出口。
     fun showAllAssetTypes() {
-        // 先拉磁盘最新偏好再合并，避免用陈旧副本整体回写（见 persistPreferences 说明）
+        // 先拉磁盘最新偏好再合并，避免用陈旧副本整体回写（见 persistPreferences 说明）。
+        // 除了打开类别开关，一并清掉「隐藏低价值/无价加密货币」——否则当所有持仓都被
+        // 低价值过滤藏起来时（空态按钮的典型成因），只开类别开关仍是一片空白，按钮像没反应。
         persistPreferences { state -> state.copy(
             showBankDeposits = true,
             showStocks = true,
             showFunds = true,
             showCrypto = true,
-            showLiabilities = true
+            showLiabilities = true,
+            hideLowValueCrypto = false,
+            hideUnknownPriceCrypto = false
         ) }
     }
 

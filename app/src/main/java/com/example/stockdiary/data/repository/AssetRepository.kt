@@ -66,6 +66,46 @@ class AssetRepository private constructor(
             throw e
         }
     }
+
+    /**
+     * 加密货币按 (symbol, account) 去重落库（#21）。
+     *
+     * 手动添加加密货币时，若同账户已存在同名代码（归一化后），直接**更新**那条，
+     * 而不是再插一条 —— 否则同一持仓在列表里出现两行、市值被重复计入。
+     * 归一化口径与表单落库一致（去 /- 空白并转大写），否则 BTCUSDT 与 BTC-USDT
+     * 被判成两条。
+     *
+     * 仅用于加密货币；存款/负债等无代码（symbol 为 null）的资产仍走 [insertAsset]。
+     */
+    suspend fun upsertCryptoAsset(asset: Asset): Long {
+        val normalizedSymbol = StockCodeManager.normalizeSymbolForType(AssetType.CRYPTO, asset.symbol ?: "")
+        return StockDatabase.getInstance(context).withTransaction {
+            val now = System.currentTimeMillis()
+            val existing = if (normalizedSymbol.isNotBlank()) {
+                assetDao.getAssetBySymbolAndAccount(normalizedSymbol, asset.account)
+            } else {
+                null
+            }
+            if (existing != null) {
+                val updated = existing.copy(
+                    name = asset.name,
+                    balance = asset.balance,
+                    purchasePrice = asset.purchasePrice,
+                    currentPrice = asset.currentPrice,
+                    currency = asset.currency,
+                    dueDate = asset.dueDate,
+                    notes = asset.notes,
+                    interestRate = asset.interestRate,
+                    lastUpdateTime = now
+                )
+                assetDao.updateAsset(updated)
+                existing.id
+            } else {
+                val newAsset = asset.copy(symbol = normalizedSymbol.takeIf { it.isNotBlank() })
+                assetDao.insertAsset(newAsset)
+            }
+        }
+    }
     
     suspend fun insertAssets(assets: List<Asset>) = assetDao.insertAssets(assets)
 

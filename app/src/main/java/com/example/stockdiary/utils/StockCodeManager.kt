@@ -325,6 +325,22 @@ object StockCodeManager {
         // 其他情况返回原始值
         return trimmed
     }
+
+    /**
+     * 按资产类型归一化代码，与 [buildAssetFromInput] 落库口径同源（单一真相，避免两处各写一套）：
+     * - 股票/基金：走 [normalizeSymbol]（加市场前缀、场外基金补 `fund_` 等）；
+     * - 加密货币：去 `/ -` 与空白并转大写（与币安交易对形态对齐，否则取价 400）；
+     * - 其它（存款/负债/信用卡/贷款）：原样。
+     *
+     * 编辑页「切换类型」时应调用本函数立即归一代码，保证界面上的代码与保存后落库形态一致，
+     * 否则用户切到证券/基金时代码还是 BTC - USDT 这种形态，体验割裂（#21）。
+     */
+    fun normalizeSymbolForType(type: AssetType, symbol: String): String =
+        when (type) {
+            AssetType.STOCK, AssetType.FUND -> normalizeSymbol(symbol)
+            AssetType.CRYPTO -> symbol.uppercase().filter { it.isLetterOrDigit() }
+            else -> symbol
+        }
     
     /**
      * 从新浪格式提取纯数字代码

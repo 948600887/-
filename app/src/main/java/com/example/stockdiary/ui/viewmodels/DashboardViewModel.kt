@@ -485,6 +485,9 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
                 interestRate = asset.interestRate,
                 currentPrice = asset.currentPrice
             )
+        } else if (asset.type == AssetType.CRYPTO && asset.symbol != null) {
+            // 加密货币按 (symbol, account) 去重，避免手动重复添加出现两条持仓（#21）
+            repository.upsertCryptoAsset(asset)
         } else {
             repository.insertAsset(asset)
         }

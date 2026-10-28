@@ -70,6 +70,9 @@ fun AddAssetDialog(
     var loadError by remember { mutableStateOf<String?>(null) }
     var fundInfo by remember { mutableStateOf<FundAPI.FundInfo?>(null) }
     var stockInfo by remember { mutableStateOf<StockData?>(null) }
+    // 用户是否手动选过类型：一旦手动选过，就不再用代码自动识别去覆盖他的选择——
+    // 否则选了「股票」输入 ETF 代码会被自动改回「基金」，用户明明想手动指定却总被改（#21）。
+    var userPickedType by remember { mutableStateOf(false) }
 
     // 焦点链：让键盘「下一步」能一路走到最后一个字段，而不是每填一项都要手点屏幕。
     val nameFocus = remember { FocusRequester() }
@@ -241,11 +244,14 @@ fun AddAssetDialog(
             return@LaunchedEffect
         }
 
-        // 自动设置资产类型
-        when (cat) {
-            CodeCategory.STOCK -> selectedType = AssetType.STOCK
-            CodeCategory.ETF, CodeCategory.LOF, CodeCategory.EXCHANGE_FUND, CodeCategory.OTC_FUND -> selectedType = AssetType.FUND
-            else -> {}
+        // 自动设置资产类型：仅当用户没手动选过类型时才根据代码自动识别，
+        // 尊重用户在类型 chip 上的显式选择（#21）
+        if (!userPickedType) {
+            when (cat) {
+                CodeCategory.STOCK -> selectedType = AssetType.STOCK
+                CodeCategory.ETF, CodeCategory.LOF, CodeCategory.EXCHANGE_FUND, CodeCategory.OTC_FUND -> selectedType = AssetType.FUND
+                else -> {}
+            }
         }
 
         isLoading = true
@@ -335,6 +341,8 @@ fun AddAssetDialog(
                         selectedType = selectedType,
                         onSelectType = { type ->
                             selectedType = type
+                            // 用户手动选过类型：后续代码自动识别不再覆盖（#21）
+                            userPickedType = true
                             // 切类型时按类型给币种一个合理默认（加密→USD，其余→CNY）
                             currency = defaultCurrencyForType(type)
                             fundInfo = null

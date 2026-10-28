@@ -184,6 +184,9 @@ fun EditAssetDialog(
                                         if (selectedType != type) {
                                             selectedType = type
                                             currency = defaultCurrencyForType(type)
+                                            // 类型切换时同步归一代码，使界面代码与落库形态一致：
+                                            // 证券/基金补市场前缀、加密货币去 /- 空白并转大写（#21）
+                                            symbol = StockCodeManager.normalizeSymbolForType(type, symbol.trim())
                                         }
                                     },
                                     modifier = Modifier.weight(1f)
@@ -205,6 +208,9 @@ fun EditAssetDialog(
                                         if (selectedType != type) {
                                             selectedType = type
                                             currency = defaultCurrencyForType(type)
+                                            // 类型切换时同步归一代码，使界面代码与落库形态一致：
+                                            // 证券/基金补市场前缀、加密货币去 /- 空白并转大写（#21）
+                                            symbol = StockCodeManager.normalizeSymbolForType(type, symbol.trim())
                                         }
                                     },
                                     modifier = Modifier.weight(1f)

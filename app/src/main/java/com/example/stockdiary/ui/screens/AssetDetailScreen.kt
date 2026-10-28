@@ -69,7 +69,8 @@ fun AssetDetailScreen(
         val assetVal = asset ?: return@remember null
         val symbol = StockCodeManager.normalizeSymbol(assetVal.symbol ?: "")
         if (symbol.isBlank()) return@remember null
-        DividendYieldCalculator.getTTMDividend(dividends)
+        // 与首页收息进度同源：「今年已宣告优先、无则 TTM」（见 DividendYieldCalculator.getDeclaredOrTTMPerTenShares）
+        DividendYieldCalculator.getDeclaredOrTTMPerTenShares(dividends)
     }
 
     Scaffold(
@@ -243,9 +244,15 @@ fun AssetDetailScreen(
                                 } else {
                                     val ttm = shareBonus
                                     if (ttm != null) {
-                                        DetailRow("TTM每十${a.shareUnitWord}分红", ttm.formatMoney())
-                                        // 股息率是百分比，不走 formatMoney——金额才统一 2 位
-                                        DetailRow("股息率", "${DividendYieldCalculator.calculateTTMDividendYield(dividends, a.currentPrice ?: a.purchasePrice).format(2)}%")
+                                        // 口径与首页「今年预计」同源：今年已宣告优先、无则 TTM
+                                        DetailRow("预计每十${a.shareUnitWord}分红", ttm.formatMoney())
+                                        // 股息率与上面展示的每十股分红同源：用同一个 per-ten-shares 口径算，
+                                        // 不再单独走 TTM 窗口，否则「每十股分红」与「股息率」两套尺子对不上
+                                        val price = a.currentPrice ?: a.purchasePrice
+                                        DetailRow(
+                                            "股息率",
+                                            if (price > 0) "${((ttm / 10.0 / price) * 100).format(2)}%" else "—"
+                                        )
                                         val annualIncome = DividendIncomeCalculator.calculateAnnualIncome(a, ttm)
                                         DetailRow("年化收益", annualIncome.formatMoney())
                                     }

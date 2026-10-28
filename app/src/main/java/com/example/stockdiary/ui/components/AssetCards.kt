@@ -26,6 +26,7 @@ import com.example.stockdiary.utils.formatMoney
 import com.example.stockdiary.utils.CRYPTO_DECIMALS
 import com.example.stockdiary.utils.formatTrim
 import com.example.stockdiary.utils.pricePrecisionFor
+import com.example.stockdiary.utils.quantityPrecisionFor
 import com.example.stockdiary.utils.totalValueCny
 
 @Composable
@@ -302,11 +303,14 @@ fun StockAssetItem(
                         Text("•", style = MaterialTheme.typography.bodySmall, color = AppTheme.colors.onSurfaceVariant)
                     }
                     // 负债没有「持仓数量」的概念，balance 就是欠多少钱。
-                    // 加密货币数量常见 6~10 位小数（如 0.1234567890），必须给足位数，否则会被舍成 0 或 0.12
+                    // 加密货币数量常见 6~10 位小数（如 0.1234567890），必须给足位数，否则会被舍成 0 或 0.12。
+                    // 其余类型统一走 quantityPrecisionFor（股票 0 位、基金/其它 2 位）：
+                    // 旧写法对非加密一律 format(0)，基金份额 100.5 会被显示成 100/101，
+                    // 与详情页 format(2) 的口径不一致，用户据此加减仓会判断错。
                     Text(
                         if (isLiability) "负债"
                         else if (asset.type == AssetType.CRYPTO) "${asset.balance.formatTrim(CRYPTO_DECIMALS)}$unitLabel"
-                        else "${asset.balance.format(0)}$unitLabel",
+                        else "${asset.balance.format(quantityPrecisionFor(asset.type, asset.symbol))}$unitLabel",
                         style = MaterialTheme.typography.bodySmall, color = AppTheme.colors.onSurfaceVariant
                     )
                     // 币安锁仓/Staking 产品以 LD 壳标识（如 LDBNB、LDUSDT）；但 LDO 这类

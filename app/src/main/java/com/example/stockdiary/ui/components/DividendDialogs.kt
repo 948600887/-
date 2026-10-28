@@ -46,7 +46,16 @@ import kotlinx.coroutines.withContext
 @Composable
 fun DividendDetailDialog(
     asset: Asset,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    /**
+     * 手动新增 / 编辑 / 删除分红后回调。
+     *
+     * 上层必须清掉「年度分红」缓存的指纹并重新计算：缓存命中判据是
+     * [dividendInputFingerprint]（只含代码 / 持仓 / 利率 / 万份收益 / 币种 / 年份），
+     * **不含分红记录本身**，所以改了一条分红后指纹不变、[loadDividendIncome] 直接命中
+     * 旧缓存返回旧值 —— 持仓页顶部「年度分红」会一直停在旧数字。
+     */
+    onRecordsChanged: () -> Unit = {}
 ) {
     val container = LocalAppContainer.current
     val symbol = remember(asset) { StockCodeManager.normalizeSymbol(asset.symbol ?: "") }
@@ -344,6 +353,8 @@ fun DividendDetailDialog(
                     }
                     showEditDialog = false
                     loadRecords()
+                    // 通知上层：年度分红的缓存指纹要作废重算（详见 onRecordsChanged 的 KDoc）
+                    onRecordsChanged()
                 }
             }
         )
@@ -382,6 +393,8 @@ fun DividendDetailDialog(
                             if (error == null) {
                                 pendingDeleteRecord = null
                                 loadRecords()
+                                // 通知上层：年度分红的缓存指纹要作废重算
+                                onRecordsChanged()
                             } else {
                                 deleteError = error.message ?: "删除失败"
                             }

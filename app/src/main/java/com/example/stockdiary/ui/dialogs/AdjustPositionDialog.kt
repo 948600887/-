@@ -29,6 +29,7 @@ import com.example.stockdiary.utils.formatMoney
 import com.example.stockdiary.utils.CRYPTO_DECIMALS
 import com.example.stockdiary.utils.formatTrim
 import com.example.stockdiary.utils.pricePrecisionFor
+import com.example.stockdiary.utils.quantityPrecisionFor
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -127,8 +128,11 @@ fun AdjustPositionDialog(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.SpaceBetween
                             ) {
+                                // 非加密不再一律 format(0)：基金份额/其它数量可能带小数
+                                // （100.5 份会被四舍五入成 100/101），与持仓页/详情页口径不一致
                                 val holdingText = if (asset.type == AssetType.CRYPTO)
-                                    asset.balance.formatTrim(CRYPTO_DECIMALS) else asset.balance.format(0)
+                                    asset.balance.formatTrim(CRYPTO_DECIMALS)
+                                else asset.balance.format(quantityPrecisionFor(asset.type, asset.symbol))
                                 DialogInfoItem("持有", holdingText)
                                 // 现价两处修正：
                                 // 1. 精度原来恒写 3 位，而持仓页是「基金/ETF 3 位、其余 2 位」——
@@ -270,7 +274,11 @@ fun AdjustPositionDialog(
                                     modifier = Modifier.fillMaxWidth(),
                                     horizontalArrangement = Arrangement.SpaceBetween
                                 ) {
-                                    DialogInfoItem("新持仓", "${newBalance.format(0)}")
+                                    // 与「持有」同一精度口径（基金/其它 2 位、股票 0 位）
+                                    DialogInfoItem(
+                                        "新持仓",
+                                        newBalance.format(quantityPrecisionFor(asset.type, asset.symbol))
+                                    )
                                     // 成交价是原币口径，交易金额也要折算成人民币——
                             // 与持仓页价格行同一口径（不过换算会把 USD 加密货币的
                             // 成交额显示成人民币数字）
@@ -362,9 +370,13 @@ private fun submitAdjustPosition(
     val quantity = amount.toDoubleOrNull() ?: return
     val delta = if (action == PositionAction.ADD) quantity else -quantity
     val newBalance = asset.balance + delta
-    // 减到负数 / 归零后再除以 0 会得到 Infinity 参考单价，
-    // Asset.init 的 require 会在主线程抛出。这里先挡住。
-    if (newBalance <= 0) return
+    // 减到负数 / 归零后再除以 0 会得到 Infinity 参考单价，这里先挡住。
+    //
+    // 但**加密货币允许负余额**（借币 / 组合保证金欠币，见 Asset 的注释）：减仓让数量
+    // 更负是合法操作，不能按「<=0 即非法」拦掉 —— 旧写法会让按钮点了没反应、且无任何提示。
+    // 豁免后若真算出负的 newCost，下面 `newCost.isFinite() && newCost > 0` 的守卫会兜住
+    // （沿用旧参考单价），不会写入负值。
+    if (newBalance <= 0 && asset.type != AssetType.CRYPTO) return
 
     isSaving.value = true
     val tradePrice = price.toDoubleOrNull()

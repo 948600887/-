@@ -334,12 +334,15 @@ fun EditAssetDialog(
                             // （全项目存库形态是 StockCodeManager.normalizeSymbol 的结果，如 600519 → sh600519）。
                             // 否则改过代码的资产在加仓、导入回放、分红匹配时会全部失配，
                             // 连「同名同账户持仓合并」也会失效——同一只票同一个账户出现两条持仓。
-                            val normalizedSymbol =
-                                if (selectedType == AssetType.STOCK || selectedType == AssetType.FUND) {
+                            val normalizedSymbol = when (selectedType) {
+                                AssetType.STOCK, AssetType.FUND ->
                                     StockCodeManager.normalizeSymbol(symbol.trim())
-                                } else {
-                                    symbol.trim()
-                                }
+                                AssetType.CRYPTO -> symbol.trim()
+                                // 存款 / 各类负债没有代码概念：从股票改过来时必须清掉残留的旧代码。
+                                // 旧逻辑直接 `symbol.trim()`，于是改成存款/信用卡后仍带着 600519
+                                // 这种无意义 symbol（后续同步、去重、展示都会被它干扰）。
+                                else -> ""
+                            }
                             asset.copy(
                                 name = name,
                                 type = selectedType,

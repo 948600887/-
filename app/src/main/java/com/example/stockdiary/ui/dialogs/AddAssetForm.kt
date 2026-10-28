@@ -723,9 +723,12 @@ internal fun AssetFormActions(
  * 抽成纯函数是为了能直接单测：这些分支（代码归一化、存款单价恒为 1、
  * 无行情时退回参考单价）原先埋在 composable 的点击回调里，改一次全靠手点验证。
  *
- * 注意：[Asset] 的 init 里有 require(...) 校验，参数非法时会抛 IllegalArgumentException，
- * 由调用方 try/catch 兜住（别让主线程抛出去崩掉整个 App）。
+ * 注意：参数非法时会抛 IllegalArgumentException（下面显式 require），由调用方
+ * try/catch 兜住（别让主线程抛出去崩掉整个 App）。
  * 正常路径下不会抛——[validateAssetInput] 已按同一套口径挡在前面。
+ *
+ * 校验写在**这里**而不是 [Asset] 的 init：实体构造阶段一旦校验，Room 读回任何一条
+ * 历史脏行都会抛异常，整表查询（getAllAssets）连带主界面崩掉。详见 [Asset] 的注释。
  */
 fun buildAssetFromInput(
     selectedType: AssetType,
@@ -764,20 +767,30 @@ fun buildAssetFromInput(
         AssetType.CRYPTO -> symbol.uppercase().filter { it.isLetterOrDigit() }
         else -> symbol
     }
+    // 显式校验（不依赖 Asset.init，见本函数 KDoc）：合法性由写入侧把关，
+    // 表单入口对非法输入直接拒绝，调用方 try/catch 后转成界面提示。
+    val trimmedName = name.trim()
+    val finalBalance = balance.toDoubleOrNull() ?: 0.0
+    val finalPurchasePrice = if (effectiveType == AssetType.BANK_DEPOSIT) {
+        1.0
+    } else {
+        purchasePrice.toDoubleOrNull() ?: fundPrice ?: stockPrice ?: 0.0
+    }
+    require(trimmedName.isNotBlank()) { "资产名称不能为空" }
+    // 加密货币允许负余额（币安借币 / 组合保证金欠币是合法状态），其它类型不允许
+    require(finalBalance >= 0 || effectiveType == AssetType.CRYPTO) { "数量不能为负数" }
+    require(finalPurchasePrice >= 0) { "参考单价不能为负数" }
+
     return Asset(
         // 名称/账户/备注统一 trim（#13）：账户尾随空格会让 (symbol+account) 精确匹配失效，
         // 同一账户被当成两个、加仓不合并、分组也分家。
-        name = name.trim(),
+        name = trimmedName,
         type = effectiveType,
         symbol = normalizedSymbol.takeIf { it.isNotBlank() },
         account = account.trim(),
-        balance = balance.toDoubleOrNull() ?: 0.0,
+        balance = finalBalance,
         // 存款的「单价」没有意义，恒定为 1，让 totalValue 直接等于本金
-        purchasePrice = if (effectiveType == AssetType.BANK_DEPOSIT) {
-            1.0
-        } else {
-            purchasePrice.toDoubleOrNull() ?: fundPrice ?: stockPrice ?: 0.0
-        },
+        purchasePrice = finalPurchasePrice,
         currentPrice = if (effectiveType == AssetType.BANK_DEPOSIT) {
             1.0
         } else {

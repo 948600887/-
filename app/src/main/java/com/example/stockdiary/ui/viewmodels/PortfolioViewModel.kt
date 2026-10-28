@@ -225,6 +225,21 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
      * 一次网络请求都不发；持仓变了（导入、增删）才重新抓。
      * 抓取期间也照常显示旧值，不用「计算中」把屏幕占住。
      */
+    /**
+     * 手动新增 / 编辑 / 删除分红后调用：作废「年度分红」的缓存指纹并重算。
+     *
+     * [loadDividendIncome] 的缓存命中判据是 [dividendInputFingerprint]，它只含
+     * 代码 / 持仓数量 / 存款利率 / 万份收益 / 币种 / 年份，**不含分红记录本身**。
+     * 所以在持仓页手动改了一条分红后指纹不变 → 直接命中旧缓存返回旧值 → 顶部
+     * 「年度分红」一直停在旧数字，直到用户手动全量刷新才纠正。
+     * 先清指纹再重载即可让用户改完立刻看到新数字。
+     */
+    fun refreshDividendIncomeAfterManualEdit(stockAssets: List<Asset>) {
+        if (stockAssets.isEmpty()) return
+        persistPreferences { state -> state.copy(annualDividendFingerprint = "") }
+        loadDividendIncome(stockAssets)
+    }
+
     fun loadDividendIncome(stockAssets: List<Asset>) {
         if (stockAssets.isEmpty()) return
 

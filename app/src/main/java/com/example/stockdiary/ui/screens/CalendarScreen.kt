@@ -458,19 +458,32 @@ private fun MonthlySummary(
         var zeroDays = 0
 
         calendarData.forEach { (date, value) ->
-            if (value > 0.0) {
-                snapshotDays++
-                positiveDays++
+            when {
+                value > 0.0 -> {
+                    snapshotDays++
+                    positiveDays++
+                }
+                value < 0.0 -> {
+                    // 净资产为负（负债 > 资产）是合法状态：这天**确实有**快照，只是净值算出来是负的。
+                    // 旧写法把它漏在两个分支之外 —— 既不计入「有数据天数」也不计入「无数据天数」，
+                    // 且 latestValue 永远取不到它，于是有负债的用户会看到「本月资产总览 ¥0.00 /
+                    // 有数据 0 天」，而日历格里明明有数（与 SelectedDateDetail 用 containsKey
+                    // 判 hasData 的口径自相矛盾）。这里按「有数据」计数。
+                    snapshotDays++
+                }
+                else -> {
+                    // 0.0 = 这天没有快照（无数据）
+                    noDataDays++
+                    zeroDays++
+                }
+            }
+            // latestValue 取「最新那一天」的净值，负值天同样参与，否则总览恒为 0
+            if (value != 0.0) {
                 val previousLatestDate = latestDate
                 if (previousLatestDate == null || date > previousLatestDate) {
                     latestDate = date
                     latestValue = value
                 }
-            }
-            if (value == 0.0) {
-                noDataDays++
-                zeroDays++
-            } else {
                 // 仅收支日历消费此值；资产日历下不累加也无害（大字显示 latestValue）。
                 monthlyIncome += value
             }

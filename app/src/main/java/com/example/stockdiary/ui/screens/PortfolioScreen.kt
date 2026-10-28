@@ -802,7 +802,10 @@ fun PortfolioScreen(
     selectedDividendAsset?.let { dividendAsset ->
         DividendDetailDialog(
             asset = dividendAsset,
-            onDismiss = { selectedDividendAsset = null }
+            onDismiss = { selectedDividendAsset = null },
+            // 手动改了分红记录后，年度分红的缓存指纹要作废重算，
+            // 否则顶部「年度分红」一直停在旧值（指纹不含分红记录本身）
+            onRecordsChanged = { viewModel.refreshDividendIncomeAfterManualEdit(allAssetsOnly) }
         )
     }
 

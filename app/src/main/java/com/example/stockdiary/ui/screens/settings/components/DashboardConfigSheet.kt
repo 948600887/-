@@ -32,6 +32,10 @@ import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
@@ -47,6 +51,17 @@ fun DashboardConfigSheet(
     onPreferencesChange: (DashboardPreferences) -> Unit,
     onDismiss: () -> Unit
 ) {
+    // 本地草稿副本：快速连拨多个开关时，必须基于「上一次本地切换后的结果」而非外部
+    // preferences 参数——外部 preferences 的回流依赖父组件 state 更新 + recomposition，
+    // 连拨时第二下往往还在用旧 preferences，copy 会覆盖第一下的修改（见 #5：连续拨开关丢改动）。
+    // 本地副本只在 sheet 组合首次初始化为当前 preferences，之后自管；emit 同时更新本地副本
+    // 与向上回调，UI 即时反映、向上写盘也基于最新本地状态。
+    var localPrefs by remember { mutableStateOf(preferences) }
+    val emit: (DashboardPreferences) -> Unit = { next ->
+        localPrefs = next
+        onPreferencesChange(next)
+    }
+
     ModalBottomSheet(
         onDismissRequest = onDismiss
     ) {
@@ -72,28 +87,28 @@ fun DashboardConfigSheet(
             SectionTitle("摘要组件")
             SwitchPreference(
                 title = "显示总资产",
-                checked = preferences.showTotalAssets,
-                onCheckedChange = { onPreferencesChange(preferences.copy(showTotalAssets = it)) }
+                checked = localPrefs.showTotalAssets,
+                onCheckedChange = { emit(localPrefs.copy(showTotalAssets = it)) }
             )
             SwitchPreference(
                 title = "显示净资产",
-                checked = preferences.showNetAssets,
-                onCheckedChange = { onPreferencesChange(preferences.copy(showNetAssets = it)) }
+                checked = localPrefs.showNetAssets,
+                onCheckedChange = { emit(localPrefs.copy(showNetAssets = it)) }
             )
             SwitchPreference(
                 title = "显示收入预估",
-                checked = preferences.showProfit,
-                onCheckedChange = { onPreferencesChange(preferences.copy(showProfit = it)) }
+                checked = localPrefs.showProfit,
+                onCheckedChange = { emit(localPrefs.copy(showProfit = it)) }
             )
             SwitchPreference(
                 title = "显示资产分布",
-                checked = preferences.showDistribution,
-                onCheckedChange = { onPreferencesChange(preferences.copy(showDistribution = it)) }
+                checked = localPrefs.showDistribution,
+                onCheckedChange = { emit(localPrefs.copy(showDistribution = it)) }
             )
             SwitchPreference(
                 title = "显示资产增值",
-                checked = preferences.showAssetGrowth,
-                onCheckedChange = { onPreferencesChange(preferences.copy(showAssetGrowth = it)) }
+                checked = localPrefs.showAssetGrowth,
+                onCheckedChange = { emit(localPrefs.copy(showAssetGrowth = it)) }
             )
 
             HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
@@ -101,18 +116,18 @@ fun DashboardConfigSheet(
             SectionTitle("收入组件")
             SwitchPreference(
                 title = "显示收息进度",
-                checked = preferences.showDividendProgress,
-                onCheckedChange = { onPreferencesChange(preferences.copy(showDividendProgress = it)) }
+                checked = localPrefs.showDividendProgress,
+                onCheckedChange = { emit(localPrefs.copy(showDividendProgress = it)) }
             )
             SwitchPreference(
                 title = "显示下一笔分红",
-                checked = preferences.showNextPayout,
-                onCheckedChange = { onPreferencesChange(preferences.copy(showNextPayout = it)) }
+                checked = localPrefs.showNextPayout,
+                onCheckedChange = { emit(localPrefs.copy(showNextPayout = it)) }
             )
             SwitchPreference(
                 title = "显示月度现金流",
-                checked = preferences.showMonthlyCashFlow,
-                onCheckedChange = { onPreferencesChange(preferences.copy(showMonthlyCashFlow = it)) }
+                checked = localPrefs.showMonthlyCashFlow,
+                onCheckedChange = { emit(localPrefs.copy(showMonthlyCashFlow = it)) }
             )
 
             HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
@@ -120,38 +135,38 @@ fun DashboardConfigSheet(
             SectionTitle("资产类别")
             SwitchPreference(
                 title = "显示银行存款",
-                checked = preferences.showBankDeposits,
-                onCheckedChange = { onPreferencesChange(preferences.copy(showBankDeposits = it)) }
+                checked = localPrefs.showBankDeposits,
+                onCheckedChange = { emit(localPrefs.copy(showBankDeposits = it)) }
             )
             SwitchPreference(
                 title = "显示股票",
-                checked = preferences.showStocks,
-                onCheckedChange = { onPreferencesChange(preferences.copy(showStocks = it)) }
+                checked = localPrefs.showStocks,
+                onCheckedChange = { emit(localPrefs.copy(showStocks = it)) }
             )
             SwitchPreference(
                 title = "显示基金",
-                checked = preferences.showFunds,
-                onCheckedChange = { onPreferencesChange(preferences.copy(showFunds = it)) }
+                checked = localPrefs.showFunds,
+                onCheckedChange = { emit(localPrefs.copy(showFunds = it)) }
             )
             SwitchPreference(
                 title = "显示虚拟货币",
-                checked = preferences.showCrypto,
-                onCheckedChange = { onPreferencesChange(preferences.copy(showCrypto = it)) }
+                checked = localPrefs.showCrypto,
+                onCheckedChange = { emit(localPrefs.copy(showCrypto = it)) }
             )
             SwitchPreference(
                 title = "显示负债",
-                checked = preferences.showLiabilities,
-                onCheckedChange = { onPreferencesChange(preferences.copy(showLiabilities = it)) }
+                checked = localPrefs.showLiabilities,
+                onCheckedChange = { emit(localPrefs.copy(showLiabilities = it)) }
             )
 
             HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
 
             SwitchPreference(
                 title = "隐藏低价值虚拟货币",
-                checked = preferences.hideLowValueCrypto,
-                onCheckedChange = { onPreferencesChange(preferences.copy(hideLowValueCrypto = it)) }
+                checked = localPrefs.hideLowValueCrypto,
+                onCheckedChange = { emit(localPrefs.copy(hideLowValueCrypto = it)) }
             )
-            if (preferences.hideLowValueCrypto) {
+            if (localPrefs.hideLowValueCrypto) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -161,8 +176,8 @@ fun DashboardConfigSheet(
                 ) {
                     Text(text = "低于此金额（¥）隐藏")
                     OutlinedTextField(
-                        value = preferences.lowValueThresholdCny,
-                        onValueChange = { onPreferencesChange(preferences.copy(lowValueThresholdCny = it)) },
+                        value = localPrefs.lowValueThresholdCny,
+                        onValueChange = { emit(localPrefs.copy(lowValueThresholdCny = it)) },
                         singleLine = true,
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                         modifier = Modifier.width(120.dp)
@@ -172,8 +187,8 @@ fun DashboardConfigSheet(
                 // 默认关：无行情不等于没持仓，开启即表示用户接受「可能藏掉真实持仓」的取舍。
                 SwitchPreference(
                     title = "同时隐藏无价格虚拟货币",
-                    checked = preferences.hideUnknownPriceCrypto,
-                    onCheckedChange = { onPreferencesChange(preferences.copy(hideUnknownPriceCrypto = it)) }
+                    checked = localPrefs.hideUnknownPriceCrypto,
+                    onCheckedChange = { emit(localPrefs.copy(hideUnknownPriceCrypto = it)) }
                 )
             }
 
@@ -185,15 +200,15 @@ fun DashboardConfigSheet(
                     modifier = Modifier
                         .fillMaxWidth()
                         .clickable {
-                            onPreferencesChange(preferences.copy(sortOrder = sortOrder))
+                            emit(localPrefs.copy(sortOrder = sortOrder))
                         }
                         .padding(vertical = 12.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     RadioButton(
-                        selected = preferences.sortOrder == sortOrder,
+                        selected = localPrefs.sortOrder == sortOrder,
                         onClick = {
-                            onPreferencesChange(preferences.copy(sortOrder = sortOrder))
+                            emit(localPrefs.copy(sortOrder = sortOrder))
                         }
                     )
                     Spacer(modifier = Modifier.width(12.dp))
@@ -227,8 +242,8 @@ fun DashboardConfigSheet(
                 )
                 periods.forEach { (value, label) ->
                     FilterChip(
-                        selected = preferences.defaultPeriod == value,
-                        onClick = { onPreferencesChange(preferences.copy(defaultPeriod = value)) },
+                        selected = localPrefs.defaultPeriod == value,
+                        onClick = { emit(localPrefs.copy(defaultPeriod = value)) },
                         label = { Text(label, style = MaterialTheme.typography.labelSmall) }
                     )
                 }
@@ -244,13 +259,13 @@ fun DashboardConfigSheet(
                     // 不能整块写 DashboardPreferences()：月度生活费（日历 FIRE 算出来的）、
                     // 年度分红缓存、分组展开态**都不在这个 sheet 里渲染**，整块回默认会把它们
                     // 静默清掉——月度生活费退回默认的 5000，正是「共享整块偏好互相踩踏」那一类 bug。
-                    onPreferencesChange(
+                    emit(
                         DashboardPreferences(
-                            monthlyExpense = preferences.monthlyExpense,
-                            annualDividendCache = preferences.annualDividendCache,
-                            annualDividendSymbols = preferences.annualDividendSymbols,
-                            annualDividendFingerprint = preferences.annualDividendFingerprint,
-                            defaultExpanded = preferences.defaultExpanded
+                            monthlyExpense = localPrefs.monthlyExpense,
+                            annualDividendCache = localPrefs.annualDividendCache,
+                            annualDividendSymbols = localPrefs.annualDividendSymbols,
+                            annualDividendFingerprint = localPrefs.annualDividendFingerprint,
+                            defaultExpanded = localPrefs.defaultExpanded
                         )
                     )
                 },

@@ -510,8 +510,12 @@ fun PortfolioScreen(
             }
         }
     }
-    val onAssetDividendClick: (Long) -> Unit = remember {
-        { id: Long -> selectedDividendAsset = visibleAssets.firstOrNull { it.id == id } }
+    // 必须用 remember(assets) 且从全量 assets 取：本 lambda 被 StockAssetItem 稳定持有，
+    // 若用无 key 的 remember 会捕获首次组合时的 visibleAssets（旧实例），价格刷新后列表里的
+    // 资产对象已是新实例，这里却仍返回旧对象 —— 点分红弹出的可能是过期价格/市值。
+    // 用全量 assets 而非 displayAssets：被显示开关/低价值隐藏的资产 id 仍在全量里，绝不会 firstOrNull 落空。
+    val onAssetDividendClick: (Long) -> Unit = remember(assets) {
+        { id: Long -> selectedDividendAsset = assets.firstOrNull { it.id == id } }
     }
     val onAssetToggleSelection: (Long) -> Unit = remember {
         { id: Long ->
@@ -625,9 +629,18 @@ fun PortfolioScreen(
         modifier = modifier
     ) { padding ->
         if (displayAssets.isEmpty()) {
-            // 分清两种「空」：有资产但被显示设置（类别开关 / 低价值隐藏）全藏了 → 给提示；
-            // 压根没有资产 → 引导添加。混为一谈会让用户以为数据丢了。
-            if (assets.isNotEmpty()) {
+            // 分清三种「空」：首帧 Room 还没发射（assetsFrameReady=false）→ 显示加载，
+            // 否则一闪而过把"引导添加"空卡片误当成"没有数据"；
+            // 有资产但被显示设置（类别开关 / 低价值隐藏）全藏了 → 给提示；
+            // 压根没有资产 → 引导添加。后两者混淆会让用户以为数据丢了。
+            if (!uiState.assetsFrameReady) {
+                Box(
+                    modifier = Modifier.fillMaxSize().padding(padding),
+                    contentAlignment = androidx.compose.ui.Alignment.Center
+                ) {
+                    CircularProgressIndicator(modifier = Modifier.size(32.dp))
+                }
+            } else if (assets.isNotEmpty()) {
                 Box(
                     modifier = Modifier.fillMaxSize().padding(padding).padding(16.dp),
                     contentAlignment = androidx.compose.ui.Alignment.Center

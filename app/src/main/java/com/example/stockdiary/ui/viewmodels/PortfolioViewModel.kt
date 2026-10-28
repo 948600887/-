@@ -27,9 +27,6 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
-import kotlinx.coroutines.flow.MutableSharedFlow
-import kotlinx.coroutines.flow.SharedFlow
-import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineExceptionHandler
@@ -90,20 +87,13 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
         val dividendWarning: String? = null,
         /** 批量删除结果（成功/失败），用于删除后清理选择态或提示重试（#12） */
         val deleteResult: Result<Unit>? = null,
+        /** Room 首帧是否已到：false 时 assets 的空只是初值，不能据此提示「暂无资产」 */
+        val assetsFrameReady: Boolean = false,
+        /** 未被界面消费的刷新结果；消费后由 clearPendingSyncResult 清掉，避免丢/重复弹 */
+        val pendingSyncResult: SyncResult? = null,
     )
 
     private val _uiState = MutableStateFlow(PortfolioUiState())
-
-    /**
-     * 刷新完成的一次性事件流：替代原本放在 [PortfolioUiState] 里的 `syncResult` 持久字段。
-     * 旧写法把「刷新完成」做成 UI 状态里的持久字段，依赖 Snackbar 关掉后清除 ——
-     * 连点刷新 / 离开页面再回来都会出竞态（第二次弹窗被 cancel、或残留旧弹窗又弹一次）。
-     * 改用 [syncDone] 事件流后，刷新完成不再写持久字段、也不再需要「弹完清掉」，
-     * 天然不残留、不重叠。replay=0 保证新进场不会收到历史事件，
-     * extraBufferCapacity=1 让「正在弹 Snackbar 时又刷完一次」也能排上队、不丢。
-     */
-    private val _syncDone = MutableSharedFlow<SyncResult>(extraBufferCapacity = 1)
-    val syncDone: SharedFlow<SyncResult> = _syncDone.asSharedFlow()
 
     /**
      * assets 由 Room Flow 驱动、其余字段由刷新动作驱动，用 combine 汇成一条流。
@@ -113,11 +103,19 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
      */
     val uiState: StateFlow<PortfolioUiState> = repository.getAllAssets()
         .distinctUntilChanged { a, b -> a.isDisplayEquivalentTo(b) }
-        .combine(_uiState) { assets, state -> state.copy(assets = assets) }
+        // assets 真正发射过（哪怕为空）才算首帧已到；空初值不能当「没有资产」
+        .combine(_uiState) { assets, state ->
+            state.copy(assets = assets, assetsFrameReady = true)
+        }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), PortfolioUiState())
 
     fun clearDividendWarning() {
         _uiState.update { it.copy(dividendWarning = null) }
+    }
+
+    /** 界面弹完「刷新完成」后清掉，避免下次回到持仓页重复提示 */
+    fun clearPendingSyncResult() {
+        _uiState.update { it.copy(pendingSyncResult = null) }
     }
 
     private val _existingAccounts = MutableStateFlow<List<String>>(emptyList())
@@ -181,8 +179,7 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
      */
     fun syncGroups(currentKeys: Set<String>, marketKeys: Set<String> = emptySet()) {
         // 分组 key 集合内容没变就直接返回：列表每轮刷新都会重算 groupKeys 并重新调用本方法，
-        // 内容相等时若不做短路，虽然 added 为空只是空转，但一旦有人在「展开态」上动了其它手脚
-        // 就会受影响。这里锁死「内容不变 → 不动展开态」，保证用户手动收起的组永远不被清掉（#12）。
+        // 内容相等时不做无意义的空转，保证用户手动收起的组不被清掉。
         if (groupsInitialized && currentKeys == knownGroups) return
         if (!groupsInitialized) {
             _expandedGroups.value = currentKeys - marketKeys
@@ -192,7 +189,10 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
             val added = (currentKeys - knownGroups) - marketKeys
             if (added.isNotEmpty()) _expandedGroups.update { it + added }
         }
-        knownGroups = currentKeys
+        // 只增不减：收起市场时它的账户 key 会从 currentKeys 里消失，若 knownGroups 跟着缩小，
+        // 再次展开市场时这些账户会被当成「新分组」自动展开，用户手动收起的状态就丢了
+        // （收起账户 → 收起市场 → 展开市场 的经典路径）。保留历史 key 即可。
+        knownGroups = knownGroups + currentKeys
     }
 
     fun toggleGroup(key: String) {
@@ -293,7 +293,9 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
             // 分红计算也会把缓存覆盖成 0（把「暂无资产」当成「年度分红 0」），提示还误导成
             // 「成功 0」。直接短路，既避免污染分红缓存，也给明确反馈。
             if (uiState.value.assets.isEmpty()) {
-                _uiState.update { it.copy(isRefreshing = false, errorMessage = "暂无资产可同步") }
+                // 区分「首帧还没到」和「真的没有资产」：前者提示加载中，后者才是暂无资产
+                val message = if (uiState.value.assetsFrameReady) "暂无资产可同步" else "资产数据加载中，请稍后再试"
+                _uiState.update { it.copy(isRefreshing = false, errorMessage = message) }
                 return@launch
             }
             // 两个范围，别混（与资产页 DashboardViewModel 同一套规则）：
@@ -401,9 +403,12 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
                     }
                 }
                 _uiState.update { it.copy(isRefreshing = false) }
-                // 刷新成功才发一次性完成事件（syncResult 为 null 表示同步阶段已抛异常，
-                // 已走 errorMessage 反馈，不再弹「完成」以免与失败提示打架）
-                syncResult?.let { _syncDone.tryEmit(it) }
+                // 刷新成功才写完成结果（syncResult 为 null 表示同步阶段已抛异常，
+                // 已走 errorMessage 反馈，不再弹「完成」以免与失败提示打架）。
+                // 写状态而不是事件流：切走标签页不丢，消费后清掉不重复。
+                syncResult?.let { result ->
+                    _uiState.update { it.copy(pendingSyncResult = result) }
+                }
             }
         }
     }

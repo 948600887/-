@@ -33,9 +33,6 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
-import kotlinx.coroutines.flow.MutableSharedFlow
-import kotlinx.coroutines.flow.SharedFlow
-import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.CancellationException
@@ -104,6 +101,14 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
          * 否则每次冷启动都会闪一下「还没有添加任何资产」的空态（老用户资产并不为空）。
          */
         val assetsFrameReady: Boolean = false,
+        /**
+         * 尚未被界面消费的刷新结果。
+         *
+         * 用 UiState 而不是 SharedFlow：SharedFlow（replay=0）在切走 Tab、收集协程被取消时
+         * 事件直接丢失；replay=1 又会让每次回到首页重复弹同一条旧结果。放进状态里，
+         * 页面消费后调用 [clearPendingSyncResult] 清掉，既不丢也不重复。
+         */
+        val pendingSyncResult: SyncResult? = null,
     )
 
     private val _uiState = MutableStateFlow(DashboardUiState())
@@ -113,18 +118,12 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
      *
      * 旧写法把「刷新完成」做成 UI 状态里的持久字段，依赖 Snackbar 关掉后清除 ——
      * 连点刷新 / 离开页面再回来都会出竞态（第二次弹窗被 cancel、或残留的旧弹窗又弹一次，
-     * 因为进场时 `syncResult` 仍在状态里）。改用 [syncDone] 事件流后，刷新完成不再写持久字段、
-     * 也不再需要「弹完清掉」，天然不残留、不重叠。
-     * 改成 SharedFlow 一次性事件：每次 refresh 收尾只发射一次，屏幕侧
-     * `LaunchedEffect(Unit)` 收集，天然不残留、不重叠。replay=1 让刷新期间切走 Tab（收集协程被取消）后回到首页仍能收到这一次结果
-     * ——replay=0 时事件直接消失，刷新明明跑完了却永远看不到「刷新完成：成功 N」的提示；
-     * extraBufferCapacity=1 让「正在弹 Snackbar 时又刷完一次」也能排上队、不丢。
+     * 因为进场时 `syncResult` 仍在状态里）。
+     *
+     * 现在由 [DashboardUiState.pendingSyncResult] 承载：刷新收尾写入状态，页面弹完调用
+     * [clearPendingSyncResult]。SharedFlow 的两种失败模式都避开了——replay=0 切走 Tab 丢事件，
+     * replay=1 每次回页重复弹旧结果。
      */
-    private val _syncDone = MutableSharedFlow<SyncResult>(
-        replay = 1,
-        extraBufferCapacity = 1
-    )
-    val syncDone: SharedFlow<SyncResult> = _syncDone.asSharedFlow()
 
     // Room 每次写库都会重发整表；而落价往往只改 lastSyncTime/lastUpdateTime，
     // 界面其实不用重画。不去重 = 一次同步上百次整屏重组。
@@ -457,13 +456,21 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
                 _uiState.update { it.copy(isRefreshing = false) }
                 // 刷新成功才发一次性完成事件（syncResult 为 null 表示同步阶段已抛异常，
                 // 已走 errorMessage 反馈，不再弹「完成」以免与失败提示打架）
-                syncResult?.let { _syncDone.tryEmit(it) }
+                // 结果写进状态而不是事件流：切走 Tab 也不会丢，消费后清掉也不会重复弹
+                syncResult?.let { result ->
+                    _uiState.update { it.copy(pendingSyncResult = result) }
+                }
             }
         }
     }
 
     fun clearError() {
         _uiState.update { it.copy(errorMessage = null) }
+    }
+
+    /** 界面弹完「刷新完成」后清掉，避免下次回到首页重复提示 */
+    fun clearPendingSyncResult() {
+        _uiState.update { it.copy(pendingSyncResult = null) }
     }
 
     fun clearDividendWarning() {

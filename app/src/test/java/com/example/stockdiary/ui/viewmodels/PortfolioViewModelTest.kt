@@ -198,9 +198,8 @@ class PortfolioViewModelTest {
     }
 
     @Test
-    fun `refresh 成功时通过 syncDone 一次性事件上报结果`() = runTest {
-        // 回归：刷新完成改为 SharedFlow 一次性事件（替代原 UiState 持久字段 + clearSyncResult），
-        // 连点刷新 / 离开页面再回来都不会重复弹或丢弹。这里断言成功时恰好发射一次且内容正确。
+    fun `refresh 成功时结果写入 pendingSyncResult，消费后清空`() = runTest {
+        // 回归：结果放 UiState 而不是 SharedFlow：切走标签页不丢，消费后清空不重复弹
         mockkObject(AssetSyncManager)
         try {
             val expected = SyncResult(successCount = 7, failedCount = 2, truncatedByTimeLimit = false)
@@ -209,14 +208,16 @@ class PortfolioViewModelTest {
             } returns expected
 
             val vm = buildVm(initialAssets = listOf(stockAsset))
+            // 必须先订阅：uiState 是 WhileSubscribed 的 stateIn，refresh 里的
+            // uiState.value.assets 在无人订阅时还是空初值，会被当成「首帧未到」而短路
             val (trackJob, latest) = vm.uiState.trackIn(this)
-            // UNDISPATCHED：让 first() 在 refresh() 前就同步完成订阅，确保一次性事件被捕获；
-            // 事件经测试调度器确定性送达（见 UiStateCollectExt 同款 trackIn 机制）
-            val event = async(start = CoroutineStart.UNDISPATCHED) { vm.syncDone.first() }
             vm.refresh()
-            val result = withTimeout(5000) { event.await() }
-            assertEquals(expected, result)
-            assertEquals(null, latest().errorMessage)
+            val state = vm.uiState.first { it.pendingSyncResult != null }
+            assertEquals(expected, state.pendingSyncResult)
+            assertEquals(null, state.errorMessage)
+
+            vm.clearPendingSyncResult()
+            assertEquals(null, latest().pendingSyncResult)
             trackJob.cancel()
         } finally {
             unmockkAll()
@@ -224,8 +225,8 @@ class PortfolioViewModelTest {
     }
 
     @Test
-    fun `refresh 同步抛异常时不发 syncDone 事件`() = runTest {
-        // 同步阶段抛异常走 errorMessage 反馈，不应再发「刷新完成」一次性事件（避免与失败提示打架）
+    fun `refresh 同步抛异常时只写 errorMessage，不写 pendingSyncResult`() = runTest {
+        // 同步阶段抛异常走 errorMessage 反馈，不应再弹「刷新完成」（避免与失败提示打架）
         mockkObject(AssetSyncManager)
         try {
             coEvery {
@@ -233,23 +234,38 @@ class PortfolioViewModelTest {
             } throws RuntimeException("网络挂了")
 
             val vm = buildVm(initialAssets = listOf(stockAsset))
+            // 同上：先订阅让 assets 真正发射，否则 refresh 会短路成「加载中」
             val (trackJob, latest) = vm.uiState.trackIn(this)
-            val event = async(start = CoroutineStart.UNDISPATCHED) { vm.syncDone.first() }
             vm.refresh()
-            // 同步抛异常路径下不应发射；first() 永不返回，用超时确认「没有事件」而非「还没收到」
-            var received = false
-            try {
-                withTimeout(500) { event.await() }
-                received = true
-            } catch (_: TimeoutCancellationException) {
-                // 期望超时：未发射任何事件
-            }
-            assertFalse("同步抛异常时不应发射 syncDone 事件", received)
-            assertEquals("刷新失败：网络挂了", latest().errorMessage)
-            event.cancel() // first() 未收到事件仍在挂起，显式取消避免 runTest 判协程泄漏
+            val state = vm.uiState.first { it.errorMessage != null }
+            assertEquals("刷新失败：网络挂了", state.errorMessage)
+            assertEquals(null, state.pendingSyncResult)
             trackJob.cancel()
         } finally {
             unmockkAll()
         }
+    }
+
+    @Test
+    fun `收起市场再展开，不会重新展开手动收起的账户`() = runTest {
+        // 回归 #12：收起账户 → 收起市场 → 展开市场时，账户 key 会从 currentKeys 消失。
+        // 若 knownGroups 跟着缩小，它会被当成新分组自动展开，用户手动收起的状态就丢了。
+        val vm = buildVm()
+
+        vm.syncGroups(setOf("market:A", "acct:A"), setOf("market:A"))
+        // 初始账户是展开的（首屏只收起一级市场头），先手动收起它
+        assertTrue("首屏账户应展开", "acct:A" in vm.expandedGroups.value)
+        vm.toggleGroup("acct:A")
+        assertFalse("手动收起后应折叠", "acct:A" in vm.expandedGroups.value)
+
+        // 收起市场：该市场的账户 key 从可见分组里消失
+        vm.syncGroups(setOf("market:A"), setOf("market:A"))
+        // 展开市场：账户 key 回来，不能被当成「新分组」自动展开
+        vm.syncGroups(setOf("market:A", "acct:A"), setOf("market:A"))
+
+        assertFalse(
+            "重新展开市场不应把用户手动收起的账户重新展开",
+            "acct:A" in vm.expandedGroups.value
+        )
     }
 }

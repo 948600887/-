@@ -37,6 +37,7 @@ import com.example.stockdiary.ui.viewmodels.PortfolioViewModel
 import com.example.stockdiary.utils.sumTotalValueCny
 import com.example.stockdiary.utils.totalValueCny
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.launch
 
 /** 负债单独成组时使用的分组 key；真实账户名不会叫这个，不会与账户分组撞车 */
@@ -436,25 +437,28 @@ fun PortfolioScreen(
         }
     }
 
-    // 刷新完成一次性事件：用 SharedFlow 收尾，不再依赖会被清掉的持久字段，
-    // 连点刷新 / 离开页面再回来都不会重复弹或丢弹（见 PortfolioViewModel.syncDone）。
-    // replay=0 保证新进场收不到历史事件，extraBufferCapacity=1 让「正在弹时又刷完一次」排队不丢
+    // 刷新结果放在 UiState 里：切走标签页不会丢，消费后立刻清掉不会重复弹。
+    // 用 snapshotFlow 而不是 LaunchedEffect(pendingSyncResult)：先清空再弹，
+    // 清空若作为 key 会把正在显示的 Snackbar 取消；snapshotFlow 不受影响。
     LaunchedEffect(Unit) {
-        viewModel.syncDone.collect { result ->
-            // 刷新结果反馈：成功/失败都报数。持仓页原先只有 errorMessage、没有成功反馈，
-            // 用户点完刷新只看到转圈停下，到底刷成了几个无从得知（资产页一直有）
-            val msg = if (result.failedCount > 0) {
-                "刷新完成：成功 ${result.successCount}，失败 ${result.failedCount}"
-            } else {
-                "刷新完成：成功 ${result.successCount}"
-            } + result.skippedHint // 上百个加密货币若因行情源不可达没更新，得让用户看见
-            snackbarHostState.showSnackbar(msg)
-        }
+        snapshotFlow { uiState.pendingSyncResult }
+            .filterNotNull()
+            .collect { result ->
+                viewModel.clearPendingSyncResult()
+                // 刷新结果反馈：成功/失败都报数。持仓页原先只有 errorMessage、没有成功反馈，
+                // 用户点完刷新只看到转圈停下，到底刷成了几个无从得知（资产页一直有）
+                val msg = if (result.failedCount > 0) {
+                    "刷新完成：成功 ${result.successCount}，失败 ${result.failedCount}"
+                } else {
+                    "刷新完成：成功 ${result.successCount}"
+                } + result.skippedHint // 上百个加密货币若因行情源不可达没更新，得让用户看见
+                snackbarHostState.showSnackbar(msg)
+            }
     }
 
     // 批量删除结果：成功才退出多选并清空选择；失败保留选择态并给可重试的提示（#12）。
-    // replay=0 的一次性事件由 syncDone 承载，这里用 uiState.deleteResult 这个持久字段
-    // + clearDeleteResult 配对即可（失败重试时会被反复 set，需要可重入）。
+    // 用 uiState.deleteResult 这个持久字段 + clearDeleteResult 配对即可
+    // （失败重试时会被反复 set，需要可重入）。
     LaunchedEffect(uiState.deleteResult) {
         uiState.deleteResult?.let { result ->
             if (result.isSuccess) {

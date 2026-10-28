@@ -246,9 +246,9 @@ class DashboardViewModelTest {
     }
 
     @Test
-    fun `refresh 成功时通过 syncDone 一次性事件上报结果`() = runTest {
-        // 回归：刷新完成改为 SharedFlow 一次性事件（替代原 UiState 持久字段 + clearSyncResult），
-        // 连点刷新 / 离开页面再回来都不会重复弹或丢弹。这里断言成功时恰好发射一次且内容正确。
+    fun `refresh 成功时结果写入 pendingSyncResult，消费后清空`() = runTest {
+        // 回归：结果放 UiState（pendingSyncResult），而不是 SharedFlow——
+        // replay=0 切走 Tab 会丢、replay=1 回页会重复弹。写状态 + 消费后清空两者都避开。
         mockkObject(AssetSyncManager)
         try {
             val expected = SyncResult(successCount = 7, failedCount = 2, truncatedByTimeLimit = false)
@@ -257,26 +257,23 @@ class DashboardViewModelTest {
             } returns expected
 
             val vm = buildVm()
-            val (trackJob, latest) = vm.uiState.trackIn(this)
-            // UNDISPATCHED：让 first() 在 refresh() 前就同步完成订阅，确保一次性事件被捕获；
-            // 事件经测试调度器确定性送达（见 UiStateCollectExt 同款 trackIn 机制）
-            val event = async(start = CoroutineStart.UNDISPATCHED) { vm.syncDone.first() }
             vm.refresh()
-            // 不要用 withTimeout 包：refresh 内部走真实的 Dispatchers.IO，runTest 的虚拟时钟
-            // 会在调度器空转时把 5s 直接推完，偶发 TimeoutCancellationException（假失败）。
-            // 直接 await，未发射时由 runTest 自身的 60s 超时兜底。
-            val result = event.await()
-            assertEquals(expected, result)
-            assertEquals(null, latest().errorMessage)
-            trackJob.cancel()
+            // refresh 走真实 Dispatchers.IO：直接等状态里出现结果，runTest 自身超时兜底
+            val state = vm.uiState.first { it.pendingSyncResult != null }
+            assertEquals(expected, state.pendingSyncResult)
+            assertEquals(null, state.errorMessage)
+
+            // 消费后必须清掉，否则回到首页会再弹一次旧结果
+            vm.clearPendingSyncResult()
+            assertEquals(null, vm.uiState.value.pendingSyncResult)
         } finally {
             unmockkAll()
         }
     }
 
     @Test
-    fun `refresh 同步抛异常时不发 syncDone 事件`() = runTest {
-        // 同步阶段抛异常走 errorMessage 反馈，不应再发「刷新完成」一次性事件（避免与失败提示打架）
+    fun `refresh 同步抛异常时只写 errorMessage，不写 pendingSyncResult`() = runTest {
+        // 同步阶段抛异常走 errorMessage 反馈，不应再弹「刷新完成」（避免与失败提示打架）
         mockkObject(AssetSyncManager)
         try {
             coEvery {
@@ -284,21 +281,10 @@ class DashboardViewModelTest {
             } throws RuntimeException("网络挂了")
 
             val vm = buildVm()
-            val (trackJob, latest) = vm.uiState.trackIn(this)
-            val event = async(start = CoroutineStart.UNDISPATCHED) { vm.syncDone.first() }
             vm.refresh()
-            // 同步抛异常路径下不应发射；first() 永不返回，用超时确认「没有事件」而非「还没收到」
-            var received = false
-            try {
-                withTimeout(500) { event.await() }
-                received = true
-            } catch (_: TimeoutCancellationException) {
-                // 期望超时：未发射任何事件
-            }
-            assertFalse("同步抛异常时不应发射 syncDone 事件", received)
-            assertEquals("刷新失败：网络挂了", latest().errorMessage)
-            event.cancel() // first() 未收到事件仍在挂起，显式取消避免 runTest 判协程泄漏
-            trackJob.cancel()
+            val state = vm.uiState.first { it.errorMessage != null }
+            assertEquals("刷新失败：网络挂了", state.errorMessage)
+            assertEquals(null, state.pendingSyncResult)
         } finally {
             unmockkAll()
         }

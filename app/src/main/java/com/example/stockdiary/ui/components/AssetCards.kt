@@ -17,6 +17,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
+import com.example.stockdiary.network.BinanceAPI
 import com.example.stockdiary.network.BinanceHostGate
 import com.example.stockdiary.utils.ExchangeRateManager
 import com.example.stockdiary.utils.StockCodeManager
@@ -308,9 +309,12 @@ fun StockAssetItem(
                         else "${asset.balance.format(0)}$unitLabel",
                         style = MaterialTheme.typography.bodySmall, color = AppTheme.colors.onSurfaceVariant
                     )
-                    // 币安锁仓/Staking 产品以 LD 前缀标识（如 LDBNB、LDUSDT）；归一化后代码为大写，
-                    // 直接判前缀即可。给一个「锁仓」红标，避免和同名现货（BNB）混在一起看不出区别（#12）
-                    if (asset.type == AssetType.CRYPTO && asset.symbol?.startsWith("LD") == true) {
+                    // 币安锁仓/Staking 产品以 LD 壳标识（如 LDBNB、LDUSDT）；但 LDO 这类
+                    // 恰好以 LD 开头的真实现货不能误标。统一复用 BinanceAPI.isEarnProduct
+                    // （内部有 BINANCE_LD_EXCEPTIONS），避免两处各写一套前缀判断（#12）
+                    if (asset.type == AssetType.CRYPTO &&
+                        asset.symbol?.let { BinanceAPI.isEarnProduct(it) } == true
+                    ) {
                         Text("•", style = MaterialTheme.typography.bodySmall, color = AppTheme.colors.onSurfaceVariant)
                         Text(
                             "锁仓",

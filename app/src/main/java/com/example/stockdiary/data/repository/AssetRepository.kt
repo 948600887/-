@@ -83,11 +83,23 @@ class AssetRepository private constructor(
             val now = System.currentTimeMillis()
             val existing = if (normalizedSymbol.isNotBlank()) {
                 assetDao.getAssetBySymbolAndAccount(normalizedSymbol, asset.account)
+                    // 兼容升级前的旧数据：当时 CRYPTO 代码未归一（库里可能是 BTC/USDT），
+                    // 精确匹配不到，按归一化后的代码在内存里再找一次，否则仍会插出第二条
+                    ?: assetDao.getAllAssets().first().firstOrNull { candidate ->
+                        candidate.type == AssetType.CRYPTO &&
+                            candidate.account == asset.account &&
+                            StockCodeManager.normalizeSymbolForType(
+                                AssetType.CRYPTO,
+                                candidate.symbol ?: ""
+                            ) == normalizedSymbol
+                    }
             } else {
                 null
             }
             if (existing != null) {
                 val updated = existing.copy(
+                    // 顺手把历史未归一的代码改正，后续同步/去重都按新形态走
+                    symbol = normalizedSymbol,
                     name = asset.name,
                     balance = asset.balance,
                     purchasePrice = asset.purchasePrice,

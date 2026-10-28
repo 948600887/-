@@ -29,6 +29,7 @@ import com.example.stockdiary.utils.AppLogger
 import com.example.stockdiary.utils.sumTotalValueCny
 import com.example.stockdiary.utils.totalValueCny
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -137,21 +138,28 @@ fun DashboardScreen(
     // 这里在每次进入该页面（重新组合）时再拉一次磁盘偏好。
     LaunchedEffect(Unit) { viewModel.reloadPreferences() }
 
-    // 刷新完成一次性事件：用 SharedFlow 收尾，不再依赖会被清掉的持久字段，
-    // 连点刷新 / 离开页面再回来都不会重复弹或丢弹（见 DashboardViewModel.syncDone）。
-    // replay=0 保证新进场收不到历史事件，extraBufferCapacity=1 让「正在弹时又刷完一次」排队不丢
+    // 刷新结果放在 UiState 里：切走 Tab 不会丢（SharedFlow replay=0 会丢），
+    // 消费后立刻清掉也不会在回到首页时重复弹（replay=1 会重复）。
+    //
+    // 用 snapshotFlow 而不是 LaunchedEffect(pendingSyncResult)：先清空再弹，
+    // 清空会让 key 变成 null、把正在显示的 Snackbar 一起取消；snapshotFlow 不受
+    // key 变化影响，清空只让下一次发射被 filterNotNull 过滤掉。
+    // 立刻消费还有个好处：用户在 Snackbar 消失前切走，回来也不会再弹一遍。
     LaunchedEffect(Unit) {
-        viewModel.syncDone.collect { result ->
-            val msg = buildString {
-                // 统一结果反馈：成功/失败都报数，用户才知道这一轮到底刷到了什么
-                append("刷新完成：成功 ${result.successCount}")
-                if (result.failedCount > 0) append("，失败 ${result.failedCount}")
-                // 跳过必须报：只说「成功 107」的话，用户不知道还有上百个加密货币
-                // 因行情源不可达（熔断）压根没更新，会以为刷新没生效而反复去点
-                append(result.skippedHint)
+        snapshotFlow { uiState.pendingSyncResult }
+            .filterNotNull()
+            .collect { result ->
+                viewModel.clearPendingSyncResult()
+                val msg = buildString {
+                    // 统一结果反馈：成功/失败都报数，用户才知道这一轮到底刷到了什么
+                    append("刷新完成：成功 ${result.successCount}")
+                    if (result.failedCount > 0) append("，失败 ${result.failedCount}")
+                    // 跳过必须报：只说「成功 107」的话，用户不知道还有上百个加密货币
+                    // 因行情源不可达（熔断）压根没更新，会以为刷新没生效而反复去点
+                    append(result.skippedHint)
+                }
+                snackbarHostState.showSnackbar(msg)
             }
-            snackbarHostState.showSnackbar(msg)
-        }
     }
 
     // 刷新兜底：ViewModel 的 CoroutineExceptionHandler 把逃逸异常变成这条提示，

@@ -111,7 +111,7 @@ class DashboardViewModelTest {
             totalAnnualIncome = 1234.5,
             hasDividendData = true
         )
-        coEvery { assetRepo.addOrUpdateStockAsset(any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any()) } returns stockAsset
+        coEvery { assetRepo.addOrUpdateStockAsset(any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any()) } returns stockAsset
         coEvery { assetRepo.insertAsset(any()) } returns 1L
         return DashboardViewModel(container)
     }
@@ -155,7 +155,7 @@ class DashboardViewModelTest {
     fun `addAsset 股票走 addOrUpdateStockAsset 而非 insertAsset`() = runBlocking {
         val vm = buildVm()
         vm.addAsset(stockAsset)
-        coVerify { assetRepo.addOrUpdateStockAsset(any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any()) }
+        coVerify { assetRepo.addOrUpdateStockAsset(any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any()) }
         coVerify(exactly = 0) { assetRepo.insertAsset(any()) }
     }
 
@@ -164,7 +164,7 @@ class DashboardViewModelTest {
         val vm = buildVm()
         vm.addAsset(depositAsset)
         coVerify { assetRepo.insertAsset(depositAsset) }
-        coVerify(exactly = 0) { assetRepo.addOrUpdateStockAsset(any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any()) }
+        coVerify(exactly = 0) { assetRepo.addOrUpdateStockAsset(any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any()) }
     }
 
     @Test
@@ -190,7 +190,9 @@ class DashboardViewModelTest {
                 dueDate = "2026-12-31",
                 notes = any(),
                 interestRate = any(),
-                currentPrice = any()
+                currentPrice = any(),
+                // 手动「添加」路径显式关闭交易记录（#5）
+                recordTransaction = false
             )
         }
         // 股票/基金仍走合并专用路径，不该走 insertAsset

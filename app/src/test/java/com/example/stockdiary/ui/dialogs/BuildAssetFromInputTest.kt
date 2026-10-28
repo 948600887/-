@@ -162,4 +162,33 @@ class BuildAssetFromInputTest {
     fun 负参考单价直接拒绝() {
         build(AssetType.STOCK, purchasePrice = "-3")
     }
+
+    @Test
+    fun 证券类型填基金号段会被校正为FUND类型() {
+        // 手选「证券」却填场外基金号段，buildAssetFromInput 校正为 FUND，与「证券」chip 涵盖一致（#7）
+        val asset = build(AssetType.STOCK, symbol = "007467")
+        assertEquals(AssetType.FUND, asset.type)
+        assertEquals("fund_007467", asset.symbol)
+    }
+
+    @Test
+    fun 加密货币负余额可正常构造_借币场景() {
+        // 币安借币/欠币是合法负余额，构造不应抛异常（#12）
+        val asset = build(AssetType.CRYPTO, name = "借币", symbol = "USDT", balance = "-100")
+        assertEquals(-100.0, asset.balance, 0.0)
+    }
+
+    @Test
+    fun 名称账户备注会被trim() {
+        // 账户尾随空格会让 (symbol+account) 精确匹配失效，构造时统一 trim（#13）
+        val asset = build(
+            AssetType.STOCK,
+            name = "  茅台  ",
+            account = " 招商 ",
+            notes = " 备注 "
+        )
+        assertEquals("茅台", asset.name)
+        assertEquals("招商", asset.account)
+        assertEquals("备注", asset.notes)
+    }
 }

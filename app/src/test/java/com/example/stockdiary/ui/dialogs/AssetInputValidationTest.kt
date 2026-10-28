@@ -320,4 +320,49 @@ class AssetInputValidationTest {
         assertEquals(".", sanitizeDecimalInput("."))
         assertEquals("0.5", sanitizeDecimalInput("0.5"))
     }
+
+    // ---------- 类型与代码号段自洽（#7） ----------
+
+    @Test
+    fun 基金类型填股票号段报错_类型与代码矛盾() {
+        val e = errors(type = AssetType.FUND, symbol = "600519")
+        assertEquals("代码", e.symbol?.label)
+        assertFalse(e.isValid)
+    }
+
+    @Test
+    fun 加密类型填可识别的股票代码报错() {
+        // 选了虚拟货币却填了股票号段，同步不到价，必须拦截
+        val e = errors(type = AssetType.CRYPTO, symbol = "600519")
+        assertFalse(e.isValid)
+    }
+
+    @Test
+    fun 证券类型填基金号段不报错_交由构造校正为FUND() {
+        // 手选「证券」却填了基金号段，构造时会校正为 FUND（证券 chip 本就涵盖股票+基金），不在这里拦
+        val e = errors(type = AssetType.STOCK, symbol = "007467")
+        assertNull(e.symbol)
+        assertTrue(e.isValid)
+    }
+
+    @Test
+    fun 加密货币允许负余额_不报不能为负数() {
+        // 币安借币/欠币是合法负余额（Asset.kt 已放开），校验层要放行（#12）
+        val e = errors(type = AssetType.CRYPTO, symbol = "BTC", balance = "-0.5")
+        assertNull(e.balance)
+        assertTrue(e.isValid)
+    }
+
+    @Test
+    fun 加密货币外的类型仍拒绝负余额() {
+        assertEquals("不能为负数", errors(balance = "-1").balance?.message)
+    }
+
+    @Test
+    fun 允许负号参数保留负号_用于加密货币借币() {
+        assertEquals("-5", sanitizeDecimalInput("-5", allowNegative = true))
+        assertEquals("-1.23", sanitizeDecimalInput("-1.23", allowNegative = true))
+        // 默认仍过滤负号，既有行为不变
+        assertEquals("5", sanitizeDecimalInput("-5"))
+    }
 }

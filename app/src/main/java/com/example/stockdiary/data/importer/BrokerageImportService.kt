@@ -367,12 +367,27 @@ class BrokerageImportService internal constructor(private val context: Context) 
      * —— **静默按 0 算**，成本悄悄少一块，用户完全看不出来。
      * 与 GalaxyStatementParser 的 toNumber 同口径（那边的 CSV 本来就带千分位）。
      */
-    internal fun parseNumber(raw: String): Double? =
-        raw.trim()
+    internal fun parseNumber(raw: String): Double? {
+        var s = raw.trim()
             .replace(",", "")
             .replace("，", "")
             .replace(" ", "")
-            .toDoubleOrNull()
+        if (s.isEmpty()) return null
+
+        // 括号负：(5.00) → -5.00，海外券商账单常见写法
+        val parenthesized = s.startsWith("(") && s.endsWith(")")
+        if (parenthesized) s = s.substring(1, s.length - 1)
+
+        // 全角 / 异体负号归一：－ — ー 一 −
+        // OCR 与部分券商导出会用这些字形表示负号（负手续费、数量冲正等），
+        // 不归一的话 toDoubleOrNull 直接返回 null。与 GalaxyStatementParser.toNumber 同口径。
+        for (dash in charArrayOf('－', '—', 'ー', '一', '−')) {
+            s = s.replace(dash, '-')
+        }
+
+        val value = s.toDoubleOrNull() ?: return null
+        return if (parenthesized) -value else value
+    }
 
     fun guessColumnMapping(headers: List<String>): ColumnMapping {
         fun findIndex(pattern: String): Int {
@@ -459,7 +474,16 @@ class BrokerageImportService internal constructor(private val context: Context) 
             if (price == null) errors.add("价格无法解析: '$rawPrice'")
             else if (price <= 0) errors.add("价格非正: $price")
 
-            val fee = parseNumber(get(mapping.feeCol)) ?: 0.0
+            // 手续费**有值却解析不出来**必须报错，不能静默按 0 算：
+            // fee 是成本的一部分，静默 0 会让加权成本少算手续费、持仓盈亏长期偏差，
+            // 且用户完全看不出来（整行还会被判成"没异常"正常入库）。
+            // 手续费列缺失 / 单元格为空是另一回事（很多账单没有手续费列），那种才是合法的 0。
+            val rawFee = get(mapping.feeCol)
+            val fee = if (rawFee.isBlank()) {
+                0.0
+            } else {
+                parseNumber(rawFee).also { if (it == null) errors.add("手续费无法解析: '$rawFee'") } ?: 0.0
+            }
             val account = get(mapping.accountCol).ifEmpty { "默认账户" }
 
             val isDup = if (date != null && type != null && quantity != null && price != null) {
@@ -540,11 +564,14 @@ class BrokerageImportService internal constructor(private val context: Context) 
             return false
         }
         val now = System.currentTimeMillis()
-        if (t.type == TransactionType.BUY.value) {
+        val applied = if (t.type == TransactionType.BUY.value) {
             applyBuy(t, now)
+            true
         } else {
             applySell(t, now)
         }
+        // 卖超被跳过：持仓没动，交易流水也不能写，否则台账与持仓对不上
+        if (!applied) return false
         transactionDao.insert(
             Transaction(
                 symbol = t.symbol,
@@ -593,16 +620,32 @@ class BrokerageImportService internal constructor(private val context: Context) 
      * 卖出：有持仓则减仓/清仓，无持仓则跳过持仓操作（仅写交易记录，回放时数据可能不全）。
      * 这里不抛异常——卖出无持仓视为交易记录补录，持仓由后续买入记录重建。
      */
-    internal suspend fun applySell(t: ParsedTransaction, now: Long) {
+    /**
+     * @return true=已应用（清仓或减仓），false=卖出量超过持仓、该笔被跳过
+     */
+    internal suspend fun applySell(t: ParsedTransaction, now: Long): Boolean {
         val existing = assetDao.getAssetBySymbolAndAccount(t.symbol, t.account)
         if (existing == null) {
             // 无持仓但仍记录交易；标记为提示而非硬失败
-            return
+            return true
         }
-        if (t.quantity >= existing.balance) {
-            assetDao.deleteAsset(existing)
-        } else {
-            assetDao.updateBalance(existing.id, existing.balance - t.quantity, now)
+        // 浮点比较留一点余量，避免 1e-15 级误差把"正好卖完"误判成卖超
+        val eps = 1e-6
+        return when {
+            // 卖超（卖出量 > 持仓）：脏数据，例如数量被多识别一位。
+            // 旧逻辑用 `>=` 一并删仓，后果是 (a) 超额部分无声丢弃，
+            // (b) 该标的的成本基线随持仓一起消失 —— 之后再买入时加权成本从 0 起算，
+            // 盈亏长期错算，而用户完全不知情。这里保留现有持仓、跳过该笔。
+            t.quantity > existing.balance + eps -> false
+            // 正好卖完：正常清仓
+            t.quantity >= existing.balance - eps -> {
+                assetDao.deleteAsset(existing)
+                true
+            }
+            else -> {
+                assetDao.updateBalance(existing.id, existing.balance - t.quantity, now)
+                true
+            }
         }
     }
 

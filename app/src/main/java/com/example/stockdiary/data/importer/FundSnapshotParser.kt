@@ -128,7 +128,11 @@ object FundSnapshotParser {
                     lineNumber = index + 1,
                     rawQuantity = formatPlain(share),
                     nav = nav,
-                    navDate = dataDate
+                    // OCR 读不出「每张卡各自的净值日期」，不能拿整张截图的数据日期来冒充：
+                    // 那样 navDate 恒等于 dataDate，UI 上「净值滞后」的红字提示永远不会触发
+                    // （QDII 等净值常滞后 2~3 天，用户会被误导成"净值就是当天的"）。
+                    // 留 null 表示"未知"，由 UI 按无净值日期处理。
+                    navDate = null
                 )
             )
         }

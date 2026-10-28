@@ -155,7 +155,12 @@ object StockCodeManager {
         
         // ETF: 510/511/512/513/515/516/517/518/588/159 开头
         if (isETF(c)) return CodeCategory.ETF
-        
+
+        // B 股（深市 200xxx / 沪市 900xxx）是股票的一个交易品种，必须显式归为 STOCK：
+        // 200xxx 以 "02" 开头，会被 [isOTCFundCode] 的开放式基金分支误判（详见该函数注释）。
+        // 放在场外基金判定之前，保证 [isStock] 对 B 股也返回 true。
+        if (c.startsWith("200") || c.startsWith("900")) return CodeCategory.STOCK
+
         // LOF: 16xxxx/18xxxx 深交所上市交易型开放式基金
         if (c.startsWith("16") || c.startsWith("18")) return CodeCategory.LOF
         
@@ -182,9 +187,15 @@ object StockCodeManager {
      */
     fun isOTCFundCode(code: String): Boolean {
         if (code.length != 6) return false
-        
+
         if (isETF(code)) return false
-        
+
+        // 深市 B 股是 200xxx（如万科 B 200002）。它也以 "02" 开头，若不排除就会被下面的
+        // `startsWith("02")` 判成场外基金 —— 导入后被落成 `fund_200xxx`、类型 FUND，
+        // 后续行情同步走天天基金净值路径，而 200xxx 根本不是基金代码，净值永远查不到，
+        // 市值长期显示 0。B 股必须留在股票口径（沪市 B 股 900xxx 本就不匹配下面的分支）。
+        if (code.startsWith("200")) return false
+
         return when {
             // 01xxxx/02xxxx - 开放式基金（场外，无交易所行情）
             code.startsWith("01") || code.startsWith("02") -> true

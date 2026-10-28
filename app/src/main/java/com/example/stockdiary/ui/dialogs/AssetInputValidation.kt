@@ -1,6 +1,7 @@
 package com.example.stockdiary.ui.dialogs
 
 import com.example.stockdiary.database.AssetType
+import com.example.stockdiary.utils.StockCodeManager
 
 /**
  * 「添加资产」表单的纯校验逻辑。
@@ -57,6 +58,30 @@ data class AssetInputErrors(
 internal fun isSymbolRequired(type: AssetType): Boolean =
     type == AssetType.STOCK || type == AssetType.FUND || type == AssetType.CRYPTO
 
+/**
+ * 类型与代码号段是否矛盾（#7）。
+ *
+ * 只在「手动选了类型、又填了与之不符的代码」时拦截——自动识别路径会按代码定类型，
+ * 不会触发。规则：
+ * - 选了「基金」却填了股票号段代码（如 600519）→ 矛盾；
+ * - 选了「虚拟货币」却填了可识别的股票/基金代码（如 600519 / 510050）→ 矛盾；
+ * - 选了「证券(STOCK)」却填了基金号段代码 → 不拦，由 [buildAssetFromInput] 校正为 FUND
+ *   （「证券」chip 本就统涵盖股票与基金）；
+ * - 代码无法识别（UNKNOWN，如纯字母的 BTCUSDT）→ 不拦，交由同步链路判断。
+ */
+private fun typeSymbolMismatch(type: AssetType, symbol: String): FieldError? {
+    if (!isSymbolRequired(type)) return null
+    if (symbol.isBlank()) return null
+    val cat = StockCodeManager.classifyCode(symbol)
+    return when {
+        type == AssetType.FUND && cat == StockCodeManager.CodeCategory.STOCK ->
+            FieldError("代码", "该代码识别为股票，与「基金」类型不符，请确认类型或代码")
+        type == AssetType.CRYPTO && cat != StockCodeManager.CodeCategory.UNKNOWN ->
+            FieldError("代码", "该代码识别为${cat.label}，与「虚拟货币」类型不符，请确认")
+        else -> null
+    }
+}
+
 /** 数量字段在不同类型下的叫法，错误提示要跟界面标签保持一致。 */
 internal fun balanceLabel(type: AssetType): String = when (type) {
     AssetType.STOCK -> "持股数量"
@@ -106,15 +131,16 @@ fun validateAssetInput(
         symbol = if (isSymbolRequired(selectedType) && symbol.isBlank()) {
             FieldError("代码", "请填写代码，否则无法同步行情价格")
         } else {
-            null
+            typeSymbolMismatch(selectedType, symbol)
         },
 
         account = if (account.isBlank()) FieldError("账户/平台", "必填") else null,
 
         balance = when {
             balanceValue == null -> FieldError(qty, "请输入有效数字")
-            // Asset 的 init 里有 require(balance >= 0)，这里必须同口径挡在前面
-            balanceValue < 0 -> FieldError(qty, "不能为负数")
+            // Asset 的 init 里有 require(balance >= 0)，这里必须同口径挡在前面。
+            // 但加密货币允许负余额（币安借币/欠币，Asset.kt 已放开），故仅对其它类型拦负数。
+            balanceValue < 0 && selectedType != AssetType.CRYPTO -> FieldError(qty, "不能为负数")
             else -> null
         },
 
@@ -148,11 +174,16 @@ fun validateAssetInput(
  *
  * 用于数量/单价/利率，挡掉 "1.2.3"、"12-"、"--3" 这类键盘能打出来但毫无意义的输入。
  * 注意是过滤而非拒绝——用户粘贴 "1,234.56" 会得到 "1234.56"，比整段拒绝更顺手。
+ *
+ * @param allowNegative 是否允许开头的负号（加密货币借币/欠币需要负余额，#12）。
+ *   默认 false，保持「数量/单价都不允许负数」的旧行为，既有测试不受影响。
  */
-fun sanitizeDecimalInput(input: String): String {
+fun sanitizeDecimalInput(input: String, allowNegative: Boolean = false): String {
+    val negative = allowNegative && input.startsWith("-")
+    val body = if (negative) input.substring(1) else input
     var seenDot = false
-    return buildString(input.length) {
-        for (ch in input) {
+    val digits = buildString(body.length) {
+        for (ch in body) {
             when {
                 ch.isDigit() -> append(ch)
                 ch == '.' && !seenDot -> {
@@ -162,4 +193,5 @@ fun sanitizeDecimalInput(input: String): String {
             }
         }
     }
+    return if (negative && digits.isNotEmpty()) "-$digits" else digits
 }

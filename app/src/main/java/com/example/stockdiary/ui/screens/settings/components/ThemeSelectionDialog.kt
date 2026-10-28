@@ -58,9 +58,11 @@ fun ThemeSelectionDialog(
                 }
             }
         },
+        // 点选即生效、没有「确定」这一步，按钮文案用「关闭」而不是「取消」，
+        // 否则用户会以为刚才的选择被撤销了
         confirmButton = {
             TextButton(onClick = onDismiss) {
-                Text("取消")
+                Text("关闭")
             }
         }
     )

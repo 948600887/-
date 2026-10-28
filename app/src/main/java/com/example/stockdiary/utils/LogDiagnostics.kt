@@ -1,5 +1,6 @@
 package com.example.stockdiary.utils
 
+import android.content.ClipData
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -359,6 +360,10 @@ object LogDiagnostics {
         val intent = Intent(Intent.ACTION_SEND).apply {
             type = "text/plain"
             putExtra(Intent.EXTRA_STREAM, uri)
+            // 除了 EXTRA_STREAM 还要带 ClipData：部分接收端（旧版微信/邮件客户端）
+            // 只读 ClipData，不设的话附件会静默丢失、只发出去一条空文本。
+            // 导出 CSV 的分享同样踩过这个坑，两处口径保持一致。
+            clipData = ClipData.newUri(context.contentResolver, "诊断报告", uri)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
         context.startActivity(Intent.createChooser(intent, "分享诊断报告"))

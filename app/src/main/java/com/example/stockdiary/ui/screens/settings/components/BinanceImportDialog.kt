@@ -43,7 +43,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
-import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
@@ -60,7 +59,6 @@ import com.example.stockdiary.ui.components.import.ImportErrorDialog
 import com.example.stockdiary.ui.components.import.ImportPreviewBottomBar
 import com.example.stockdiary.ui.components.import.ImportResultStep
 import com.example.stockdiary.ui.components.import.ImportWizardScaffold
-import com.example.stockdiary.ui.dialogs.sanitizeDecimalInput
 import com.example.stockdiary.ui.theme.AppTheme
 import com.example.stockdiary.ui.viewmodels.BinanceImportViewModel
 import com.example.stockdiary.network.BinanceAPI
@@ -241,28 +239,6 @@ private fun BinanceInputStep(
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
                 keyboardActions = KeyboardActions(onDone = { focusManager.clearFocus() })
             )
-            Spacer(Modifier.height(12.dp))
-            OutlinedTextField(
-                value = state.thresholdText,
-                // 只留数字与一个小数点：挡掉键盘能打出来但无意义的输入
-                onValueChange = { viewModel.onThresholdChange(sanitizeDecimalInput(it)) },
-                label = { Text("零碎资产阈值（¥）") },
-                placeholder = { Text("10") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-                keyboardOptions = KeyboardOptions(
-                    keyboardType = KeyboardType.Decimal,
-                    imeAction = ImeAction.Done
-                ),
-                keyboardActions = KeyboardActions(onDone = { focusManager.clearFocus() }),
-                supportingText = {
-                    Text(
-                        "忽略市值低于该金额（人民币）的资产，默认 ¥10；填 0 表示不过滤",
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                }
-            )
-
             Spacer(Modifier.height(20.dp))
             Button(
                 onClick = viewModel::fetch,
@@ -365,33 +341,6 @@ private fun BinancePreviewStep(
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                }
-            }
-        }
-
-        // 有资产被市值阈值挡掉时明确告知数量——静默丢持仓最伤信任
-        if (state.filteredCount > 0) {
-            item {
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.4f)
-                    )
-                ) {
-                    Row(modifier = Modifier.padding(12.dp)) {
-                        Icon(
-                            Icons.Default.Info,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.tertiary,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        Text(
-                            "已过滤 ${state.filteredCount} 个市值低于 " +
-                                "¥${state.minValueCny.toInt()} 的零碎资产",
-                            style = MaterialTheme.typography.bodySmall
-                        )
-                    }
                 }
             }
         }

@@ -361,36 +361,6 @@ internal fun estimatedValueCny(
 }
 
 /**
- * 按人民币市值过滤零碎资产。
- *
- * 保留两类：市值 ≥ [minValueCny] 的，以及**估不出价**的（priceOf 拿不到价）。
- * 后者一律保留——取不到价可能是新币/冷门币，静默丢弃等于弄丢用户真实持仓，
- * 宁可多导一条让人自己删，也不能凭空少一份。
- *
- * @return (保留的余额列表, 被过滤掉的数量)
- */
-internal fun filterDustByValue(
-    balances: List<BinanceBalance>,
-    priceOf: (String) -> Double?,
-    minValueCny: Double
-): Pair<List<BinanceBalance>, Int> {
-    val kept = mutableListOf<BinanceBalance>()
-    var filtered = 0
-    for (balance in balances) {
-        val value = estimatedValueCny(balance.asset, balance.total, priceOf)
-        // value == null（估不出价）→ 保留；|value| < 阈值 → 滤掉。
-        // 判据用绝对值：负余额是借币/欠币，金额大的负债**必须留下**（丢了就虚高净资产），
-        // 只有「几十元都不到」的零头负债才当噪声滤掉。
-        if (value == null || value >= minValueCny || value <= -minValueCny) {
-            kept.add(balance)
-        } else {
-            filtered++
-        }
-    }
-    return kept to filtered
-}
-
-/**
  * 资产归组键：把理财壳（LDUSDT/LDPAXG）与它的底层币（USDT/PAXG）看成同一个资产。
  *
  * 为什么必须归一：`/api/v3/account` 把 Simple Earn 的活期持仓以 **LD 壳**形式返回

@@ -3,7 +3,6 @@ package com.example.stockdiary.data
 import com.example.stockdiary.data.repository.AssetRepository
 import com.example.stockdiary.data.importer.BinanceImportService
 import com.example.stockdiary.data.importer.estimatedValueCny
-import com.example.stockdiary.data.importer.filterDustByValue
 import com.example.stockdiary.data.importer.mergeEarnIntoBalances
 import com.example.stockdiary.data.importer.priceKeyFor
 import com.example.stockdiary.data.importer.referencePriceForImport
@@ -304,54 +303,6 @@ class BinanceImportServiceTest {
         assertEquals(725.0, value!!, 1e-6)
     }
 
-    // ---------- 按市值过滤 filterDustByValue ----------
-
-    @Test
-    fun 低于阈值滤掉_高于阈值保留_无价保留_计数正确() = runBlocking {
-        val priceOf: (String) -> Double? = {
-            when (it) {
-                "BTCUSDT" -> 67000.0   // 0.01 → 4857.5 元，保留
-                "SHIBUSDT" -> 0.00001  // 100000 → 7.25 元，低于 10 滤掉
-                else -> null           // 查不到
-            }
-        }
-        val balances = listOf(
-            balance("BTC", free = 0.01),
-            balance("SHIB", free = 100000.0),
-            balance("NEWCOIN", free = 500.0)   // 估不出价 → 一律保留
-        )
-
-        val (kept, filtered) = filterDustByValue(balances, priceOf, minValueCny = 10.0)
-
-        assertEquals(1, filtered)
-        assertEquals(setOf("BTC", "NEWCOIN"), kept.map { it.asset }.toSet())
-    }
-
-    @Test
-    fun 取不到价时全保留_不过滤() = runBlocking {
-        // 模拟 getPrices 失败：priceOf 全 null → 一个都滤不掉，绝不因取价挂掉丢持仓
-        val balances = listOf(
-            balance("BTC", free = 0.01),
-            balance("SHIB", free = 100000.0)
-        )
-        val (kept, filtered) = filterDustByValue(balances, { null }, minValueCny = 10.0)
-
-        assertEquals(0, filtered)
-        assertEquals(balances.size, kept.size)
-    }
-
-    @Test
-    fun 阈值为0时全部保留() = runBlocking {
-        val priceOf: (String) -> Double? = { 67000.0 }
-        val (kept, filtered) = filterDustByValue(
-            listOf(balance("BTC", free = 0.0001)),  // 市值很小但 > 0
-            priceOf,
-            minValueCny = 0.0
-        )
-        assertEquals(0, filtered)
-        assertEquals(1, kept.size)
-    }
-
     // ---------- 导入即预填参考价 ----------
 
     @Test
@@ -564,33 +515,6 @@ class BinanceImportServiceTest {
         // 稳定币参考价按 1.0 美元预填，故总市值 = -30 美元（负，自动扣减净值）
         assertEquals(1.0, asset.currentPrice!!, 1e-9)
         assertEquals(-30.0, asset.totalValue, 1e-9)
-    }
-
-    @Test
-    fun 金额够大的负债不被市值过滤丢掉() = runBlocking {
-        // filterDustByValue 的判据必须是绝对值：欠 -700 元不能因为 < 阈值 10 元而被滤掉
-        val (kept, filtered) = filterDustByValue(
-            balances = listOf(
-                balance("USDT", free = -100.0),   // 欠 100 USDT → 必须保留
-                balance("AAA", free = 0.000001)   // 零头正持仓 → 滤掉
-            ),
-            priceOf = { 1.0 },
-            minValueCny = 10.0
-        )
-        assertEquals(listOf("USDT"), kept.map { it.asset })
-        assertEquals(1, filtered)
-    }
-
-    @Test
-    fun 估不出价的资产一律保留不丢弃() {
-        // 取不到价（新币/冷门币）→ value == null → 保留，宁可多导一条让人自己删
-        val (kept, filtered) = filterDustByValue(
-            balances = listOf(balance("NEWCOIN", free = 5.0)),
-            priceOf = { null },
-            minValueCny = 10.0
-        )
-        assertEquals(1, kept.size)
-        assertEquals(0, filtered)
     }
 
     // ---------- 理财持仓合并（取最大值，绝不重复计） ----------

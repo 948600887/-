@@ -27,6 +27,7 @@ import com.example.stockdiary.di.AppContainer
 import com.example.stockdiary.utils.AppLogger
 import com.example.stockdiary.utils.DataSourceHealth
 import com.example.stockdiary.utils.DataSourceHealthChecker
+import com.example.stockdiary.utils.LogDiagnostics
 import com.example.stockdiary.utils.NotificationHelper
 import com.example.stockdiary.utils.ExchangeRateManager
 import kotlinx.coroutines.Dispatchers
@@ -148,6 +149,9 @@ class SettingsViewModel(
                 if (ok) {
                     _uiState.update { it.copy(reminderEnabled = NotificationHelper.isReminderEnabled(appContext)) }
                 } else {
+                    // 排闹钟失败时磁盘上的开关可能仍是 true（权限检查前就 return），
+                    // 必须显式取消一次，否则退出再进设置页开关会自己亮回去
+                    NotificationHelper.cancelReminder(appContext)
                     _uiState.update {
                         it.copy(
                             reminderEnabled = false,
@@ -159,7 +163,8 @@ class SettingsViewModel(
                 throw e
             } catch (e: Exception) {
                 AppLogger.e("设置每日提醒失败: ${e.message}", e, "SettingsVM")
-                _uiState.update { it.copy(reminderError = "设置提醒失败: ${e.message}") }
+                NotificationHelper.cancelReminder(appContext)
+                _uiState.update { it.copy(reminderEnabled = false, reminderError = "设置提醒失败: ${e.message}") }
             }
         }
     }
@@ -174,6 +179,8 @@ class SettingsViewModel(
                 if (_uiState.value.reminderEnabled) {
                     val ok = NotificationHelper.setDailyReminder(appContext, hour, minute)
                     if (!ok) {
+                        // 同 setReminderEnabled：失败必须把磁盘开关也关掉，保持「有闹钟才显示开」
+                        NotificationHelper.cancelReminder(appContext)
                         _uiState.update {
                             it.copy(
                                 reminderEnabled = false,
@@ -181,6 +188,9 @@ class SettingsViewModel(
                             )
                         }
                     }
+                } else {
+                    // 开关关闭时不排闹钟，但时间仍要落盘：否则退出再进设置页会读回旧时间
+                    NotificationHelper.saveReminderTime(appContext, hour, minute)
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -365,6 +375,13 @@ class SettingsViewModel(
                 // （createSnapshot 不判空），历史净值曲线会多出一串净资产为 0 的点。
                 SnapshotScheduler.cancelDailySnapshot(appContext)
                 NotificationHelper.cancelReminder(appContext)
+                // 本地文件同样要清：导出的 CSV、诊断报告都在 cacheDir/exports，运行日志在
+                // externalFilesDir。不清的话「清除所有数据」之后，账目快照还躺在手机里。
+                runCatching { dataExporter.clearExportedFiles() }
+                runCatching { LogDiagnostics.clear(appContext) }
+                // 汇率单例还持有内存里的旧汇率与刷新时间（磁盘偏好已清），
+                // 不同步复位的话设置页会一直显示清除前的值，直到重启进程
+                ExchangeRateManager.resetToDefaultRates()
                 // 磁盘已清，本 VM 内存里的偏好副本也要立刻回默认：
                 // 否则设置页仍按旧副本渲染，再拨任何一个开关就会把「已清除的旧偏好」写回磁盘。
                 _dashboardPreferences.value = DashboardPreferences()
@@ -419,33 +436,50 @@ class SettingsViewModel(
     }
 
     fun checkDataSourceHealth() {
+        // 连点入口行 / 弹窗里重复点「刷新」时不要再起一轮：每次体检要并发跑 4~5 个 HTTP 探测，
+        // 重叠执行既浪费流量，也让最终落到界面上的结果来自哪一轮变得不确定
+        if (_uiState.value.isCheckingHealth) return
         viewModelScope.launch(Dispatchers.IO) {
             _uiState.update { state -> state.copy(isCheckingHealth = true) }
             try {
                 val health = dataSourceHealthChecker.checkAllHealth()
-                // 结果摘要回流到列表行的 subtitle：不点开弹窗也能看到当前几个源可用
-                val summary = when {
-                    health.isEmpty() -> "未获取到数据源状态"
-                    health.all { it.isAvailable } -> "全部正常（${health.size} 个源）"
-                    else -> "${health.count { it.isAvailable }}/${health.size} 个源可用，其余已降级"
-                }
+                // 结果摘要回流到列表行的 subtitle：不点开弹窗也能看到各域几个源可用
                 _uiState.update { state ->
                     state.copy(
                         isCheckingHealth = false,
                         dataSourceHealth = health,
-                        dataSourceHealthSummary = summary
+                        dataSourceHealthSummary = summarizeHealth(health)
                     )
                 }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 AppLogger.e("检查数据源健康失败: ${e.message}", e, "SettingsVM")
+                // 摘要与结果一起清掉：否则 Snackbar 说「失败」，同一行却还挂着上次的
+                // 「全部正常」，两个信息互相打架；且旧摘要没有时间戳、看不出有多旧
                 _uiState.update { state -> state.copy(
                     isCheckingHealth = false,
+                    dataSourceHealth = null,
+                    dataSourceHealthSummary = "上次体检失败，点击重试",
                     errorMessage = "检查数据源状态失败"
                 ) }
             }
         }
+    }
+
+    /**
+     * 体检摘要按资产域分组，例如「股票 3/3 · 基金 1/1 · 加密 0/1（部分源降级）」。
+     *
+     * 不混算成「x/y 个源可用」：币安不可用只影响加密货币，不该把股票一并报成降级。
+     */
+    private fun summarizeHealth(health: List<DataSourceHealth>): String = when {
+        health.isEmpty() -> "未获取到数据源状态"
+        health.all { it.isAvailable } -> "全部正常（${health.size} 个源）"
+        else -> health.groupBy { it.category }
+            .entries
+            .joinToString(" · ") { (category, sources) ->
+                "$category ${sources.count { it.isAvailable }}/${sources.size}"
+            } + "（部分源降级）"
     }
 
     fun clearExportResult() {
@@ -526,6 +560,11 @@ class SettingsViewModel(
                 throw e
             } catch (e: Exception) {
                 AppLogger.e("保存自动价格同步设置失败: ${e.message}", e, "SettingsVM")
+                // 落盘或调度失败：开关是按状态渲染的，会弹回原值；必须告诉用户为什么没生效，
+                // 否则只是一次「点了没反应」
+                _uiState.update {
+                    it.copy(errorMessage = "保存自动刷新设置失败：${e.message ?: "未知错误"}")
+                }
             }
         }
     }
@@ -544,6 +583,9 @@ class SettingsViewModel(
                 throw e
             } catch (e: Exception) {
                 AppLogger.e("保存盘中同步股票设置失败: ${e.message}", e, "SettingsVM")
+                _uiState.update {
+                    it.copy(errorMessage = "保存盘中同步设置失败：${e.message ?: "未知错误"}")
+                }
             }
         }
     }
@@ -561,6 +603,9 @@ class SettingsViewModel(
                 throw e
             } catch (e: Exception) {
                 AppLogger.e("保存自动同步虚拟货币设置失败: ${e.message}", e, "SettingsVM")
+                _uiState.update {
+                    it.copy(errorMessage = "保存自动同步虚拟货币设置失败：${e.message ?: "未知错误"}")
+                }
             }
         }
     }
@@ -638,20 +683,37 @@ class SettingsViewModel(
         _uiState.update { it.copy(isRefreshingRate = true) }
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                ExchangeRateManager.refresh(force = true)
-                _uiState.update {
-                    it.copy(
-                        isRefreshingRate = false,
-                        usdRate = ExchangeRateManager.getRate("USD"),
-                        usdRateUpdatedAt = ExchangeRateManager.getLastRefreshTimeMillis()
-                    )
+                // refresh() 失败时**返回 false 而不是抛异常**：不能只看异常，
+                // 否则网络不通/汇率源异常时用户点了「刷新」完全没有任何反馈
+                val ok = ExchangeRateManager.refresh(force = true)
+                if (ok) {
+                    _uiState.update {
+                        it.copy(
+                            isRefreshingRate = false,
+                            usdRate = ExchangeRateManager.getRate("USD"),
+                            usdRateUpdatedAt = ExchangeRateManager.getLastRefreshTimeMillis()
+                        )
+                    }
+                } else {
+                    AppLogger.w("刷新汇率返回失败（网络或汇率源异常）", "SettingsVM")
+                    _uiState.update {
+                        it.copy(
+                            isRefreshingRate = false,
+                            errorMessage = "汇率刷新失败，仍沿用当前汇率（网络不通或汇率源异常）"
+                        )
+                    }
                 }
             } catch (e: CancellationException) {
                 _uiState.update { it.copy(isRefreshingRate = false) }
                 throw e
             } catch (e: Exception) {
                 AppLogger.e("刷新汇率失败: ${e.message}", e, "SettingsVM")
-                _uiState.update { it.copy(isRefreshingRate = false) }
+                _uiState.update {
+                    it.copy(
+                        isRefreshingRate = false,
+                        errorMessage = "汇率刷新失败：${e.message ?: "未知错误"}"
+                    )
+                }
             }
         }
     }

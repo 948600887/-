@@ -450,7 +450,7 @@ fun SettingsScreen(
                 SettingsItemData(
                     icon = Icons.Default.DeleteForever,
                     title = "清除所有数据",
-                    subtitle = "删除所有资产和历史快照",
+                    subtitle = "清空资产、快照、设置与本地文件",
                     onClick = { showClearDataDialog = true },
                     isDestructive = true
                 )
@@ -521,6 +521,7 @@ fun SettingsScreen(
 
     if (showExportDialog) {
         ExportDataDialog(
+            assetCount = assetCount,
             snapshotCount = snapshotCount,
             transactionCount = transactionCount,
             dividendCount = uiState.dividendCount,

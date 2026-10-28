@@ -32,6 +32,7 @@ import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -43,6 +44,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.example.stockdiary.data.prefs.DashboardPreferences
 import com.example.stockdiary.data.prefs.SortOrder
+import kotlinx.coroutines.delay
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
@@ -60,6 +62,18 @@ fun DashboardConfigSheet(
     val emit: (DashboardPreferences) -> Unit = { next ->
         localPrefs = next
         onPreferencesChange(next)
+    }
+
+    // 低价值阈值的输入框文本单独持有，防抖后才落盘：
+    // - 直接绑定 localPrefs 会让每敲一个字符走一次 updatePreferences（读-改-写磁盘）；
+    // - 编辑中途的 "" / "." 不是合法金额，立即写盘会让阈值静默回落到默认值。
+    var thresholdText by remember { mutableStateOf(preferences.lowValueThresholdCny) }
+    LaunchedEffect(thresholdText) {
+        delay(400)
+        val value = thresholdText.toDoubleOrNull()
+        if (value != null && value >= 0 && thresholdText != localPrefs.lowValueThresholdCny) {
+            emit(localPrefs.copy(lowValueThresholdCny = thresholdText))
+        }
     }
 
     ModalBottomSheet(
@@ -176,8 +190,8 @@ fun DashboardConfigSheet(
                 ) {
                     Text(text = "低于此金额（¥）隐藏")
                     OutlinedTextField(
-                        value = localPrefs.lowValueThresholdCny,
-                        onValueChange = { emit(localPrefs.copy(lowValueThresholdCny = it)) },
+                        value = thresholdText,
+                        onValueChange = { thresholdText = sanitizeThresholdInput(it) },
                         singleLine = true,
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                         modifier = Modifier.width(120.dp)
@@ -259,8 +273,11 @@ fun DashboardConfigSheet(
                     // 不能整块写 DashboardPreferences()：月度生活费（日历 FIRE 算出来的）、
                     // 年度分红缓存、分组展开态**都不在这个 sheet 里渲染**，整块回默认会把它们
                     // 静默清掉——月度生活费退回默认的 5000，正是「共享整块偏好互相踩踏」那一类 bug。
+                    val defaults = DashboardPreferences()
+                    // 阈值输入框是独立的文本状态，恢复默认时要同步，否则界面停在旧数字上
+                    thresholdText = defaults.lowValueThresholdCny
                     emit(
-                        DashboardPreferences(
+                        defaults.copy(
                             monthlyExpense = localPrefs.monthlyExpense,
                             annualDividendCache = localPrefs.annualDividendCache,
                             annualDividendSymbols = localPrefs.annualDividendSymbols,
@@ -287,6 +304,24 @@ private fun SectionTitle(title: String) {
         color = MaterialTheme.colorScheme.primary,
         modifier = Modifier.padding(vertical = 8.dp)
     )
+}
+
+/**
+ * 阈值输入框只接受「数字 + 至多一个小数点」，长度上限 9 位。
+ *
+ * 不做这层过滤的话，键盘粘贴进 "1.2.3" / "abc" 这类文本会被原样写进偏好，
+ * 之后解析失败就静默回落到默认 ¥10——界面显示一串乱码、实际却按 10 元在筛选，
+ * 用户完全无从察觉。
+ */
+private fun sanitizeThresholdInput(raw: String): String {
+    val digitsAndDot = raw.filter { it.isDigit() || it == '.' }
+    val firstDot = digitsAndDot.indexOf('.')
+    val normalized = if (firstDot < 0) {
+        digitsAndDot
+    } else {
+        digitsAndDot.substring(0, firstDot + 1) + digitsAndDot.substring(firstDot + 1).replace(".", "")
+    }
+    return normalized.take(9)
 }
 
 @Composable

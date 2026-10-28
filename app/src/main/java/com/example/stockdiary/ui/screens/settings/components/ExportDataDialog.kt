@@ -4,7 +4,10 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.TextSnippet
 import androidx.compose.material.icons.filled.History
@@ -25,6 +28,7 @@ import androidx.compose.ui.unit.dp
 
 @Composable
 fun ExportDataDialog(
+    assetCount: Int,
     snapshotCount: Int,
     transactionCount: Int,
     dividendCount: Int,
@@ -41,30 +45,40 @@ fun ExportDataDialog(
         onDismissRequest = onDismiss,
         title = { Text("导出数据") },
         text = {
-            Column {
+            // 6 个按钮竖排会超过一屏（尤其横屏/小屏），必须可滚动，
+            // 否则最下面的「分红明细」会被对话框裁掉又够不着
+            Column(
+                modifier = Modifier
+                    .heightIn(max = 420.dp)
+                    .verticalScroll(rememberScrollState())
+            ) {
                 Text("选择导出格式：")
                 Spacer(modifier = Modifier.height(16.dp))
 
                 Button(
                     onClick = onExportText,
-                    enabled = !isExporting,
+                    enabled = !isExporting && assetCount > 0,
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Icon(Icons.AutoMirrored.Filled.TextSnippet, contentDescription = null)
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text("导出为文本文件 (.txt)")
+                    Text(if (assetCount > 0) "导出为文本文件 (.txt)" else "导出为文本文件 (暂无资产)")
                 }
 
                 Spacer(modifier = Modifier.height(8.dp))
 
                 Button(
                     onClick = onExportCsvAssets,
-                    enabled = !isExporting,
+                    // 空库导出的只有一个表头，等于给用户一个「成功」的空文件
+                    enabled = !isExporting && assetCount > 0,
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Icon(Icons.Default.TableChart, contentDescription = null)
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text("导出资产 (.csv)")
+                    Text(
+                        if (assetCount > 0) "导出资产 (${assetCount}条)"
+                        else "导出资产 (暂无资产)"
+                    )
                 }
 
                 if (transactionCount > 0) {
@@ -99,7 +113,9 @@ fun ExportDataDialog(
 
                 OutlinedButton(
                     onClick = onExportCsvStatement,
-                    enabled = !isExporting,
+                    // 四类数据全空时同样只剩表头，禁用
+                    enabled = !isExporting &&
+                        (assetCount > 0 || snapshotCount > 0 || transactionCount > 0 || dividendCount > 0),
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Icon(Icons.AutoMirrored.Filled.TextSnippet, contentDescription = null)
@@ -124,7 +140,10 @@ fun ExportDataDialog(
                 }
             }
         },
-        confirmButton = {
+        // 单选取消的对话框：把「取消」放在 dismissButton 槽位，
+        // 别再用 confirmButton 的强调位去承载一个取消动作
+        confirmButton = {},
+        dismissButton = {
             TextButton(onClick = onDismiss) {
                 Text("取消")
             }

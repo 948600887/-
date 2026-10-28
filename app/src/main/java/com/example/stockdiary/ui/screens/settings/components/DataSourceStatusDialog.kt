@@ -93,8 +93,10 @@ fun DataSourceStatusDialog(
             }
         },
         confirmButton = {
-            TextButton(onClick = onRefresh) {
-                Text("刷新")
+            // 体检进行中禁用：否则连点会并发再起一轮探测（每次 4~5 个 HTTP 请求），
+            // 最终落到界面上的结果来自哪一轮变得不确定
+            TextButton(onClick = onRefresh, enabled = !isLoading) {
+                Text(if (isLoading) "刷新中…" else "刷新")
             }
         },
         dismissButton = {

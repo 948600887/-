@@ -271,14 +271,39 @@ object NotificationHelper {
                 // 拿不到 AlarmManager 就等于没排上闹钟，不能回报成功——
                 // 否则设置页显示"已开启"，用户却永远收不到提醒。
                 AppLogger.w("无法获取 AlarmManager，每日提醒未生效", "NotificationHelper")
+                // 上面的 setReminderEnabled(true) 已写盘，这里必须回滚，
+                // 否则磁盘说"开"、实际没闹钟，重进设置页开关会自己亮回去
+                runCatching { setReminderEnabled(context, false) }
                 false
             }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             AppLogger.e("设置每日提醒失败: ${e.message}", e, "NotificationHelper")
+            // 排闹钟中途异常：同样把磁盘开关回滚，保持"磁盘状态 = 真的有闹钟"
+            runCatching { setReminderEnabled(context, false) }
             // 提醒设置失败，不影响应用运行
             false
+        }
+    }
+
+    /**
+     * 只持久化提醒时间，不动启停状态。
+     *
+     * 用于开关关闭时改时间：此时不该排闹钟，但时间仍要落盘，
+     * 否则退出再进设置页会读回旧时间（内存新值、磁盘旧值）。
+     */
+    fun saveReminderTime(context: Context, hour: Int, minute: Int) {
+        try {
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putInt(KEY_REMINDER_HOUR, hour)
+                .putInt(KEY_REMINDER_MINUTE, minute)
+                .apply()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            AppLogger.e("保存提醒时间失败: ${e.message}", e, "NotificationHelper")
         }
     }
 

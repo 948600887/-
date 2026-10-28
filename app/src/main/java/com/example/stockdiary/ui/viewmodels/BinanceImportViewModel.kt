@@ -9,7 +9,6 @@ import androidx.lifecycle.viewModelScope
 import com.example.stockdiary.data.repository.AssetRepository
 import com.example.stockdiary.data.importer.BinanceCredentialsManager
 import com.example.stockdiary.data.importer.BinanceImportService
-import com.example.stockdiary.data.importer.filterDustByValue
 import com.example.stockdiary.data.importer.mergeEarnIntoBalances
 import com.example.stockdiary.data.importer.priceKeyFor
 import com.example.stockdiary.data.sync.AssetSyncManager
@@ -60,15 +59,8 @@ open class BinanceImportViewModel(
         val knownAccounts: List<String> = emptyList(),
         val result: BinanceImportService.CommitResult? = null,
         val error: String? = null,
-        /**
-         * 零碎资产阈值的原始输入（人民币）。存文本而非 Double：
-         * 数字输入框编辑中途会出现 "10." 这类非法值，文本权威、按需解析更稳。
-         */
-        val thresholdText: String = DEFAULT_THRESHOLD_CNY.toInt().toString(),
         /** 本次拉取用到的交易对最新价，供预览行估算市值 */
         val prices: Map<String, Double> = emptyMap(),
-        /** 本次拉取因市值低于阈值被过滤掉的资产数量 */
-        val filteredCount: Int = 0,
         /**
          * 理财（Simple Earn）接口没拉全时的提示。
          *
@@ -81,10 +73,6 @@ open class BinanceImportViewModel(
         /** 密钥都填了才能拉取 */
         val canFetch: Boolean
             get() = apiKey.isNotBlank() && apiSecret.isNotBlank() && !fetching
-
-        /** 生效的市值阈值（人民币）。输入为空/非法时回落到默认值 */
-        val minValueCny: Double
-            get() = thresholdText.toDoubleOrNull() ?: DEFAULT_THRESHOLD_CNY
     }
 
     init {
@@ -115,10 +103,6 @@ open class BinanceImportViewModel(
 
     fun onAccountChange(value: String) {
         updateState { it.copy(account = value) }
-    }
-
-    fun onThresholdChange(value: String) {
-        updateState { it.copy(thresholdText = value) }
     }
 
     /**
@@ -199,29 +183,23 @@ open class BinanceImportViewModel(
             } else {
                 spotPriceMap + BinanceAccountAPI.getPrices(missingPairs)
             }
-            val priceOf: (String) -> Double? = { priceMap[it] }
-
-            // 按市值过滤零碎（阈值用户可设，默认 ¥10）；估不出价的一律保留
-            val (kept, filteredCount) = filterDustByValue(mergedBalances, priceOf, current.minValueCny)
-
             // 只取库里已有的加密货币资产来对齐：导入只可能命中这一类
             val existing = repository.getAssetsByTypes(listOf(AssetType.CRYPTO))
-            val preview = service.buildPreview(kept, existing)
+            // 不做任何市值过滤：零碎资产也一并导入。
+            // 「按金额隐藏小币」属于展示层偏好（仪表盘的隐藏低价值虚拟货币），
+            // 不应该在导入环节静默丢掉用户真实持仓——导入是记账，不是展示。
+            val preview = service.buildPreview(mergedBalances, existing)
 
             AppLogger.i(
-                "币安账户拉取：${balances.size} 项 → 市值过滤 $filteredCount → 合并后 ${preview.items.size} 条",
+                "币安账户拉取：${balances.size} 项 → 合并后 ${preview.items.size} 条",
                 "BinanceImportVM"
             )
 
             if (preview.items.isEmpty()) {
-                // 滤完一条不剩：账户为空、只剩dust、或全被市值阈值挡掉。
+                // 一条不剩：账户为空或只剩 dust 零头。
                 // 停在 INPUT 说清楚原因，别给个空预览页让用户以为出错了
                 val hint = buildString {
-                    if (filteredCount > 0) {
-                        append("有 $filteredCount 项市值低于 ¥${current.minValueCny.toInt()} 被过滤，可调低阈值重试。")
-                    } else {
-                        append("可能账户为空或只剩dust零头。")
-                    }
+                    append("可能账户为空或只剩dust零头。")
                     // 理财没拉全时，'账户为空' 很可能只是现货为空（钱都在 Earn 里），必须点明
                     if (earnWarning != null) append(earnWarning)
                 }
@@ -230,7 +208,6 @@ open class BinanceImportViewModel(
                         fetching = false,
                         step = Step.INPUT,
                         error = "账户里没有可导入的持仓。$hint",
-                        filteredCount = 0,
                         prices = emptyMap()
                     )
                 }
@@ -242,7 +219,6 @@ open class BinanceImportViewModel(
                     fetching = false,
                     step = Step.PREVIEW,
                     preview = preview,
-                    filteredCount = filteredCount,
                     prices = priceMap,
                     earnWarning = earnWarning
                 )
@@ -335,16 +311,12 @@ open class BinanceImportViewModel(
                 preview = null,
                 result = null,
                 error = null,
-                filteredCount = 0,
                 prices = emptyMap()
             )
         }
     }
 
     companion object {
-        /** 零碎资产市值阈值默认值（人民币） */
-        const val DEFAULT_THRESHOLD_CNY = 10.0
-
         /**
          * 工厂统一用 lifecycle 的 viewModelFactory DSL：initializer 按请求的 modelClass 自动匹配，
          * 免去手写 create(modelClass) 逐个 cast 的样板（原 9 个 VM 各一份，漏改一个就是运行期 ClassCastException）。

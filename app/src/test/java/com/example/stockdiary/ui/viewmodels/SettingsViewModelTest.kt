@@ -14,7 +14,9 @@ import com.example.stockdiary.database.DividendDao
 import com.example.stockdiary.database.SnapshotDao
 import com.example.stockdiary.database.TransactionDao
 import com.example.stockdiary.utils.AppLogger
+import com.example.stockdiary.utils.DataSourceHealth
 import com.example.stockdiary.utils.DataSourceHealthChecker
+import com.example.stockdiary.utils.ExchangeRateManager
 import com.example.stockdiary.utils.NotificationHelper
 import io.mockk.Runs
 import io.mockk.coEvery
@@ -99,6 +101,7 @@ class SettingsViewModelTest {
         every { PriceSyncScheduler.cancelDailySync(any()) } just Runs
         every { SnapshotScheduler.cancelDailySnapshot(any()) } just Runs
         every { NotificationHelper.cancelReminder(any()) } just Runs
+        every { NotificationHelper.saveReminderTime(any(), any(), any()) } just Runs
 
         // init 里的三个 Flow 收集必须给确定性数据源，否则会挂住或落到未初始化实现上抛异常
         every { assetRepository.getAllAssets() } returns flowOf(emptyList())
@@ -187,6 +190,59 @@ class SettingsViewModelTest {
     fun `clearReminderError 清空错误状态且不抛异常`() = runBlocking {
         vm.clearReminderError()
         assertNull(vm.uiState.value.reminderError)
+    }
+
+    @Test
+    fun `提醒关闭时改时间仍落盘_只是不排闹钟`() = runBlocking {
+        // 默认 reminderEnabled=false（见 setUp 的 isReminderEnabled stub）
+        vm.setReminderTime(7, 30)
+
+        verify { NotificationHelper.saveReminderTime(appContext, 7, 30) }
+        // 关闭状态不该排闹钟
+        verify(exactly = 0) { NotificationHelper.setDailyReminder(any(), any(), any()) }
+        assertEquals(7, vm.uiState.value.reminderHour)
+        assertEquals(30, vm.uiState.value.reminderMinute)
+    }
+
+    @Test
+    fun `体检失败时清空旧摘要_避免与失败提示自相矛盾`() = runBlocking {
+        coEvery { dataSourceHealthChecker.checkAllHealth() } throws RuntimeException("offline")
+
+        vm.checkDataSourceHealth()
+        waitUntil { vm.uiState.value.errorMessage != null }
+
+        assertEquals("上次体检失败，点击重试", vm.uiState.value.dataSourceHealthSummary)
+        assertNull(vm.uiState.value.dataSourceHealth)
+        assertEquals("检查数据源状态失败", vm.uiState.value.errorMessage)
+    }
+
+    @Test
+    fun `体检摘要按资产域分组统计`() = runBlocking {
+        coEvery { dataSourceHealthChecker.checkAllHealth() } returns listOf(
+            DataSourceHealth("新浪财经", "hq.sinajs.cn", true, 10, 1L, category = "股票"),
+            DataSourceHealth("天天基金", "fundmobapi", false, 20, 1L, "HTTP 500", category = "基金"),
+            DataSourceHealth("Binance", "binance", false, 30, 1L, "timeout", category = "加密")
+        )
+
+        vm.checkDataSourceHealth()
+        waitUntil { vm.uiState.value.dataSourceHealthSummary != null }
+
+        assertEquals(
+            "股票 1/1 · 基金 0/1 · 加密 0/1（部分源降级）",
+            vm.uiState.value.dataSourceHealthSummary
+        )
+    }
+
+    @Test
+    fun `汇率刷新返回失败时给出可见提示`() = runBlocking {
+        mockkObject(ExchangeRateManager)
+        coEvery { ExchangeRateManager.refresh(any()) } returns false
+
+        vm.refreshExchangeRate()
+        waitUntil { vm.uiState.value.errorMessage != null }
+
+        assertFalse(vm.uiState.value.isRefreshingRate)
+        assertEquals("汇率刷新失败，仍沿用当前汇率（网络不通或汇率源异常）", vm.uiState.value.errorMessage)
     }
 
     // ==================== saveDashboardPreferences：原子读-改-写护栏 ====================

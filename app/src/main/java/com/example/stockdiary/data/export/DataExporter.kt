@@ -125,6 +125,16 @@ class DataExporter(private val context: Context) {
         }
     }
 
+    /**
+     * 清空所有已导出的文件（「清除所有数据」调用）。
+     *
+     * 这些 CSV 里是完整的持仓/交易明细，只清数据库和偏好、留着文件，
+     * 等于用户以为删干净了、账目还躺在 cacheDir 里。
+     */
+    fun clearExportedFiles() {
+        pruneOldExports(keep = 0)
+    }
+
     private fun pruneOldExports(keep: Int = MAX_EXPORT_FILES) {
         try {
             val files = exportDir.listFiles()?.filter { it.isFile } ?: return

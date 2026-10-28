@@ -13,9 +13,11 @@ import com.example.stockdiary.utils.totalValueCny
  * - [hideUnknownPriceCrypto] 同时开启时，**无价格**（[Asset.currentPrice] == null，
  *   界面显示「价格待更新」/ ¥0.00）的加密货币也一并隐藏。
  *
- * 设计取舍（与导入侧的 [com.example.stockdiary.data.importer.filterDustByValue] 一致）：
- * 价格未知默认**不藏**——没行情不等于没持仓，静默丢掉等于弄丢真实资产；要藏得用户自己开开关。
- * 无价格隐藏**依赖** [hideLowValueCrypto] 开启，它只是后者的一个子项。
+ * 设计取舍：价格未知默认**不藏**——没行情不等于没持仓，静默丢掉等于弄丢真实资产；
+ * 要藏得用户自己开开关。无价格隐藏**依赖** [hideLowValueCrypto] 开启，它只是后者的一个子项。
+ *
+ * 注意这只影响**展示**：币安导入等写库路径不做任何金额过滤，零碎资产照样入库，
+ * 是否隐藏完全由这里的偏好决定。
  *
  * 纯函数、无 Compose 依赖，便于单测。
  */

@@ -1,10 +1,14 @@
 package com.example.stockdiary.utils
 
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import okhttp3.Request
+import com.example.stockdiary.network.EastmoneySkillApi
 import com.example.stockdiary.network.FundNavParser
 import com.example.stockdiary.network.NetworkClient
+import com.example.stockdiary.network.TencentStockAPI
 import kotlinx.coroutines.CancellationException
 
 data class DataSourceHealth(
@@ -13,7 +17,15 @@ data class DataSourceHealth(
     val isAvailable: Boolean,
     val latency: Long,
     val lastCheck: Long,
-    val errorMessage: String? = null
+    val errorMessage: String? = null,
+    /**
+     * 该源服务的资产域：股票 / 基金 / 加密。
+     *
+     * 摘要按域分组统计，而不是把全部源混成一个「x/y 个源可用」：
+     * 币安在部分地区不可用（或用户根本不持币）时，混算会把「股票源全好」
+     * 也说成整体降级，属于误报。
+     */
+    val category: String = "股票"
 )
 
 object DataSourceHealthChecker {
@@ -23,12 +35,98 @@ object DataSourceHealthChecker {
 
     private val client = NetworkClient.defaultClient
     
-    suspend fun checkAllHealth(): List<DataSourceHealth> = withContext(Dispatchers.IO) {
-        listOf(
-            checkSinaStock(),
-            checkFundAPI(),
-            checkBinanceAPI()
-        )
+    /**
+     * 并行体检**完整取价链路**：妙想Skill（配了 Key 才参与）→ 新浪 → 腾讯，外加持仓用到的
+     * 天天基金（基金净值）与 Binance（加密货币行情）。
+     *
+     * 原先只探「新浪 / 天天基金 / Binance」：腾讯是真实存在的二级降级源却从不体检，
+     * 妙想（配置后是首选源）更是完全缺席；而三家串行探测，任一源超时都要把整体拖到十几秒。
+     */
+    suspend fun checkAllHealth(): List<DataSourceHealth> = coroutineScope {
+        val skill = if (EastmoneySkillApi.isApiKeyConfigured()) {
+            async(Dispatchers.IO) { checkSkillAPI() }
+        } else {
+            null
+        }
+        val sina = async(Dispatchers.IO) { checkSinaStock() }
+        val tencent = async(Dispatchers.IO) { checkTencentStock() }
+        val fund = async(Dispatchers.IO) { checkFundAPI() }
+        val binance = async(Dispatchers.IO) { checkBinanceAPI() }
+
+        buildList {
+            if (skill != null) add(skill.await())
+            add(sina.await())
+            add(tencent.await())
+            add(fund.await())
+            add(binance.await())
+        }
+    }
+
+    /**
+     * 妙想 Skill 体检：仅在配置了 API Key 时参与（没 Key 时它本来就不在链路里）。
+     *
+     * 没有轻量 ping 接口，只能用一次真实的股票查询探活；设置页手动触发一次，
+     * 用量可以接受。返回失败时区分不了 Key 无效/额度用尽/限流，文案里一并提示。
+     */
+    suspend fun checkSkillAPI(): DataSourceHealth = withContext(Dispatchers.IO) {
+        val startTime = System.currentTimeMillis()
+        try {
+            val result = EastmoneySkillApi.queryStock("600519 最新价")
+            DataSourceHealth(
+                name = "妙想Skill",
+                url = "mkapi2.dgcfs.com",
+                isAvailable = result.isSuccess,
+                latency = System.currentTimeMillis() - startTime,
+                lastCheck = System.currentTimeMillis(),
+                errorMessage = if (result.isSuccess) null else {
+                    result.exceptionOrNull()?.message ?: "接口返回错误（Key 无效 / 额度用尽 / 限流）"
+                }
+            )
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            DataSourceHealth(
+                name = "妙想Skill",
+                url = "mkapi2.dgcfs.com",
+                isAvailable = false,
+                latency = System.currentTimeMillis() - startTime,
+                lastCheck = System.currentTimeMillis(),
+                errorMessage = e.message
+            )
+        }
+    }
+
+    /**
+     * 腾讯行情体检：股票取价链路的二级降级源，原来完全没纳入体检。
+     */
+    suspend fun checkTencentStock(): DataSourceHealth = withContext(Dispatchers.IO) {
+        val startTime = System.currentTimeMillis()
+        try {
+            val result = TencentStockAPI.getStockData("600519")
+            val data = result.getOrNull()
+            val healthy = result.isSuccess && data?.name?.isNotBlank() == true
+            DataSourceHealth(
+                name = "腾讯财经",
+                url = "qt.gtimg.cn",
+                isAvailable = healthy,
+                latency = System.currentTimeMillis() - startTime,
+                lastCheck = System.currentTimeMillis(),
+                errorMessage = if (healthy) null else {
+                    result.exceptionOrNull()?.message ?: "返回空行情（解析失败或字段缺失）"
+                }
+            )
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            DataSourceHealth(
+                name = "腾讯财经",
+                url = "qt.gtimg.cn",
+                isAvailable = false,
+                latency = System.currentTimeMillis() - startTime,
+                lastCheck = System.currentTimeMillis(),
+                errorMessage = e.message
+            )
+        }
     }
     
     suspend fun checkSinaStock(): DataSourceHealth = withContext(Dispatchers.IO) {
@@ -122,6 +220,7 @@ object DataSourceHealthChecker {
                     isAvailable = available,
                     latency = latency,
                     lastCheck = System.currentTimeMillis(),
+                    category = "基金",
                     errorMessage = when {
                         !response.isSuccessful -> "HTTP ${response.code}"
                         parsed == null -> "轻量净值接口返回异常（业务码非 0 或数据缺失）"
@@ -138,6 +237,7 @@ object DataSourceHealthChecker {
                 isAvailable = false,
                 latency = System.currentTimeMillis() - startTime,
                 lastCheck = System.currentTimeMillis(),
+                category = "基金",
                 errorMessage = e.message
             )
         }
@@ -162,6 +262,7 @@ object DataSourceHealthChecker {
                     isAvailable = response.isSuccessful,
                     latency = latency,
                     lastCheck = System.currentTimeMillis(),
+                    category = "加密",
                     errorMessage = if (!response.isSuccessful) "HTTP ${response.code}" else null
                 )
             }
@@ -174,6 +275,7 @@ object DataSourceHealthChecker {
                 isAvailable = false,
                 latency = System.currentTimeMillis() - startTime,
                 lastCheck = System.currentTimeMillis(),
+                category = "加密",
                 errorMessage = e.message
             )
         }

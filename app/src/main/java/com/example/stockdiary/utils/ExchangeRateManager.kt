@@ -29,8 +29,9 @@ import kotlinx.coroutines.sync.withLock
  * [refresh] 是挂起函数：走 [RateSource] 拉数 → 护栏校验 → 合并 → 持久化。
  *
  * - TTL（[CacheConfig.EXCHANGE_RATE_TTL_MS]，6 小时）内不重复回源，`force = true` 跳过；
- * - **失败静默降级**：拉不到 / 全被护栏拒绝时保持当前汇率并返回 false，
- *   不抛异常、不弹提示、不阻塞任何链路——汇率刷新是后台增强，不是关键路径；
+ * - **失败降级**：拉不到 / 全被护栏拒绝时保持当前汇率并返回 false，
+ *   不抛异常、不阻塞任何链路——汇率刷新是后台增强，不是关键路径。
+ *   后台触发时不打扰用户；设置页手动刷新会依据返回值提示失败；
  * - **脏数据护栏**（[sanitize]）：只接受相对静态默认值 0.2x~5x 区间内、且 > 0
  *   的有限数值，防止接口返回垃圾 / 单位错乱（如「每百日元」报价）把全 App
  *   的钱数带偏。
@@ -119,6 +120,18 @@ object ExchangeRateManager {
         if (accepted.isEmpty()) return
         liveRates = defaultRates + accepted
         lastRefreshTimeMs = saved.timestampMs
+    }
+
+    /**
+     * 「清除所有数据」后复位到内置默认汇率。
+     *
+     * 磁盘上的汇率偏好已被清空，但内存单例还持有刷新的 live 值与时间戳，
+     * 不复位的话设置页会继续显示清除前的汇率/更新时间，直到进程重启。
+     */
+    fun resetToDefaultRates() {
+        liveRates = defaultRates
+        lastRefreshTimeMs = 0L
+        warnedUnknownCurrencies.clear()
     }
 
     fun getRate(currency: String): Double {

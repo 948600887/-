@@ -88,6 +88,8 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
         val incomeCalculationStatus: String? = null,
         val errorMessage: String? = null,
         val dividendWarning: String? = null,
+        /** 批量删除结果（成功/失败），用于删除后清理选择态或提示重试（#12） */
+        val deleteResult: Result<Unit>? = null,
     )
 
     private val _uiState = MutableStateFlow(PortfolioUiState())
@@ -178,6 +180,10 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
      * 所以点一级标题会一路展开到资产，不用再逐个点账户。
      */
     fun syncGroups(currentKeys: Set<String>, marketKeys: Set<String> = emptySet()) {
+        // 分组 key 集合内容没变就直接返回：列表每轮刷新都会重算 groupKeys 并重新调用本方法，
+        // 内容相等时若不做短路，虽然 added 为空只是空转，但一旦有人在「展开态」上动了其它手脚
+        // 就会受影响。这里锁死「内容不变 → 不动展开态」，保证用户手动收起的组永远不被清掉（#12）。
+        if (groupsInitialized && currentKeys == knownGroups) return
         if (!groupsInitialized) {
             _expandedGroups.value = currentKeys - marketKeys
             groupsInitialized = true
@@ -468,16 +474,22 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
 
     fun batchDelete(assetIds: Set<Long>) {
         viewModelScope.launch {
-            try {
+            val result = runCatching {
                 repository.deleteAssetsByIds(assetIds)
                 _existingAccounts.value = repository.getAllAccounts().sorted()
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
+            }.onFailure { e ->
+                // runCatching 会把协程取消也吞掉，必须重新抛出保证取消语义
+                if (e is CancellationException) throw e
                 AppLogger.e("批量删除失败: ${e.message}", e, "PortfolioVM")
-                _uiState.update { it.copy(errorMessage = "批量删除失败") }
             }
+            // 成功/失败都写进 deleteResult：UI 据此决定「清选择态」还是「提示重试」，
+            // 不再靠关闭对话框时一刀切清掉选择（那样失败了也清，用户只能重选重删，没有重试入口）（#12）
+            _uiState.update { it.copy(deleteResult = result) }
         }
+    }
+
+    fun clearDeleteResult() {
+        _uiState.update { it.copy(deleteResult = null) }
     }
 
     fun batchMoveToAccount(assetIds: Set<Long>, targetAccount: String) {

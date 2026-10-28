@@ -452,6 +452,38 @@ fun PortfolioScreen(
         }
     }
 
+    // 批量删除结果：成功才退出多选并清空选择；失败保留选择态并给可重试的提示（#12）。
+    // replay=0 的一次性事件由 syncDone 承载，这里用 uiState.deleteResult 这个持久字段
+    // + clearDeleteResult 配对即可（失败重试时会被反复 set，需要可重入）。
+    LaunchedEffect(uiState.deleteResult) {
+        uiState.deleteResult?.let { result ->
+            if (result.isSuccess) {
+                selectionMode = false
+                selectedIds = emptySet()
+            } else {
+                val action = snackbarHostState.showSnackbar(
+                    message = "批量删除失败，请重试",
+                    actionLabel = "重试"
+                )
+                if (action == SnackbarResult.ActionPerformed) {
+                    // 选择态仍保留着（删除失败没清），直接再发一次
+                    viewModel.batchDelete(selectedIds)
+                }
+            }
+            viewModel.clearDeleteResult()
+        }
+    }
+
+    // 选择态修剪：资产被删/被其它路径移除后，selectedIds 里残留的失效 id 要清掉，
+    // 否则这些幽灵 id 会让「全选/反选」状态算错、删除按钮点数虚高（#12）
+    LaunchedEffect(assets) {
+        if (selectedIds.isNotEmpty()) {
+            val existingIds = assets.map { it.id }.toSet()
+            val pruned = selectedIds.filter { it in existingIds }.toSet()
+            if (pruned.size != selectedIds.size) selectedIds = pruned
+        }
+    }
+
     // 稳定回调：以下 lambda 都用 remember 缓存同一实例，且只读「实时状态」
     // （selectionMode / selectedIds 等都是 by-remember 属性，lambda 体内读取拿到的是
     // 调用时刻的最新值；viewModel.toggleGroup 本身稳定）。这是持仓页流畅的关键：
@@ -792,10 +824,11 @@ fun PortfolioScreen(
             confirmButton = {
                 Button(
                     onClick = {
+                        // 先关对话框，但**保留选择态与多选模式**：删除结果（成功/失败）由
+                        // LaunchedEffect(deleteResult) 处理——成功才清选择，失败给「重试」入口（#12）。
+                        // 原写法无论成败都立刻清空选择，失败了用户只能重选重删，没有重试。
                         viewModel.batchDelete(selectedIds)
                         showDeleteConfirmDialog = false
-                        selectionMode = false
-                        selectedIds = emptySet()
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = AppTheme.colors.error)
                 ) { Text("删除") }

@@ -404,7 +404,11 @@ object BinanceAccountAPI {
 
     private fun warnEarnFailure(kind: String, e: Throwable) {
         if (e is CancellationException) throw e
-        AppLogger.w(
+        // 这条只记日志、不阻断导入：失败原因已通过 BinanceEarnFetch.failures 带给预览页，
+        // 用户能直接看到该去开哪个权限。绝大多数情况是「未开通 Simple Earn 读取权限 /
+        // 接口调整 / 该地区不支持」而返回 404——属预期、已降级处理，不该每轮导入刷 WARN，
+        // 降级到 DEBUG，避免诊断日志被这类"非故障"刷屏。
+        AppLogger.d(
             "拉取币安${kind}理财持仓异常: ${e::class.simpleName}，本次导入只用现货",
             "BinanceAccountAPI"
         )

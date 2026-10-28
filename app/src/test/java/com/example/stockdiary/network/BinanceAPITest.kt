@@ -141,10 +141,19 @@ class BinanceAPITest {
     }
 
     @Test
-    fun `用户填错的符号两个候选都非法_如实失败`() {
-        // SHIB2USDT 是错误符号（真实是 SHIBUSDT）。primary=SHIB2USDT，fallback=SHIB2USDTUSDT，
-        // 两个币安都回 400——App 无法猜出正确对，仍应判失败（不能误以为成功）。
-        assertEquals(listOf("SHIB2USDT", "SHIB2USDTUSDT"), BinanceAPI.cryptoSymbolCandidates("SHIB2USDT"))
+    fun `已是对_usdt 后缀的符号不再拼出脏对兜底`() {
+        // SHIB2USDT 是错误符号（真实是 SHIBUSDT）。primary=SHIB2USDT，它已是 USDT 计价对，
+        // 再拼一次 USDT 必成脏对 SHIB2USDTUSDT（币安 400、徒增请求）——这种脏兜底直接不生成。
+        // 主候选 SHIB2USDT 仍会被币安 400，如实判失败（不能误以为成功）。
+        assertEquals(listOf("SHIB2USDT"), BinanceAPI.cryptoSymbolCandidates("SHIB2USDT"))
+    }
+
+    @Test
+    fun `LD 底层已是USDT对时不拼脏兜底`() {
+        // earnUnderlyingPair("LD1MBBDOGE") = "1MBBDOGEUSDT"（已是对），getCryptoPrice 套用
+        // cryptoSymbolCandidates 时不能再拼出 1MBBDOGEUSDTUSDT 脏对——那正是诊断日志里
+        // GET /ticker/24hr (symbol=1MBBDOGEUSDTUSDT) 的源头。
+        assertEquals(listOf("1MBBDOGEUSDT"), BinanceAPI.cryptoSymbolCandidates("1MBBDOGEUSDT"))
     }
 
     @Test

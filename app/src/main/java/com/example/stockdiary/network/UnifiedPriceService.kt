@@ -674,6 +674,10 @@ object UnifiedPriceService {
         client: OkHttpClient = NetworkClient.binanceClient
     ): Result<CryptoData> = withContext(Dispatchers.IO) {
         val codeNorm = code.uppercase().trim()
+        // 是否币安理财/锁仓（LD 前缀）产品：这类持仓的底层交易对若在币安现货根本没有
+        // 可交易对（如 1MBBDOGE / SHIB2 这类币安理财持仓但无 USDT 现货盘），应归为
+        // 「不可交易」（NonTradableAssetException，不计同步失败），而非网络/符号错误。
+        val isLdProduct = BinanceAPI.isEarnProduct(codeNorm)
 
         // 稳定币识别统一走 BinanceAPI.isLikelyStablecoin（白名单 + 命名兜底），
         // 与导入路径口径一致——白名单外、命名疑似稳定币的币（如 NEWUSD/USDG）
@@ -783,7 +787,22 @@ object UnifiedPriceService {
                             lastFailure = BinanceAccountAPI.binanceError(body, it.code)
                             return@use
                         }
-                        return@withContext Result.failure(BinanceAccountAPI.binanceError(body, it.code))
+                        val err = BinanceAccountAPI.binanceError(body, it.code)
+                        // LD 理财/锁仓产品的底层交易对若返回「非法符号」(-1121)，说明底层在币安
+                        // 现货根本没有可交易对（如 1MBBDOGE / SHIB2 这类币安理财持仓但无 USDT
+                        // 现货盘）：不是同步故障、也不是用户填错符号，而是「底层无行情」。
+                        // 归为不可交易（NonTradableAssetException）——同步侧不计入失败数，
+                        // 否则每轮同步都会把这两条真实持有的理财持仓当成"失败 2"骚扰用户。
+                        if (isLdProduct && it.code == 400 && isInvalidSymbolError(err)) {
+                            AppLogger.i(
+                                "理财/锁仓产品 $code 的底层交易对($rawPair)在币安不存在（无效符号），按不可交易处理",
+                                TAG
+                            )
+                            return@withContext Result.failure(
+                                NonTradableAssetException("$code 的底层资产在币安现货无交易对")
+                            )
+                        }
+                        return@withContext Result.failure(err)
                     }
 
                     if (!body.contains("lastPrice")) {
@@ -840,7 +859,15 @@ object UnifiedPriceService {
 
         // 所有候选都因 400 失败（如用户填错的符号 SHIB2USDT → SHIB2USDTUSDT）：真实失败，
         // 用户必须自己改对 symbol，App 无法猜出正确交易对。
-        Result.failure(lastFailure ?: Exception("所有候选交易对均查询失败: $code"))
+        val finalError = lastFailure ?: Exception("所有候选交易对均查询失败: $code")
+        // LD 理财/锁仓产品的底层交易对若全部「非法符号」(-1121)，底层在币安现货无交易对，
+        // 归为不可交易（不计同步失败），与上面单候选分支同口径。
+        if (isLdProduct && lastFailure != null && isInvalidSymbolError(finalError)) {
+            AppLogger.i("理财/锁仓产品 $code 的底层交易对均无效（无现货盘），按不可交易处理", TAG)
+            Result.failure(NonTradableAssetException("$code 的底层资产在币安现货无交易对"))
+        } else {
+            Result.failure(finalError)
+        }
     }
     
     private fun parseBinanceCrypto(code: String, response: String): CryptoData? {
@@ -921,4 +948,18 @@ internal fun isCancellationArtifact(e: Throwable): Boolean {
     // OkHttp 取消 call 后抛 IOException("Canceled")
     if (e is IOException && e.message?.equals("canceled", ignoreCase = true) == true) return true
     return false
+}
+
+/**
+ * 判断异常是不是币安「非法符号」（-1121 Invalid symbol）。
+ *
+ * [BinanceAccountAPI.binanceError] 对这类错误统一格式化为
+ * "币安拒绝请求（-1121）：Invalid symbol."。LD 理财/锁仓产品的底层交易对
+ * （如 1MBBDOGE → 1MBBDOGEUSDT）在币安现货根本没有可交易对时就会回这个错——
+ * 它不是同步故障、也不是用户填错符号，而是「底层无行情」，应归为
+ * [NonTradableAssetException]（不计同步失败），见 [getCryptoPrice]。
+ */
+internal fun isInvalidSymbolError(e: Throwable): Boolean {
+    val msg = e.message ?: return false
+    return msg.contains("-1121") || msg.contains("Invalid symbol", ignoreCase = true)
 }

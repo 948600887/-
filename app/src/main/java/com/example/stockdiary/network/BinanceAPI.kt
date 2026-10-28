@@ -173,9 +173,16 @@ object BinanceAPI {
      *   （调用方按「无行情」处理，不在此补 USDT——稳定币没有 XXXUSDT 自我交易对）
      */
     internal fun cryptoSymbolCandidates(symbol: String): List<String> {
-        val primary = cryptoTradingPairFor(symbol) ?: return emptyList()
-        val fallback = "${symbol.uppercase().trim()}USDT"
-        return if (primary.equals(fallback, ignoreCase = true)) {
+        val s = symbol.uppercase().trim()
+        val primary = cryptoTradingPairFor(s) ?: return emptyList()
+        // 原始符号若已是 USDT 计价对（如 earnUnderlyingPair 算出的 1MBBDOGEUSDT、
+        // 用户误填的 SHIB2USDT），再拼一次 USDT 必成脏对（1MBBDOGEUSDTUSDT），
+        // 且这种脏对一定会被币安 400、徒增一次请求与日志噪音。USDT 是报价币，
+        // 裸基础资产不可能以它结尾，所以「结尾已是 USDT」即「已是完整交易对」，无需兜底。
+        // 这条只拦 USDT 后缀：WBETH 这类以 ETH/BTC 结尾的裸资产仍需要「裸码+USDT」
+        // 兜底（见下方用例），绝不能一并拦掉。
+        val fallback = if (s.endsWith("USDT")) null else "${s}USDT"
+        return if (fallback == null || primary.equals(fallback, ignoreCase = true)) {
             listOf(primary)
         } else {
             listOf(primary, fallback)

@@ -295,4 +295,29 @@ class UnifiedPriceServiceTest {
         assertEquals(0, BinanceHostGate.consecutiveFailuresForTesting())
         assertEquals(Phase.CLOSED, BinanceHostGate.phaseForTesting())
     }
+
+    /**
+     * LD 理财/锁仓产品的底层交易对在币安现货根本没有可交易对（如 1MBBDOGE / SHIB2 这类币安
+     * 理财持仓但无 USDT 现货盘）时，底层返回 -1121 Invalid symbol：这是「底层无行情」而非同步
+     * 故障，必须归为 [NonTradableAssetException]，让同步侧不计入失败数。否则每轮同步都会把
+     * 这两条真实持有的理财持仓当成"失败 2"骚扰用户（2026-10-28 诊断日志实锤：v11 每轮稳定
+     * 失败 2 = LD1MBBDOGE + LDSHIB2）。
+     *
+     * 注意与上面「用户填错符号」用例的区别：那个是非 LD 的普通符号，确实应当如实失败；
+     * 这个是 LD 产品、底层币安根本没上现货盘，归为不可交易（不计失败）。
+     */
+    @Test
+    fun `getCryptoPrice LD底层无交易对返回不可交易而非失败`() = runBlocking {
+        BinanceHostGate.resetForTesting()
+        val result = UnifiedPriceService.getCryptoPrice("LD1MBBDOGE", client = fakeClient(Ticker400Interceptor()))
+        // 业务上仍是失败结果（不是成功），但必须是「不可交易」语义
+        assertTrue("LD 底层无行情应是失败结果", result.isFailure)
+        assertTrue(
+            "LD 底层 -1121 必须归为不可交易（不计同步失败）",
+            NonTradableAssetException.isNonTradable(result.exceptionOrNull())
+        )
+        // 底层无行情不是网络故障：不喂 onNetworkFailure，计数保持 0、相位仍 CLOSED
+        assertEquals(0, BinanceHostGate.consecutiveFailuresForTesting())
+        assertEquals(Phase.CLOSED, BinanceHostGate.phaseForTesting())
+    }
 }

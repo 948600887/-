@@ -237,11 +237,29 @@ object DividendProgressCalculator {
 
         // 今年预计 = 自然年口径的年度收入（单一数据源）：与 DividendIncomeLoader.totalAnnualIncome
         // 同源，保证「收息进度今年预计」与「预计年度收入/年度分红/年收入」两个头条数字严格一致。
+        // 银行存款利息按「已过天数」计提进分子（梦瑶口径决策：两边都含存款，头条不缩水）。
+        //
+        // 存款不像股票/基金那样有逐笔除息到账记录，利息是随时间连续累积的：
+        // 不计提的话分子永远够不到含利息的分母（yearProjected 走 naturalYearAnnualIncome、含存款利息），
+        // 进度条永远到不了 100%，与上面「分子分母同源」的注释自相矛盾。
+        // 走 dayOfYear（含今天）而不是 Instancee 差值，避免跨年与时区口径又冒出来一套。
+        //
+        // **不进 receivedCount**：那是「派息笔数」，按日计提计入会把笔数冲到几百——
+        // 与货基同处理（见 moneyFundIncome 的 KDoc：笔数只数真金到账的派息）。
+        val daysInYear = Year.of(year).length()
+        val elapsedDays = today.dayOfYear.coerceAtMost(daysInYear)
+        val depositAccruedInterest = assets
+            .filter { it.type == AssetType.BANK_DEPOSIT }
+            .sumOf { asset ->
+                val rate = asset.interestRate ?: 0.0
+                asset.totalValueCny * (rate / 100.0) *
+                    (elapsedDays.toDouble() / daysInYear)
+            }
+        yearReceived += depositAccruedInterest
+
         // 循环里只算过 yearReceived / 月度柱图 / nextPayout，yearProjected 在此一次性算出。
-        // 已知口径张力（待产品决策，故行为保持不变）：分母含银行存款利息，而分子 yearReceived
-        // 只累加股票/基金的除息记录 —— 有息存款时进度条走不到 100%。
-        // 它是 NaturalYearIncomeTest / DividendProgressCalculatorTest 两条现有用例钉住的口径，
-        // 任何一边改口径都必须连同这两条用例一起改，不能单边悄悄翻。
+        // 分子已含上面按天数计提的存款利息，分母同龄含全年存款利息 → 两边同源，
+        // 有息存款时进度条能正常走到 100%。
         yearProjected = naturalYearAnnualIncome(assets, recordsBySymbol, today)
 
         return Progress(

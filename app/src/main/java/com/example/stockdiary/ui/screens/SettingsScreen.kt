@@ -526,28 +526,8 @@ fun SettingsScreen(
             transactionCount = transactionCount,
             dividendCount = uiState.dividendCount,
             isExporting = uiState.isExporting,
-            onExportText = {
-                viewModel.exportData(context, SettingsViewModel.ExportType.TEXT)
-                showExportDialog = false
-            },
-            onExportCsvAssets = {
-                viewModel.exportData(context, SettingsViewModel.ExportType.CSV_ASSETS)
-                showExportDialog = false
-            },
-            onExportCsvSnapshots = {
-                viewModel.exportData(context, SettingsViewModel.ExportType.CSV_SNAPSHOTS)
-                showExportDialog = false
-            },
-            onExportCsvTransactions = {
-                viewModel.exportData(context, SettingsViewModel.ExportType.CSV_TRANSACTIONS)
-                showExportDialog = false
-            },
-            onExportCsvStatement = {
-                viewModel.exportData(context, SettingsViewModel.ExportType.CSV_STATEMENT)
-                showExportDialog = false
-            },
-            onExportCsvDividends = {
-                viewModel.exportData(context, SettingsViewModel.ExportType.CSV_DIVIDENDS)
+            onExport = { type ->
+                viewModel.exportData(context, type)
                 showExportDialog = false
             },
             onDismiss = { showExportDialog = false }

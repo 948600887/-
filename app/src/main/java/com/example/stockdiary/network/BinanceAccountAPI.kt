@@ -110,10 +110,19 @@ object BinanceAccountAPI {
      * 与 [ACCOUNT_URL] 同主机（都只能走 api.binance.com，镜像不服务签名接口），
      * 因此**同样不喂熔断器**（理由见 [getAccount] 的 451 注释）。
      */
+    /**
+     * 币安 **SAPI** 接口基址。⚠️ 关键点：SAPI（`/sapi/v1/...`）与现货 REST（`/api/v3/...`）是
+     * **两套不同的基址**，SAPI **不在** `/api/v3` 之下。早期误把现货基址（含 `/api/v3`）拼到
+     * SAPI 路径前，生成 `https://api.binance.com/api/v3/sapi/v1/...` 这个根本不存在的路径，
+     * 被网关回**空 body 404**——表现为「理财活期/定期永远拉不到、且伪装成接口未开通」。
+     * 这里单独用 SAPI 基址修正（现货 `/account` 仍走 [ACCOUNT_URL] 的 `/api/v3`）。
+     */
+    private const val EARN_SAPI_BASE = "https://api.binance.com/sapi/v1"
+
     private const val EARN_FLEXIBLE_URL =
-        APIEndpoints.Binance.BASE_URL + "/sapi/v1/simple-earn/flexible/position"
+        EARN_SAPI_BASE + "/simple-earn/flexible/position"
     private const val EARN_LOCKED_URL =
-        APIEndpoints.Binance.BASE_URL + "/sapi/v1/simple-earn/locked/position"
+        EARN_SAPI_BASE + "/simple-earn/locked/position"
 
     /**
      * 理财持仓单页条数。真实账户的理财标的通常是个位数到几十个，
@@ -364,6 +373,13 @@ object BinanceAccountAPI {
             val body = resp.body?.string()
                 ?: throw IOException("币安返回了空响应")
             if (!resp.isSuccessful) {
+                // 诊断：把币安真实 HTTP 码与响应体落盘（不含密钥/签名，安全），便于排查
+                // 404/403/-2015 等——此前因空 body 404 被兜底成「HTTP 404」，盲猜了很久。
+                // 注意只记端点路径常量，绝不记带 signature 的完整请求 URL。
+                AppLogger.d(
+                    "币安理财接口 ${url} 返回 HTTP ${resp.code}，响应体=$body",
+                    "BinanceAccountAPI"
+                )
                 // 币安的 msg 说明原因（权限不足/参数错），不含密钥，可以带出去
                 throw binanceError(body, resp.code)
             }

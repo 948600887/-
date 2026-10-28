@@ -210,4 +210,43 @@ class BinanceAccountAPITest {
         val client = OkHttpClient.Builder().addInterceptor(interceptor).build()
         assertTrue(BinanceAccountAPI.getPrices(emptyList(), client).isEmpty())
     }
+
+    // ---------- 理财 SAPI 接口基址（回归：绝不能误带 /api/v3 前缀） ----------
+
+    @Test
+    fun 理财接口走正确的SAPI基址_不带api_v3前缀() = runBlocking {
+        // 回归根因：SAPI 与现货 REST 是两套基址，SAPI 不在 /api/v3 之下。旧代码把现货基址
+        // （含 /api/v3）拼到 SAPI 路径前，生成 /api/v3/sapi/v1/... 这种不存在的路径，被网关回
+        // 空 body 404，理财活期/定期永远拉不到、且伪装成「接口未开通」。这里钉死真实发出的路径。
+        val recorded = mutableListOf<String>()
+        val interceptor = object : Interceptor {
+            override fun intercept(chain: Interceptor.Chain): Response {
+                recorded.add(chain.request().url.encodedPath)
+                return Response.Builder()
+                    .request(chain.request())
+                    .protocol(Protocol.HTTP_1_1)
+                    .code(200)
+                    .message("OK")
+                    .body("""{"rows":[],"total":0}""".toResponseBody("application/json".toMediaType()))
+                    .build()
+            }
+        }
+        val client = OkHttpClient.Builder().addInterceptor(interceptor).build()
+        BinanceAccountAPI.getEarnPositions("dummyKey", "dummySecret", client)
+
+        // 活期 + 定期两个接口各发一次
+        assertEquals("应发出 2 个理财接口请求（活期+定期）", 2, recorded.size)
+        assertTrue(
+            "活期接口应为 /sapi/v1/simple-earn/flexible/position",
+            recorded.any { it == "/sapi/v1/simple-earn/flexible/position" }
+        )
+        assertTrue(
+            "定期接口应为 /sapi/v1/simple-earn/locked/position",
+            recorded.any { it == "/sapi/v1/simple-earn/locked/position" }
+        )
+        assertTrue(
+            "SAPI 绝不能带 /api/v3 前缀（那是现货基址，拼上去路径不存在→404）",
+            recorded.none { it.contains("/api/v3/") }
+        )
+    }
 }

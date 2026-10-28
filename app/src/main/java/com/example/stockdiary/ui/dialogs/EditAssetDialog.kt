@@ -177,7 +177,15 @@ fun EditAssetDialog(
                                 DialogTypeChip(
                                     type = type,
                                     selected = selectedType == type,
-                                    onClick = { selectedType = type; currency = defaultCurrencyForType(type) },
+                                    onClick = {
+                                        // 只有类型**真的发生变化**才重置币种：无条件重置的话，编辑
+                                        // 美元/港币资产时误触已经选中的「股票」chip，币种就被静默冲回 CNY，
+                                        // 保存后该资产按 1:1 折人民币 → 市值/盈亏全错。
+                                        if (selectedType != type) {
+                                            selectedType = type
+                                            currency = defaultCurrencyForType(type)
+                                        }
+                                    },
                                     modifier = Modifier.weight(1f)
                                 )
                             }
@@ -190,7 +198,15 @@ fun EditAssetDialog(
                                 DialogTypeChip(
                                     type = type,
                                     selected = selectedType == type,
-                                    onClick = { selectedType = type; currency = defaultCurrencyForType(type) },
+                                    onClick = {
+                                        // 只有类型**真的发生变化**才重置币种：无条件重置的话，编辑
+                                        // 美元/港币资产时误触已经选中的「股票」chip，币种就被静默冲回 CNY，
+                                        // 保存后该资产按 1:1 折人民币 → 市值/盈亏全错。
+                                        if (selectedType != type) {
+                                            selectedType = type
+                                            currency = defaultCurrencyForType(type)
+                                        }
+                                    },
                                     modifier = Modifier.weight(1f)
                                 )
                             }

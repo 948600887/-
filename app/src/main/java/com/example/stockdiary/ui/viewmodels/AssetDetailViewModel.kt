@@ -117,6 +117,8 @@ class AssetDetailViewModel(private val container: AppContainer, private val asse
     fun refreshData() {
         viewModelScope.launch {
             _uiState.update { it.copy(isRefreshing = true) }
+            // 同步失败的提示必须等 loadAssetData 跑完再写：它一进来就把 errorMessage 清成 null
+            var syncErrorMessage: String? = null
             try {
                 val currentAsset = _uiState.value.asset
                 // 加密货币详情页同样走单独刷新（同步引擎 CRYPTO 分支见
@@ -128,6 +130,9 @@ class AssetDetailViewModel(private val container: AppContainer, private val asse
                             context = container.context,
                             repository = repository,
                             assets = listOf(currentAsset),
+                            // 手动刷新必须强制：门面在非强制时直接返回 60 秒内的缓存，
+                            // 于是 60 秒内连点刷新 = 转圈结束、价格没变，用户以为「刷新了但没变化」。
+                            forceRefresh = true,
                             onProgress = { },
                         syncTrigger = "资产详情页刷新"
                         )
@@ -135,10 +140,15 @@ class AssetDetailViewModel(private val container: AppContainer, private val asse
                         throw e
                     } catch (e: Exception) {
                         AppLogger.w("资产详情页同步失败: ${e.message}", "AssetDetailViewModel")
-                        _uiState.update { it.copy(errorMessage = "价格同步失败: ${e.localizedMessage ?: e.message}") }
+                        // 不立刻写 errorMessage：下一句 loadAssetData 会无条件把它清成 null，
+                        // 于是「价格同步失败」一闪而过甚至完全不显示。先存局部，等它跑完再写回。
+                        syncErrorMessage = "价格同步失败: ${e.localizedMessage ?: e.message}"
                     }
                 }
                 loadAssetData(forceRefreshDividend = true)
+                syncErrorMessage?.let { msg ->
+                    _uiState.update { it.copy(errorMessage = msg) }
+                }
             } finally {
                 _uiState.update { it.copy(isRefreshing = false) }
             }

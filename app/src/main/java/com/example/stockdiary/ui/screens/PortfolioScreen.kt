@@ -209,7 +209,10 @@ fun PortfolioScreen(
     val displayAssets = remember(
         visibleAssets,
         preferences.hideLowValueCrypto,
-        preferences.hideUnknownPriceCrypto
+        preferences.hideUnknownPriceCrypto,
+        // 阈值必须进 key：设置里只改阈值、开关不动时，remember 不重算 → 旧阈值继续生效，
+        // 用户以为设置没保存（MEMORY.md 同类坑：过滤结果必须随阈值变）
+        preferences.lowValueThreshold()
     ) {
         filterLowValueCrypto(
             visibleAssets,

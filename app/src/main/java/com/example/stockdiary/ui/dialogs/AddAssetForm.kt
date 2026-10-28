@@ -667,10 +667,14 @@ fun buildAssetFromInput(
     currency: String = "CNY",
     dueDate: String? = null
 ): Asset {
-    val normalizedSymbol = if (selectedType == AssetType.STOCK || selectedType == AssetType.FUND) {
-        StockCodeManager.normalizeSymbol(symbol)
-    } else {
-        symbol
+    val normalizedSymbol = when (selectedType) {
+        AssetType.STOCK, AssetType.FUND -> StockCodeManager.normalizeSymbol(symbol)
+        // 加密货币：占位符写的是「例如：BTC/USDT」，用户照抄就把斜杠原样落库；
+        // cryptoTradingPairFor 不剥离 '/'，于是 ?symbol=BTC/USDT 币安直接返回 400，
+        // 兜底候选又拼成 BTC/USDTUSDT → 同样是 400，这条资产永远同步不到价。
+        // 统一去掉 / - 与空白并转大写，与币安的交易对形态对齐。
+        AssetType.CRYPTO -> symbol.uppercase().filter { it.isLetterOrDigit() }
+        else -> symbol
     }
     return Asset(
         name = name,

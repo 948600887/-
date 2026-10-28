@@ -31,7 +31,9 @@ internal fun filterLowValueCrypto(
             // 无价格：仅在用户显式开启 hideUnknownPriceCrypto 时才藏
             asset.currentPrice == null -> hideUnknownPriceCrypto
             // 有价格：人民币市值低于阈值才藏
-            else -> asset.totalValueCny < thresholdCny
+            // 负市值（借币/组合保证金欠币）一律保留：负必然小于阈值，
+            // 不拦的话大额负债会从列表与分组小计里消失，而顶部总资产仍扣着它 → 逐项加总对不上。
+            else -> asset.totalValueCny >= 0.0 && asset.totalValueCny < thresholdCny
         }
     }
 }

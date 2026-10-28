@@ -19,6 +19,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import java.time.LocalDate
 import kotlinx.coroutines.CancellationException
+import java.util.Collections
 
 /**
  * 一条「待落库的价格」意图。
@@ -56,9 +57,24 @@ class AssetRepository private constructor(
     
     suspend fun getAllAccounts(): List<String> = assetDao.getAllAccounts()
     
+    /**
+     * 写入侧合法性兜底（对应 [Asset.init] 已移除的 require 校验）。
+     *
+     * 历史脏行可能在库里（空白 name、负值 purchasePrice、非加密类的负 balance），
+     * 读路径必须永远安全；合法性改在这里落库前把关：空白 name 用 symbol 兜底、
+     * 负参考单价归零、非加密类的负数量归零。对合法数据是无操作。
+     */
+    private fun Asset.sanitizeForWrite(): Asset {
+        var a = this
+        if (a.name.isBlank()) a = a.copy(name = a.symbol ?: "未命名资产")
+        if (a.purchasePrice < 0) a = a.copy(purchasePrice = 0.0)
+        if (a.balance < 0 && a.type != AssetType.CRYPTO) a = a.copy(balance = 0.0)
+        return a
+    }
+
     suspend fun insertAsset(asset: Asset): Long {
         return try {
-            assetDao.insertAsset(asset)
+            assetDao.insertAsset(asset.sanitizeForWrite())
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -110,16 +126,16 @@ class AssetRepository private constructor(
                     interestRate = asset.interestRate,
                     lastUpdateTime = now
                 )
-                assetDao.updateAsset(updated)
+                assetDao.updateAsset(updated.sanitizeForWrite())
                 existing.id
             } else {
                 val newAsset = asset.copy(symbol = normalizedSymbol.takeIf { it.isNotBlank() })
-                assetDao.insertAsset(newAsset)
+                assetDao.insertAsset(newAsset.sanitizeForWrite())
             }
         }
     }
     
-    suspend fun insertAssets(assets: List<Asset>) = assetDao.insertAssets(assets)
+    suspend fun insertAssets(assets: List<Asset>) = assetDao.insertAssets(assets.map { it.sanitizeForWrite() })
 
     /**
      * 把一段写库操作包进 Room 事务：要么全成，要么全不成。
@@ -233,6 +249,9 @@ class AssetRepository private constructor(
             // 净值持久化缓存也算「所有数据」：留着它，清完数据后下一次刷新
             // 会直接复用库里的旧净值 —— 用户以为清干净了，数字却原样回来。
             db.fundNavCacheDao().clear()
+            // 分红"抓过/没分红"的负缓存同样要清：否则旧标的被认为 7 天内抓过且无分红，
+            // 清完库后最长 7 天不再真正重抓，分红一直空白（见 DividendRepository.clearFetchState）。
+            DividendRepository.getInstance(context).clearFetchState()
         }
     }
     
@@ -713,6 +732,33 @@ class AssetRepository private constructor(
         }
     }
 
+    /**
+     * 进程内「刚记录过」的交易指纹 → 时间戳，用于短时间窗内的重复调用去重。
+     *
+     * 旧口径是按 (symbol,type,quantity,price,date) 五元组**持久化**判重
+     * （transactionDao.findDuplicate）：用户同一天、同价位、同数量的两笔真实分批买入
+     * （例如两笔各 100 股）会被当成重复而静默丢弃 —— 交易流水与持仓数量凭空少计。
+     * 改成进程内 + 短时间窗后：误触两次仍被吃掉，真实分批买入能正常入账。
+     */
+    private val recentTransactionKeys = Collections.synchronizedMap(mutableMapOf<String, Long>())
+
+    /**
+     * 登记一条交易指纹。[key] 在 [TRANSACTION_DEDUP_WINDOW_MS] 内重复出现即判为重复。
+     * @return true 表示这条不是重复（已登记，可以落库）
+     */
+    private fun markTransactionRecent(key: String, now: Long): Boolean {
+        synchronized(recentTransactionKeys) {
+            val last = recentTransactionKeys[key]
+            if (last != null && now - last < TRANSACTION_DEDUP_WINDOW_MS) return false
+            recentTransactionKeys[key] = now
+            // 顺手清掉过期项，避免长期驻留的进程把这张表撑大
+            if (recentTransactionKeys.size > 200) {
+                recentTransactionKeys.entries.removeIf { now - it.value > TRANSACTION_DEDUP_WINDOW_MS }
+            }
+            return true
+        }
+    }
+
     private suspend fun recordTransactionInternal(
         symbol: String,
         name: String,
@@ -723,9 +769,10 @@ class AssetRepository private constructor(
     ) {
         val db = StockDatabase.getInstance(context)
         val date = LocalDate.now().toString()
-        // 避免同一天同价位同数量的重复交易记录
-        val existing = db.transactionDao().findDuplicate(symbol, type, quantity, price, date)
-        if (existing != null) {
+        // 只在极短时间窗内去重（详见 [markTransactionRecent] 的说明）
+        val now = System.currentTimeMillis()
+        val key = "$symbol|$type|$quantity|$price|$date|$fee"
+        if (!markTransactionRecent(key, now)) {
             AppLogger.d("跳过重复交易记录: $symbol $type $quantity@$price $date", "AssetRepository")
             return
         }
@@ -742,6 +789,9 @@ class AssetRepository private constructor(
     }
     
     companion object {
+        /** 交易去重的短时间窗（毫秒）：窗口内完全相同的交易才判为误触重复 */
+        private const val TRANSACTION_DEDUP_WINDOW_MS = 5_000L
+
         @SuppressLint("StaticFieldLeak")
         @Volatile
         private var instance: AssetRepository? = null

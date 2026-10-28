@@ -71,7 +71,17 @@ abstract class StockDatabase : RoomDatabase() {
 
         private val MIGRATION_3_4 = object : Migration(3, 4) {
             override fun migrate(db: SupportSQLiteDatabase) {
-                db.execSQL("ALTER TABLE portfolio ADD COLUMN account TEXT DEFAULT '默认账户'")
+                // 早期迁移链里 portfolio 表可能从未被 CREATE（与 assets/stock_basic 同源的"未建表"
+                // 问题，见 4_5 / 8_9）。无守卫直接 ALTER 会在 v1/v2→v17 升级路径上抛
+                // no such table: portfolio，且本项目没开 fallbackToDestructiveMigration，
+                // Room 打开即 IllegalStateException、升级后一开 App 就崩。
+                // 先查 sqlite_master 确认表存在再 ALTER（与 8_9 同一套守卫口径）。
+                db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='portfolio'")
+                    .use { cursor ->
+                        if (cursor.moveToFirst()) {
+                            db.execSQL("ALTER TABLE portfolio ADD COLUMN account TEXT DEFAULT '默认账户'")
+                        }
+                    }
             }
         }
 

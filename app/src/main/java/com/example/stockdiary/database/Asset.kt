@@ -31,17 +31,12 @@ data class Asset(
     val dueDate: String? = null,
     val millionCopiesIncome: Double? = null
 ) {
-    init {
-        require(name.isNotBlank()) { "资产名称不能为空" }
-        // 加密货币允许负余额：币安借币 / 组合保证金欠币在账户接口里 free+locked 就是负值，
-        // 负余额按设计落成一条数量为负的 CRYPTO 资产，参与净值计算时自动扣减
-        // （见 BinanceImportService 的 dust 过滤注释与 SnapshotAlignment.commit）。
-        // 其它类型（股票 / 基金 / 存款 / 贷款 / 负债）数量必须是非负，保持原约束——
-        // 这些类型出现负值是数据错误，应当直接拒绝，而不是静默存成脏数据。
-        require(balance >= 0 || type == AssetType.CRYPTO) { "数量不能为负数" }
-        // purchasePrice 现在只作「参考单价」：无行情时的市值估算兜底，不再是成本
-        require(purchasePrice >= 0) { "参考单价不能为负数" }
-    }
+    // ⚠️ 不再在 init 里做 require 校验。原因：Room 每次从游标构造实体都会跑 init，
+    // 一旦库里存在历史脏行（例如旧版本导入留下的空白 name、负值 purchasePrice、
+    // 非加密类的负 balance），init 会抛 IllegalArgumentException，导致 getAllAssets()
+    // 这类读路径整批查询崩溃，主界面直接打不开。
+    // 数据合法性改由数据写入侧统一把关（见 AssetRepository.sanitizeForWrite）：
+    // 只有「新建/更新资产」入口才会校验并兜底，读任意历史行永远安全。
     val totalValue: Double
         get() = if (type.isLiability || type == AssetType.BANK_DEPOSIT) {
             balance

@@ -97,6 +97,17 @@ class DividendRepository private constructor(
         context.getSharedPreferences(FETCH_STATE_PREFS, Context.MODE_PRIVATE)
     }
 
+    /**
+     * 清空全部抓取状态簿记（"清除所有数据"时调用）。
+     *
+     * 否则库清空了，但每条标的仍带着「X 分钟/7 天内抓过且没分红」的时间戳，
+     * [shouldReuseEmptyResult] 会把它们当成"确实没分红"复用，最长 7 天不再真正重抓，
+     * 用户以为清干净了、分红却一直空白。见 [AssetRepository.deleteAllData]。
+     */
+    fun clearFetchState() {
+        runCatching { fetchState.edit().clear().apply() }
+    }
+
     /** 记录一次抓取完成（不管抓没抓到）。必须在抓取**成功**后写，失败时写会把错误固化 24 小时 */
     private fun markFetched(symbol: String) {
         runCatching { fetchState.edit().putLong(symbol, System.currentTimeMillis()).apply() }
@@ -679,6 +690,11 @@ class DividendRepository private constructor(
 
             if (data.isNotEmpty()) {
                 saveDividendsToDb(normalizedSymbol, data, isIncremental)
+            } else if (!isIncremental) {
+                // 全量刷新且数据源应答了空（确实没分红 / 这次没返回）：清掉旧自动分红记录，
+                // 否则库里陈旧自动分红会被读回并固化 TTL，用户点"刷新"却看到旧数据。
+                // 增量刷新不在此清，避免源临时缺数据误删历史自动分红；手动记录始终保留。
+                dividendDao.deleteNonManualBySymbol(normalizedSymbol)
             }
 
             val mergedData = if (isIncremental && existingEntry != null) {

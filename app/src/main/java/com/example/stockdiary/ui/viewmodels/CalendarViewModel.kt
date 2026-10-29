@@ -443,7 +443,11 @@ class CalendarViewModel(
                 today = today
             )
 
-            val symbols = assets.mapNotNull { it.symbol }
+            // 同代码多账户：按 symbol 合并 balance 后再遍历，否则下方 dividends.add(symbol, …)
+            // 会把同一 symbol 塞进列表 N 次，而详情卡 DividendDayDetail 用合并 balance 逐条重算，
+            // 会把当天分红放大 N 倍（格子/月汇总因逐条未合并累加反而数值正确）。
+            val mergedAssets = aggregateAssetsBySymbol(assets).values.toList()
+            val symbols = mergedAssets.mapNotNull { it.symbol }
             // 冷启动不强制重抓：先用宽口径批量读把库里有记录的标的预热进内存缓存
             //（零网络、2 次 IO），只让「连过期数据都没有」的标的去联网。
             //
@@ -466,7 +470,7 @@ class CalendarViewModel(
             val dividendDates = mutableSetOf<LocalDate>()
             val dividends = mutableListOf<Pair<String, List<DividendRecord>>>()
 
-            for (asset in assets) {
+            for (asset in mergedAssets) {
                 val symbol = asset.symbol ?: continue
                 try {
                 val records = dividendRepository.getDividendsBySymbol(symbol)
@@ -523,7 +527,10 @@ class CalendarViewModel(
             }
 
             val today = LocalDate.now()
-            val symbols = assets.mapNotNull { it.symbol }
+            // 同 generateAssetCalendarData：按 symbol 合并 balance 后再遍历，避免同代码多账户时
+            // 详情卡分红金额翻倍（见 aggregateAssetsBySymbol）。
+            val mergedAssets = aggregateAssetsBySymbol(assets).values.toList()
+            val symbols = mergedAssets.mapNotNull { it.symbol }
             // 同 generateAssetCalendarData：冷启动先宽口径预热、只补抓缺失的标的，
             // 不再无条件全量预取（那正是本页冷启动转圈几十秒的根因）。
             // forceRefresh=true（用户主动刷新）时 primeDividendCache 直接放行全部，
@@ -540,7 +547,7 @@ class CalendarViewModel(
             val dividendDates = mutableSetOf<LocalDate>()
             val dividends = mutableListOf<Pair<String, List<DividendRecord>>>()
 
-            for (asset in assets) {
+            for (asset in mergedAssets) {
                 val symbol = asset.symbol ?: continue
                 try {
                     val records = dividendRepository.getDividendsBySymbol(symbol)

@@ -445,4 +445,43 @@ class CalendarViewModelTest {
         assertEquals(66.6, result[today]!!, 1e-9)
         assertEquals(0.0, result[month.atDay(1)]!!, 1e-9)
     }
+
+    // ---------- 同代码多账户：分红金额翻倍回归 ----------
+
+    @Test
+    fun `同一股票多账户时分红不翻倍_详情卡金额与格子对齐`() = runBlocking {
+        // 回归：生成函数原先用未合并的 assets 循环，同一 symbol 多账户会被 dividends.add 塞进
+        // 列表 N 次；而详情卡 DividendDayDetail 按合并 balance 逐条重算，会把当天分红放大 N 倍。
+        // 修复后两生成函数都按 aggregateAssetsBySymbol 合并遍历，同一 symbol 只计一次。
+        val a1 = stockAsset.copy(account = "华泰", balance = 1000.0)
+        val a2 = stockAsset.copy(account = "中信", balance = 2000.0) // 同 symbol 600900，合并后 3000
+        val vm = buildVm(assets = listOf(a1, a2))
+        waitUntil { vm.uiState.value.assets.size == 2 }
+
+        val recDate = vm.uiState.value.currentMonth.atDay(15)
+        coEvery { divRepo.getDividendsBySymbol(any(), any()) } returns listOf(
+            DividendRecord(
+                exDividendDate = recDate.toString(),
+                dividendPerShare = "10.0",
+                announceDate = "",
+                fiscalYear = recDate.year.toString(),
+                paymentDate = null
+            )
+        )
+        vm.selectTab("收支日历")
+        // 每十股 10 元 × 合并 3000 股 ÷ 10 = 3000（修复前逐条未合并累加也恰好是 3000，
+        // 所以格子数值无法区分；真正区分点在 dividends 列表是否重复）
+        waitUntil { vm.uiState.value.calendarData[recDate] == 3000.0 }
+
+        assertEquals(3000.0, vm.uiState.value.calendarData[recDate] ?: 0.0, 0.001)
+        // 关键断言：同一 symbol 的 dividends 条目只能出现一次（修复前 = 2，详情卡金额翻倍）
+        assertEquals(1, vm.uiState.value.dividends.size)
+        assertEquals("600900", vm.uiState.value.dividends.first().first)
+        assertEquals(1, vm.uiState.value.dividends.first().second.size)
+
+        // 两 Tab 共用同一 dividends 来源，切回资产日历详情卡同样不能翻倍
+        vm.selectTab("资产日历")
+        waitUntil { vm.uiState.value.selectedTab == "资产日历" && vm.uiState.value.dividends.size == 1 }
+        assertEquals(1, vm.uiState.value.dividends.size)
+    }
 }

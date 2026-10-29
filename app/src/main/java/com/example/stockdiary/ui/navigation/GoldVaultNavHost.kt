@@ -3,6 +3,8 @@ package com.example.stockdiary.ui.navigation
 import android.app.Activity
 import android.content.Context
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccountBalance
@@ -112,6 +114,7 @@ fun GoldVaultNavHost() {
     }
 
     Scaffold(
+        contentWindowInsets = WindowInsets.navigationBars,
         snackbarHost = { SnackbarHost(snackbarHostState) },
         bottomBar = {
             if (!isDetailScreen) {

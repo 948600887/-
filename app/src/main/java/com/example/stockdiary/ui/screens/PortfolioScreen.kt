@@ -524,6 +524,7 @@ fun PortfolioScreen(
     }
 
     Scaffold(
+        contentWindowInsets = WindowInsets.statusBars,
         snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             TopAppBar(

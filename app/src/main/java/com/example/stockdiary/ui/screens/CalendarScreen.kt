@@ -9,6 +9,8 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
@@ -139,6 +141,7 @@ fun CalendarScreen(
 
     // Snackbar 必须由 Scaffold 固定托管；放进 verticalScroll 会滚到页面底部且撑高内容。
     Scaffold(
+        contentWindowInsets = WindowInsets.statusBars,
         modifier = modifier.fillMaxSize(),
         snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
         containerColor = AppTheme.colors.background,

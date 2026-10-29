@@ -3,7 +3,12 @@ package com.example.stockdiary
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.runtime.SideEffect
+import androidx.compose.ui.platform.LocalView
+import androidx.core.view.WindowCompat
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -39,6 +44,12 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        // targetSdk 35（Android 15）强制边到边：系统不再为状态栏/导航栏预留空间，
+        // 内容会延伸到系统栏之下。enableEdgeToEdge 把系统栏背景设为透明并关闭
+        // decorFitsSystemWindows，配合各屏幕 Material3 Scaffold 默认的
+        // contentWindowInsets=WindowInsets.systemBars 自动避让系统栏，避免 TopAppBar 被遮。
+        enableEdgeToEdge()
+
         // 初始化已全部收敛到 StockDiaryApplication.onCreate（AppLogger / 崩溃处理 / DI 容器）。
         // 原先这里还有一份 initializeApp()：重复 init GlobalExceptionHandler + AppLogger。
         // 因 GlobalExceptionHandler.initialize 有幂等守卫、Application 先跑，那次调用是空操作——
@@ -46,6 +57,17 @@ class MainActivity : ComponentActivity() {
         // 不再 onConfigurationChanged→recreate()（见 manifest 的 configChanges="uiMode"）。
 
         setContent {
+            val darkTheme = isSystemInDarkTheme()
+            val view = LocalView.current
+            // 系统栏前景色随主题切换：亮色主题用暗色图标、深色主题用亮色图标，
+            // 保证状态栏/导航栏文字始终落在 TopAppBar 同色系背景上清晰可见。
+            SideEffect {
+                WindowCompat.getInsetsController(window, view).apply {
+                    isAppearanceLightStatusBars = !darkTheme
+                    isAppearanceLightNavigationBars = !darkTheme
+                }
+            }
+
             val container = StockDiaryApplication.instance.container
             GoldVaultTheme {
                 Surface(

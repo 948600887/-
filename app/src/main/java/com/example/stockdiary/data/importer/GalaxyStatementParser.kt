@@ -124,7 +124,7 @@ object GalaxyStatementParser {
      * 除了去千分位，还要把 OCR 认错的负号（中文「一」、全角破折号）还原成半角减号——
      * 真实截图里 `-486.40` 被认成 `一486.40`，不归一化的话这笔金额直接解析失败。
      */
-    private fun toNumber(raw: String): Double? =
+    internal fun toNumber(raw: String): Double? =
         raw.replace(NEGATIVE_GLYPH_REGEX, "-").replace(",", "").toDoubleOrNull()
 
     /** 首行之后最多向后看几行去找详情行 */
@@ -471,7 +471,7 @@ object GalaxyStatementParser {
     }
 
     /** 去掉名称里的空白（OCR 常在名称中间插空格） */
-    private fun cleanName(raw: String): String =
+    internal fun cleanName(raw: String): String =
         raw.replace(INNER_BLANK_REGEX, "").replace("\u00A0", "").trim()
 
     /**
@@ -480,7 +480,7 @@ object GalaxyStatementParser {
      * 只做「确定安全」的替换，不做通用去空格——否则会把相邻的两个数字
      * （如 "700 0.10"）粘成一个数，那属于静默数据损坏，比解析失败更危险。
      */
-    private fun normalizeLine(raw: String): String {
+    internal fun normalizeLine(raw: String): String {
         var s = toHalfWidth(raw)
         // 小数点两侧被拆开：'1 . 546' / '1. 546' / '1 .546' → '1.546'
         // 后顾断言排除了「日期后面的句点」：'09-23. 10:48' 若被粘成 '09-23.10:48'，
@@ -498,7 +498,7 @@ object GalaxyStatementParser {
     }
 
     /** 全角 → 半角；全角空格（U+3000）转普通空格 */
-    private fun toHalfWidth(input: String): String {
+    internal fun toHalfWidth(input: String): String {
         val sb = StringBuilder(input.length)
         for (ch in input) {
             when {

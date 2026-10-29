@@ -872,17 +872,15 @@ object UnifiedPriceService {
     
     private fun parseBinanceCrypto(code: String, response: String): CryptoData? {
         return try {
-            val price = parseJsonField(response, "lastPrice")?.toDoubleOrNull()
-                ?: return null
-            
-            val change = parseJsonField(response, "priceChange")?.toDoubleOrNull()
-            val changePercent = parseJsonField(response, "priceChangePercent")?.toDoubleOrNull()
-            val high = parseJsonField(response, "highPrice")?.toDoubleOrNull()
-            val low = parseJsonField(response, "lowPrice")?.toDoubleOrNull()
-            val volume = parseJsonField(response, "volume")?.let {
-                it.toDoubleOrNull()?.toLong()
-            }
-            
+            val json = JSONObject(response)
+            // 用 optString + toDoubleOrNull：字段缺失→null（与原正则解析语义一致），
+            // 且能正确处理带引号/千分位的数字（原正则 [^",\}] 会把 "1,234.56" 截断成 "1"）。
+            val price = json.optString("lastPrice", "").toDoubleOrNull() ?: return null
+            val change = json.optString("priceChange", "").toDoubleOrNull()
+            val changePercent = json.optString("priceChangePercent", "").toDoubleOrNull()
+            val high = json.optString("highPrice", "").toDoubleOrNull()
+            val low = json.optString("lowPrice", "").toDoubleOrNull()
+            val volume = json.optString("volume", "").toDoubleOrNull()?.toLong()
             CryptoData(
                 code = code,
                 name = code,
@@ -901,12 +899,7 @@ object UnifiedPriceService {
             null
         }
     }
-    
-    private fun parseJsonField(json: String, key: String): String? {
-        val pattern = "\"$key\"\\s*:\\s*\"?([^\",\\}]+)\"?".toRegex()
-        return pattern.find(json)?.groupValues?.getOrNull(1)?.trim()
-    }
-    
+
     /**
      * 测试专用：只清本门面的 60 秒缓存，不碰 FundAPI / CacheManager（它们在 JVM 单测里需要 Context）。
      *

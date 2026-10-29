@@ -131,6 +131,9 @@ class DividendService {
         }
     }
     
+    /** 单表内真实解析异常（非合法的「缺字段/脏日期/零派息」跳过）超过该值，判定源结构变化并抛出 */
+    private val ROW_PARSE_FAILURE_THRESHOLD = 3
+
     /**
      * 解析新浪财经分红HTML页面
      * 表格结构（以 600519 为例）：
@@ -139,6 +142,9 @@ class DividendService {
      */
     internal fun parseDividendHtml(html: String, @Suppress("UNUSED_PARAMETER") stockCode: String, @Suppress("UNUSED_PARAMETER") market: String): List<DividendRecord> {
         val records = mutableListOf<DividendRecord>()
+        // 真实解析异常计数（不含合法的「缺字段/脏日期/零派息」跳过）：
+        // 超阈值说明源表格结构可能已变化，在返回前抛出交由上层按「源不可用」处置，避免静默返回部分结果。
+        var rowParseFailures = 0
 
         try {
             val doc = Jsoup.parse(html)
@@ -195,7 +201,8 @@ class DividendService {
                     } catch (e: CancellationException) {
                         throw e
                     } catch (e: Exception) {
-                        AppLogger.e("解析表格行失败: ${e.message}", tag = "DividendService")
+                        rowParseFailures++
+                        AppLogger.e("解析分红表格行失败（第 $i 行）: ${e.message}", e, "DividendService")
                         continue
                     }
                 }
@@ -203,11 +210,17 @@ class DividendService {
                 if (records.isNotEmpty()) break
             }
 
-            AppLogger.d("最终解析到 ${records.size} 条分红记录", "DividendService")
+            AppLogger.d("最终解析到 ${records.size} 条分红记录（其中 $rowParseFailures 行解析异常）", "DividendService")
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             AppLogger.e("HTML解析异常", e, "DividendService")
+        }
+
+        // 大量行解析失败：源表格结构多半已变化，抛出来让上层按「源不可用」处理，
+        // 而不是默默返回残缺列表（用户会误以为「今年没分红」）。
+        if (rowParseFailures >= ROW_PARSE_FAILURE_THRESHOLD) {
+            throw IOException("新浪分红表格解析失败 $rowParseFailures 行，源结构可能已变化")
         }
 
         return records

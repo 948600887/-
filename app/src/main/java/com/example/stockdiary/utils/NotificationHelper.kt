@@ -226,9 +226,11 @@ object NotificationHelper {
     // 设置每日提醒
     fun setDailyReminder(context: Context, hour: Int, minute: Int): Boolean {
         return try {
+            // setAlarmClock 不需要 SCHEDULE_EXACT_ALARM 权限（Android 12+ 推荐方式），
+            // 因此不应以 canScheduleExactAlarms() 为前置阻塞——否则用户未授予精确闹钟权限时
+            // 每日提醒会静默失效。仅保留日志观察，仍照常排期。
             if (!canScheduleExactAlarms(context)) {
-                AppLogger.w("无精确闹钟权限，无法设置每日提醒", "NotificationHelper")
-                return false
+                AppLogger.w("未授予精确闹钟权限，但 setAlarmClock 无需该权限，仍尝试设置每日提醒", "NotificationHelper")
             }
             setReminderEnabled(context, true)
             // 持久化提醒时间：开机广播重排闹钟时只能从 prefs 读（闹钟 Intent 随重启清空）
@@ -413,8 +415,7 @@ object NotificationHelper {
 
         /** 设置下一天的提醒（保留原始时间），Android 12+ 需先检查权限 */
         private fun scheduleNextDay(context: Context, hour: Int, minute: Int) {
-            if (!canScheduleExactAlarms(context)) return
-
+            // setAlarmClock 无需 SCHEDULE_EXACT_ALARM 权限，不再以该权限为前置阻塞
             val tomorrowScheduledTime = LocalDateTime.now().plusDays(1)
                 .withHour(hour).withMinute(minute).withSecond(0).withNano(0)
             val tomorrowMillis = tomorrowScheduledTime

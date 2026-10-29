@@ -29,6 +29,9 @@ interface AssetDao {
     
     @Query("SELECT * FROM assets WHERE type IN (:types) ORDER BY type, name")
     suspend fun getAssetsByTypes(types: List<AssetType>): List<Asset>
+
+    @Query("SELECT * FROM assets WHERE type IN (:types) ORDER BY type, name")
+    fun getAssetsByTypesFlow(types: List<AssetType>): Flow<List<Asset>>
     
     @Query("SELECT DISTINCT account FROM assets")
     suspend fun getAllAccounts(): List<String>

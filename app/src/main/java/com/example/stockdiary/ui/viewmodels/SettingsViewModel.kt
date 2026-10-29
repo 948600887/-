@@ -19,10 +19,9 @@ import com.example.stockdiary.data.sync.PriceSyncScheduler
 import com.example.stockdiary.data.sync.SnapshotScheduler
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetSnapshot
-import com.example.stockdiary.database.DividendDao
-import com.example.stockdiary.database.SnapshotDao
+import com.example.stockdiary.data.repository.DividendRepository
+import com.example.stockdiary.data.repository.TransactionRepository
 import com.example.stockdiary.database.Transaction
-import com.example.stockdiary.database.TransactionDao
 import com.example.stockdiary.di.AppContainer
 import com.example.stockdiary.utils.AppLogger
 import com.example.stockdiary.utils.DataSourceHealth
@@ -46,9 +45,8 @@ import java.io.File
 class SettingsViewModel(
     private val appContext: Context,
     private val assetRepository: AssetRepository,
-    private val snapshotDao: SnapshotDao,
-    private val transactionDao: TransactionDao,
-    private val dividendDao: DividendDao,
+    private val dividendRepository: DividendRepository,
+    private val transactionRepository: TransactionRepository,
     private val dataExporter: DataExporter,
     private val dashboardPreferencesManager: DashboardPreferencesManager,
     private val dataSourceHealthChecker: DataSourceHealthChecker,
@@ -223,7 +221,7 @@ class SettingsViewModel(
         }
         viewModelScope.launch {
             try {
-                snapshotDao.getAllSnapshots()
+                assetRepository.getAllSnapshots()
                     .map { it.size }
                     .distinctUntilChanged()
                     .collect { count -> _uiState.update { state -> state.copy(snapshotCount = count) } }
@@ -235,7 +233,7 @@ class SettingsViewModel(
         }
         viewModelScope.launch {
             try {
-                transactionDao.getAllFlow()
+                transactionRepository.getAllFlow()
                     .map { it.size }
                     .distinctUntilChanged()
                     .collect { count -> _uiState.update { state -> state.copy(transactionCount = count) } }
@@ -247,7 +245,7 @@ class SettingsViewModel(
         }
         viewModelScope.launch {
             try {
-                dividendDao.getAllFlow()
+                dividendRepository.getAllDividendsFlow()
                     .map { it.size }
                     .distinctUntilChanged()
                     .collect { count -> _uiState.update { state -> state.copy(dividendCount = count) } }
@@ -281,18 +279,18 @@ class SettingsViewModel(
                     ExportType.TEXT -> dataExporter.exportToText(assetRepository.getAllAssets().first())
                     ExportType.CSV_ASSETS -> dataExporter.exportAssetsToCSV(assetRepository.getAllAssets().first())
                     ExportType.CSV_SNAPSHOTS ->
-                        dataExporter.exportSnapshotsToCSV(snapshotDao.getAllSnapshotsSync())
+                        dataExporter.exportSnapshotsToCSV(assetRepository.getAllSnapshotsSync())
                     ExportType.CSV_TRANSACTIONS -> dataExporter.exportTransactionsToCSV(
                         assetRepository.getAllAssets().first(),
-                        transactionDao.getAllFlow().first()
+                        transactionRepository.getAllFlow().first()
                     )
                     ExportType.CSV_STATEMENT -> dataExporter.exportStatementCSV(
                         assetRepository.getAllAssets().first(),
-                        transactionDao.getAllFlow().first(),
-                        snapshotDao.getAllSnapshotsSync(),
-                        dividendDao.getAllSync()
+                        transactionRepository.getAllFlow().first(),
+                        assetRepository.getAllSnapshotsSync(),
+                        dividendRepository.getAllDividendsSync()
                     )
-                    ExportType.CSV_DIVIDENDS -> dataExporter.exportDividendsToCSV(dividendDao.getAllSync())
+                    ExportType.CSV_DIVIDENDS -> dataExporter.exportDividendsToCSV(dividendRepository.getAllDividendsSync())
                 }
                 result.fold(
                     onSuccess = { uri ->
@@ -728,9 +726,8 @@ class SettingsViewModel(
                 SettingsViewModel(
                     appContext = container.context.applicationContext,
                     assetRepository = container.assetRepository,
-                    snapshotDao = container.database.snapshotDao(),
-                    transactionDao = container.database.transactionDao(),
-                    dividendDao = container.database.dividendDao(),
+                    dividendRepository = container.dividendRepository,
+                    transactionRepository = container.transactionRepository,
                     dataExporter = container.dataExporter,
                     dashboardPreferencesManager = container.dashboardPreferencesManager,
                     dataSourceHealthChecker = DataSourceHealthChecker,

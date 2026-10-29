@@ -45,6 +45,9 @@ class AssetRepository private constructor(
 ) {
     
     fun getAllAssets(): Flow<List<Asset>> = assetDao.getAllAssets()
+
+    /** 日历等只关心部分资产类型的场景：把类型过滤下推到 SQL，避免全表拉取后在内存里 filter */
+    fun getAssetsByTypesFlow(types: List<AssetType>): Flow<List<Asset>> = assetDao.getAssetsByTypesFlow(types)
     
     fun getAssetsByType(type: AssetType): Flow<List<Asset>> = assetDao.getAssetsByType(type)
     
@@ -581,6 +584,13 @@ class AssetRepository private constructor(
     
     fun getSnapshotsSince(startTime: Long): Flow<List<AssetSnapshot>> = 
         snapshotDao.getSnapshotsSince(startTime)
+
+    /** 导出用：同步取全部快照（避免 ViewModel 直连 DAO） */
+    suspend fun getAllSnapshotsSync(): List<AssetSnapshot> = snapshotDao.getAllSnapshotsSync()
+
+    /** 日历用：取某时刻之后的快照（挂起版，避免 ViewModel 直连 DAO） */
+    suspend fun getSnapshotsSinceSync(startTime: Long): List<AssetSnapshot> =
+        snapshotDao.getSnapshotsSinceSync(startTime)
     
     fun getRecentSnapshots(limit: Int): Flow<List<AssetSnapshot>> = 
         snapshotDao.getRecentSnapshots(limit)

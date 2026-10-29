@@ -15,7 +15,6 @@ import com.example.stockdiary.data.repository.DividendRepository
 import com.example.stockdiary.data.sync.SyncBudget
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
-import com.example.stockdiary.database.SnapshotDao
 import com.example.stockdiary.database.perTenSharesToAmount
 import com.example.stockdiary.di.AppContainer
 import com.example.stockdiary.utils.AppLogger
@@ -41,7 +40,6 @@ import java.time.YearMonth
 class CalendarViewModel(
     private val assetRepository: AssetRepository,
     private val dividendRepository: DividendRepository,
-    private val snapshotDao: SnapshotDao,
     private val dashboardPreferencesManager: DashboardPreferencesManager,
     private val dividendIncomeUseCase: DividendIncomeUseCase
 ) : ViewModel() {
@@ -108,13 +106,10 @@ class CalendarViewModel(
         _uiState.update { state -> state.copy(monthlyExpense = prefs.monthlyExpense) }
 
         viewModelScope.launch {
-            assetRepository.getAllAssets()
-                .map { assets -> assets.filter { it.type in supportedTypes } }
-                // 日历只依赖「有哪些标的 + 数量/币种」：资产日历按 symbol 取分红，收支日历还按
-                // balance/currency 折算金额——都与**实时价无关**。而 getAllAssets() 是 Room 流，
-                // 同步时每更新一个 currentPrice 就重发一次，实测一次全量刷新让「生成资产日历」
-                // 白跑 20+ 次（快照/分红都没变，结果一模一样）。按日历真正关心的字段做签名去重，
-                // 价格抖动不再触发重算；首值直接放行、零延迟，不影响冷启动加载。
+            // 类型过滤下推到 SQL（getAssetsByTypesFlow 的 WHERE type IN）：不再全表拉取后内存 filter，
+            // 同步时 crypto/负债类资产的价格更新不会让这条流重发无关数据，配合下方签名去重，
+            // 价格抖动不再触发「生成资产日历」白跑。首值直接放行、零延迟，不影响冷启动加载。
+            assetRepository.getAssetsByTypesFlow(supportedTypes)
                 .distinctUntilChanged { old, new -> calendarSignature(old) == calendarSignature(new) }
                 .collect { assets ->
                     _uiState.update { state -> state.copy(assets = assets) }
@@ -413,7 +408,7 @@ class CalendarViewModel(
                 .atZone(java.time.ZoneId.systemDefault())
                 .toInstant()
                 .toEpochMilli()
-            val monthSnapshots = snapshotDao.getSnapshotsSinceSync(monthStartMillis).mapNotNull { snapshot ->
+            val monthSnapshots = assetRepository.getSnapshotsSinceSync(monthStartMillis).mapNotNull { snapshot ->
                 val date = try {
                     LocalDate.parse(snapshot.date)
                 } catch (e: CancellationException) {
@@ -609,7 +604,6 @@ class CalendarViewModel(
                 CalendarViewModel(
                     assetRepository = container.assetRepository,
                     dividendRepository = container.dividendRepository,
-                    snapshotDao = container.database.snapshotDao(),
                     dashboardPreferencesManager = container.dashboardPreferencesManager,
                     dividendIncomeUseCase = container.dividendIncomeUseCase
                 )

@@ -11,6 +11,7 @@ import com.example.stockdiary.data.dividend.isFetchedToday
 import com.example.stockdiary.data.dividend.shouldRefetchOtc
 import android.annotation.SuppressLint
 import android.content.Context
+import kotlinx.coroutines.flow.Flow
 import androidx.room.withTransaction
 import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.database.Dividend
@@ -53,6 +54,12 @@ class DividendRepository private constructor(
     private val sinaService = DividendService()
     private val fundDividendApi = FundDividendApiService()
     private val dividendDao by lazy { StockDatabase.getInstance(context).dividendDao() }
+
+    /** 设置页计数/导出用：全部分红（流） */
+    fun getAllDividendsFlow(): Flow<List<Dividend>> = dividendDao.getAllFlow()
+
+    /** 设置页导出用：同步取全部分红（避免 ViewModel 直连 DAO） */
+    suspend fun getAllDividendsSync(): List<Dividend> = dividendDao.getAllSync()
     
     private val cache = ConcurrentHashMap<String, CacheEntry>()
     private val cacheTTL = 24 * 60 * 60 * 1000L

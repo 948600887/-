@@ -12,6 +12,7 @@ import com.example.stockdiary.data.dividend.DividendIncomeCache
 import com.example.stockdiary.data.dividend.DividendIncomeLoader
 import com.example.stockdiary.data.dividend.DividendIncomeUseCase
 import com.example.stockdiary.data.repository.DividendRepository
+import com.example.stockdiary.data.repository.TransactionRepository
 import com.example.stockdiary.data.importer.HoldingSnapshotService
 import com.example.stockdiary.data.importer.ImageTextRecognizer
 import com.example.stockdiary.data.importer.OcrStatementService
@@ -26,6 +27,8 @@ import com.example.stockdiary.utils.CrashRecoveryManager
 class AppContainer(val context: Context) {
     val assetRepository: AssetRepository by lazy { AssetRepository.getInstance(context) }
     val dividendRepository: DividendRepository by lazy { DividendRepository.getInstance(context) }
+    /** 交易流水的唯一访问入口，收口对 TransactionDao 的直接访问（与 AssetRepository/DividendRepository 同一架构边界） */
+    val transactionRepository: TransactionRepository by lazy { TransactionRepository.getInstance(context) }
     // 跨 VM 共享的单一入口：分红收入抓取经此收口，进程内 in-flight 单飞，避免多屏重复抓同一份数据
     // 注入 DividendIncomeCache：把算好的「预计收入」持久化，同日刷新复用、仅底层数据变化或跨日才重算
     private val dividendIncomeLoader by lazy {

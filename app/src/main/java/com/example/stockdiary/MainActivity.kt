@@ -46,8 +46,10 @@ class MainActivity : ComponentActivity() {
 
         // targetSdk 35（Android 15）强制边到边：系统不再为状态栏/导航栏预留空间，
         // 内容会延伸到系统栏之下。enableEdgeToEdge 把系统栏背景设为透明并关闭
-        // decorFitsSystemWindows，配合各屏幕 Material3 Scaffold 默认的
-        // contentWindowInsets=WindowInsets.systemBars 自动避让系统栏，避免 TopAppBar 被遮。
+        // decorFitsSystemWindows。系统栏避让由两层 Scaffold 分工，**切勿都用默认 systemBars**：
+        // 嵌套 Scaffold 若各算一遍 systemBars，顶部/底部会各多出一大块空白（已修回归）。
+        //   - 外层 GoldVaultNavHost Scaffold：WindowInsets.navigationBars（只管底部导航栏）
+        //   - 各页面 Scaffold：WindowInsets.statusBars（只管顶部状态栏，bottomBar 交给外层）
         enableEdgeToEdge()
 
         // 初始化已全部收敛到 StockDiaryApplication.onCreate（AppLogger / 崩溃处理 / DI 容器）。

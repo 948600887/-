@@ -7,14 +7,11 @@ import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
-import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -78,6 +75,16 @@ fun DashboardConfigSheet(
 
     ModalBottomSheet(
         onDismissRequest = onDismiss
+        // 刻意不传 windowInsets，也不在 content 里手动加 navigationBars padding。
+        //
+        // 反编译本项目 material3 1.2.0（compose-bom 2024.02.00）的 aar 字节码确认：
+        // ModalBottomSheet 默认 windowInsets = systemBars.only(Vertical)，其 Dialog window
+        // 内容容器会 windowInsetsPadding(该值)——已含顶部 statusBars + 底部 navigationBars
+        // 避让，且**全程不 consumeWindowInsets**（全 material3 仅 SearchBar 用 consume）。
+        // 旧代码在 content 又写了 .windowInsetsPadding(WindowInsets.navigationBars)，
+        // 因未被 consume 会读到完整导航栏值、叠加成第二份，底部出现双倍留白——本次删除。
+        // 顶部 statusBars 同样由这份默认 windowInsets 负责，故绝不能把 windowInsets 清零，
+        // 否则内容超过一屏、sheet 展开到接近全屏时会顶进状态栏。
     ) {
         Column(
             modifier = Modifier
@@ -86,9 +93,10 @@ fun DashboardConfigSheet(
                 // 下方（排序 / 历史周期 / 恢复默认）被裁掉且够不着——即「不能下滑」。
                 .verticalScroll(rememberScrollState())
                 // 阈值输入框弹键盘时，把内容顶到键盘之上，避免输入框被键盘挡住。
+                // 底部系统栏（navigationBars）避让由 ModalBottomSheet 默认 windowInsets 负责，
+                // 这里不再手动叠加（旧代码会多出一份、形成双倍留白，见上方注释）。
                 .imePadding()
                 .padding(horizontal = 16.dp)
-                .windowInsetsPadding(WindowInsets.navigationBars)
                 .padding(bottom = 16.dp)
         ) {
             Text(

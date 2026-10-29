@@ -301,7 +301,7 @@ class DividendIncomeCacheVerifyTest {
     fun `缓存同日但 dataHash 不同_必须重算而不是复用旧值`() = runBlocking {
         val assets = listOf(stock("sh600519"))
         coEvery { repository.getCachedAllowingStale("sh600519") } returns listOf(record(today, "5.0"))
-        coEvery { repository.prefetchDividends(any(), any()) } returns emptyMap()
+        coEvery { repository.prefetchDividendsBatch(any(), any()) } returns emptyMap()
         coEvery { repository.getDividendsBySymbol("sh600519", false, any()) } returns listOf(record(today, "5.0"))
 
         val (results, hashes, dates) = captureSave()
@@ -319,7 +319,7 @@ class DividendIncomeCacheVerifyTest {
         // 哈希不同 → 第二次必须重算：拿新抓的 50.0，而不是缓存里的 999.0
         assertEquals(50.0, first.totalAnnualIncome, 1e-6)
         assertEquals(50.0, second.totalAnnualIncome, 1e-6)
-        coVerify(exactly = 2) { repository.prefetchDividends(any(), any()) }
+        coVerify(exactly = 2) { repository.prefetchDividendsBatch(any(), any()) }
         coVerify(exactly = 2) { repository.getDividendsBySymbol("sh600519", false, any()) }
         coVerify(exactly = 2) { cache.save(any(), any(), any(), any()) }
         assertEquals(2, hashes.size)
@@ -330,7 +330,7 @@ class DividendIncomeCacheVerifyTest {
     fun `缓存非同日_即使 dataHash 完全一致也必须重算_保留跨日 TTM 漂移`() = runBlocking {
         val assets = listOf(stock("sh600519"))
         coEvery { repository.getCachedAllowingStale("sh600519") } returns listOf(record(today, "5.0"))
-        coEvery { repository.prefetchDividends(any(), any()) } returns emptyMap()
+        coEvery { repository.prefetchDividendsBatch(any(), any()) } returns emptyMap()
         coEvery { repository.getDividendsBySymbol("sh600519", false, any()) } returns listOf(record(today, "5.0"))
 
         val (_, hashes, _) = captureSave()
@@ -353,7 +353,7 @@ class DividendIncomeCacheVerifyTest {
         val second = cachedLoader.loadIncome(assets)
 
         // 两次都重算（TTM 滑窗随日期漂移是预期行为，不许被缓存吃掉）
-        coVerify(exactly = 2) { repository.prefetchDividends(any(), any()) }
+        coVerify(exactly = 2) { repository.prefetchDividendsBatch(any(), any()) }
         coVerify(exactly = 2) { cache.save(any(), any(), any(), any()) }
         assertEquals(50.0, first.totalAnnualIncome, 1e-6)
         assertEquals(50.0, second.totalAnnualIncome, 1e-6)
@@ -363,7 +363,7 @@ class DividendIncomeCacheVerifyTest {
     fun `forceRefresh 同日且数据未变_必须重抓重算且不读持久化缓存`() = runBlocking {
         val assets = listOf(stock("sh600519"))
         coEvery { repository.getCachedAllowingStale("sh600519") } returns listOf(record(today, "5.0"))
-        coEvery { repository.prefetchDividends(any(), any()) } returns emptyMap()
+        coEvery { repository.prefetchDividendsBatch(any(), any()) } returns emptyMap()
         coEvery { repository.getDividendsBySymbol("sh600519", false, any()) } returns listOf(record(today, "5.0"))
         coEvery { repository.getDividendsBySymbol("sh600519", true, any()) } returns listOf(record(today, "5.0"))
 
@@ -395,7 +395,7 @@ class DividendIncomeCacheVerifyTest {
     fun `同日哈希一致_原样复用缓存值即使与重算值不同`() = runBlocking {
         val assets = listOf(stock("sh600519"))
         coEvery { repository.getCachedAllowingStale("sh600519") } returns listOf(record(today, "5.0"))
-        coEvery { repository.prefetchDividends(any(), any()) } returns emptyMap()
+        coEvery { repository.prefetchDividendsBatch(any(), any()) } returns emptyMap()
         coEvery { repository.getDividendsBySymbol("sh600519", false, any()) } returns listOf(record(today, "5.0"))
 
         val (_, hashes, _) = captureSave()
@@ -414,7 +414,7 @@ class DividendIncomeCacheVerifyTest {
         // 原样返回持久化的 777.0（证明是真复用，不是偷偷重算了一遍）
         assertEquals(777.0, reused.totalAnnualIncome, 1e-6)
         // 两次调用总共只抓取过一次
-        coVerify(exactly = 1) { repository.prefetchDividends(any(), any()) }
+        coVerify(exactly = 1) { repository.prefetchDividendsBatch(any(), any()) }
         coVerify(exactly = 1) { repository.getDividendsBySymbol("sh600519", false, any()) }
     }
 
@@ -432,7 +432,7 @@ class DividendIncomeCacheVerifyTest {
             )
         )
         coEvery { repository.getCachedAllowingStale("sh600519") } returns currentRecords
-        coEvery { repository.prefetchDividends(any(), any()) } returns emptyMap()
+        coEvery { repository.prefetchDividendsBatch(any(), any()) } returns emptyMap()
         coEvery { repository.getDividendsBySymbol("sh600519", false, any()) } returns listOf(record(today, "5.0"))
 
         val (_, hashes, _) = captureSave()
@@ -460,7 +460,7 @@ class DividendIncomeCacheVerifyTest {
         val assets = listOf(stock("sh600519"))
         // 库里读回的是 amount.toString() 规范形态；假设某次落盘用的原始串是 "5.00"（同值不同形）
         coEvery { repository.getCachedAllowingStale("sh600519") } returns listOf(record(today, "5.00"))
-        coEvery { repository.prefetchDividends(any(), any()) } returns emptyMap()
+        coEvery { repository.prefetchDividendsBatch(any(), any()) } returns emptyMap()
         coEvery { repository.getDividendsBySymbol("sh600519", false, any()) } returns listOf(record(today, "5.0"))
 
         val (_, _, _) = captureSave()
@@ -476,7 +476,7 @@ class DividendIncomeCacheVerifyTest {
         val second = cachedLoader.loadIncome(assets)
 
         // 形态不同 → 哈希不同 → 保守重算：不返回可能过期的值，且重算结果正确
-        coVerify(exactly = 2) { repository.prefetchDividends(any(), any()) }
+        coVerify(exactly = 2) { repository.prefetchDividendsBatch(any(), any()) }
         assertEquals(50.0, first.totalAnnualIncome, 1e-6)
         assertEquals(50.0, second.totalAnnualIncome, 1e-6)
     }
@@ -493,7 +493,7 @@ class DividendIncomeCacheVerifyTest {
         assertEquals(50.0, first.totalAnnualIncome, 1e-6)
         assertEquals(50.0, second.totalAnnualIncome, 1e-6)
         coVerify(exactly = 2) { repository.getCachedAllowingStale("sh600519") }
-        coVerify(exactly = 0) { repository.prefetchDividends(any(), any()) }
+        coVerify(exactly = 0) { repository.prefetchDividendsBatch(any(), any()) }
         coVerify(exactly = 0) { repository.getDividendsBySymbol(any(), any(), any()) }
     }
 
@@ -506,7 +506,7 @@ class DividendIncomeCacheVerifyTest {
     fun `旧格式缓存_哈希不含持仓指纹_同日也自然不命中自动重算不崩`() = runBlocking {
         val assets = listOf(stock("sh600519", balance = 100.0))
         coEvery { repository.getCachedAllowingStale("sh600519") } returns listOf(record(today, "5.0"))
-        coEvery { repository.prefetchDividends(any(), any()) } returns emptyMap()
+        coEvery { repository.prefetchDividendsBatch(any(), any()) } returns emptyMap()
         coEvery { repository.getDividendsBySymbol("sh600519", false, any()) } returns listOf(record(today, "5.0"))
 
         every { cache.loadCached(any()) } returns DividendIncomeCache.CachedIncome(
@@ -522,7 +522,7 @@ class DividendIncomeCacheVerifyTest {
 
         // 自然不命中 → 重算拿到当前持仓的正确值，不崩、不返回旧缓存的 999
         assertEquals(50.0, result.totalAnnualIncome, 1e-6)
-        coVerify(exactly = 1) { repository.prefetchDividends(any(), any()) }
+        coVerify(exactly = 1) { repository.prefetchDividendsBatch(any(), any()) }
         coVerify(exactly = 1) { repository.getDividendsBySymbol("sh600519", false, any()) }
         // 重算后照常落盘（新格式哈希），下次同日即可命中
         coVerify(exactly = 1) { cache.save(any(), any(), any(), any()) }

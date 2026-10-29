@@ -22,7 +22,7 @@ import org.junit.Test
 /**
  * 天天基金 514 限流的「信号链」回归：
  *
- * Service(otcRateLimitHit) → Repository(preFetchDividends 读走 → _otcRateLimitedThisCycle)
+ * Service(otcRateLimitHit) → Repository(prefetchDividends 读走 → _otcRateLimitedThisCycle)
  * → ViewModel(consumeOtcRateLimitWarning) → Snackbar。
  *
  * 不做整条 UI 链路的 Instrumented 测试（太重），只钉死「限流发生了 ⇒ consume 返回 true」
@@ -42,7 +42,7 @@ class DividendOtcRateLimitTest {
     }
 
     @Test
-    fun `preFetchDividends 把场外 514 信号透传到 consumeOtcRateLimitWarning`() = runBlocking {
+    fun `prefetchDividends 把场外 514 信号透传到 consumeOtcRateLimitWarning`() = runBlocking {
         // 用桩模拟「场外基金抓取撞 514」：getDividendsBySymbol 被调用时把进程级 flag 置位，
         // 这正是 FundDividendApiService 在两个 514/429 分支里做的事。
         coEvery { repository.getDividendsBySymbol(any(), any(), any()) } coAnswers {
@@ -50,10 +50,10 @@ class DividendOtcRateLimitTest {
             emptyList()
         }
 
-        // 全选场外基金：批量预取直接跳过（不走东财），只走 preFetchDividends 的逐条补抓路径，
+        // 全选场外基金：批量预取直接跳过（不走东财），只走 prefetchDividends 的逐条补抓路径，
         // 整条路不碰网络与 Room。
         val symbols = listOf("fund_010001", "fund_010002", "fund_010003")
-        repository.preFetchDividends(symbols, forceRefresh = true, timeBudgetMs = 600_000L)
+        repository.prefetchDividends(symbols, forceRefresh = true, timeBudgetMs = 600_000L)
 
         // 信号链透传：本轮确实撞过限流 ⇒ 消费返回 true
         assertTrue(repository.consumeOtcRateLimitWarning())

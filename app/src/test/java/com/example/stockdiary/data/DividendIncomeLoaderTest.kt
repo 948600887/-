@@ -116,7 +116,7 @@ class DividendIncomeLoaderTest {
         // 严格桩下任何抓取调用都会当场抛异常；这里再显式钉死「一次都没发」
         coVerify(exactly = 1) { repository.getCachedAllowingStale("sh600519") }
         coVerify(exactly = 1) { repository.getCachedAllowingStale("sh000001") }
-        coVerify(exactly = 0) { repository.prefetchDividends(any(), any()) }
+        coVerify(exactly = 0) { repository.prefetchDividendsBatch(any(), any()) }
         coVerify(exactly = 0) { repository.getDividendsBySymbol(any(), any(), any()) }
     }
 
@@ -126,14 +126,14 @@ class DividendIncomeLoaderTest {
         val assets = listOf(stock("sh600519"), stock("sh000001"))
         coEvery { repository.getCachedAllowingStale("sh600519") } returns listOf(record(today, "5.0"))
         coEvery { repository.getCachedAllowingStale("sh000001") } returns null // 连过期数据都没有
-        coEvery { repository.prefetchDividends(any(), any()) } returns emptyMap()
+        coEvery { repository.prefetchDividendsBatch(any(), any()) } returns emptyMap()
         coEvery { repository.getDividendsBySymbol("sh600519", false, any()) } returns listOf(record(today, "5.0"))
         coEvery { repository.getDividendsBySymbol("sh000001", false, any()) } returns emptyList()
 
         val result = loader.loadIncome(assets, cacheOnly = true)
 
         // 批量预取必须带上全部标的，而不是只抓缺的那只——合并请求才省得下请求数
-        coVerify(exactly = 1) { repository.prefetchDividends(listOf("sh600519", "sh000001"), false) }
+        coVerify(exactly = 1) { repository.prefetchDividendsBatch(listOf("sh600519", "sh000001"), false) }
         coVerify(exactly = 1) { repository.getDividendsBySymbol("sh600519", false, any()) }
         coVerify(exactly = 1) { repository.getDividendsBySymbol("sh000001", false, any()) }
         assertEquals(50.0, result.totalAnnualIncome, 1e-6)
@@ -143,13 +143,13 @@ class DividendIncomeLoaderTest {
     fun `cacheOnly 与 forceRefresh 同时为 true 时不走快速路径`() = runBlocking {
         val today = LocalDate.now().toString()
         val assets = listOf(stock("sh600519"))
-        coEvery { repository.prefetchDividends(any(), any()) } returns emptyMap()
+        coEvery { repository.prefetchDividendsBatch(any(), any()) } returns emptyMap()
         coEvery { repository.getDividendsBySymbol("sh600519", true, any()) } returns listOf(record(today, "5.0"))
 
         loader.loadIncome(assets, forceRefresh = true, cacheOnly = true)
 
         // 刷新路径刻意不看缓存：宁可多发一次批量请求，也不能把旧数据当新的
-        coVerify(exactly = 1) { repository.prefetchDividends(listOf("sh600519"), true) }
+        coVerify(exactly = 1) { repository.prefetchDividendsBatch(listOf("sh600519"), true) }
         coVerify(exactly = 1) { repository.getDividendsBySymbol("sh600519", true, any()) }
     }
 
@@ -157,7 +157,7 @@ class DividendIncomeLoaderTest {
     fun `只有存款没有股票基金时零请求且结果正确`() = runBlocking {
         val assets = listOf(deposit(balance = 100_000.0, rate = 3.0))
         // 没有股票基金时 prefetch 仍会被调一次（空列表直接返回），必须打桩
-        coEvery { repository.prefetchDividends(any(), any()) } returns emptyMap()
+        coEvery { repository.prefetchDividendsBatch(any(), any()) } returns emptyMap()
 
         val result = loader.loadIncome(assets, cacheOnly = true)
 
@@ -165,7 +165,7 @@ class DividendIncomeLoaderTest {
         assertEquals(3000.0, result.totalAnnualIncome, 1e-6)
         assertTrue(result.dividendsBySymbol.isEmpty())
         assertTrue(!result.hasDividendData)
-        coVerify(exactly = 1) { repository.prefetchDividends(emptyList(), false) }
+        coVerify(exactly = 1) { repository.prefetchDividendsBatch(emptyList(), false) }
         coVerify(exactly = 0) { repository.getDividendsBySymbol(any(), any(), any()) }
     }
 
@@ -208,7 +208,7 @@ class DividendIncomeLoaderTest {
         val assets = listOf(stock("sh600519"), stock("sh000001"))
         coEvery { repository.getCachedAllowingStale("sh600519") } returns listOf(record(today, "5.0"))
         coEvery { repository.getCachedAllowingStale("sh000001") } returns listOf(record(today, "3.0"))
-        coEvery { repository.prefetchDividends(any(), any()) } returns emptyMap()
+        coEvery { repository.prefetchDividendsBatch(any(), any()) } returns emptyMap()
         coEvery { repository.getDividendsBySymbol("sh600519", false, any()) } returns listOf(record(today, "5.0"))
         coEvery { repository.getDividendsBySymbol("sh000001", false, any()) } returns listOf(record(today, "3.0"))
 
@@ -241,7 +241,7 @@ class DividendIncomeLoaderTest {
         // 两次结果一致（复用）
         assertEquals(first.totalAnnualIncome, second.totalAnnualIncome, 1e-9)
         // 第二次不应再进抓取：prefetch / getDividendsBySymbol 只在第一次各调一次
-        coVerify(exactly = 1) { repository.prefetchDividends(any(), any()) }
+        coVerify(exactly = 1) { repository.prefetchDividendsBatch(any(), any()) }
         coVerify(exactly = 1) { repository.getDividendsBySymbol("sh600519", false, any()) }
         coVerify(exactly = 1) { repository.getDividendsBySymbol("sh000001", false, any()) }
         // 落盘只在第一次发生（复用那次走缓存分支、不save）
@@ -258,7 +258,7 @@ class DividendIncomeLoaderTest {
         // 第一次底层记录 5.0；第二次底层记录变成 9.0（数据真变了）
         coEvery { repository.getCachedAllowingStale("sh600519") } returns listOf(record(today, "5.0")) andThen
             listOf(record(today, "9.0"))
-        coEvery { repository.prefetchDividends(any(), any()) } returns emptyMap()
+        coEvery { repository.prefetchDividendsBatch(any(), any()) } returns emptyMap()
         coEvery { repository.getDividendsBySymbol("sh600519", false, any()) } returns
             listOf(record(today, "5.0")) andThen listOf(record(today, "9.0"))
 
@@ -293,7 +293,7 @@ class DividendIncomeLoaderTest {
         assertEquals(50.0, first.totalAnnualIncome, 1e-6)
         assertEquals(90.0, second.totalAnnualIncome, 1e-6)
         // 两次都走了抓取（prefetch 各一次）并都落盘
-        coVerify(exactly = 2) { repository.prefetchDividends(any(), any()) }
+        coVerify(exactly = 2) { repository.prefetchDividendsBatch(any(), any()) }
         coVerify(exactly = 2) { repository.getDividendsBySymbol("sh600519", false, any()) }
         coVerify(exactly = 2) { cache.save(any(), any(), any(), any()) }
     }
@@ -306,7 +306,7 @@ class DividendIncomeLoaderTest {
         val today = LocalDate.now().format(DateTimeFormatter.ISO_LOCAL_DATE)
         val assets = listOf(stock("sh600519"))
         coEvery { repository.getCachedAllowingStale("sh600519") } returns listOf(record(today, "5.0"))
-        coEvery { repository.prefetchDividends(any(), any()) } returns emptyMap()
+        coEvery { repository.prefetchDividendsBatch(any(), any()) } returns emptyMap()
         coEvery { repository.getDividendsBySymbol("sh600519", false, any()) } returns listOf(record(today, "5.0"))
 
         val savedResults = mutableListOf<DividendIncomeLoader.IncomeResult>()
@@ -336,7 +336,7 @@ class DividendIncomeLoaderTest {
         val second = cachedLoader.loadIncome(assets)
 
         // 两次都走抓取（跨日不复用），各自重算
-        coVerify(exactly = 2) { repository.prefetchDividends(any(), any()) }
+        coVerify(exactly = 2) { repository.prefetchDividendsBatch(any(), any()) }
         coVerify(exactly = 2) { repository.getDividendsBySymbol("sh600519", false, any()) }
         coVerify(exactly = 2) { cache.save(any(), any(), any(), any()) }
         // 两次结果一致（同一份数据），但都是重算得到的，而非复用旧缓存
@@ -350,7 +350,7 @@ class DividendIncomeLoaderTest {
     fun `forceRefresh 强制重算不读缓存`() = runBlocking {
         val today = LocalDate.now().format(DateTimeFormatter.ISO_LOCAL_DATE)
         val assets = listOf(stock("sh600519"))
-        coEvery { repository.prefetchDividends(any(), any()) } returns emptyMap()
+        coEvery { repository.prefetchDividendsBatch(any(), any()) } returns emptyMap()
         coEvery { repository.getDividendsBySymbol("sh600519", true, any()) } returns listOf(record(today, "5.0"))
 
         every { cache.save(any(), any(), any(), any()) } just runs
@@ -392,7 +392,7 @@ class DividendIncomeLoaderTest {
         val assetsA = listOf(stock("sh600519", balance = 100.0))
         val assetsB = listOf(stock("sh600519", balance = 200.0)) // 当天加仓
         coEvery { repository.getCachedAllowingStale("sh600519") } returns listOf(record(today, "5.0"))
-        coEvery { repository.prefetchDividends(any(), any()) } returns emptyMap()
+        coEvery { repository.prefetchDividendsBatch(any(), any()) } returns emptyMap()
         coEvery { repository.getDividendsBySymbol("sh600519", false, any()) } returns listOf(record(today, "5.0"))
 
         val (results, hashes, dates) = captureSave()
@@ -417,7 +417,7 @@ class DividendIncomeLoaderTest {
         assertEquals(50.0, first.totalAnnualIncome, 1e-6)
         assertEquals(100.0, second.totalAnnualIncome, 1e-6)
         // 两次都走了抓取（哈希因持仓而不同）+ 都落盘
-        coVerify(exactly = 2) { repository.prefetchDividends(any(), any()) }
+        coVerify(exactly = 2) { repository.prefetchDividendsBatch(any(), any()) }
         coVerify(exactly = 2) { repository.getDividendsBySymbol("sh600519", false, any()) }
         coVerify(exactly = 2) { cache.save(any(), any(), any(), any()) }
     }
@@ -432,7 +432,7 @@ class DividendIncomeLoaderTest {
         val assetsA = listOf(stock("sh600519").copy(currency = "CNY"))
         val assetsB = listOf(stock("sh600519").copy(currency = "USD"))
         coEvery { repository.getCachedAllowingStale("sh600519") } returns listOf(record(today, "5.0"))
-        coEvery { repository.prefetchDividends(any(), any()) } returns emptyMap()
+        coEvery { repository.prefetchDividendsBatch(any(), any()) } returns emptyMap()
         coEvery { repository.getDividendsBySymbol("sh600519", false, any()) } returns listOf(record(today, "5.0"))
 
         val (results, hashes, dates) = captureSave()
@@ -453,7 +453,7 @@ class DividendIncomeLoaderTest {
         cachedLoader.loadIncome(assetsA)
         cachedLoader.loadIncome(assetsB) // currency 变了 → 哈希不同 → 重算
 
-        coVerify(exactly = 2) { repository.prefetchDividends(any(), any()) }
+        coVerify(exactly = 2) { repository.prefetchDividendsBatch(any(), any()) }
         coVerify(exactly = 2) { repository.getDividendsBySymbol("sh600519", false, any()) }
         coVerify(exactly = 2) { cache.save(any(), any(), any(), any()) }
     }
@@ -467,7 +467,7 @@ class DividendIncomeLoaderTest {
         val today = LocalDate.now().format(DateTimeFormatter.ISO_LOCAL_DATE)
         val assets = listOf(stock("sh600519", balance = 100.0))
         coEvery { repository.getCachedAllowingStale("sh600519") } returns listOf(record(today, "5.0"))
-        coEvery { repository.prefetchDividends(any(), any()) } returns emptyMap()
+        coEvery { repository.prefetchDividendsBatch(any(), any()) } returns emptyMap()
         coEvery { repository.getDividendsBySymbol("sh600519", false, any()) } returns listOf(record(today, "5.0"))
 
         val (_, hashes, _) = captureSave()
@@ -491,7 +491,7 @@ class DividendIncomeLoaderTest {
 
         assertEquals(777.0, reused.totalAnnualIncome, 1e-6)
         // 两次调用总共只抓取过一次
-        coVerify(exactly = 1) { repository.prefetchDividends(any(), any()) }
+        coVerify(exactly = 1) { repository.prefetchDividendsBatch(any(), any()) }
         coVerify(exactly = 1) { repository.getDividendsBySymbol("sh600519", false, any()) }
     }
 }

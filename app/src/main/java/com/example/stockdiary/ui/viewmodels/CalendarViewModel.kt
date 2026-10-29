@@ -447,7 +447,7 @@ class CalendarViewModel(
             // 冷启动不强制重抓：先用宽口径批量读把库里有记录的标的预热进内存缓存
             //（零网络、2 次 IO），只让「连过期数据都没有」的标的去联网。
             //
-            // 从前是无条件 preFetchDividends(全部标的)。而 DividendRepository.cache
+            // 从前是无条件 prefetchDividends(全部标的)。而 DividendRepository.cache
             // 是进程内内存 Map、一重启就全丢，预取判据 forceRefresh || ttlExpired
             // 于是对每个标的都成立；更要命的是 getDividendsBySymbol 里
             // 「DB 有记录但 lastFetchedAt 超过 24h」会 return null 转去联网 ——
@@ -456,7 +456,7 @@ class CalendarViewModel(
             // 转圈期间整条收集链都阻塞着。详见 primeDividendCache 的 KDoc。
             val needFetch = dividendRepository.primeDividendCache(symbols, forceRefresh)
             if (needFetch.isNotEmpty()) {
-                dividendRepository.preFetchDividends(
+                dividendRepository.prefetchDividends(
                     symbols = needFetch,
                     forceRefresh = forceRefresh,
                     timeBudgetMs = SyncBudget.MANUAL_SYNC_TIME_LIMIT_MS
@@ -530,7 +530,7 @@ class CalendarViewModel(
             // 走的仍是原来的全量重抓路径
             val needFetch = dividendRepository.primeDividendCache(symbols, forceRefresh)
             if (needFetch.isNotEmpty()) {
-                dividendRepository.preFetchDividends(
+                dividendRepository.prefetchDividends(
                     symbols = needFetch,
                     forceRefresh = forceRefresh,
                     timeBudgetMs = SyncBudget.MANUAL_SYNC_TIME_LIMIT_MS

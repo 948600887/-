@@ -16,7 +16,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * [DividendRepository.preFetchDividends] 时间预算的数据完整性回归。
+ * [DividendRepository.prefetchDividends] 时间预算的数据完整性回归。
  *
  * ## 为什么值得单测
  *
@@ -60,7 +60,7 @@ class DividendRepositoryPrefetchBudgetTest {
     fun `预算充足时每个待查代码都走到逐条抓取`() = runBlocking {
         coEvery { repository.getDividendsBySymbol(any(), any(), any()) } returns emptyList()
 
-        repository.preFetchDividends(symbols, forceRefresh = true, timeBudgetMs = 600_000L)
+        repository.prefetchDividends(symbols, forceRefresh = true, timeBudgetMs = 600_000L)
 
         symbols.forEach { symbol ->
             coVerify(exactly = 1) { repository.getDividendsBySymbol(symbol, true, emptyMap()) }
@@ -96,7 +96,7 @@ class DividendRepositoryPrefetchBudgetTest {
         // 60 个代码远多于预取并发上限（8）：绝大多数必然处于「排队中」状态
         val manySymbols = (1..60).map { "fund_01%04d".format(it) }
         val job = launch {
-            repository.preFetchDividends(manySymbols, forceRefresh = true, timeBudgetMs = 150L)
+            repository.prefetchDividends(manySymbols, forceRefresh = true, timeBudgetMs = 150L)
         }
 
         // 等第一批真的进入抓取（说明其余已在排队），再让 150ms 预算在这期间耗尽
@@ -128,7 +128,7 @@ class DividendRepositoryPrefetchBudgetTest {
             emptyList()
         }
 
-        repository.preFetchDividends(manySymbols, forceRefresh = true, timeBudgetMs = 1L)
+        repository.prefetchDividends(manySymbols, forceRefresh = true, timeBudgetMs = 1L)
 
         // 最后一个代码一定创建于截止时刻之后：必须被跳过。
         // getDividendsBySymbol 是本流程唯一写 cache / markFetched 的入口

@@ -10,7 +10,6 @@ import com.example.stockdiary.data.repository.DividendRepository
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetSnapshot
 import com.example.stockdiary.database.AssetType
-import com.example.stockdiary.database.SnapshotDao
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
@@ -67,7 +66,6 @@ class CalendarViewModelTest {
 
     private val assetRepo = mockk<AssetRepository>(relaxed = true)
     private val divRepo = mockk<DividendRepository>(relaxed = true)
-    private val snapshotDao = mockk<SnapshotDao>(relaxed = true)
     private val prefsMgr = mockk<DashboardPreferencesManager>(relaxed = true)
     // DividendIncomeUseCase 本身用挂起 lambda 注入，直接用真实对象做桩。
     // 刻意**不加**延后：这样 loadDividendIncome 会先于 generateCalendarData 完成写入，
@@ -112,12 +110,13 @@ class CalendarViewModelTest {
             updated
         }
         every { assetRepo.getAllAssets() } returns flowOf(assets)
+        every { assetRepo.getAssetsByTypesFlow(any()) } returns flowOf(assets)
         // E3：日历改用按月查询 getSnapshotsSinceSync，不再整表读取 asset_snapshots
-        coEvery { snapshotDao.getSnapshotsSinceSync(any()) } returns snapshots
-        // 两个日历生成路径都会先调 preFetchDividends，必须显式打桩：
+        coEvery { assetRepo.getSnapshotsSinceSync(any()) } returns snapshots
+        // 两个日历生成路径都会先调 prefetchDividends，必须显式打桩：
         // 只依赖 relaxed 会让它落到未初始化字段的真实实现上抛异常，日历生成整体失败
-        coEvery { divRepo.preFetchDividends(any(), any(), any()) } returns Unit
-        return CalendarViewModel(assetRepo, divRepo, snapshotDao, prefsMgr, useCase)
+        coEvery { divRepo.prefetchDividends(any(), any(), any()) } returns Unit
+        return CalendarViewModel(assetRepo, divRepo, prefsMgr, useCase)
     }
 
     @Test
@@ -257,24 +256,25 @@ class CalendarViewModelTest {
 
     @Test
     fun `只变实时价不触发日历重算_数量或币种变化才触发`() = runBlocking {
-        // getAllAssets() 是 Room 流：同步时每更新一个 currentPrice 就重发一次，实测一次全量刷新
+        // getAssetsByTypesFlow 是下推 SQL 的 Room 流：同步时每更新一个 currentPrice 就重发一次，实测一次全量刷新
         // 让「生成资产日历」白跑 20+ 次。日历与实时价无关，故按 (symbol,balance,currency) 签名去重。
         // 下面三次发射里，只有「首次」和「数量变化」应触发重算，「仅价格变化」那次必须被去重掉。
         val regenCount = java.util.concurrent.atomic.AtomicInteger(0)
-        coEvery { divRepo.getDividendsBySymbol(any(), any()) } coAnswers {
+        // 诊断：用 getSnapshotsSinceSync 的调用次数作为「日历重算」的计数信号（每次 generateAssetCalendarData 必调一次）。
+        coEvery { assetRepo.getSnapshotsSinceSync(any()) } coAnswers {
             regenCount.incrementAndGet()
-            emptyList<DividendRecord>()
+            emptyList()
         }
         every { prefsMgr.loadPreferences() } returns DashboardPreferences()
-        every { assetRepo.getAllAssets() } returns flowOf(
+        every { assetRepo.getAllAssets() } returns flowOf(emptyList())
+        every { assetRepo.getAssetsByTypesFlow(any()) } returns flowOf(
             listOf(stockAsset),
             listOf(stockAsset.copy(currentPrice = 99.0)),  // 仅变实时价 → 不重算
             listOf(stockAsset.copy(balance = 2000.0))       // 变数量 → 重算
         )
-        coEvery { snapshotDao.getSnapshotsSinceSync(any()) } returns emptyList()
-        coEvery { divRepo.preFetchDividends(any(), any(), any()) } returns Unit
+        coEvery { divRepo.prefetchDividends(any(), any(), any()) } returns Unit
 
-        val vm = CalendarViewModel(assetRepo, divRepo, snapshotDao, prefsMgr, useCase)
+        val vm = CalendarViewModel(assetRepo, divRepo, prefsMgr, useCase)
 
         // VM 已构造并处理完首次发射（末次发射的 balance=2000 已反映到 assets）
         waitUntil { vm.uiState.value.assets.firstOrNull()?.balance == 2000.0 }
@@ -385,7 +385,7 @@ class CalendarViewModelTest {
 
         // E3 回归锁：翻月触发的日历生成必须走按月查询 getSnapshotsSinceSync，
         // 而不是把整张 asset_snapshots 表都拉进来（老用户几百天快照时纯属浪费）
-        coVerify { snapshotDao.getSnapshotsSinceSync(any()) }
+        coVerify { assetRepo.getSnapshotsSinceSync(any()) }
         // 翻旧月：即使今天恰好也有快照，也不能把实时值写进上个月
         assertEquals(7777.77, vm.uiState.value.calendarData[dayInLastMonth] ?: 0.0, 1e-9)
         // 当月其余日子无快照 → 0（无数据）

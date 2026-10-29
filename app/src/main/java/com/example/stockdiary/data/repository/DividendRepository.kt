@@ -68,7 +68,7 @@ class DividendRepository private constructor(
     private val MAX_CACHE_ENTRIES = 200
 
     /**
-     * 本轮 [preFetchDividends] 是否撞过天天基金限流（514/429）。
+     * 本轮 [prefetchDividends] 是否撞过天天基金限流（514/429）。
      *
      * 进程级的 [FundDividendApiService.otcRateLimitHit] 在每轮预取开头清零、结尾读走，
      * 这里存的是「读走那一瞬间的状态」，由 [consumeOtcRateLimitWarning] 消费一次（读即清零），
@@ -169,7 +169,7 @@ class DividendRepository private constructor(
         runCatching { fetchState.getInt(FAILURE_COUNT_PREFIX + symbol, 0) }.getOrDefault(0)
 
 // ==========================================================================
-// §3 预取入口 prefetchDividends（批量抓取，冷启动/后台主力路径）
+// §3 预取入口 prefetchDividendsBatch（批量抓取，冷启动/后台主力路径）
 // 东财合并请求 + Semaphore 限流 + 超时预算判定在 withPermit 内部。Semaphore 用法是踩过的坑：判定写在外层等于没判定，改法照抄 AssetSyncManager。
 // ==========================================================================
 
@@ -202,7 +202,7 @@ class DividendRepository private constructor(
      * 批量说没有的标的，级联照旧走完，只是**跳过已经问过的东财那一步**，
      * 让 Sina 兜底有机会发言。这样不因为合并请求而丢任何数据来源。
      */
-    suspend fun prefetchDividends(
+    suspend fun prefetchDividendsBatch(
         symbols: List<String>,
         forceRefresh: Boolean = false
     ): Map<String, List<DividendRecord>> {
@@ -493,7 +493,7 @@ class DividendRepository private constructor(
      *
      * ## 为什么需要它（日历页冷启动转圈的根因）
      *
-     * [CalendarViewModel] 生成日历时无条件调一次 `preFetchDividends(全部标的)`。
+     * [CalendarViewModel] 生成日历时无条件调一次 `prefetchDividends(全部标的)`。
      * 而预取的判据是 `forceRefresh || ttlExpired`，其中 `cache` 是**进程内内存 Map**、
      * 一重启就全丢 —— 于是每个标的都算 `ttlExpired`，全部进抓取队列。
      * 更糟的是 [getDividendsBySymbol] 里「DB 有记录但 `lastFetchedAt` 超过
@@ -513,7 +513,7 @@ class DividendRepository private constructor(
      * （[getCachedAllowingStale] 的 [STALE_CEILING_MS] = 30 天）。
      *
      * @param forceRefresh true = 不预热、直接返回全部 symbol 让调用方全量重抓
-     * @return 仍需抓取的 symbol（**原始 symbol**，未规范化；[preFetchDividends]
+     * @return 仍需抓取的 symbol（**原始 symbol**，未规范化；[prefetchDividends]
      *         内部会自己 normalize + distinct）
      */
     suspend fun primeDividendCache(symbols: List<String>, forceRefresh: Boolean): List<String> {
@@ -563,7 +563,7 @@ class DividendRepository private constructor(
          *
          * 失败既不能写进 [fetchState]（那等于把网络抖动固化成「这只没有分红」最长
          * 7 天，界面还一声不吭），也不能什么都不记 —— 场外基金没有批量入口
-         * （天天基金是每基金一个页面，见 [prefetchDividends] 的说明），上百只标的
+         * （天天基金是每基金一个页面，见 [prefetchDividendsBatch] 的说明），上百只标的
          * 每轮各重打一次失败的接口就是请求风暴。所以给失败单独一个短窗：
          * 窗内不重打，过期自动重试；用户点刷新（forceRefresh）随时可以绕过。
          */
@@ -627,7 +627,7 @@ class DividendRepository private constructor(
      * 返回 true 表示这一轮手动刷新撞过 514/429（部分场外基金分红因限流没抓全），
      * 并**清零**，避免下一次刷新（或同一轮别处的入口）重复提示。
      * 不消费 [FundDividendApiService.otcRateLimitHit] 本身（那是进程级退避标志，
-     * 由 [preFetchDividends] 结尾读走后清零）；这里只回仓库实例级累积的结论。
+     * 由 [prefetchDividends] 结尾读走后清零）；这里只回仓库实例级累积的结论。
      */
     internal fun consumeOtcRateLimitWarning(): Boolean {
         val hit = _otcRateLimitedThisCycle
@@ -654,7 +654,7 @@ class DividendRepository private constructor(
      * 取某个标的的分红记录。
      *
      * @param forceRefresh true 时跳过缓存强制重抓（用户点「刷新」走这条）
-     * @param batchResults 同一批 [prefetchDividends] 的结果，key 是**标准化后**的 symbol。
+     * @param batchResults 同一批 [prefetchDividendsBatch] 的结果，key 是**标准化后**的 symbol。
      *        命中就跳过逐条级联；为 null 时行为与从前完全一致（单标的查询传 null）。
      *        按次传入而不是读共享字段，是为了让并发的两个预取周期互不干扰 ——
      *        共享字段会互相清空，导致整批退化成逐条级联
@@ -854,7 +854,7 @@ class DividendRepository private constructor(
         normalizedSymbol: String,
         batchResults: Map<String, List<DividendRecord>>?
     ): List<DividendRecord> {
-        // 批量预取优先。[prefetchDividends] 已经用少量请求把这批标的问完了，
+        // 批量预取优先。[prefetchDividendsBatch] 已经用少量请求把这批标的问完了，
         // 命中就直接用，省掉逐条的级联（ETF 空手还要顺序试三种代码格式，再 3 个请求）
         //
         // 从入参读而不是从共享字段 remove：共享字段在资产页与持仓页同时刷新时
@@ -1225,12 +1225,12 @@ class DividendRepository private constructor(
     }
     
 // ==========================================================================
-// §8 preFetchDividends（旧批量入口，按 SyncBudget 预算）
-// 与 §3 的 prefetchDividends 并存：这版按调用方传入的预算跳过后续代码、超时不写缓存（「抓过且没有分红」的结论留空，之后按需抓取再补，不丢数据）。
+// §8 prefetchDividends（按 SyncBudget 预算的预取编排）
+// 与 §3 的 prefetchDividendsBatch 并存：这版按调用方传入的预算跳过后续代码、超时不写缓存（「抓过且没有分红」的结论留空，之后按需抓取再补，不丢数据）。
 // ==========================================================================
 
     /**
-     * 老入口：逐条抓一批标的的分红（内部先跑一次 [prefetchDividends] 批量预取）。
+     * 老入口：逐条抓一批标的的分红（内部先跑一次 [prefetchDividendsBatch] 批量预取）。
      *
      * 先批量再逐条是这次修复的核心：刷新按钮（forceRefresh=true）是全 App
      * 唯一还在走这条老入口的路径，而它从前**完全绕开批量预取** —— 每个标的
@@ -1238,7 +1238,7 @@ class DividendRepository private constructor(
      * 逐个抓 HTML），59 个标的打出 250~400 个请求：OkHttp 队列排长龙、
      * 多个协程同时做 Jsoup 解析，内存压力直接让系统回收进程 ——
      * 就是用户看到的「按了刷新就闪退」。
-     * forceRefresh 时 [prefetchDividends] 内部全量 pending，不存在「刷新拿到旧数据」。
+     * forceRefresh 时 [prefetchDividendsBatch] 内部全量 pending，不存在「刷新拿到旧数据」。
      *
      * 整段强制跑在 [Dispatchers.IO] 上：调用方可能是 `viewModelScope`
      * （`Dispatchers.Main.immediate`），52 个代码的协程启动与续体挤在主线程
@@ -1249,7 +1249,7 @@ class DividendRepository private constructor(
      *        [SyncBudget.prefetchPhaseBudget]）：超时后跳过的代码不写缓存，
      *        「抓过且没有分红」的结论留空，之后按需抓取时还会补上，不丢数据。
      */
-    suspend fun preFetchDividends(
+    suspend fun prefetchDividends(
         symbols: List<String>,
         forceRefresh: Boolean = false,
         timeBudgetMs: Long = 0L
@@ -1261,7 +1261,7 @@ class DividendRepository private constructor(
 
             val normalizedSymbols = symbols.map { StockCodeManager.normalizeSymbol(it) }.distinct()
 
-            val batchResults = prefetchDividends(normalizedSymbols, forceRefresh)
+            val batchResults = prefetchDividendsBatch(normalizedSymbols, forceRefresh)
 
             // 预算截止时刻：超时后不再启动新代码的逐条抓取
             val deadline = if (timeBudgetMs > 0L) System.currentTimeMillis() + timeBudgetMs else 0L

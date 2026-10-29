@@ -528,7 +528,7 @@ object AssetSyncManager {
             // 分红预取是刷新的配角，只划一段子预算（见 SyncBudget），
             // 剩下的留给价格同步——用户点刷新真正要看的是行情
             val prefetchBudget = SyncBudget.prefetchPhaseBudget(timeLimitMs)
-            dividendRepository.preFetchDividends(symbols, forceRefresh, prefetchBudget)
+            dividendRepository.prefetchDividends(symbols, forceRefresh, prefetchBudget)
             AppLogger.i("分红预取阶段结束，开始逐标的价格同步", TAG)
         }
 

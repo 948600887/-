@@ -125,7 +125,7 @@ class DividendIncomeLoader(
         // 反过来就是每个代码各发一次请求，批量白发。
         // 结果按次传回给下面的逐条循环：并发的另一个抓取周期有自己的一份，
         // 不会互相清空 —— 曾经的共享字段就是这么把批量结果弄丢、退回逐条级联的
-        val batchResults = dividendRepository.prefetchDividends(
+        val batchResults = dividendRepository.prefetchDividendsBatch(
             symbols = stockAssets.mapNotNull { it.symbol },
             forceRefresh = forceRefresh
         )

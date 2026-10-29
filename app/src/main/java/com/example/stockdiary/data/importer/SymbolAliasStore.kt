@@ -25,6 +25,9 @@ class SymbolAliasStore private constructor(context: Context) {
     private val prefs = context.applicationContext
         .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
+    /** 复用单例 Gson，避免每次读写都 new Gson() 重建 TypeAdapter 缓存 */
+    private val gson = Gson()
+
     /** 返回「名称 → 代码」全表（键已归一化） */
     @Synchronized
     fun all(): Map<String, String> =
@@ -77,7 +80,7 @@ class SymbolAliasStore private constructor(context: Context) {
         val json = prefs.getString(KEY_MAP, null) ?: return emptyMap()
         return try {
             val type = object : TypeToken<Map<String, String>>() {}.type
-            Gson().fromJson<Map<String, String>>(json, type) ?: emptyMap()
+            gson.fromJson<Map<String, String>>(json, type) ?: emptyMap()
         } catch (e: Exception) {
             // 坏数据不应拖垮导入：清掉重来即可（最坏结果是用户再手填一次）
             AppLogger.w("证券名称记忆数据损坏，已清空: ${e.message}", "SymbolAlias")
@@ -94,7 +97,7 @@ class SymbolAliasStore private constructor(context: Context) {
      */
     private fun write(map: Map<String, String>) {
         runCatching {
-            prefs.edit().putString(KEY_MAP, Gson().toJson(map)).commit()
+            prefs.edit().putString(KEY_MAP, gson.toJson(map)).commit()
         }.onFailure {
             AppLogger.e("写入证券名称记忆失败: ${it.message}", it, "SymbolAlias")
         }

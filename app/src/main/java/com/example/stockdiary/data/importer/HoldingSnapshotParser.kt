@@ -1,6 +1,7 @@
 package com.example.stockdiary.data.importer
 
 import com.example.stockdiary.data.dividend.DividendDateValidator
+import com.example.stockdiary.utils.NumberFormatUtils
 
 /**
  * 「中国结算 · 一码通持有查询」持仓截图解析器（纯函数，可直接 JVM 单测）。
@@ -169,7 +170,7 @@ object HoldingSnapshotParser {
                             symbol = symbol,
                             quantity = quantity,
                             lineNumber = pendingLine.takeIf { it > 0 } ?: lineNo,
-                            rawQuantity = rawQuantity ?: formatPlain(quantity)
+                            rawQuantity = rawQuantity ?: NumberFormatUtils.formatPlain(quantity)
                         )
                     )
                 } else {
@@ -380,7 +381,4 @@ object HoldingSnapshotParser {
         if (HEADER_KEYWORDS.any { text.contains(it) }) return false
         return true
     }
-
-    private fun formatPlain(value: Double): String =
-        if (value % 1.0 == 0.0) value.toLong().toString() else value.toString()
 }

@@ -351,9 +351,9 @@ object NotificationHelper {
     // 提醒接收器
     class ReminderReceiver : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            // 读取保存的提醒时间
-            val hour = intent.getIntExtra("reminder_hour", 9)
-            val minute = intent.getIntExtra("reminder_minute", 0)
+            // 读取保存的提醒时间（防御性收敛：异常 extra 值参与闹钟计算前先夹到合法范围）
+            val hour = intent.getIntExtra("reminder_hour", 9).coerceIn(0, 23)
+            val minute = intent.getIntExtra("reminder_minute", 0).coerceIn(0, 59)
 
             // 先排明天的闹钟，再发今天这条通知。
             //

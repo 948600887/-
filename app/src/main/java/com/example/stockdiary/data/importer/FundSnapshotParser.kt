@@ -1,6 +1,7 @@
 package com.example.stockdiary.data.importer
 
 import com.example.stockdiary.data.dividend.DividendDateValidator
+import com.example.stockdiary.utils.NumberFormatUtils
 
 /**
  * 「基金E账户」持仓截图解析器（纯函数，可直接 JVM 单测）。
@@ -126,7 +127,7 @@ object FundSnapshotParser {
                     symbol = FundEStatementParser.SYMBOL_PREFIX + card.second,
                     quantity = share,
                     lineNumber = index + 1,
-                    rawQuantity = formatPlain(share),
+                    rawQuantity = NumberFormatUtils.formatPlain(share),
                     nav = nav,
                     // OCR 读不出「每张卡各自的净值日期」，不能拿整张截图的数据日期来冒充：
                     // 那样 navDate 恒等于 dataDate，UI 上「净值滞后」的红字提示永远不会触发
@@ -198,7 +199,4 @@ object FundSnapshotParser {
         line.replace('\u00A0', ' ')
             .replace(Regex("""\s{2,}"""), " ")
             .trim()
-
-    private fun formatPlain(value: Double): String =
-        if (value % 1.0 == 0.0) value.toLong().toString() else value.toString()
 }

@@ -170,11 +170,14 @@ internal class SourceCircuitBreaker {
         /**
          * 触发禁用的连续**源级**失败次数。
          *
-         * 取 5（原为 3）：3 恰等于同步并发度，单波并发同时失败即误禁；5 ≈ 两波，
-         * 真实不健康仍能在约 100s 内禁用（每次源级失败约 20s callTimeout ×重试），
-         * 且与 [com.example.stockdiary.network.BinanceHostGate.FAIL_THRESHOLD] 对齐。
+         * 取 8（原为 5，最早为 3）：3 恰等于旧同步并发度，单波并发同时失败即误禁；
+         * 现 [com.example.stockdiary.data.sync.AssetSyncManager.MAX_CONCURRENT_SYNC] = 6，
+         * 若阈值仍 ≤6，则一波 6 个同源标的超时（外加一次整批未命中）即可凑满阈值、误禁该源
+         * （重现「单波抖动误禁新浪/腾讯 5 分钟」的老问题）。抬到 8 与
+         * [com.example.stockdiary.network.BinanceHostGate.FAIL_THRESHOLD] 对齐，
+         * 单波并发抖动不再误禁；真实不健康仍会在连续多波后禁用。
          */
-        const val FAIL_THRESHOLD = 5
+        const val FAIL_THRESHOLD = 8
 
         /**
          * 禁用冷却时长（毫秒）。取 5 分钟（原为 30 分钟）：配合半开探测，恢复成本从

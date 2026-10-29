@@ -1089,16 +1089,36 @@ object AssetSyncManager {
                 AppLogger.i("币安接口临时熔断，跳过: ${asset.name}（${lastError?.message}）", TAG)
                 skipReason = "币安熔断"; onSkip("币安熔断")
             } else {
-                failedCount.incrementAndGet()
-                errorTypes.offer(SyncStrategy.classifyError(lastError))
+                // 仅当协程仍活跃时才把这次记为同步失败。协程已被取消（切后台 / VM 销毁 /
+                // 看门狗超预算）时，lastError 多半是「我们自己放弃」的产物（如币安抓取层把
+                // 取消后的超时归为失败），不是真实同步故障——计入会「成功被静默判失败」
+                // （真机日志 22:29 那批：2854ms 成功记录后紧接「判失败且无堆栈」）。
+                // 已成功取得的价在上面的 isSuccess 分支已记成功，这里只跳过失败计数，避免误伤。
+                if (currentCoroutineContext().isActive) {
+                    failedCount.incrementAndGet()
+                    errorTypes.offer(SyncStrategy.classifyError(lastError))
+                } else {
+                    AppLogger.d("协程已取消，跳过失败记账: ${asset.name}", TAG)
+                }
             }
 
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            AppLogger.w("同步资产 ${asset.name} 失败: ${e.message}", TAG)
-            failedCount.incrementAndGet()
-            errorTypes.offer(SyncStrategy.classifyError(e))
+            // 仅当协程仍活跃时才计为同步失败。已取消说明是「我们放弃」而非真实故障，
+            // 不计入失败数（与上面 else 分支同口径，避免取消被误判成失败）。
+            // 例：取消后的取消类异常（InterruptedIOException 等）在最上面的 CancellationException
+            // 分支之外漏进来的情形，这里同样不记账。
+            if (currentCoroutineContext().isActive) {
+                AppLogger.w("同步资产 ${asset.name} 失败: ${e.message}", TAG)
+                failedCount.incrementAndGet()
+                errorTypes.offer(SyncStrategy.classifyError(e))
+            } else {
+                AppLogger.d(
+                    "协程已取消，跳过异常记账: ${asset.name}（${e::class.simpleName}）",
+                    TAG
+                )
+            }
         } finally {
             // 每个标的一行收尾。读日志时最缺的就是「这个标的最后怎么了」——
             // 从前只有"开始同步 XXX"，结果散在几百行之后的另一条日志里，中间夹着 OkHttp 噪音。

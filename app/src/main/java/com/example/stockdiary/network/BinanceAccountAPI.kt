@@ -5,6 +5,8 @@ import com.example.stockdiary.utils.AppLogger
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -500,7 +502,19 @@ object BinanceAccountAPI {
                 // 网络级失败（连不上 / 超时 / 域名解析不了 / IO 错误）喂给主机级熔断器，
                 // 与 getAccount / fetchBatch 口径一致——批量取价此前也漏接 gate。
                 // 注意：JSON 解析等非 IO 异常不记账——它们不是"主机不可达"，不该顶爆熔断。
-                if (e is IOException) {
+                //
+                // 「我们自己放弃」不算主机不可达的证据，绝不喂熔断器。
+                // 典型是切后台（MainActivity onStop 取消同步/导入）：协程取消了，但阻塞中的
+                // execute() 不会被打断，仍要跑到 callTimeout 才以 InterruptedIOException 收尾。
+                // 这些失败若计入，一次切后台就能凑满阈值、把整个主机熔断 5 分钟——
+                // 真机日志实锤：20:06:59 切后台 → 20:07:05 六个 35s 超时 → 触发熔断。
+                // 与行情路径 [UnifiedPriceService.getCryptoPrice] 同口径：用 isCancellationArtifact
+                // + isActive 双判，只有「协程仍活跃时的真实网络 IO 失败（超时/连不上/DNS）」才记账；
+                // 取消/中断类（CancellationException、InterruptedIOException: timeout 且已不在前台）
+                // 一律跳过。注意 isCancellationArtifact 刻意**不**把带 timeout 的
+                // InterruptedIOException 当取消——真超时本身是网络证据，是否计入只看 isActive。
+                val gaveUp = !currentCoroutineContext().isActive || isCancellationArtifact(e)
+                if (!gaveUp && e is IOException) {
                     BinanceHostGate.onNetworkFailure(System.currentTimeMillis())
                 }
                 // 只记异常类型，不记 message（可能含 URL）；返回已取到的部分（通常为空）

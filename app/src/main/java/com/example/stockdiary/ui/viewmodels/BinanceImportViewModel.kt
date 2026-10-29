@@ -68,7 +68,14 @@ open class BinanceImportViewModel(
          * （定期/锁仓都在 Earn 里，现货账户看不到）。必须在预览页明示，
          * 否则用户只能看到「数字比对账单少」却不知道为什么。
          */
-        val earnWarning: String? = null
+        val earnWarning: String? = null,
+        /**
+         * 借币（Flexible Loan）负债接口没拉全时的提示。
+         *
+         * 非 null 表示这次导入没计入借币负债，净资产会虚高（只记借来的钱、不记欠的钱）。
+         * 必须在预览页明示，否则用户看到的总资产比对账单高、却不知道差在借币上。
+         */
+        val loanWarning: String? = null
     ) {
         /** 密钥都填了才能拉取 */
         val canFetch: Boolean
@@ -151,25 +158,43 @@ open class BinanceImportViewModel(
             // 理财持仓单拉：官方对账单证实钱可能在 Earn 里而不在现货余额里，只导现货会少算。
             // 失败（含 API Key 未开通权限）内部降级为空列表，绝不中断导入。
             //
-            // 汇率强制刷新、批量取价、理财持仓三条互不依赖，并发执行省掉两次串行往返。
+            // 借币（Flexible Loan）负债单拉：币安不把借币计入现货余额，只走独立的
+            // /sapi/v2/loan/... 接口。不拉这笔，导入的资产只有「借来的钱」、没有「欠的钱」，
+            // 净资产被虚高（诊断实锤用户有 USDT 活期借币 -50.8 而此前完全没导入）。
+            //
+            // 汇率强制刷新、批量取价、理财持仓、借币负债四条互不依赖，并发执行省掉三次串行往返。
             // 汇率用 force=true：默认走 6 小时 TTL，实测 00:04 那次导入就沿用了 19:01 抓的
             // 6.6702（比真实价低约 6%），导入是用户主动触发的低频动作，值得多打这一次请求。
             val spotPriceMap: Map<String, Double>
             val mergedBalances: List<BinanceBalance>
             val earnWarning: String?
+            val loanWarning: String?
             coroutineScope {
                 val refreshDeferred = async(Dispatchers.IO) { ExchangeRateManager.refresh(force = true) }
                 val earnDeferred = async(Dispatchers.IO) {
                     BinanceAccountAPI.getEarnPositions(current.apiKey, current.apiSecret)
                 }
+                val loanDeferred = async(Dispatchers.IO) {
+                    BinanceAccountAPI.getLoans(current.apiKey, current.apiSecret)
+                }
                 val pairs = balances.mapNotNull { priceKeyFor(it.asset) }.distinct()
                 val pricesDeferred = async(Dispatchers.IO) { BinanceAccountAPI.getPrices(pairs) }
                 refreshDeferred.await()
                 val earn = earnDeferred.await()
+                val loan = loanDeferred.await()
                 spotPriceMap = pricesDeferred.await()
-                mergedBalances = mergeEarnIntoBalances(balances, earn.positions)
+                // 先合并理财（取最大值、绝不重复计），再**追加**借币负债：
+                // 借币负债表示成负余额追加在 earn 合并之后，避免被 mergeEarnIntoBalances 的
+                // max 规则误当成「待补齐的理财量」覆盖掉（负债必须作为独立的负余额进入
+                // SnapshotAlignment 的按代码 sumOf，才能与同代码持仓自然抵消 / 落成纯负资产）。
+                val loanBalances = loan.debts.map {
+                    BinanceBalance(asset = it.asset, free = -it.debt, locked = 0.0)
+                }
+                mergedBalances = mergeEarnIntoBalances(balances, earn.positions) + loanBalances
                 // 理财没拉全 = 总资产会少算，必须带到预览页说清楚（不能静默降级）
                 earnWarning = earn.warning
+                // 借币没拉到 = 净资产会虚高，同样必须明示
+                loanWarning = loan.warning
             }
 
             // 理财独有的资产在上面那批取价时还不知道，补一次小额批量请求（通常个位数）。
@@ -202,6 +227,8 @@ open class BinanceImportViewModel(
                     append("可能账户为空或只剩dust零头。")
                     // 理财没拉全时，'账户为空' 很可能只是现货为空（钱都在 Earn 里），必须点明
                     if (earnWarning != null) append(earnWarning)
+                    // 借币没拉到时，净资产会比真实偏低（没扣负债），同样要点明
+                    if (loanWarning != null) append(loanWarning)
                 }
                 updateState { state ->
                     state.copy(
@@ -220,7 +247,8 @@ open class BinanceImportViewModel(
                     step = Step.PREVIEW,
                     preview = preview,
                     prices = priceMap,
-                    earnWarning = earnWarning
+                    earnWarning = earnWarning,
+                    loanWarning = loanWarning
                 )
             }
         }

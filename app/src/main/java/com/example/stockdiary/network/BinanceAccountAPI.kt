@@ -101,6 +101,49 @@ data class BinanceEarnFetch(
  * - 币安返回的业务错误（如 -2015 密钥无效）可以带出来给用户看——那是排障必需，
  *   且币安的 msg 本身不含密钥；但绝不允许把本地 secret 拼进去。
  */
+/**
+ * 币安**活期借币（Flexible Loan）**的一笔负债。
+ *
+ * 用户用「活期借币」借出的币（如 USDT），币安**不计入**现货余额 `/api/v3/account`，
+ * 只走独立的 `/sapi/v2/loan/flexible/ongoing/orders` 接口。导入时若不拉这笔负债，
+ * 总资产就只有「借来的钱」、没有「欠的钱」，净资产被虚高。诊断实锤：用户账户有
+ * `USDT 活期借币 -50.80033811` 而 App 此前完全没导入（核对页只列 LD 理财）。
+ *
+ * [debt] 是币安返回的正数负债（`totalDebt` 字段），导入时取负作为**负余额**进入合并链路，
+ * 与同代码持仓自然抵消、纯负债落成数量为负的加密资产参与净值扣减（见
+ * [com.example.stockdiary.data.importer.BinanceImportService.buildPreview] 的负余额注释）。
+ *
+ * @param asset 借入的基础资产（USDT / BNB…）
+ * @param debt  未还负债数量（正数）；调用方转负
+ */
+data class BinanceLoanDebt(
+    val asset: String,
+    val debt: Double
+)
+
+/**
+ * 活期借币负债的拉取结果：拿到多少笔，以及哪些接口没拉成。
+ *
+ * 与 [BinanceEarnFetch] 同口径：借币接口需要 API Key 开通 Loan 读取权限，
+ * 失败也降级（不阻断导入），但把原因带出去让用户看见——否则净资产虚高却查不出为什么。
+ *
+ * @param debts    成功拉到的负债（正数，调用方转负）
+ * @param failures 失败的人话原因；空 = 全部成功
+ */
+data class BinanceLoanFetch(
+    val debts: List<BinanceLoanDebt>,
+    val failures: List<String>
+) {
+    /** 给用户看的一句话；全部拉取成功时为 null */
+    val warning: String?
+        get() = if (failures.isEmpty()) {
+            null
+        } else {
+            "借币负债没拉到（${failures.joinToString("；")}）。本次不计入借币负债，净资产会虚高；" +
+                "请确认 API Key 已勾选 Loan 读取权限、IP 白名单与地区限制都放行后重新拉取。"
+        }
+}
+
 object BinanceAccountAPI {
 
     /** 账户查询接口（签名，需 API Key）。必须走 api.binance.com——公开行情镜像不服务 /account */
@@ -125,6 +168,22 @@ object BinanceAccountAPI {
         EARN_SAPI_BASE + "/simple-earn/flexible/position"
     private const val EARN_LOCKED_URL =
         EARN_SAPI_BASE + "/simple-earn/locked/position"
+
+    /**
+     * 借币（Flexible Loan）接口基址：v2。币安 `/sapi/v1/loan/...` 已于 2024-04-24 退役，
+     * 必须用 v2，否则 404（伪装成「接口未开通」）。与 [EARN_SAPI_BASE] 同理，
+     * SAPI 不在 `/api/v3` 之下，拼上去就是 `/api/v3/sapi/v2/...` 这种不存在的路径。
+     */
+    private const val LOAN_SAPI_BASE = "https://api.binance.com/sapi/v2"
+
+    /**
+     * 活期借币在途负债接口（签名，需 API Key 开通 Loan 读取权限）。
+     *
+     * 与 [EARN_SAPI_BASE] 同主机（都只能走 api.binance.com，镜像不服务签名接口），
+     * 因此**同样不喂熔断器**（理由见 [getAccount] 的 451 注释）。
+     */
+    private const val LOAN_FLEXIBLE_URL =
+        LOAN_SAPI_BASE + "/loan/flexible/ongoing/orders"
 
     /**
      * 理财持仓单页条数。真实账户的理财标的通常是个位数到几十个，
@@ -321,6 +380,128 @@ object BinanceAccountAPI {
                 flexibleResult.exceptionOrNull()?.let { add("活期：${it.message ?: "拉取失败"}") }
                 lockedResult.exceptionOrNull()?.let { add("定期：${it.message ?: "拉取失败"}") }
             }
+        )
+    }
+
+    /**
+     * 拉取活期借币（Flexible Loan）负债（只读）。
+     *
+     * ## 为什么必须单拉
+     *
+     * 活期借币是**独立于现货和理财**的负债：币安不把它计入 `/api/v3/account` 余额，
+     * 只走 `/sapi/v2/loan/flexible/ongoing/orders`。不拉这笔，导入的资产只有「借来的钱」、
+     * 没有「欠的钱」，净资产被虚高（诊断实锤用户账户有 `USDT 活期借币 -50.80033811`
+     * 而 App 此前完全没导入）。与 `mergeEarnIntoBalances` 之后把负债表示成负余额进入合并链路，
+     * 同代码持仓会自然抵消（持有 100、欠 30 → 净 70），正是币安自己的净额口径。
+     *
+     * ## 失败依然不打断导入，但**不再假装成功**
+     *
+     * 借币接口需要 API Key 开通 Loan 读取权限，权限不足/接口调整/网络失败都是常态，
+     * 因此失败降级成「不计入借币」，绝不把整个导入打回去——余额才是关键数据。
+     * 但失败原因会随 [BinanceLoanFetch.failures] 一起返回，由预览页明确告诉用户
+     * 「借币没拉到、净资产会虚高」，而不是让它静默地虚高一块。
+     */
+    suspend fun getLoans(apiKey: String, apiSecret: String): BinanceLoanFetch =
+        getLoans(apiKey, apiSecret, client)
+
+    /** internal 重载：允许单测注入假 client，与 [getAccount] 同惯例 */
+    internal suspend fun getLoans(
+        apiKey: String,
+        apiSecret: String,
+        httpClient: OkHttpClient
+    ): BinanceLoanFetch = withContext(Dispatchers.IO) {
+        try {
+            val debts = fetchLoanPage(LOAN_FLEXIBLE_URL, apiKey, apiSecret, httpClient)
+            BinanceLoanFetch(debts = debts, failures = emptyList())
+        } catch (e: CancellationException) {
+            // 协程取消必须原样重抛：横竖都不能把「用户关掉弹窗」记成一次权限失败
+            throw e
+        } catch (e: Exception) {
+            // 降级：不阻断导入，只把原因带回预览页
+            warnLoanFailure(e)
+            BinanceLoanFetch(debts = emptyList(), failures = listOf(e.message ?: "拉取失败"))
+        }
+    }
+
+    /**
+     * 拉一页借币在途负债。
+     *
+     * 非 2xx（未开通权限 / 接口下线 / 被地区限制）与空响应都**抛异常**，由 [getLoans]
+     * 收成 Result 并把原因带回预览页——绝不在这里静默返回空列表，那等于把「少算一块负债」
+     * 伪装成「本来就没有」。
+     */
+    private suspend fun fetchLoanPage(
+        url: String,
+        apiKey: String,
+        apiSecret: String,
+        httpClient: OkHttpClient
+    ): List<BinanceLoanDebt> {
+        val timestamp = System.currentTimeMillis()
+        // current/size 必须参与签名：它们是 query 的一部分，缺了会被判签名无效
+        // （与 fetchEarnPage 同口径，size 复用 EARN_PAGE_SIZE：真实账户的在途借币通常个位数）
+        val query = "current=1&size=$EARN_PAGE_SIZE&timestamp=$timestamp&recvWindow=$RECV_WINDOW"
+        val signature = sign(apiSecret, query)
+        val request = Request.Builder()
+            // 日志只记端点路径，url 里的 signature 由 secret 派生，绝不落盘
+            .url("$url?$query&signature=$signature")
+            .addHeader("X-MBX-APIKEY", apiKey)
+            .addHeader("User-Agent", "Mozilla/5.0")
+            .build()
+
+        val response = httpClient.newCall(request).execute()
+        response.use { resp ->
+            val body = resp.body?.string()
+                ?: throw IOException("币安返回了空响应")
+            if (!resp.isSuccessful) {
+                // 诊断：把币安真实 HTTP 码与响应体落盘（不含密钥/签名，安全），便于排查
+                // 404/403/-2015 等。注意只记端点路径常量，绝不记带 signature 的完整请求 URL。
+                AppLogger.d(
+                    "币安借币接口 ${url} 返回 HTTP ${resp.code}，响应体=$body",
+                    "BinanceAccountAPI"
+                )
+                // 币安的 msg 说明原因（权限不足/参数错），不含密钥，可以带出去
+                throw binanceError(body, resp.code)
+            }
+            return parseLoanOrders(body)
+        }
+    }
+
+    /**
+     * 解析借币负债响应：`{"rows":[{"loanCoin":"USDT","totalDebt":"50.80033811",...}],"total":N}`。
+     *
+     * 负债额在 **`totalDebt`**（不是 `amount`）。debt <= 0 的行（已还清空壳）没有导入意义，
+     * 跳过，交给现货侧的 dust 过滤口径。
+     */
+    internal fun parseLoanOrders(body: String): List<BinanceLoanDebt> {
+        return try {
+            val rows = JSONObject(body).optJSONArray("rows") ?: return emptyList()
+            val result = mutableListOf<BinanceLoanDebt>()
+            for (i in 0 until rows.length()) {
+                val obj = rows.getJSONObject(i)
+                val asset = obj.optString("loanCoin")
+                val debt = obj.optString("totalDebt").toDoubleOrNull() ?: continue
+                // 数量为 0 / 已还空的行没有导入意义
+                if (asset.isBlank() || debt <= 0.0) continue
+                result.add(BinanceLoanDebt(asset = asset, debt = debt))
+            }
+            result
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            AppLogger.e("解析币安借币负债失败: ${e::class.simpleName}", e, "BinanceAccountAPI")
+            emptyList()
+        }
+    }
+
+    private fun warnLoanFailure(e: Throwable) {
+        if (e is CancellationException) throw e
+        // 这条只记日志、不阻断导入：失败原因已通过 BinanceLoanFetch.failures 带给预览页，
+        // 用户能直接看到该去开哪个权限。绝大多数情况是「未开通 Loan 读取权限 /
+        // 接口调整 / 该地区不支持」而返回 404——属预期、已降级处理，不该每轮导入刷 WARN，
+        // 降级到 DEBUG，避免诊断日志被这类"非故障"刷屏。
+        AppLogger.d(
+            "拉取币安借币负债异常: ${e::class.simpleName}，本次导入不计入借币负债",
+            "BinanceAccountAPI"
         )
     }
 

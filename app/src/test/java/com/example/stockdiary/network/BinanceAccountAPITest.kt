@@ -249,4 +249,95 @@ class BinanceAccountAPITest {
             recorded.none { it.contains("/api/v3/") }
         )
     }
+
+    // ---------- 借币（Flexible Loan）负债接口 ----------
+
+    @Test
+    fun 借币负债解析totalDebt与loanCoin() {
+        // 币安借币接口负债在 totalDebt（不是 amount），借入币在 loanCoin
+        val json = """{"rows":[{"loanCoin":"USDT","totalDebt":"50.80033811","collateralCoin":"BNB","currentLTV":"0.57"},{"loanCoin":"BNB","totalDebt":"1.5"}],"total":2}"""
+        val debts = BinanceAccountAPI.parseLoanOrders(json)
+        assertEquals(2, debts.size)
+        assertEquals("USDT", debts[0].asset)
+        assertEquals(50.80033811, debts[0].debt, 1e-9)
+        assertEquals("BNB", debts[1].asset)
+        assertEquals(1.5, debts[1].debt, 1e-9)
+    }
+
+    @Test
+    fun 借币负债跳过零值与空行() {
+        // debt <= 0 的已还空壳行没导入意义
+        val json = """{"rows":[{"loanCoin":"USDT","totalDebt":"0.0"},{"loanCoin":"BNB","totalDebt":"-1.0"},{"loanCoin":"ETH","totalDebt":""}],"total":3}"""
+        val debts = BinanceAccountAPI.parseLoanOrders(json)
+        assertTrue("零值/负值/空值行都应被跳过", debts.isEmpty())
+    }
+
+    @Test
+    fun 借币接口走正确的v2SAPI路径_且返回负债() = runBlocking {
+        // 回归根因：/sapi/v1/loan/... 已于 2024-04-24 退役，必须用 v2，否则 404。
+        // 同时钉死真实发出的路径，并验证返回体被正确解析成 BinanceLoanDebt。
+        val recorded = mutableListOf<String>()
+        val interceptor = object : Interceptor {
+            override fun intercept(chain: Interceptor.Chain): Response {
+                recorded.add(chain.request().url.encodedPath)
+                return Response.Builder()
+                    .request(chain.request())
+                    .protocol(Protocol.HTTP_1_1)
+                    .code(200)
+                    .message("OK")
+                    .body(
+                        """{"rows":[{"loanCoin":"USDT","totalDebt":"50.80033811"}],"total":1}"""
+                            .toResponseBody("application/json".toMediaType())
+                    )
+                    .build()
+            }
+        }
+        val client = OkHttpClient.Builder().addInterceptor(interceptor).build()
+        val result = BinanceAccountAPI.getLoans("dummyKey", "dummySecret", client)
+
+        assertEquals("应发出 1 个借币接口请求", 1, recorded.size)
+        assertEquals(
+            "借币接口应为 /sapi/v2/loan/flexible/ongoing/orders",
+            "/sapi/v2/loan/flexible/ongoing/orders",
+            recorded[0]
+        )
+        assertTrue(
+            "SAPI 绝不能带 /api/v3 前缀（拼上去路径不存在→404）",
+            recorded.none { it.contains("/api/v3/") }
+        )
+        // 返回体被正确解析；失败时 failures 为空、warning 为 null
+        assertEquals(1, result.debts.size)
+        assertEquals("USDT", result.debts[0].asset)
+        assertEquals(50.80033811, result.debts[0].debt, 1e-9)
+        assertTrue(result.failures.isEmpty())
+        assertEquals(null, result.warning)
+    }
+
+    @Test
+    fun 借币接口失败时降级_不抛且warning非空() = runBlocking {
+        // 缺 Loan 读取权限 / 接口下线 / 地区限制都属常态，绝不能让整个导入崩溃。
+        // 失败应降级为空负债 + 非空 warning，交预览页提示。
+        val interceptor = object : Interceptor {
+            override fun intercept(chain: Interceptor.Chain): Response {
+                return Response.Builder()
+                    .request(chain.request())
+                    .protocol(Protocol.HTTP_1_1)
+                    .code(404)
+                    .message("Not Found")
+                    .body(
+                        """{"code":-2015,"msg":"Invalid API-key, IP, or permissions for action."}"""
+                            .toResponseBody("application/json".toMediaType())
+                    )
+                    .build()
+            }
+        }
+        val client = OkHttpClient.Builder().addInterceptor(interceptor).build()
+        val result = BinanceAccountAPI.getLoans("dummyKey", "dummySecret", client)
+
+        // 关键：不抛异常、降级为空负债
+        assertEquals(0, result.debts.size)
+        assertEquals(1, result.failures.size)
+        assertTrue("失败原因应带回预览页提示", result.warning != null)
+        assertTrue(result.warning!!.contains("借币负债没拉到"))
+    }
 }

@@ -493,6 +493,23 @@ class BinanceImportServiceTest {
     }
 
     @Test
+    fun 借币负债作为负余额追加在理财合并之后_与现货净额抵消() = runBlocking {
+        // 锁定 BinanceImportViewModel.fetch 的真实组装顺序：先 mergeEarnIntoBalances（max 规则，
+        // 不能把负余额当「待补齐的理财量」覆盖掉），再追加借币负余额。
+        // 现货/理财 USDT 142.52 + 借币 -50.80033811 → 净 91.71966189（币安总览净额口径）。
+        // 若有人把 loan 负余额错误地塞进 mergeEarnIntoBalances，max 规则会把它抹掉、净资产虚高。
+        val merged = mergeEarnIntoBalances(
+            balances = listOf(balance("USDT", free = 142.52)),
+            earn = emptyList()
+        ) + listOf(BinanceBalance(asset = "USDT", free = -50.80033811, locked = 0.0))
+
+        val preview = service.buildPreview(merged, existingAssets = emptyList())
+        assertEquals(1, preview.items.size)
+        assertEquals("USDT", preview.items[0].symbol)
+        assertEquals(142.52 - 50.80033811, preview.items[0].quantity, 1e-9)
+    }
+
+    @Test
     fun 负余额commit落成数量为负的加密货币资产_不再崩溃() = runBlocking {
         // 端到端回归：纯负债（没有对应持仓的负余额）按设计落成一条数量为负的 CRYPTO 资产，
         // 参与净值计算自动扣减。修复前 Asset.init 的 require(balance >= 0) 会让 commit

@@ -368,6 +368,29 @@ private fun BinancePreviewStep(
             }
         }
 
+        // 借币负债没拉全时明确告知：否则用户只会看到总资产比对账单高一块（没扣负债），却找不到原因
+        state.loanWarning?.let { warning ->
+            item {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.35f)
+                    )
+                ) {
+                    Row(modifier = Modifier.padding(12.dp)) {
+                        Icon(
+                            Icons.Default.Info,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(warning, style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            }
+        }
+
         item {
             ImportAccountField(
                 account = state.account,

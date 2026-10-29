@@ -3,7 +3,7 @@ import java.util.Properties
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
-    id("kotlin-kapt")
+    id("com.google.devtools.ksp")
 }
 
 android {
@@ -70,10 +70,8 @@ android {
     composeOptions {
         kotlinCompilerExtensionVersion = "1.5.14"
     }
-    kapt {
-        arguments {
-            arg("room.schemaLocation", "$projectDir/schemas")
-        }
+    ksp {
+        arg("room.schemaLocation", "$projectDir/schemas")
     }
 
     packaging {
@@ -112,7 +110,7 @@ dependencies {
 
     // Room - 使用 2.6.1 稳定版本
     implementation("androidx.room:room-runtime:2.6.1")
-    kapt("androidx.room:room-compiler:2.6.1")
+    ksp("androidx.room:room-compiler:2.6.1")
     implementation("androidx.room:room-ktx:2.6.1")
 
     // OkHttp（项目实际全裸 OkHttp：Retrofit 曾经声明但零 import，已删）

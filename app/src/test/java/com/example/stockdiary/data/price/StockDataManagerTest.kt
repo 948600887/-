@@ -195,7 +195,7 @@ class StockDataManagerTest {
             manager.getStockData("sh600000", forceRefresh = true, networkAvailable = true)
         }
 
-        // 累计 5 次源级失败 → 熔禁
+        // 累计达阈值（FAIL_THRESHOLD=8）次源级失败 → 熔禁
         assertEquals(SourcePhase.OPEN, manager.sourcePhaseForTesting(ApiManager.API_SINA))
     }
 
@@ -208,7 +208,7 @@ class StockDataManagerTest {
      * 用 NetworkRetryHelper 旁路跳过重试延迟，聚焦「sink 透出 → 分类 → 熔禁」链路本身。
      */
     @Test
-    fun `回归_新浪无缓存网络超时_真实Sink路径_5次熔禁`() = runBlocking {
+    fun `回归_新浪无缓存网络超时_真实Sink路径_达阈值熔禁`() = runBlocking {
         mockkObject(NetworkRetryHelper)
         coEvery { NetworkRetryHelper.executeWithRetry<StockData>(any(), any(), any(), any(), any()) } coAnswers {
             @Suppress("UNCHECKED_CAST")
@@ -224,7 +224,7 @@ class StockDataManagerTest {
         mockkObject(TencentStockAPI)
         coEvery { TencentStockAPI.getStockData(any()) } returns Result.failure(IOException("腾讯也不通"))
 
-        repeat(5) {
+        repeat(SourceCircuitBreaker.FAIL_THRESHOLD) {
             manager.getStockData("sh600000", forceRefresh = true, networkAvailable = true)
         }
 

@@ -141,11 +141,12 @@ class SourceCircuitBreakerVerifyTest {
     }
 
     /**
-     * 闭环 ③ 修复目标：单波 3 个并发同时源级失败（=同步并发度=旧阈值）不熔禁；
-     * 再补 2 次（累计 5）才熔禁。用非重试的限流文案跑快点（与真实 403 文案同型）。
+     * 闭环 ③ 修复目标：单波 6 个并发同时源级失败（=同步并发度 MAX_CONCURRENT_SYNC=6）不熔禁；
+     * 再补 2 次（累计 8 = [SourceCircuitBreaker.FAIL_THRESHOLD]）才熔禁。用非重试的限流文案跑快点。
+     * 阈值 5→8 是与并发度解耦的权宜：单波并发(6) < 阈值(8)，避免一波超时误熔整源。
      */
     @Test
-    fun `单波3次源级失败不熔禁_累计5次才熔禁_闭环修复目标`() = runBlocking {
+    fun `单波6次源级失败不熔禁_累计8次才熔禁_闭环修复目标`() = runBlocking {
         mockkObject(SinaStockAPI)
         mockkObject(TencentStockAPI)
         coEvery { SinaStockAPI.getStockData(any()) } returns
@@ -153,17 +154,23 @@ class SourceCircuitBreakerVerifyTest {
         coEvery { TencentStockAPI.getStockData(any()) } returns
             Result.failure(IOException("API请求频率过高，请稍后再试"))
 
-        // 单波 3 次（=并发度）：不熔禁，流量继续走新浪（只是每次都失败）
-        repeat(3) {
+        // 单波 6 次（=并发度）：不熔禁，流量继续走新浪（只是每次都失败）
+        repeat(6) {
             manager.getStockData("sh600000", forceRefresh = true, networkAvailable = true)
         }
-        assertEquals("单波3次不得熔禁（旧阈值3会误禁）", SourcePhase.CLOSED, manager.sourcePhaseForTesting(ApiManager.API_SINA))
+        assertEquals(
+            "单波6次不得熔禁（阈值8、并发6，单波不误禁）",
+            SourcePhase.CLOSED, manager.sourcePhaseForTesting(ApiManager.API_SINA)
+        )
 
-        // 再 2 次累计到 5：熔禁
-        repeat(2) {
+        // 再补 (8-6)=2 次累计到 8（=FAIL_THRESHOLD）：熔禁
+        repeat(SourceCircuitBreaker.FAIL_THRESHOLD - 6) {
             manager.getStockData("sh600000", forceRefresh = true, networkAvailable = true)
         }
-        assertEquals("累计5次源级失败必须熔禁", SourcePhase.OPEN, manager.sourcePhaseForTesting(ApiManager.API_SINA))
+        assertEquals(
+            "累计${SourceCircuitBreaker.FAIL_THRESHOLD}次源级失败必须熔禁",
+            SourcePhase.OPEN, manager.sourcePhaseForTesting(ApiManager.API_SINA)
+        )
     }
 
     /**
@@ -186,18 +193,18 @@ class SourceCircuitBreakerVerifyTest {
      * 累计 5 次后必须熔禁（OPEN）——修复前会永远 CLOSED。
      */
     @Test
-    fun `回归_新浪无缓存网络故障_熔断器不再饿死_5次熔禁`() = runBlocking {
+    fun `回归_新浪无缓存网络故障_熔断器不再饿死_达阈值熔禁`() = runBlocking {
         stubSinaHttpFailure(IOException("API请求频率过高，请稍后再试"))
         mockkObject(TencentStockAPI)
         coEvery { TencentStockAPI.getStockData(any()) } returns
             Result.failure(IOException("腾讯也不通"))
 
-        repeat(5) {
+        repeat(SourceCircuitBreaker.FAIL_THRESHOLD) {
             manager.getStockData("sh600000", forceRefresh = true, networkAvailable = true)
         }
 
         assertEquals(
-            "修复后：新浪真实故障（无缓存）累计 5 次必须熔禁，不再被 sink 消息饿死",
+            "修复后：新浪真实故障（无缓存）累计 ${SourceCircuitBreaker.FAIL_THRESHOLD} 次必须熔禁，不再被 sink 消息饿死",
             SourcePhase.OPEN,
             manager.sourcePhaseForTesting(ApiManager.API_SINA)
         )

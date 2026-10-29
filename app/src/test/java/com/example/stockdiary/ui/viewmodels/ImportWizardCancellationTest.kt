@@ -115,12 +115,26 @@ class ImportWizardCancellationTest {
             // 底层 suspend 桩成永不返回的挂起（可取消），停在「正在拉取」
             coEvery { BinanceAccountAPI.getAccount(any(), any()) } coAnswers { awaitCancellation() }
 
+            // init 块（BinanceImportViewModel:80）会异步读已存密钥并回填：
+            // relaxed mock 的 getApiKey() 返回 null → 把 apiKey/apiSecret 清空。
+            // 若不对齐时序，全量跑时 IO 线程可能在 onApiKeyChange("k") 之后、fetch()
+            // 捕获状态之前把 apiKey 清掉，使 fetch() 命中空白守卫提前 return，
+            // fetching 永不置位、回归测试误报。这里给 credentialsManager 一个可观测的
+            // 哨兵返回值，等 init 回填完成（apiKey == 哨兵）再设真实 key，保证时序确定。
+            val credentialsManager = mockk<BinanceCredentialsManager>(relaxed = true)
+            coEvery { credentialsManager.getApiKey() } returns "PRESET_KEY"
+            coEvery { credentialsManager.getApiSecret() } returns "PRESET_SECRET"
+
             val vm = CancelableBinanceVm(
                 context = mockk(relaxed = true),
                 repository = mockk(relaxed = true),
                 service = mockk(relaxed = true),
-                credentialsManager = mockk(relaxed = true)
+                credentialsManager = credentialsManager
             )
+            // 等 init 异步回填密钥（说明 init 协程已 settle，之后设的 key 不会被覆盖）
+            val initSettled = waitUntil { vm.uiState.value.apiKey == "PRESET_KEY" }
+            assertTrue("init 异步回填密钥未完成，测试时序不可靠", initSettled)
+
             vm.onApiKeyChange("k")
             vm.onApiSecretChange("s")
             vm.fetch()

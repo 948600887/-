@@ -10,9 +10,8 @@ import com.example.stockdiary.data.sync.PriceSyncPreferencesManager
 import com.example.stockdiary.data.sync.PriceSyncScheduler
 import com.example.stockdiary.data.sync.SnapshotScheduler
 import com.example.stockdiary.common.Result
-import com.example.stockdiary.database.DividendDao
-import com.example.stockdiary.database.SnapshotDao
-import com.example.stockdiary.database.TransactionDao
+import com.example.stockdiary.data.repository.DividendRepository
+import com.example.stockdiary.data.repository.TransactionRepository
 import com.example.stockdiary.utils.AppLogger
 import com.example.stockdiary.utils.DataSourceHealth
 import com.example.stockdiary.utils.DataSourceHealthChecker
@@ -73,9 +72,8 @@ class SettingsViewModelTest {
 
     private val appContext = mockk<Context>(relaxed = true)
     private val assetRepository = mockk<AssetRepository>(relaxed = true)
-    private val snapshotDao = mockk<SnapshotDao>(relaxed = true)
-    private val transactionDao = mockk<TransactionDao>(relaxed = true)
-    private val dividendDao = mockk<DividendDao>(relaxed = true)
+    private val dividendRepository = mockk<DividendRepository>(relaxed = true)
+    private val transactionRepository = mockk<TransactionRepository>(relaxed = true)
     private val dataExporter = mockk<DataExporter>(relaxed = true)
     private val dashboardPreferencesManager = mockk<DashboardPreferencesManager>(relaxed = true)
     private val dataSourceHealthChecker = mockk<DataSourceHealthChecker>(relaxed = true)
@@ -105,17 +103,16 @@ class SettingsViewModelTest {
 
         // init 里的三个 Flow 收集必须给确定性数据源，否则会挂住或落到未初始化实现上抛异常
         every { assetRepository.getAllAssets() } returns flowOf(emptyList())
-        every { snapshotDao.getAllSnapshots() } returns flowOf(emptyList())
-        every { transactionDao.getAllFlow() } returns flowOf(emptyList())
-        every { dividendDao.getAllFlow() } returns flowOf(emptyList())
-        coEvery { dividendDao.getAllSync() } returns emptyList()
+        every { assetRepository.getAllSnapshots() } returns flowOf(emptyList())
+        every { transactionRepository.getAllFlow() } returns flowOf(emptyList())
+        every { dividendRepository.getAllDividendsFlow() } returns flowOf(emptyList())
+        coEvery { dividendRepository.getAllDividendsSync() } returns emptyList()
 
         vm = SettingsViewModel(
             appContext = appContext,
             assetRepository = assetRepository,
-            snapshotDao = snapshotDao,
-            transactionDao = transactionDao,
-            dividendDao = dividendDao,
+            dividendRepository = dividendRepository,
+            transactionRepository = transactionRepository,
             dataExporter = dataExporter,
             dashboardPreferencesManager = dashboardPreferencesManager,
             dataSourceHealthChecker = dataSourceHealthChecker,
@@ -146,7 +143,7 @@ class SettingsViewModelTest {
         vm.exportData(mockk(relaxed = true), SettingsViewModel.ExportType.CSV_DIVIDENDS)
         waitUntil { vm.uiState.value.exportResult != null }
 
-        coVerify { dividendDao.getAllSync() }
+        coVerify { dividendRepository.getAllDividendsSync() }
         verify { dataExporter.exportDividendsToCSV(any()) }
         assertTrue(vm.uiState.value.exportResult?.isSuccess == true)
     }
@@ -333,9 +330,8 @@ class SettingsViewModelTest {
         return SettingsViewModel(
             appContext = appContext,
             assetRepository = assetRepository,
-            snapshotDao = snapshotDao,
-            transactionDao = transactionDao,
-            dividendDao = dividendDao,
+            dividendRepository = dividendRepository,
+            transactionRepository = transactionRepository,
             dataExporter = dataExporter,
             dashboardPreferencesManager = dashboardPreferencesManager,
             dataSourceHealthChecker = dataSourceHealthChecker,

@@ -50,6 +50,8 @@ class UnifiedPriceServiceCryptoPrewarmTest {
         // 预取会双写门面 60s 缓存：不清的话下一条用例可能直接命中上一条的价，
         // 假 client 根本没被调用，断言「发了几次请求」就变成假绿
         UnifiedPriceService.clearPriceCacheForTesting()
+        // 黑名单是 object 单例字段，跨用例共享：不清会让上一个用例登记的坏码污染下一个
+        UnifiedPriceService.clearNonTradableForTesting()
         requestCount.set(0)
         lastUrl.set("")
     }
@@ -59,6 +61,7 @@ class UnifiedPriceServiceCryptoPrewarmTest {
         // 与 @Before 对称：熔断状态与价格缓存都不能漏给后续测试类
         BinanceHostGate.resetForTesting()
         UnifiedPriceService.clearPriceCacheForTesting()
+        UnifiedPriceService.clearNonTradableForTesting()
     }
 
     // ---------- 1. 请求数：N 个标的 1 次请求 ----------
@@ -261,6 +264,79 @@ class UnifiedPriceServiceCryptoPrewarmTest {
         )
     }
 
+    // ---------- 6. 不可交易黑名单：首轮脏、次轮整片不再被坏码拖累 ----------
+
+    @Test
+    fun `已知不可交易LD理财_逐只确认后次轮批量不再含坏码交易对`() = runBlocking {
+        // 真实痛点（诊断 20261026/1029）：LDSHIB2 底层 SHIB2USDT 在币安无盘，每轮都触发
+        // 批量整片 400 → 切小重试 → 逐只白打网络。加黑名单后：首轮脏、逐只回落确认不可交易、
+        // 次轮起坏码被剔除，批量整片能成功，不再每轮烧「整片 400 + 切小 + 逐只」。
+        val badCode = "LDSHIB2"
+        val badPair = "SHIB2USDT"
+        val goodCodes = listOf("BTC", "ETH")
+
+        val client = recordingClient { req ->
+            val url = req.url.toString()
+            if (url.contains("symbols=")) {
+                val asked = symbolsOf(url)
+                if (badPair in asked) respond(400, """{"code":-1121,"msg":"Invalid symbol."}""", req)
+                else respond(200, tickers(*asked.map { it to "100" }.toTypedArray()), req)
+            } else {
+                val sym = url.substringAfter("symbol=").substringBefore("&")
+                if (sym == badPair) respond(400, """{"code":-1121,"msg":"Invalid symbol."}""", req)
+                else respond(200, singleTicker(sym, "100"), req)
+            }
+        }
+
+        // 首轮：坏码进批量 → 整片 400（含坏码）→ 切小 → 子片仍 400 → 不进 map（回落）
+        val first = UnifiedPriceService.prewarmCryptoPrices(
+            goodCodes + badCode, forceRefresh = true, client = client
+        ).getOrThrow()
+        assertTrue("首轮坏码不应进 map（回落逐只）", badCode !in first)
+
+        // 逐只回落确认不可交易 → 入黑名单（LD 底层 400 无效符号分支）
+        val single = UnifiedPriceService.getCryptoPrice(badCode, client = client)
+        assertTrue(
+            "坏码应判不可交易（NonTradableAssetException）",
+            single.isFailure && single.exceptionOrNull() is NonTradableAssetException
+        )
+
+        // 次轮：坏码被黑名单剔除，批量不再含坏码交易对 → 整片 200 成功
+        requestCount.set(0); lastUrl.set("")
+        val second = UnifiedPriceService.prewarmCryptoPrices(
+            goodCodes + badCode, forceRefresh = true, client = client
+        ).getOrThrow()
+        assertTrue("次轮正常码应进 map", goodCodes.all { it in second })
+        assertTrue("次轮坏码仍不进 map", badCode !in second)
+        val secondBatch = symbolsOf(lastUrl.get())
+        assertTrue(
+            "次轮批量不应再含坏码交易对 $badPair（优化生效，整片不再 400）: $secondBatch",
+            badPair !in secondBatch
+        )
+        assertEquals("次轮只需 1 次整片请求（无整片 400、无切小）", 1, requestCount.get())
+    }
+
+    @Test
+    fun `黑名单命中时getCryptoPrice入口短路_不再发网络请求`() = runBlocking {
+        // 先逐只确认一次（底层 400 无效符号 → 入黑名单）
+        val confirmClient = recordingClient { req ->
+            val sym = req.url.toString().substringAfter("symbol=").substringBefore("&")
+            if (sym == "SHIB2USDT") respond(400, """{"code":-1121,"msg":"Invalid symbol."}""", req)
+            else respond(200, singleTicker(sym, "100"), req)
+        }
+        UnifiedPriceService.getCryptoPrice("LDSHIB2", client = confirmClient)
+
+        // 次轮用「永远 200」的 client，断言命中黑名单后根本不调用它（请求数 0）
+        val neverHit = recordingClient { req -> respond(200, singleTicker("ANY", "1"), req) }
+        requestCount.set(0)
+        val r = UnifiedPriceService.getCryptoPrice("LDSHIB2", client = neverHit)
+        assertEquals("黑名单命中应直接短路，不再发网络请求", 0, requestCount.get())
+        assertTrue(
+            "黑名单命中应直接返回不可交易",
+            r.isFailure && r.exceptionOrNull() is NonTradableAssetException
+        )
+    }
+
     /** 从批量请求 URL 里解出本次请求的 symbols 列表 */
     private fun symbolsOf(url: String): List<String> {
         val decoded = URLDecoder.decode(url, "UTF-8")
@@ -293,6 +369,11 @@ class UnifiedPriceServiceCryptoPrewarmTest {
             """{"symbol":"$symbol","lastPrice":"$price","priceChange":"1.5",""" +
                 """"priceChangePercent":"2.5","highPrice":"$price","lowPrice":"$price","volume":"1234.5"}"""
         }
+
+    /** 币安单只行情响应体（与批量元素同字段，单对象而非数组） */
+    private fun singleTicker(symbol: String, price: String): String =
+        """{"symbol":"$symbol","lastPrice":"$price","priceChange":"1.5",""" +
+            """"priceChangePercent":"2.5","highPrice":"$price","lowPrice":"$price","volume":"1234.5"}"""
 
     private fun priceOf(map: Map<String, AssetPrice>, code: String): Double =
         (map[code] as AssetPrice.Crypto).data.price

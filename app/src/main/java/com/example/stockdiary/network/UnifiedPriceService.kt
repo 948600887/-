@@ -65,6 +65,21 @@ object UnifiedPriceService {
     private val priceCache = ConcurrentHashMap<String, CacheEntry>()
     private val pendingRequests = ConcurrentHashMap<String, CompletableDeferred<Result<AssetPrice>>>()
 
+    /**
+     * 进程级「已知不可交易」code 黑名单（币安现货无交易对）。
+     *
+     * 逐只回落 [getCryptoPrice] 向币安确认某 code 底层无现货盘（400 无效符号 /
+     * LD 理财无底层）后登记；后续 [prewarmCryptoPrices] 构建批量请求前剔除、
+     * [getCryptoPrice] 入口直接判不可交易短路——避免这些 code 每轮污染批量整片
+     * 导致整片 400、吃掉批量预取收益（真机诊断 20261026/1029 实锤：1MBBDOGE /
+     * SHIB2 类底层无盘标的每轮都触发整片 400 → 切小重试 → 逐只白打网络）。
+     *
+     * 进程级、非持久化：重启即清。不持久化是刻意的——币安上新交易对时持久化黑名单
+     * 会误杀需手动清缓存；进程内「首轮脏、后续轮干净」已足够（自动同步每轮都预热）。
+     * 线程安全：getCryptoPrice 被同步扇出 6 并发调用，写入点并发，故用 ConcurrentHashMap 集合。
+     */
+    private val nonTradableCodes = ConcurrentHashMap.newKeySet<String>()
+
     private fun isFresh(entry: CacheEntry): Boolean =
         System.currentTimeMillis() - entry.timestamp < PRICE_CACHE_TTL_MS
 
@@ -313,6 +328,13 @@ object UnifiedPriceService {
             val code = rawCode.trim()
             if (code.isEmpty()) continue
             val codeNorm = code.uppercase()
+
+            // 已知在币安现货无交易对的 code（逐只回落时已向币安确认过）：直接剔除，不进
+            // 批量请求——否则会污染整片、导致整片 400 吃掉批量预取收益（见 [nonTradableCodes]）。
+            if (codeNorm in nonTradableCodes) {
+                AppLogger.d("跳过已知不可交易标的 $code，不进批量行情请求", TAG)
+                continue
+            }
 
             // 稳定币锚定 1 美元：币安上没有自我交易对，查价必然空——直接按 1.0 计，不进批量请求
             // 稳定币识别统一走 BinanceAPI.isLikelyStablecoin（白名单 + 命名兜底），
@@ -689,6 +711,14 @@ object UnifiedPriceService {
             )
         }
 
+        // 已知在币安现货无交易对的 code（本轮同步逐只回落时已向币安确认过 400 无效符号）：
+        // 直接判不可交易、不再发网络请求，也不进批量预取（否则每轮整片 400 吃掉批量收益）。
+        if (codeNorm in nonTradableCodes) {
+            return@withContext Result.failure(
+                NonTradableAssetException("$code 在币安现货无交易对（已知不可交易）")
+            )
+        }
+
         // 候选交易对：先按既有映射算出（多数情况正确），再补一个「裸码 + USDT」兜底，
         // 解决 WBETH 这类 ticker 以报价币名结尾、被误判成已是交易对导致永远 400 的问题
         // （详见 [BinanceAPI.cryptoSymbolCandidates]）。LD 理财/锁仓走底层 1:1 计价，
@@ -710,6 +740,7 @@ object UnifiedPriceService {
                     )
                 }
                 AppLogger.d("理财/锁仓产品 $code 无底层交易对，跳过查价", TAG)
+                nonTradableCodes.add(codeNorm)
                 return@withContext Result.failure(
                     NonTradableAssetException("$code 是币安理财/锁仓产品，没有现货行情")
                 )
@@ -722,6 +753,7 @@ object UnifiedPriceService {
 
         if (candidates.isEmpty()) {
             AppLogger.d("无可用交易对（无法归一化的符号）：$code，跳过查价", TAG)
+            nonTradableCodes.add(codeNorm)
             return@withContext Result.failure(NonTradableAssetException("$code 没有可用的现货行情"))
         }
 
@@ -798,6 +830,7 @@ object UnifiedPriceService {
                                 "理财/锁仓产品 $code 的底层交易对($rawPair)在币安不存在（无效符号），按不可交易处理",
                                 TAG
                             )
+                            nonTradableCodes.add(codeNorm)
                             return@withContext Result.failure(
                                 NonTradableAssetException("$code 的底层资产在币安现货无交易对")
                             )
@@ -864,6 +897,7 @@ object UnifiedPriceService {
         // 归为不可交易（不计同步失败），与上面单候选分支同口径。
         if (isLdProduct && lastFailure != null && isInvalidSymbolError(finalError)) {
             AppLogger.i("理财/锁仓产品 $code 的底层交易对均无效（无现货盘），按不可交易处理", TAG)
+            nonTradableCodes.add(codeNorm)
             Result.failure(NonTradableAssetException("$code 的底层资产在币安现货无交易对"))
         } else {
             Result.failure(finalError)
@@ -909,6 +943,11 @@ object UnifiedPriceService {
     internal fun clearPriceCacheForTesting() {
         priceCache.clear()
         pendingRequests.clear()
+    }
+
+    /** 测试隔离用：清空 [nonTradableCodes]（object 单例跨用例共享，必须复位） */
+    internal fun clearNonTradableForTesting() {
+        nonTradableCodes.clear()
     }
 
     fun clearCache() {

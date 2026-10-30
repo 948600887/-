@@ -75,7 +75,16 @@ open class BinanceImportViewModel(
          * 非 null 表示这次导入没计入借币负债，净资产会虚高（只记借来的钱、不记欠的钱）。
          * 必须在预览页明示，否则用户看到的总资产比对账单高、却不知道差在借币上。
          */
-        val loanWarning: String? = null
+        val loanWarning: String? = null,
+        /**
+         * 借币（含抵押资产）成功拉到时的提示。
+         *
+         * 与 [loanWarning] 互斥：借币接口成功且有在途订单时设置，预览页用信息卡片明示
+         * 「已把抵押资产与负债都计入，净资产按币安净额口径」。这直接回答用户最常见的困惑——
+         * 「我抵押出去的资产为什么没出现在导入里」：抵押资产是用户自己的钱、被币安锁定，
+         * 必须加回才能算对净资产，本卡片就是告诉用户这次已经加回了。
+         */
+        val loanNote: String? = null
     ) {
         /** 密钥都填了才能拉取 */
         val canFetch: Boolean
@@ -169,6 +178,7 @@ open class BinanceImportViewModel(
             val mergedBalances: List<BinanceBalance>
             val earnWarning: String?
             val loanWarning: String?
+            val loanNote: String?
             coroutineScope {
                 val refreshDeferred = async(Dispatchers.IO) { ExchangeRateManager.refresh(force = true) }
                 val earnDeferred = async(Dispatchers.IO) {
@@ -187,14 +197,35 @@ open class BinanceImportViewModel(
                 // 借币负债表示成负余额追加在 earn 合并之后，避免被 mergeEarnIntoBalances 的
                 // max 规则误当成「待补齐的理财量」覆盖掉（负债必须作为独立的负余额进入
                 // SnapshotAlignment 的按代码 sumOf，才能与同代码持仓自然抵消 / 落成纯负资产）。
-                val loanBalances = loan.debts.map {
-                    BinanceBalance(asset = it.asset, free = -it.debt, locked = 0.0)
+                // 借币订单同时含「负债」与「抵押资产」两部分，两者都必须转成余额：
+                // - 借款（loanCoin/totalDebt）是负债，转成负余额；
+                // - 抵押给币安的资产（collateralCoin/collateralAmount）仍是用户自己的钱、
+                //   只是被锁定，必须转成正余额（locked 态）加回，否则净资产只减借来的、
+                //   没加回押出去的，被严重低估。
+                // 两者都追加在 mergeEarnIntoBalances 之后：负余额不能被 earn 的 max 规则
+                // 误当「待补齐的理财量」抹掉（负债必须作为独立负余额进入按代码 sumOf）。
+                val loanBalances = buildList {
+                    for (debt in loan.debts) {
+                        add(BinanceBalance(asset = debt.asset, free = -debt.debt, locked = 0.0))
+                        val collateralCoin = debt.collateralCoin
+                        val collateralAmount = debt.collateralAmount
+                        if (!collateralCoin.isNullOrBlank() && collateralAmount > 0.0) {
+                            add(BinanceBalance(asset = collateralCoin, free = 0.0, locked = collateralAmount))
+                        }
+                    }
                 }
                 mergedBalances = mergeEarnIntoBalances(balances, earn.positions) + loanBalances
                 // 理财没拉全 = 总资产会少算，必须带到预览页说清楚（不能静默降级）
                 earnWarning = earn.warning
                 // 借币没拉到 = 净资产会虚高，同样必须明示
                 loanWarning = loan.warning
+                // 借币（含抵押）拉到了：预览页用信息卡片明示已把抵押资产与负债都计入，
+                // 净资产按币安净额口径。直接回答「抵押资产为什么没出现在导入里」。
+                loanNote = if (loan.debts.isNotEmpty()) {
+                    "已计入借币抵押资产与负债，净资产按币安净额口径（资产 − 欠币）计算。"
+                } else {
+                    null
+                }
             }
 
             // 理财独有的资产在上面那批取价时还不知道，补一次小额批量请求（通常个位数）。
@@ -248,7 +279,8 @@ open class BinanceImportViewModel(
                     preview = preview,
                     prices = priceMap,
                     earnWarning = earnWarning,
-                    loanWarning = loanWarning
+                    loanWarning = loanWarning,
+                    loanNote = loanNote
                 )
             }
         }

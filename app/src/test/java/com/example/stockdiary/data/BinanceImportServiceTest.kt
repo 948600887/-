@@ -510,6 +510,27 @@ class BinanceImportServiceTest {
     }
 
     @Test
+    fun 借币抵押资产作为正余额追加_净资产等于资产减负债() = runBlocking {
+        // 抵押 0.5 BTC 借 50.80033811 USDT：
+        // 现货/理财 USDT 142.52 + 借币 -50.80033811 → 净 91.71966189（USDT）
+        // 抵押 BTC 0.5 作为正余额（locked 态）追加 → BTCUSDT = 0.5（用户资产回归）。
+        // 若抵押资产没抓，BTCUSDT 压根不会出现，净资产被低估 0.5 BTC。
+        // 锁定 fetch 的真实组装顺序：抵押与负债都追加在 mergeEarnIntoBalances 之后。
+        val merged = mergeEarnIntoBalances(
+            balances = listOf(balance("USDT", free = 142.52)),
+            earn = emptyList()
+        ) + listOf(
+            BinanceBalance(asset = "USDT", free = -50.80033811, locked = 0.0),
+            BinanceBalance(asset = "BTC", free = 0.0, locked = 0.5)  // 抵押资产（锁定态）
+        )
+        val preview = service.buildPreview(merged, existingAssets = emptyList())
+        val bySymbol = preview.items.associateBy { it.symbol }
+        assertEquals(2, preview.items.size)
+        assertEquals(142.52 - 50.80033811, bySymbol["USDT"]!!.quantity, 1e-9)
+        assertEquals(0.5, bySymbol["BTCUSDT"]!!.quantity, 1e-9)
+    }
+
+    @Test
     fun 负余额commit落成数量为负的加密货币资产_不再崩溃() = runBlocking {
         // 端到端回归：纯负债（没有对应持仓的负余额）按设计落成一条数量为负的 CRYPTO 资产，
         // 参与净值计算自动扣减。修复前 Asset.init 的 require(balance >= 0) 会让 commit

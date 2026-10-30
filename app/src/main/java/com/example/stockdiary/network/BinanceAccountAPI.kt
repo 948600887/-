@@ -116,9 +116,29 @@ data class BinanceEarnFetch(
  * @param asset 借入的基础资产（USDT / BNB…）
  * @param debt  未还负债数量（正数）；调用方转负
  */
+/**
+ * 一笔活期借币（Flexible Loan）订单的**负债 + 抵押**快照。
+ *
+ * 币安活期借币是「抵押一种资产、借出另一种币」：
+ * - [asset]/[debt] 是**借入的负债**（USDT/BTC…），导入时取负作为负余额；
+ * - [collateralCoin]/[collateralAmount] 是**抵押给币安的担保资产**（仍是用户自己的资产，
+ *   只是被币安锁定），必须作为正余额加回，否则净资产只减借来的钱、没加回押出去的资产，
+ *   被严重低估（例如抵押 1 BTC 借 5000 USDT，正确净额是 1 BTC − 5000 USDT，
+ *   漏掉抵押就会算成 − 5000 USDT）。接口响应里同一订单同时携带这两类字段。
+ *
+ * [collateralCoin]/[collateralAmount] 带默认值（null/0）——老订单或数据缺失时这两项为空，
+ * 此时只导入负债、不影响负债解析（负债口径完全独立）。
+ *
+ * @param asset 借入的基础资产（USDT / BNB…）
+ * @param debt  未还负债数量（正数）；调用方转负
+ * @param collateralCoin 抵押给币安的担保资产基础名（BNB/BTC…）；无抵押记录时为 null
+ * @param collateralAmount 抵押数量（正数）；供调用方转成正余额（锁定态）用
+ */
 data class BinanceLoanDebt(
     val asset: String,
-    val debt: Double
+    val debt: Double,
+    val collateralCoin: String? = null,
+    val collateralAmount: Double = 0.0
 )
 
 /**
@@ -472,6 +492,15 @@ object BinanceAccountAPI {
      * 负债额在 **`totalDebt`**（不是 `amount`）。debt <= 0 的行（已还清空壳）没有导入意义，
      * 跳过，交给现货侧的 dust 过滤口径。
      */
+    /**
+     * 解析借币订单响应：`{"rows":[{"loanCoin":"USDT","totalDebt":"50.8",
+     * "collateralCoin":"BNB","collateralAmount":"1.23",...}],"total":N}`。
+     *
+     * 每笔订单同时含**负债**（loanCoin/totalDebt）与**抵押资产**（collateralCoin/
+     * collateralAmount）两部分，都要解析——漏掉抵押资产会让净资产被低估（见
+     * [BinanceLoanDebt] 注释）。debt <= 0 的行（已还清空壳）没有导入意义，跳过；
+     * 但抵押字段的解析与负债跳过互不影响：只要 debt > 0，哪怕 collateral 缺失也照常导入负债。
+     */
     internal fun parseLoanOrders(body: String): List<BinanceLoanDebt> {
         return try {
             val rows = JSONObject(body).optJSONArray("rows") ?: return emptyList()
@@ -482,7 +511,18 @@ object BinanceAccountAPI {
                 val debt = obj.optString("totalDebt").toDoubleOrNull() ?: continue
                 // 数量为 0 / 已还空的行没有导入意义
                 if (asset.isBlank() || debt <= 0.0) continue
-                result.add(BinanceLoanDebt(asset = asset, debt = debt))
+                // 抵押资产：仍是用户自己的资产，单独解析，绝不被「负债跳过」逻辑误伤。
+                // collateralAmount 解析不到按 0 处理（该订单无抵押记录），不阻断负债导入。
+                val collateralCoin = obj.optString("collateralCoin").takeIf { it.isNotBlank() }
+                val collateralAmount = obj.optString("collateralAmount").toDoubleOrNull() ?: 0.0
+                result.add(
+                    BinanceLoanDebt(
+                        asset = asset,
+                        debt = debt,
+                        collateralCoin = collateralCoin,
+                        collateralAmount = collateralAmount
+                    )
+                )
             }
             result
         } catch (e: CancellationException) {

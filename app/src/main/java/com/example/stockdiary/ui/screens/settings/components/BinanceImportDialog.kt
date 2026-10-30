@@ -391,6 +391,31 @@ private fun BinancePreviewStep(
             }
         }
 
+        // 借币（含抵押）成功拉到时：明确告知已把抵押资产与负债都计入，
+        // 直接回答「抵押资产为什么没出现在导入里」——它已作为持仓出现，净资产按币安净额口径。
+        // 用锁图标呼应「抵押资产被币安锁定」的语义（与顶部只读说明的锁图标同族）。
+        state.loanNote?.let { note ->
+            item {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.35f)
+                    )
+                ) {
+                    Row(modifier = Modifier.padding(12.dp)) {
+                        Icon(
+                            Icons.Default.Lock,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.tertiary,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(note, style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            }
+        }
+
         item {
             ImportAccountField(
                 account = state.account,

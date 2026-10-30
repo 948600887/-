@@ -253,15 +253,35 @@ class BinanceAccountAPITest {
     // ---------- 借币（Flexible Loan）负债接口 ----------
 
     @Test
-    fun 借币负债解析totalDebt与loanCoin() {
-        // 币安借币接口负债在 totalDebt（不是 amount），借入币在 loanCoin
+    fun 借币负债解析totalDebt与loanCoin_并解析抵押资产() {
+        // 币安借币接口负债在 totalDebt（不是 amount），借入币在 loanCoin；
+        // 同一订单的抵押资产在 collateralCoin/collateralAmount，也必须解析出来
+        // （漏掉抵押资产会让净资产只减借来的钱、没加回押出去的资产，被严重低估）
         val json = """{"rows":[{"loanCoin":"USDT","totalDebt":"50.80033811","collateralCoin":"BNB","currentLTV":"0.57"},{"loanCoin":"BNB","totalDebt":"1.5"}],"total":2}"""
         val debts = BinanceAccountAPI.parseLoanOrders(json)
         assertEquals(2, debts.size)
         assertEquals("USDT", debts[0].asset)
         assertEquals(50.80033811, debts[0].debt, 1e-9)
+        // 第一行有抵押 BNB（没给 collateralAmount → 默认 0.0），第二行无抵押字段 → null/0
+        assertEquals("BNB", debts[0].collateralCoin)
+        assertEquals(0.0, debts[0].collateralAmount, 1e-9)
         assertEquals("BNB", debts[1].asset)
         assertEquals(1.5, debts[1].debt, 1e-9)
+        assertEquals(null, debts[1].collateralCoin)
+        assertEquals(0.0, debts[1].collateralAmount, 1e-9)
+    }
+
+    @Test
+    fun 借币订单解析抵押资产_作为用户资产加回() {
+        // 抵押 1.23 BNB 借 50.8 USDT：collateralCoin/collateralAmount 是用户自己的担保资产，
+        // 必须被解析出来（否则净资产漏算这 1.23 BNB）
+        val json = """{"rows":[{"loanCoin":"USDT","totalDebt":"50.8","collateralCoin":"BNB","collateralAmount":"1.23"}],"total":1}"""
+        val debts = BinanceAccountAPI.parseLoanOrders(json)
+        assertEquals(1, debts.size)
+        assertEquals("USDT", debts[0].asset)
+        assertEquals(50.8, debts[0].debt, 1e-9)
+        assertEquals("BNB", debts[0].collateralCoin)
+        assertEquals(1.23, debts[0].collateralAmount, 1e-9)
     }
 
     @Test

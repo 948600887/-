@@ -92,11 +92,14 @@ class AssetTrendChartTest {
 
     @Test
     fun `trendXLabelIndices极窄画布只保留一个刻度_不叠字`() {
-        // 4 个点间距只有 10px、标签宽 50px：物理上放不下第二个标签，只留一个
+        // 4 个点间距只有 10px、标签宽 50px：即便 maxTicks 已保底 4 个预算，
+        // 物理上仍放不下第二个标签；重叠兜底 filterWithOverlapGuard 从左到右扫描，
+        // 只保留首标签（不叠字优先于「凑够 4 个」）。这是极端窄屏的退化兜底，
+        // 正常手机绘图区放得下 4 个 M/d 标签，不会走到这里。
         val positions = listOf(0f, 10f, 20f, 30f)
         val widths = List(4) { 50f }
         val dates = List(4) { LocalDate.of(2026, 10, 21).plusDays(it.toLong()) }
-        assertEquals(listOf(3), trendXLabelIndices(dates, positions, widths, minGap = 8f))
+        assertEquals(listOf(0), trendXLabelIndices(dates, positions, widths, minGap = 8f))
     }
 
     @Test

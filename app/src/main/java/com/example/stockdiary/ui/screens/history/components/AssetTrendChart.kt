@@ -67,6 +67,13 @@ private const val TREND_LABEL_SPACING = 16f
 internal const val MAX_X_LABELS = 5
 /** 自然步长选档时希望落到的刻度数（同花顺最常见 4 个） */
 private const val TARGET_X_LABELS = 4
+/**
+ * X 轴刻度保底下限：同花顺资产曲线无论周期长短都至少画 4 个刻度。
+ * 之前 maxTicks 直接等于屏宽容量（窄屏手机绘图区 ~250px 只够 2~3 个），
+ * 导致跨度 >7 天的周期退化成 2 个刻度；这里给保底下限，重叠兜底的
+ * filterWithOverlapGuard 仍会在物理真的放不下时砍到不叠字为止。
+ */
+private const val MIN_X_LABELS = 4
 
 /**
  * 按时间戳等距排布折线点的 x 坐标。
@@ -136,9 +143,13 @@ internal fun trendXLabelIndices(
 
     val widest = labelWidths.maxOrNull() ?: 0f
     val availableWidth = (positions.last() - positions.first()).coerceAtLeast(0f)
-    // 屏宽只决定「最多能放几个」；刻度数仍按自然步长选，宽屏不会因此排满
+    // 屏宽只决定「最多能放几个」；刻度数仍按自然步长选，宽屏不会因此排满。
+    // maxTicks 给保底下限 MIN_X_LABELS（4）：窄屏手机绘图区 ~250px 容量算出来只有
+    // 2~3，若直接用它当上限，跨度 >7 天的周期会被 selectTrendTickDates 逼到 dayStep=7
+    // 只出 2 个刻度；保底 4 才能让同花顺「4~5 个」规则在所有周期都落地。
+    // 数据点不足 4 个时直接全画（n 个），不强行补到 4。
     val capacity = ((availableWidth + minGap) / (widest + TREND_LABEL_SPACING)).toInt()
-    val maxTicks = capacity.coerceIn(1, MAX_X_LABELS)
+    val maxTicks = if (n < MIN_X_LABELS) n else capacity.coerceIn(MIN_X_LABELS, MAX_X_LABELS)
 
     val first = dates.firstOrNull { it != null }
     val last = dates.lastOrNull { it != null }

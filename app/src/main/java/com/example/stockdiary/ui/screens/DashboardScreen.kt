@@ -27,6 +27,9 @@ import com.example.stockdiary.ui.theme.*
 import com.example.stockdiary.ui.viewmodels.DashboardViewModel
 import com.example.stockdiary.utils.AppLogger
 import com.example.stockdiary.utils.sumTotalValueCny
+import com.example.stockdiary.utils.sumDebtValueCny
+import com.example.stockdiary.utils.excludingDebts
+import com.example.stockdiary.utils.debts
 import com.example.stockdiary.utils.totalValueCny
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.filterNotNull
@@ -59,8 +62,9 @@ fun DashboardScreen(
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
 
-    val assetsOnly = remember(assets) { assets.filter { !it.type.isLiability } }
-    val liabilities = remember(assets) { assets.filter { it.type.isLiability } }
+    // 首页列表只列「真正的持仓」：币安借币（负余额 crypto）不在这里出现，
+    // 否则列表逐项加总对不上顶部「总资产」（借款已挪到负债端，见 [Asset.isDebt]）。
+    val assetsOnly = remember(assets) { assets.excludingDebts() }
 
     val visibleAssetTypes = remember(preferences) {
         setOfNotNull(
@@ -74,14 +78,16 @@ fun DashboardScreen(
         assetsOnly.filter { it.type in visibleAssetTypes }
     }
 
-    val totalAssets = remember(assetsOnly) { assetsOnly.sumTotalValueCny() }
+    // 总资产/总负债按「欠款」口径拆：借币不算资产（它被算进负债），否则同一笔钱两头扣。
+    // 净资产结果与旧口径完全一致（见 Asset.isDebt），历史曲线不跳变。
+    val totalAssets = remember(assetsOnly) { assetsOnly.excludingDebts().sumTotalValueCny() }
 
     // 分布图必须用「可见资产」做分母：分子是过滤后的，若分母用未过滤的总资产，
     // 用户把某类资产藏起来后各分类百分比之和会小于 100%，看起来像账算错了。
     val visibleTotalAssets = remember(visibleAssetsOnly) { visibleAssetsOnly.sumTotalValueCny() }
     val hasHiddenAssets = remember(visibleAssetsOnly, assetsOnly) { visibleAssetsOnly.size < assetsOnly.size }
 
-    val totalLiabilities = remember(liabilities) { liabilities.sumTotalValueCny() }
+    val totalLiabilities = remember(assets) { assets.debts().sumDebtValueCny() }
     val netAssets = totalAssets - totalLiabilities
 
     val snapshots = uiState.snapshots

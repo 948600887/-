@@ -35,6 +35,9 @@ import com.example.stockdiary.ui.dialogs.AddAssetDialog
 import com.example.stockdiary.ui.theme.*
 import com.example.stockdiary.ui.viewmodels.PortfolioViewModel
 import com.example.stockdiary.utils.sumTotalValueCny
+import com.example.stockdiary.utils.sumDebtValueCny
+import com.example.stockdiary.utils.excludingDebts
+import com.example.stockdiary.utils.debts
 import com.example.stockdiary.utils.totalValueCny
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.filterNotNull
@@ -240,8 +243,9 @@ fun PortfolioScreen(
     // 卡片上如实标注列表少显示了多少项，免得用户拿列表逐项加总对不上顶部数字
     val hiddenAssetCount = remember(displayAssets, assets) { assets.size - displayAssets.size }
 
-    val totalAssets = remember(allAssetsOnly) { allAssetsOnly.sumTotalValueCny() }
-    val totalLiabilities = remember(allLiabilities) { allLiabilities.sumTotalValueCny() }
+    // 同 DashboardScreen：借款从资产端挪到负债端，净资产数值不变。
+    val totalAssets = remember(allAssetsOnly) { allAssetsOnly.excludingDebts().sumTotalValueCny() }
+    val totalLiabilities = remember(assets) { assets.debts().sumDebtValueCny() }
     val netAssets = totalAssets - totalLiabilities
 
     val sortedAssets = remember(assetsOnly, preferences.sortOrder) {

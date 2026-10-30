@@ -4,6 +4,8 @@ import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.utils.ExchangeRateManager
 import com.example.stockdiary.utils.totalValueCny
+import com.example.stockdiary.utils.sumTotalValueCny
+import com.example.stockdiary.utils.excludingDebts
 import java.time.LocalDate
 import java.time.Year
 import kotlin.math.pow
@@ -118,7 +120,7 @@ object DividendIncomeCalculator {
         assets: List<com.example.stockdiary.database.Asset>,
         dividendsBySymbol: Map<String, Double> = emptyMap()
     ): Double {
-        val totalValue = assets.filter { !it.type.isLiability }.sumOf { it.totalValueCny }
+        val totalValue = assets.excludingDebts().sumTotalValueCny()
         if (totalValue <= 0) return 0.0
         val totalIncome = calculateTotalAnnualIncome(assets, dividendsBySymbol)
         return (totalIncome / totalValue) * 100

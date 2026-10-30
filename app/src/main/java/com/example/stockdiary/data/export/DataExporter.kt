@@ -20,6 +20,9 @@ import com.example.stockdiary.utils.StockCodeManager
 import com.example.stockdiary.utils.pricePrecisionFor
 import com.example.stockdiary.utils.quantityPrecisionFor
 import com.example.stockdiary.utils.sumTotalValueCny
+import com.example.stockdiary.utils.sumDebtValueCny
+import com.example.stockdiary.utils.excludingDebts
+import com.example.stockdiary.utils.debts
 import com.example.stockdiary.utils.toFileTimestamp
 import com.example.stockdiary.utils.totalValueCny
 import java.io.File
@@ -288,10 +291,10 @@ internal object CsvContent {
         sb.appendLine(csvRow(*ASSET_HEADER.toTypedArray()))
         assets.forEach { sb.appendLine(assetRow(it)) }
 
-        val assetsOnly = assets.filter { !it.type.isLiability }
-        val liabilities = assets.filter { it.type.isLiability }
+        val assetsOnly = assets.excludingDebts()
+        val liabilities = assets.debts()
         val totalAssets = assetsOnly.sumTotalValueCny()
-        val totalLiabilities = liabilities.sumTotalValueCny()
+        val totalLiabilities = liabilities.sumDebtValueCny()
 
         sb.appendLine()
         sb.appendLine("汇总信息")
@@ -548,10 +551,10 @@ internal object CsvContent {
             )
         }
 
-        val assetsOnly = assets.filter { !it.type.isLiability }
-        val liabilities = assets.filter { it.type.isLiability }
+        val assetsOnly = assets.excludingDebts()
+        val liabilities = assets.debts()
         val totalAssets = assetsOnly.sumTotalValueCny()
-        val totalLiabilities = liabilities.sumTotalValueCny()
+        val totalLiabilities = liabilities.sumDebtValueCny()
         sb.appendLine(summaryRow("总资产(人民币)", totalAssets))
         sb.appendLine(summaryRow("总负债(人民币)", totalLiabilities))
         sb.appendLine(summaryRow("净资产(人民币)", totalAssets - totalLiabilities))
@@ -573,10 +576,10 @@ internal object CsvContent {
         sb.appendLine("生成时间: ${generatedAt.format(DateFormats.CN_DATETIME_FORMATTER)}")
         sb.appendLine()
 
-        val assetsOnly = assets.filter { !it.type.isLiability }
-        val liabilities = assets.filter { it.type.isLiability }
+        val assetsOnly = assets.excludingDebts()
+        val liabilities = assets.debts()
         val totalAssets = assetsOnly.sumTotalValueCny()
-        val totalLiabilities = liabilities.sumTotalValueCny()
+        val totalLiabilities = liabilities.sumDebtValueCny()
 
         sb.appendLine("【净资产】")
         sb.appendLine("  ¥${csvNumber(totalAssets - totalLiabilities, MONEY_DIGITS)}")

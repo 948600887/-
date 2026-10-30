@@ -4,6 +4,9 @@ import androidx.room.Entity
 import androidx.room.Index
 import androidx.room.PrimaryKey
 import com.example.stockdiary.utils.costCny
+import com.example.stockdiary.utils.sumDebtValueCny
+import com.example.stockdiary.utils.excludingDebts
+import com.example.stockdiary.utils.debts
 import com.example.stockdiary.utils.profitCny
 import com.example.stockdiary.utils.totalValueCny
 
@@ -35,8 +38,8 @@ data class AssetSnapshot(
 ) {
     companion object {
         fun fromAssets(assets: List<Asset>, date: String, @Suppress("UNUSED_PARAMETER") previousSnapshot: AssetSnapshot? = null): AssetSnapshot {
-            val assetsOnly = assets.filter { !it.type.isLiability }
-            val liabilities = assets.filter { it.type.isLiability }
+            val assetsOnly = assets.excludingDebts()
+            val liabilities = assets.debts()
             
             val stocks = assetsOnly.filter { it.type == AssetType.STOCK }
             val funds = assetsOnly.filter { it.type == AssetType.FUND }
@@ -52,7 +55,7 @@ data class AssetSnapshot(
 
             // 同一份求和只算一次：原来 totalAssets/netAssets 各写一遍 sumOf，profit 也各写一遍
             val assetValue = assetsOnly.sumOf { it.totalValueCny }
-            val liabilityValue = liabilities.sumOf { it.totalValueCny }
+            val liabilityValue = liabilities.sumDebtValueCny()
             val totalProfit = assetsOnly.sumOf { it.profitCny }
 
             return AssetSnapshot(

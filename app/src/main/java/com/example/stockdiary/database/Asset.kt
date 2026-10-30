@@ -45,6 +45,27 @@ data class Asset(
     // 这类读路径整批查询崩溃，主界面直接打不开。
     // 数据合法性改由数据写入侧统一把关（见 AssetRepository.sanitizeForWrite）：
     // 只有「新建/更新资产」入口才会校验并兜底，读任意历史行永远安全。
+    /**
+     * 这条记录是不是「欠别人的钱」。
+     *
+     * 两类来源：
+     * - [AssetType.isLiability] 的负债类型本来就是负债（余额记正数，欠多少写多少）；
+     * - **余额为负的持仓**：目前只有币安借币（symbol 带 `#loan`，见 [com.example.stockdiary.data.importer.isLoanDebtSymbol]）。
+     *   它在币安净额口径里就是欠款，之前被当成「负资产」混在总资产里，首页总负债看不到这笔钱。
+     *
+     * ## 为什么要单独抽这一个判定
+     *
+     * 过去各处散写 `asset.type.isLiability`，新增一处口径就要改 N 个地方，漏一处就
+     * 「首页看到借款、导出里没有」。负债判定集中在这里，调用方只问 [Asset.isDebt]。
+     *
+     * ## 净资产数值不变（重要）
+     *
+     * 把借款从「总资产里减」挪到「总负债里加」，只是换了个位置，
+     * `净资产 = 总资产 − 总负债` 的结果与旧口径完全一致，历史快照曲线不会跳变。
+     */
+    val isDebt: Boolean
+        get() = type.isLiability || balance < 0.0
+
     val totalValue: Double
         get() = if (type.isLiability || type == AssetType.BANK_DEPOSIT) {
             balance

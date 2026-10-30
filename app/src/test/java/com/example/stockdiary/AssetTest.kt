@@ -131,6 +131,60 @@ class AssetSnapshotTest {
     }
 }
 
+class DebtCaliberTest {
+
+    // 币安借币以「负余额的 CRYPTO」落库（symbol 带 #loan），必须被识别成负债，
+    // 否则它会被当成负资产混进总资产、首页总负债里看不到这笔借款。
+    @Test
+    fun `negative crypto balance counts as debt`() {
+        val borrow = Asset(
+            id = 1,
+            name = "USDT",
+            type = AssetType.CRYPTO,
+            symbol = "USDT#loan",
+            account = "币安",
+            balance = -17.4775654,
+            purchasePrice = 0.0,
+            currentPrice = 1.0
+        )
+        val holding = Asset(
+            id = 2,
+            name = "USDT",
+            type = AssetType.CRYPTO,
+            symbol = "LDUSDT",
+            account = "币安",
+            balance = 142.0590224,
+            purchasePrice = 0.0,
+            currentPrice = 1.0
+        )
+        assertTrue(borrow.isDebt)
+        assertFalse(holding.isDebt)
+    }
+
+    @Test
+    fun `snapshot moves borrow to liabilities without changing net assets`() {
+        // 口径调整的核心不变量：借款从「总资产里扣」挪到「总负债里加」，
+        // 净资产必须与净额口径完全一致（124.581457），历史曲线不能跳变。
+        val assets = listOf(
+            Asset(
+                id = 1, name = "USDT", type = AssetType.CRYPTO, symbol = "LDUSDT",
+                account = "币安", balance = 142.0590224, purchasePrice = 0.0, currentPrice = 1.0
+            ),
+            Asset(
+                id = 2, name = "USDT", type = AssetType.CRYPTO, symbol = "USDT#loan",
+                account = "币安", balance = -17.4775654, purchasePrice = 0.0, currentPrice = 1.0
+            )
+        )
+
+        val snapshot = AssetSnapshot.fromAssets(assets, "2026-10-31")
+
+        assertEquals(142.0590224, snapshot.totalAssets, 0.01)
+        // 负债必须取绝对值，否则总负债会被算成 -17.48
+        assertEquals(17.4775654, snapshot.totalLiabilities, 0.01)
+        assertEquals(124.581457, snapshot.netAssets, 0.01)
+    }
+}
+
 class AssetTypeTest {
     
     @Test

@@ -22,6 +22,10 @@ import com.example.stockdiary.ui.dialogs.sanitizeDecimalInput
 import com.example.stockdiary.ui.theme.AppTheme
 import com.example.stockdiary.utils.format
 import com.example.stockdiary.utils.totalValueCny
+import com.example.stockdiary.utils.sumTotalValueCny
+import com.example.stockdiary.utils.sumDebtValueCny
+import com.example.stockdiary.utils.excludingDebts
+import com.example.stockdiary.utils.debts
 
 @Composable
 fun FireCalculationDialog(
@@ -201,8 +205,8 @@ internal fun computeFireMetrics(
     realAnnualIncome: Double,
     monthlyExpense: Double
 ): FireMetrics {
-    val nonLiabilityValue = assets.filter { !it.type.isLiability }.sumOf { it.totalValueCny }
-    val liabilityValue = assets.filter { it.type.isLiability }.sumOf { it.totalValueCny }
+    val nonLiabilityValue = assets.excludingDebts().sumTotalValueCny()
+    val liabilityValue = assets.debts().sumDebtValueCny()
     val netWorth = nonLiabilityValue - liabilityValue
 
     val annualDividend = realAnnualIncome

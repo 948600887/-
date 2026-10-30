@@ -60,6 +60,9 @@ interface AssetDao {
     
     @Query("UPDATE assets SET balance = :balance, lastUpdateTime = :updateTime WHERE id = :id")
     suspend fun updateBalance(id: Long, balance: Double, updateTime: Long)
+
+    @Query("UPDATE assets SET isEarnLocked = :locked, lastUpdateTime = :updateTime WHERE id = :id")
+    suspend fun updateEarnLocked(id: Long, locked: Boolean, updateTime: Long)
     
     @Delete
     suspend fun deleteAsset(asset: Asset)

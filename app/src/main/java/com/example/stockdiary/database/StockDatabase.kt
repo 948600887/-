@@ -19,7 +19,7 @@ import com.example.stockdiary.utils.AppLogger
         StockBasic::class,
         FundNavCache::class
     ],
-    version = 17,
+    version = 18,
     // 必须开着：项目铁律是「迁移 SQL 取自 Room 自己导出的 JSON，不手敲」。
     // 当前导出的 schema JSON 只有 1/2/3/4/16/17 —— **5~15.json 永久缺失**：
     // 那段时间 exportSchema 是关的，kapt 一次都没生成过，git 历史里也查无此文件
@@ -387,6 +387,36 @@ abstract class StockDatabase : RoomDatabase() {
         }
 
         /**
+         * 给 `assets` 表加 `isEarnLocked` 列（布尔，默认 false）。
+         *
+         * ## 为什么加这列
+         *
+         * 币安 Simple Earn 分**活期（随时赎回）**与**定期/锁仓（真定时锁）**两类，接口用
+         * `locked` 字段区分。旧版把所有 LD 壳持仓一律打成「锁仓」标签，其实连随时可赎的
+         * 活期也标成了锁——语义反了。修复后需要把「是否定期」持久化到库，展示层才能
+         * 把标签拆成「理财（活期）/ 锁仓（定期）」。
+         *
+         * ## 为什么用 ALTER 而不是搬表
+         *
+         * 这是给既有表**加一列**，SQLite 原生 `ALTER TABLE ... ADD COLUMN` 即可，不需要
+         * 像 16→17 那样搬整张表。新列 `INTEGER NOT NULL DEFAULT 0`：Room 把 Boolean 存成
+         * INTEGER，默认 0=false（活期）。旧行全部回落成「活期」，比旧版「一律锁仓」更准，
+         * 且不会让任何原有持仓凭空变成锁仓。
+         *
+         * ## 与 16→17 同样「末端新增、零侵入已发布链」
+         *
+         * 16 的迁移链对外发布过，往回改会分裂历史分支；新增末端迁移对已升级/未升级的库都成立。
+         */
+        private val MIGRATION_17_18 = object : Migration(17, 18) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE `assets` ADD COLUMN `isEarnLocked` INTEGER NOT NULL DEFAULT 0"
+                )
+                AppLogger.d("assets.isEarnLocked 列迁移完成", "StockDatabase")
+            }
+        }
+
+        /**
          * 全部手写迁移，按版本升序。抽成方法既给 `getInstance` 用（避免重复罗列），
          * 也让 Room 的 `MigrationTestHelper` 测试能直接拿到同一份迁移数组做端到端校验。
          */
@@ -407,7 +437,8 @@ abstract class StockDatabase : RoomDatabase() {
             MIGRATION_13_14,
             MIGRATION_14_15,
             MIGRATION_15_16,
-            MIGRATION_16_17
+            MIGRATION_16_17,
+            MIGRATION_17_18
         )
 
         @JvmStatic

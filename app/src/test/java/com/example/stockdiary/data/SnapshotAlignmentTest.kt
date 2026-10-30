@@ -45,6 +45,12 @@ class SnapshotAlignmentTest {
             priceUpdates.add(id to price)
         }
 
+        val earnLockedUpdates = mutableListOf<Pair<Long, Boolean>>()
+
+        override suspend fun updateEarnLocked(id: Long, locked: Boolean) {
+            earnLockedUpdates.add(id to locked)
+        }
+
         /** 假实现没有真数据库：直接执行即可（真仓库会开 Room 事务） */
         override suspend fun <T> runInTransaction(block: suspend () -> T): T = block()
     }

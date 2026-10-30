@@ -482,7 +482,12 @@ private fun BinancePreviewItemRow(
                     Text(item.name, fontWeight = FontWeight.Medium)
                     if (BinanceAPI.isEarnProduct(item.name)) {
                         Spacer(Modifier.width(6.dp))
-                        BinanceKindTag("锁仓", MaterialTheme.colorScheme.onTertiaryContainer, MaterialTheme.colorScheme.tertiaryContainer)
+                        // 活期（随时赎回）标「理财」、定期/锁仓标「锁仓」，按 isEarnLocked 区分
+                        BinanceKindTag(
+                            if (item.isEarnLocked) "锁仓" else "理财",
+                            MaterialTheme.colorScheme.onTertiaryContainer,
+                            MaterialTheme.colorScheme.tertiaryContainer
+                        )
                     }
                     if (isLoanDebt) {
                         Spacer(Modifier.width(6.dp))

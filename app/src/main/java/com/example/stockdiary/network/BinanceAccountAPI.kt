@@ -32,7 +32,15 @@ data class BinanceBalance(
     val locked: Double,
     /** 余额来源。默认 SPOT；借币负债(LOAN_DEBT)与抵押资产(LOAN_COLLATERAL)带标记，
      *  让导入预览内核能把它们与同币种现货区分开、独立成行，而不是按 symbol 合并抵消。 */
-    val kind: Kind = Kind.SPOT
+    val kind: Kind = Kind.SPOT,
+    /**
+     * 该余额是否来自币安**定期/锁仓**理财（Locked Staking）。
+     * 仅对 [kind]==SPOT 且 [asset] 是 LD 理财壳的持仓有意义：true=定期锁仓、false=活期理财。
+     * 由 [mergeEarnIntoBalances] 按底层资产归组时填入（见其注释），经 buildPreview → 落库
+     * 一路透传到 [com.example.stockdiary.database.Asset.isEarnLocked]，展示层据此把「锁仓」
+     * 标拆成「理财（活期）/ 锁仓（定期）」。注意与上面的 `locked: Double`（现货冻结量）是两回事。
+     */
+    val isEarnLocked: Boolean = false
 ) {
     /** 可用 + 冻结 = 该资产的实际持有量 */
     val total: Double

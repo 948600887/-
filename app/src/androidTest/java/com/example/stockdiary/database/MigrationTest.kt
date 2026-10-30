@@ -19,12 +19,14 @@ import java.io.IOException
  *
  * 设计取舍：
  * - 用 [MigrationTestHelper.createDatabase] 按 1.json 的 schema 建一个 v1 库（同时校验 v1 自身
- *   的 schema 与 1.json 一致），再交给真实的迁移链升到 v17。
+ *   的 schema 与 1.json 一致），再交给真实的迁移链升到 v18。
  * - 这里**不**用 `runMigrationsAndValidate` 的严格 JSON 校验：历史上 5~15.json 永久缺失，
  *   无法为整个区间提供 JSON 基准。改为自建 PRAGMA 校验，聚焦真正会崩的点：早期迁移漏建的
  *   表 / 列、应删除的旧表、列类型是否对齐、以及数据是否随迁移保留。
  * - `transactions.quantity` 的类型分歧（v1 INTEGER / 17.json REAL）已由 MIGRATION_16_17 修掉，
  *   所以这里可以额外断言它是 REAL；在此之前只能刻意回避这条校验。
+ * - 18.json 由 Room 在编译主源码集时导出（exportSchema=true），MIGRATION_17_18 升到 v18 后
+ *   Room 自带的 schema 校验会比对 18.json；缺失会直接让开库失败，故每次改 schema 都要先编译出 json。
  */
 @RunWith(AndroidJUnit4::class)
 class MigrationTest {
@@ -42,7 +44,7 @@ class MigrationTest {
 
     @Test
     @Throws(IOException::class)
-    fun migrate1To17_createsMissingTablesPreservesData() {
+    fun migrate1To18_createsMissingTablesPreservesData() {
         // 1) 建一个 v1 库并写入两条记录：dividend 在 v1 已存在（验证数据随迁移保留），
         //    transactions 也在 v1 存在（验证 16_17 的改表没把数据弄丢）
         helper.createDatabase(TEST_DB, 1).apply {
@@ -96,6 +98,9 @@ class MigrationTest {
         assertColumnExists(db, "stock_basic", "isETF")
         assertColumnExists(db, "asset_snapshots", "totalCost")
         assertColumnExists(db, "asset_snapshot_details", "cost")
+
+        // 5.1) 17→18 新增的「是否定期/锁仓理财」标记列必须存在（布尔存为 INTEGER）
+        assertColumnExists(db, "assets", "isEarnLocked")
 
         // 6) 新表 fund_nav_cache 已按 15_16 建好
         assertColumnExists(db, "fund_nav_cache", "nav")

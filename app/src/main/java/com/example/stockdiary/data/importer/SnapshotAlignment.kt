@@ -157,7 +157,13 @@ object SnapshotAlignment {
          */
         val nav: Double?,
         /** 结算币种；null 表示多来源不一致，落库时回落 [CommitPolicy.defaultCurrency] */
-        val currency: String?
+        val currency: String?,
+        /**
+         * 是否币安**定期/锁仓**理财（对应 [Asset.isEarnLocked]）。
+         * 仅币安 LD 壳持仓会为真（活期=false）；基金E账户链路恒为 false（其 [RawHolding]
+         * 不带此信息，走默认）。落库时 NEW 写进 Asset、UPDATE 仅在变化时落库，避免无谓写。
+         */
+        val isEarnLocked: Boolean = false
     )
 
     /**
@@ -187,6 +193,8 @@ object SnapshotAlignment {
         suspend fun insertAssets(assets: List<Asset>)
         suspend fun updateBalance(id: Long, balance: Double)
         suspend fun updatePriceById(id: Long, price: Double)
+        /** 更新「是否定期/锁仓理财」标记（币安 LD 壳专用）。写库与 updateBalance 同事务 */
+        suspend fun updateEarnLocked(id: Long, locked: Boolean)
 
         /**
          * 把一段写库操作包进事务。
@@ -326,7 +334,9 @@ object SnapshotAlignment {
                             currentPrice = row.nav?.takeIf { it > 0.0 },
                             // 结算币种必须按导入数据写：默认 CNY 会让一只美元结算的 QDII
                             // 被按人民币数值直接汇总。null（多来源币种不一致）时不猜，留默认
-                            currency = row.currency ?: policy.defaultCurrency
+                            currency = row.currency ?: policy.defaultCurrency,
+                            // 是否定期/锁仓理财（币安 LD 壳专用，基金E账户恒为 false）
+                            isEarnLocked = row.isEarnLocked
                         )
                     )
 
@@ -337,6 +347,10 @@ object SnapshotAlignment {
                         // 否则用户会看到「数量更新了、市值还是上周的」
                         row.nav?.takeIf { it > 0.0 }?.let { nav ->
                             writer.updatePriceById(existing.id, nav)
+                        }
+                        // 定期/锁仓标记只在变化时落库：避免每条 UPDATE 都多一次无谓写
+                        if (existing.isEarnLocked != row.isEarnLocked) {
+                            writer.updateEarnLocked(existing.id, row.isEarnLocked)
                         }
                         updated++
                     }
@@ -384,6 +398,10 @@ internal fun AssetRepository.asSnapshotAssetWriter(): SnapshotAlignment.Snapshot
 
         override suspend fun updatePriceById(id: Long, price: Double) {
             this@asSnapshotAssetWriter.updatePriceById(id, price)
+        }
+
+        override suspend fun updateEarnLocked(id: Long, locked: Boolean) {
+            this@asSnapshotAssetWriter.updateEarnLocked(id, locked)
         }
 
         override suspend fun <T> runInTransaction(block: suspend () -> T): T {

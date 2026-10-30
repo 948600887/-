@@ -29,7 +29,15 @@ data class Asset(
     val notes: String? = null,
     val interestRate: Double? = null,
     val dueDate: String? = null,
-    val millionCopiesIncome: Double? = null
+    val millionCopiesIncome: Double? = null,
+    /**
+     * 该加密货币是否处于币安**定期/锁仓**理财（Locked Staking）。
+     * 仅对 `isEarnProduct(symbol)` 为真的 LD 壳持仓有意义：true=定期锁仓、false=活期理财。
+     * 导入时由 BinanceEarnPosition.locked 一路透传而来（见 BinanceImportService /
+     * SnapshotAlignment），落库持久化；展示层据此把笼统的「锁仓」标拆成「理财 / 锁仓」。
+     * 旧版库无此列，迁移默认 0（false=活期），更贴合多数持仓、且比旧版「一律锁仓」更准确。
+     */
+    val isEarnLocked: Boolean = false
 ) {
     // ⚠️ 不再在 init 里做 require 校验。原因：Room 每次从游标构造实体都会跑 init，
     // 一旦库里存在历史脏行（例如旧版本导入留下的空白 name、负值 purchasePrice、

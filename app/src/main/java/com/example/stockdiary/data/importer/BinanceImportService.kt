@@ -89,7 +89,14 @@ class BinanceImportService(
         val name: String,
         val quantity: Double,
         val existing: Asset?,
-        val status: ItemStatus
+        val status: ItemStatus,
+        /**
+         * 是否币安**定期/锁仓**理财（对应库里 [Asset.isEarnLocked]）。
+         * 仅当 symbol 是 LD 理财壳时有意义：true=定期锁仓、false=活期理财。
+         * 由 buildPreview 从原始 [BinanceBalance.isEarnLocked] 透传而来（按底层资产归组，
+         * 见 [mergeEarnIntoBalances]）；toCommitRow 再转成内核 CommitRow 落库。
+         */
+        val isEarnLocked: Boolean = false
     ) {
         /** 数量变化量；新建时就是全部数量 */
         val delta: Double
@@ -170,7 +177,10 @@ class BinanceImportService(
                 name = aligned.name,
                 quantity = aligned.quantity,
                 existing = aligned.matched.firstOrNull(),
-                status = aligned.status.toUiStatus()
+                status = aligned.status.toUiStatus(),
+                // 该底层资产是否在币安有定期/锁仓持仓：原始 BinanceBalance 已带 isEarnLocked 标记
+                // （mergeEarnIntoBalances 按归组键透传），这里从对齐内核带回的 sources 取出来。
+                isEarnLocked = aligned.sources.filterIsInstance<BinanceBalance>().any { it.isEarnLocked }
             )
         }
 
@@ -239,7 +249,9 @@ class BinanceImportService(
             // 查不到（含 LD 剥不出底层）留空，等行情同步按交易对补真实价
             nav = referencePriceForImport(name, prices),
             // 币安现货价以 USDT 计价（≈美元）：币种恒走策略里的 USD，不按行取
-            currency = null
+            currency = null,
+            // 是否定期/锁仓理财：LD 壳持仓才会为真，落库进 Asset.isEarnLocked
+            isEarnLocked = isEarnLocked
         )
 
     /** 内核状态 → 本链路 UI 状态（两边枚举常量一一对应） */
@@ -447,11 +459,17 @@ internal fun mergeEarnIntoBalances(
 ): List<BinanceBalance> {
     if (earn.isEmpty()) return balances
 
+    // 按底层资产归组：累计理财总量，并记住该资产是否存在**定期/锁仓**持仓。
+    // 一个底层资产可能既有活期又有定期（币安允许同币双开），只要任一笔是定期，
+    // 承载行就标记为 isEarnLocked=true（展示层据此显示「锁仓」而非「理财」）。
     val earnTotals = linkedMapOf<String, Double>()
+    val earnLockedFlags = mutableMapOf<String, Boolean>()
     for (position in earn) {
         val key = earnMergeKey(position.asset)
         if (key.isEmpty() || position.amount <= 0.0) continue
         earnTotals[key] = (earnTotals[key] ?: 0.0) + position.amount
+        // 同底层资产可能既活期又定期：任一笔是定期就标 true（OR 累计，不能只取首条）
+        earnLockedFlags[key] = (earnLockedFlags[key] ?: false) || position.locked
     }
     if (earnTotals.isEmpty()) return balances
 
@@ -473,8 +491,14 @@ internal fun mergeEarnIntoBalances(
         val earnAmount = earnTotals[key]
         if (earnAmount != null && carrierIndex[key] == index && earnAmount > balance.total) {
             raised++
-            // 用理财数量覆盖：free 存合并值、locked 归零（理财侧不再区分可用/冻结）
-            BinanceBalance(asset = balance.asset, free = earnAmount, locked = 0.0)
+            // 用理财数量覆盖：free 存合并值、locked 归零（理财侧不再区分可用/冻结）。
+            // isEarnLocked 透传：该底层资产有定期持仓则为 true（现货 LD 壳本身都是活期，默认 false）。
+            BinanceBalance(
+                asset = balance.asset,
+                free = earnAmount,
+                locked = 0.0,
+                isEarnLocked = earnLockedFlags[key] ?: false
+            )
         } else {
             balance
         }
@@ -485,7 +509,14 @@ internal fun mergeEarnIntoBalances(
     var added = 0
     earnTotals.forEach { (asset, amount) ->
         if (asset !in known) {
-            merged.add(BinanceBalance(asset = asset, free = amount, locked = 0.0))
+            merged.add(
+                BinanceBalance(
+                    asset = asset,
+                    free = amount,
+                    locked = 0.0,
+                    isEarnLocked = earnLockedFlags[asset] ?: false
+                )
+            )
             added++
         }
     }

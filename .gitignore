@@ -22,3 +22,5 @@ Thumbs.db
 
 # Debug APKs (large binaries, must not be committed)
 *.apk
+# apksigner v4 签名副产物（ signing 时随 APK 生成，非源码）
+*.idsig

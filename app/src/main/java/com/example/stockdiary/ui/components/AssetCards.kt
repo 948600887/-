@@ -313,15 +313,18 @@ fun StockAssetItem(
                         else "${asset.balance.format(quantityPrecisionFor(asset.type, asset.symbol))}$unitLabel",
                         style = MaterialTheme.typography.bodySmall, color = AppTheme.colors.onSurfaceVariant
                     )
-                    // 币安锁仓/Staking 产品以 LD 壳标识（如 LDBNB、LDUSDT）；但 LDO 这类
+                    // 币安理财/锁仓产品以 LD 壳标识（如 LDBNB、LDUSDT）；但 LDO 这类
                     // 恰好以 LD 开头的真实现货不能误标。统一复用 BinanceAPI.isEarnProduct
                     // （内部有 BINANCE_LD_EXCEPTIONS），避免两处各写一套前缀判断（#12）
                     if (asset.type == AssetType.CRYPTO &&
                         asset.symbol?.let { BinanceAPI.isEarnProduct(it) } == true
                     ) {
                         Text("•", style = MaterialTheme.typography.bodySmall, color = AppTheme.colors.onSurfaceVariant)
+                        // 活期（随时赎回）标「理财」、定期/锁仓标「锁仓」——按 Asset.isEarnLocked
+                        // 区分（币安 Simple Earn 的 locked 字段一路透传而来）。旧数据该列默认 false，
+                        // 即回落成「理财」，比旧版「一律锁仓」更贴合多数持仓。
                         Text(
-                            "锁仓",
+                            if (asset.isEarnLocked) "锁仓" else "理财",
                             style = MaterialTheme.typography.bodySmall,
                             fontWeight = FontWeight.SemiBold,
                             color = AppTheme.colors.lossRed

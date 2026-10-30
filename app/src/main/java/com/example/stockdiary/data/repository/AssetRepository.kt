@@ -226,6 +226,10 @@ class AssetRepository private constructor(
     suspend fun updateBalance(id: Long, balance: Double) = 
         assetDao.updateBalance(id, balance, System.currentTimeMillis())
     
+    /** 更新「是否币安定期/锁仓理财」标记（币安 LD 壳专用）。与 updateBalance 同理走即时时间戳 */
+    suspend fun updateEarnLocked(id: Long, locked: Boolean) =
+        assetDao.updateEarnLocked(id, locked, System.currentTimeMillis())
+    
     suspend fun deleteAsset(asset: Asset) = assetDao.deleteAsset(asset)
     
     suspend fun deleteAssetById(id: Long) = assetDao.deleteAssetById(id)

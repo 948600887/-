@@ -690,4 +690,51 @@ class BinanceImportServiceTest {
         assertEquals(1, merged.size)
         assertEquals(20.0, merged[0].total, 1e-9)
     }
+
+    // ---------- 活期/定期区分（isEarnLocked）必须随合并透传 ----------
+
+    @Test
+    fun 定期理财持仓把承载行标记为锁仓() {
+        // 定期(locked=true) earn → 合并后的 LD 壳承载行 isEarnLocked 应为 true
+        val merged = mergeEarnIntoBalances(
+            balances = listOf(balance("LDUSDT", free = 124.3460405)),
+            earn = listOf(earn("USDT", 141.023539, locked = true))
+        )
+        assertEquals(1, merged.size)
+        assertEquals("LDUSDT", merged[0].asset)
+        assertTrue("定期持仓应标记 isEarnLocked=true", merged[0].isEarnLocked)
+    }
+
+    @Test
+    fun 活期理财持仓承载行标记为活期() {
+        // 活期(locked=false) earn → 合并后的承载行 isEarnLocked 应为 false（不是锁仓）
+        val merged = mergeEarnIntoBalances(
+            balances = listOf(balance("LDUSDT", free = 124.3460405)),
+            earn = listOf(earn("USDT", 141.023539, locked = false))
+        )
+        assertEquals(1, merged.size)
+        assertFalse("活期持仓应保持 isEarnLocked=false", merged[0].isEarnLocked)
+    }
+
+    @Test
+    fun 同资产活期与定期并存时标记为锁仓() {
+        // 活期 10 + 定期 30：只要任一笔定期，承载行就标 true（展示层据此显示「锁仓」）
+        val merged = mergeEarnIntoBalances(
+            balances = listOf(balance("USDT", free = 5.0)),
+            earn = listOf(earn("USDT", 10.0), earn("USDT", 30.0, locked = true))
+        )
+        assertEquals(40.0, merged[0].total, 1e-9)
+        assertTrue("含定期持仓应标记 isEarnLocked=true", merged[0].isEarnLocked)
+    }
+
+    @Test
+    fun 纯现货无理财时保持默认未锁仓() {
+        // 没有 earn 持仓的行不应被误标成锁仓
+        val merged = mergeEarnIntoBalances(
+            balances = listOf(balance("BTC", free = 0.5), balance("LDUSDT", free = 1.0)),
+            earn = emptyList()
+        )
+        assertFalse(merged.first { it.asset == "BTC" }.isEarnLocked)
+        assertFalse(merged.first { it.asset == "LDUSDT" }.isEarnLocked)
+    }
 }

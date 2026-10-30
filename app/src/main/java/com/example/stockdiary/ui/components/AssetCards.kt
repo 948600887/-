@@ -15,6 +15,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.state.ToggleableState
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.example.stockdiary.data.importer.isLoanCollateralSymbol
+import com.example.stockdiary.data.importer.isLoanDebtSymbol
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.network.BinanceAPI
@@ -325,6 +327,24 @@ fun StockAssetItem(
                         // 即回落成「理财」，比旧版「一律锁仓」更贴合多数持仓。
                         Text(
                             if (asset.isEarnLocked) "锁仓" else "理财",
+                            style = MaterialTheme.typography.bodySmall,
+                            fontWeight = FontWeight.SemiBold,
+                            color = AppTheme.colors.lossRed
+                        )
+                    }
+                    // 借币负债 / 抵押资产以 #loan / #collateral 后缀独立成行（2026-10-30 起不再并入
+                    // 同币种现货），否则用户会对着一条负数孤单的 USDT 不知道它是什么。
+                    val loanLabel = asset.symbol?.let {
+                        when {
+                            isLoanDebtSymbol(it) -> "借币"
+                            isLoanCollateralSymbol(it) -> "抵押"
+                            else -> null
+                        }
+                    }
+                    if (loanLabel != null) {
+                        Text("•", style = MaterialTheme.typography.bodySmall, color = AppTheme.colors.onSurfaceVariant)
+                        Text(
+                            loanLabel,
                             style = MaterialTheme.typography.bodySmall,
                             fontWeight = FontWeight.SemiBold,
                             color = AppTheme.colors.lossRed

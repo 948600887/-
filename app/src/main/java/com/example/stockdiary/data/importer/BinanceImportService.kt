@@ -35,13 +35,26 @@ import kotlin.math.abs
  * 导入的资产就永远同步不到行情。这里统一拼成 `<基础资产>USDT`，与既有加密资产同格式。
  */
 /**
- * 借币负债 / 抵押资产的预览 symbol 后缀。
+ * 借币负债 / 抵押资产的 symbol 后缀。
  *
- * 为什么需要后缀：SnapshotAlignment.align 按 symbol 合并同代码余额，借币负债
- * （USDT -50.8）若用真实交易对 symbol 会和现货 USDT 142.52 合并成净 91.7，
- * 用户就看不到独立的「借币负债」项、只看到被抵消的净数字。给它们加后缀让 align
- * 不去重、独立成行；落库时用 [stripLoanSuffix] 把后缀还原成真实交易对，
- * 仍按币安净额口径合并（净值正确，且不污染行情同步的取价键）。
+ * ## 为什么预览要加后缀
+ *
+ * [SnapshotAlignment.align] 按 symbol 合并同代码余额，借币负债（USDT -50.8）若用真实
+ * 交易对 symbol 会和现货 USDT 142.52 合并成净 91.7——用户核对时看不到独立的「借币负债」
+ * 项，只看到被抵消的净数字，也就对不上币安逐条资产的数量。加后缀让 align 不去重、
+ * 负债与现货各成一行。
+ *
+ * ## 为什么落库**保留**后缀（2026-10-30 改）
+ *
+ * 早期版本在 [toCommitRow] 里用 [stripLoanSuffix] 把后缀剥掉，让负债「按币安净额口径」
+ * 合并进现货行——数量被改写，与用户拍板的「列表数量和币安逐条对齐」冲突。剥后缀还有
+ * 一个更硬的伤：DB 里同一个 symbol 会有两条（USDT 现货 + USDT 负债），而下一次导入
+ * 的分组键是 `USDT#loan`（库里没有），于是每次导入都再插一条负债，净值随导入次数线性崩坏。
+ *
+ * 保留后缀后 symbol 是**稳定唯一键**：重复导入命中同一行走 UPDATE（不累积），
+ * 数量为负自动参与净值扣减（净资产 = 资产 − 欠币），两个目标同时成立。
+ * 代价：symbol 不是币安交易对，取价必须剥掉后缀按底层交易对走
+ * （[com.example.stockdiary.network.UnifiedPriceService.getCryptoPrice] 已处理）。
  */
 private const val LOAN_DEBT_SUFFIX = "#loan"
 private const val LOAN_COLLATERAL_SUFFIX = "#collateral"
@@ -104,7 +117,16 @@ class BinanceImportService(
     }
 
     data class Preview(
-        val items: List<PreviewItem>
+        val items: List<PreviewItem>,
+        /**
+         * 库里**已被这一次导入归并掉**的旧资产行（同一个底层资产在币安被拆成两行，
+         * 现在合到 [items] 的那一行里了）。落库时把它们的数量清零。
+         *
+         * 为什么必须清零：合并只改 quantity 不足以让列表少一行——旧行留在库里还是
+         * 一条独立资产，用户看到的仍是「同一个币两行」，而且它们的数量已经计入了新行，
+         * 留着就是同一笔钱记两遍（正是 USDC / LDUSDC 那个现象）。
+         */
+        val supersededAssets: List<Asset> = emptyList()
     ) {
         val newItems: List<PreviewItem> get() = items.filter { it.status == ItemStatus.NEW }
         val updatedItems: List<PreviewItem> get() = items.filter { it.status == ItemStatus.UPDATE }
@@ -157,17 +179,7 @@ class BinanceImportService(
                 // 借币负债 / 抵押资产带 kind 标记，用带后缀的独立 symbol 跳过 align 的
                 // 同代码合并（否则会与同币种现货抵消成净数字，用户看不到独立的负债/抵押项）。
                 // 其余（现货 / 理财壳）走原逻辑：LD 壳用原始 LD 代码、其它补 USDT 交易对。
-                symbol = when (balance.kind) {
-                    BinanceBalance.Kind.LOAN_DEBT ->
-                        (priceKeyFor(balance.asset) ?: baseAssetToSymbol(balance.asset)) + LOAN_DEBT_SUFFIX
-                    BinanceBalance.Kind.LOAN_COLLATERAL ->
-                        (priceKeyFor(balance.asset) ?: baseAssetToSymbol(balance.asset)) + LOAN_COLLATERAL_SUFFIX
-                    else -> if (BinanceAPI.isEarnProduct(balance.asset)) {
-                        balance.asset
-                    } else {
-                        priceKeyFor(balance.asset) ?: baseAssetToSymbol(balance.asset)
-                    }
-                },
+                symbol = symbolForBalance(balance),
                 name = balance.asset,
                 quantity = balance.total
             )
@@ -182,7 +194,7 @@ class BinanceImportService(
                 // （mergeEarnIntoBalances 按归组键透传），这里从对齐内核带回的 sources 取出来。
                 isEarnLocked = aligned.sources.filterIsInstance<BinanceBalance>().any { it.isEarnLocked }
             )
-        }
+        }.let { adoptLegacyLoanRows(it, existingAssets) }
 
         AppLogger.i(
             "币安持仓对齐完成：共 ${items.size} 条，新增 ${items.count { it.status == ItemStatus.NEW }}，" +
@@ -191,7 +203,11 @@ class BinanceImportService(
             "BinanceImport"
         )
 
-        return Preview(items = items)
+        return Preview(
+            items = items,
+            // 同一底层资产折叠成一行后，被折掉那行在库里的旧资产要清零（见 [Preview.supersededAssets]）
+            supersededAssets = findSupersededAssets(balances, existingAssets)
+        )
     }
 
     /**
@@ -211,7 +227,7 @@ class BinanceImportService(
         prices: Map<String, Double> = emptyMap()
     ): CommitResult {
         val result = SnapshotAlignment.commit(
-            rows = preview.items.map { it.toCommitRow(prices) },
+            rows = preview.items.map { it.toCommitRow(prices) } + preview.supersededAssets.map { it.toZeroRow() },
             writer = writer,
             account = account,
             policy = commitPolicy
@@ -238,9 +254,12 @@ class BinanceImportService(
      */
     private fun PreviewItem.toCommitRow(prices: Map<String, Double>): SnapshotAlignment.CommitRow =
         SnapshotAlignment.CommitRow(
-            // 落库用真实交易对：去掉借币/抵押后缀，让负债与同币种现货按币安净额口径合并
-            // （净值正确，且行情同步拿到的取价键仍是真实交易对、不会 400）。
-            symbol = stripLoanSuffix(symbol),
+            // 落库**保留** #loan / #collateral 后缀（不再 stripLoanSuffix）：
+            // 借币负债要与同币种现货分列（数量和币安逐条对齐），后缀是它在库里的稳定唯一键，
+            // 重复导入才能命中同一行走 UPDATE 而不是每导一次多插一条负债。
+            // 净资产仍是对的：负债数量是负的，参与汇总时自动扣减（资产 − 欠币）。
+            // 取价按剥掉后缀的交易对走（UnifiedPriceService.getCryptoPrice）。
+            symbol = symbol,
             name = name,
             quantity = quantity,
             status = status.toKernelStatus(),
@@ -251,6 +270,24 @@ class BinanceImportService(
             // 币安现货价以 USDT 计价（≈美元）：币种恒走策略里的 USD，不按行取
             currency = null,
             // 是否定期/锁仓理财：LD 壳持仓才会为真，落库进 Asset.isEarnLocked
+            isEarnLocked = isEarnLocked
+        )
+
+    /**
+     * 被 [mergeEarnIntoBalances] 折叠掉的旧行 → 清零行。
+     *
+     * 只改数量、不碰价格与 [Asset.isEarnLocked]：这一行的钱已经并入同底层的主行，
+     * 刷价/改标记都是无谓写；清零才是让它不再被重复计入总资产。
+     */
+    private fun Asset.toZeroRow(): SnapshotAlignment.CommitRow =
+        SnapshotAlignment.CommitRow(
+            symbol = symbol.orEmpty(),
+            name = name,
+            quantity = 0.0,
+            status = SnapshotAlignment.ItemStatus.UPDATE,
+            existing = this,
+            nav = null,
+            currency = null,
             isEarnLocked = isEarnLocked
         )
 
@@ -422,42 +459,50 @@ internal fun earnMergeKey(asset: String): String {
 }
 
 /**
- * 把理财持仓（活期 + 定期）合并进现货余额。
+ * 把理财持仓（活期 + 定期）与借币抵押资产合并进现货余额，**并把同一个底层资产折叠成一行**。
  *
- * ## 合并规则：同资产取 **较大值**，不是相加
+ * ## 规则一：跨来源取 **较大值**（现货口径 vs 理财接口）
  *
- * 为什么不能相加：`/api/v3/account` 的 balances **已经包含了一部分理财持仓**——
- * 实测用户现货余额里的 USDC 43.46 / PAXG 0.002474 / BNB 0.003154 与官方对账单的
- * Earn 持仓数字完全一致，说明这些理财资产在现货接口里是有体现的。直接相加会把
- * 同一笔钱记两遍。取 max 则两种情形都对：
+ * 为什么不能相加：`/api/v3/account` 的 balances 与 simple-earn 的 position 是**两个都在描述
+ * 同一笔订阅**的来源。实测用户的 Simple Earn 活期 USDT 142.0590224 已经体现在现货接口的
+ * LDUSDT 壳里（124.581457，差额正是被押进借币抵押金库的那部分），相加会把同一笔钱记两遍。
+ * 取 max 则两种情形都对：
  *
- * - 理财已包含在现货里（两者相等或现货更大）→ 值不变，不会重复计；
- * - 现货只有一部分 / 完全没有（这部分理财不在现货口径里）→ 用理财的完整数量补齐。
+ * - 理财已包含在现货口径里（相等或现货更大）→ 值不变；
+ * - 现货只有一部分（如上：壳 + 抵押金库 = 全部）→ 用理财的完整数量补齐。
  *
- * ## 匹配用 [earnMergeKey]，不是原始资产名
+ * ## 规则二：同一份快照内的不同金库**相加**
  *
- * 现货侧的 Simple Earn 活期持仓是 LD 壳（LDPAXG），理财接口给的是底层币（PAXG）。
- * 按原名匹配的话两者互不相识，max 规则形同虚设（见 [earnMergeKey]）。
+ * `/api/v3/account` 可能同时给出 `USDC`（现货钱包）与 `LDUSDC`（理财壳）——它们是同一个
+ * 权威来源里**互不重叠**的两份余额，本来就该合计（实测两者相加才等于官方的 43.56723483）。
+ * 借币押在币安的抵押资产同理：它不在钱包余额里，是另一间金库，加回来才不低估净资产。
  *
- * ## 每个底层资产只让**一行**承载理财总量
+ * ## 规则三：一个底层资产**只留一行**
  *
- * 库里可能同时有 `LDPAXG`（活期壳）和 `PAXG`（现货）。若两行都拿理财总量去 max，
- * 活期那笔会被记两遍。因此按归组键选出唯一的承载行：优先 LD 壳（它本身就是
- * 理财在现货里的容器），没有壳时退回第一条。其余行原样保留。
+ * 旧实现「只抬高承载行、其余行原样保留」，于是同一个币在列表里出现两行（USDCUSDT 43.56 +
+ * LDUSDC 0.0043），用户既看不懂 LDUSDC 是哪来的，也无法把它和币安逐条数字对上。
+ * 现在整组折叠成一行：数量 = max(组内合计, 理财总量)，行身份取组内持仓量最大的那行
+ * （它多半就是库里已有的那条，不会换 key 留下孤儿行），被折掉的行以 **0 数量**返回——
+ * buildPreview 据此把库里对应的旧资产清零（[BinanceImportService.Preview.supersededAssets]）。
  *
- * 代价：若同一资产在两个来源里是**互不重叠的两笔**（如现货 57 + 定期 34.5），
- * max 会漏掉小的那笔。宁可少记也不能虚高——虚高会让总资产凭空多出一笔钱，
- * 比少记危险得多；且这种情况在币安口径下极少（理财接口返回的是该资产的全部持仓）。
+ * ## 货币网络的取舍
+ *
+ * 若同一资产在两个来源里是互不重叠的两笔（现货 57 + 定期 34.5），max 会漏掉小的那笔。
+ * 宁可少记也不能虚高——虚高会让总资产凭空多出一笔钱，比少记危险得多；且这种情况在币安
+ * 口径下极少（simple-earn 接口返回的是该资产的全部持仓，钱包余额只是它被拆分展示的样子）。
  *
  * @param balances 现货余额（`/api/v3/account`）
- * @param earn     理财持仓（simple-earn 的活期与定期接口）；为空时原样返回
- * @return 合并后的余额列表（顺序：先现货原序，后理财独有的资产）
+ * @param earn     理财持仓（simple-earn 的活期与定期接口）
+ * @return 合并后的余额列表：每个底层资产一行；被折叠的行数量为 0
+ *
+ * 注：借币的负债 / 抵押资产**不**由这里合并。它们带 #loan / #collateral 后缀
+ * 由调用方追加在结果之后，独立成行（见 ViewModel 的 loanBalances）。
  */
 internal fun mergeEarnIntoBalances(
     balances: List<BinanceBalance>,
     earn: List<BinanceEarnPosition>
 ): List<BinanceBalance> {
-    if (earn.isEmpty()) return balances
+    if (balances.isEmpty()) return balances
 
     // 按底层资产归组：累计理财总量，并记住该资产是否存在**定期/锁仓**持仓。
     // 一个底层资产可能既有活期又有定期（币安允许同币双开），只要任一笔是定期，
@@ -471,41 +516,50 @@ internal fun mergeEarnIntoBalances(
         // 同底层资产可能既活期又定期：任一笔是定期就标 true（OR 累计，不能只取首条）
         earnLockedFlags[key] = (earnLockedFlags[key] ?: false) || position.locked
     }
-    if (earnTotals.isEmpty()) return balances
 
-    // 每个归组键挑唯一的承载行：LD 壳优先（它就是理财在现货里的容器），
-    // 没有壳时退回第一条（现货行 / 同名现货）。
-    val carrierIndex = mutableMapOf<String, Int>()
+    // 按归组键折叠：LinkedHashMap 保证「首次出现」的顺序，与原列表顺序基本一致
+    val groupIndices = linkedMapOf<String, MutableList<Int>>()
     balances.forEachIndexed { index, balance ->
-        val key = earnMergeKey(balance.asset)
-        val current = carrierIndex[key]
-        val carrierIsEarnShell = current != null && BinanceAPI.isEarnProduct(balances[current].asset)
-        if (current == null || (!carrierIsEarnShell && BinanceAPI.isEarnProduct(balance.asset))) {
-            carrierIndex[key] = index
-        }
+        groupIndices.getOrPut(earnMergeKey(balance.asset)) { mutableListOf() }.add(index)
     }
 
     var raised = 0
-    val merged = balances.mapIndexed { index, balance ->
-        val key = earnMergeKey(balance.asset)
+    var folded = 0
+    val merged = mutableListOf<BinanceBalance>()
+    groupIndices.forEach { (key, indices) ->
         val earnAmount = earnTotals[key]
-        if (earnAmount != null && carrierIndex[key] == index && earnAmount > balance.total) {
-            raised++
-            // 用理财数量覆盖：free 存合并值、locked 归零（理财侧不再区分可用/冻结）。
-            // isEarnLocked 透传：该底层资产有定期持仓则为 true（现货 LD 壳本身都是活期，默认 false）。
+        val members = indices.map { balances[it] }
+        if (members.size == 1 && earnAmount == null) {
+            // 单一来源且没有理财：原样透传（保留它的 kind / free / locked 原貌）
+            merged.add(members[0])
+            return@forEach
+        }
+        val carrier = pickCarrier(members)
+        val groupTotal = members.sumOf { it.total }
+        // 两个来源取较大值（规则一），组内同来源相加（规则二）
+        val total = if (earnAmount == null) groupTotal else maxOf(groupTotal, earnAmount)
+        if (total > carrier.total) raised++
+        // 承载行用合并值重建：free 存合并值、locked 归零（合并后不再区分可用/冻结）。
+        // isEarnLocked 透传：该底层资产有定期持仓则为 true（现货 LD 壳本身都是活期，默认 false）。
+        merged.add(
             BinanceBalance(
-                asset = balance.asset,
-                free = earnAmount,
+                asset = carrier.asset,
+                free = total,
                 locked = 0.0,
                 isEarnLocked = earnLockedFlags[key] ?: false
             )
-        } else {
-            balance
+        )
+        // 被折叠的行：数量归 0 —— 既是「已并入主行」的标记，也让 buildPreview 能把
+        // 库里对应的旧资产清零（否则旧行留着，同一笔钱在列表里被记两遍）
+        for (member in members) {
+            if (member === carrier) continue
+            merged.add(BinanceBalance(asset = member.asset, free = 0.0, locked = 0.0))
+            folded++
         }
-    }.toMutableList()
+    }
 
-    // known 同样按归组键判重：已有 LDPAXG 时，理财的 PAXG 不该再插一行
-    val known = balances.map { earnMergeKey(it.asset) }.toSet()
+    // known 同样按归组键判重：已有 LDUSDC 时，理财的 USDC 不该再插一行
+    val known = groupIndices.keys
     var added = 0
     earnTotals.forEach { (asset, amount) ->
         if (asset !in known) {
@@ -522,9 +576,107 @@ internal fun mergeEarnIntoBalances(
     }
 
     AppLogger.i(
-        "币安理财持仓合并：现货 ${balances.size} 项 + 理财 ${earnTotals.size} 个资产 → " +
-            "补齐 $raised 项、新增 $added 项",
+        "币安理财持仓合并： ${balances.size} 项 + 理财 ${earnTotals.size} 个资产 → " +
+            "合并 $raised 项、折叠 $folded 行、新增 $added 项",
         "BinanceImport"
     )
     return merged
 }
+
+/**
+ * 从同一底层资产的多行里挑出**承载**那一行：持仓量最大的优先，持平则优先 LD 壳。
+ *
+ * 为什么不是「LD 壳优先」：壳常常只是一个 0.004 的残余份额，真正的钱在现货行；
+ * 以最大的那行作为承行者，行的 symbol/名称就是用户原本认得的那一行，
+ * 换 key 会留下库里的孤儿行（旧代码再插一行、旧行永不清理，正是列表里出现重复行的来源）。
+ */
+private fun pickCarrier(members: List<BinanceBalance>): BinanceBalance =
+    members.reduce { best, next ->
+        val nextAbs = abs(next.total)
+        val bestAbs = abs(best.total)
+        val nextWins = nextAbs > bestAbs ||
+            // 持平：LD 壳优先保留（它是「这笔钱在 Simple Earn 里」的语义标记）
+            (nextAbs == bestAbs && !BinanceAPI.isEarnProduct(best.asset) && BinanceAPI.isEarnProduct(next.asset))
+        if (nextWins) next else best
+    }
+
+/** 一条余额在预览 / 落库里的 symbol：LD 壳用原始 LD 码、借币与抵押加后缀、其余补 USDT 交易对 */
+private fun symbolForBalance(balance: BinanceBalance): String {
+    val base = priceKeyFor(balance.asset) ?: baseAssetToSymbol(balance.asset)
+    return when (balance.kind) {
+        BinanceBalance.Kind.LOAN_DEBT -> base + LOAN_DEBT_SUFFIX
+        BinanceBalance.Kind.LOAN_COLLATERAL -> base + LOAN_COLLATERAL_SUFFIX
+        // LD 理财/锁仓壳（LDBNB）用原始 LD 代码：它与现货 BNB 是两个不同的钱包仓位，
+        // 落到同一个去重键会被合并成一行，看不到「多少在理财、多少在现货」
+        BinanceBalance.Kind.EARN,
+        BinanceBalance.Kind.SPOT ->
+            if (BinanceAPI.isEarnProduct(balance.asset)) balance.asset else base
+    }
+}
+
+/**
+ * 资产代码 → 底层资产归组键（供 [earnMergeKey] 口径复用）。
+ *
+ * 库里存的是交易对形态（`USDCUSDT`）或 LD 壳（`LDUSDC`），而 [earnMergeKey] 吃的是
+ * 基础资产名，这里先把交易对还原成基础资产名（并跳过稳定币 `USDT` 自身的剥后缀）。
+ */
+private fun underlyingKeyOf(symbol: String): String {
+    val core = stripLoanSuffix(symbol).uppercase().trim()
+    if (BinanceAPI.isEarnProduct(core)) return earnMergeKey(core)
+    return earnMergeKey(if (core.endsWith("USDT") && core.length > 4) core.removeSuffix("USDT") else core)
+}
+
+/**
+ * 找出库里「已被这次导入折叠掉」的旧行：某条余额数量为 0（被 [mergeEarnIntoBalances]
+ * 折进别的行），而同一底层还有其它行带着钱——那么这条余额对应在库里的旧资产就该清零。
+ *
+ * 为什么限定「同底层还有别的行有钱」：币安会把历史接触过的币都列成 0 余额，
+ * 那些行只是 dust，不该把用户手动建的同类持仓一并清掉。
+ */
+internal fun findSupersededAssets(
+    balances: List<BinanceBalance>,
+    existingAssets: List<Asset>
+): List<Asset> {
+    if (existingAssets.isEmpty()) return emptyList()
+    val fundedKeys = balances.filter { it.total != 0.0 }
+        .map { underlyingKeyOf(symbolForBalance(it)) }
+        .toSet()
+    val foldedSymbols = balances.filter { it.total == 0.0 }
+        .map { symbolForBalance(it) }
+        .filter { underlyingKeyOf(it) in fundedKeys }
+        .toSet()
+    if (foldedSymbols.isEmpty()) return emptyList()
+    return existingAssets.filter { it.symbol != null && it.symbol in foldedSymbols }
+}
+
+/**
+ * 认领老口径留下的借币负债行。
+ *
+ * 以前负债按**剥掉后缀**的交易对落库（`USDT` 一条负数）；改成带 `#loan` 后缀后，
+ * 直接按新 code 落库会再插一条负债 —— 同一笔欠款记两遍、每导一次多一遍。这里把那种
+ * 「基础交易对 + 负余额」的老行认领过来走 UPDATE，升级后无需用户手工清理。
+ *
+ * 只认领负债（负余额）：抵押行以前也落成真实交易对，但正余额行没法与用户自己的
+ * 现货持仓区分，贸然认领会改写真实持仓，故不动。
+ */
+// 这两个类型是 BinanceImportService 的嵌套成员，顶层函数必须写全限定名才能引用
+private fun adoptLegacyLoanRows(
+    items: List<BinanceImportService.PreviewItem>,
+    existingAssets: List<Asset>
+): List<BinanceImportService.PreviewItem> = items.map { item ->
+    if (item.existing != null || !isLoanDebtSymbol(item.symbol)) return@map item
+    val legacy = existingAssets.firstOrNull { asset ->
+        asset.symbol == stripLoanSuffix(item.symbol) && asset.balance < 0.0
+    } ?: return@map item
+    item.copy(
+        existing = legacy,
+        status = if (abs(legacy.balance - item.quantity) < ZERO_QUANTITY_TOLERANCE) {
+            BinanceImportService.ItemStatus.UNCHANGED
+        } else {
+            BinanceImportService.ItemStatus.UPDATE
+        }
+    )
+}
+
+/** [adoptLegacyLoanRows] 判定「老行数量是否已经等于本次拉取」的容差 */
+private const val ZERO_QUANTITY_TOLERANCE = 1e-12

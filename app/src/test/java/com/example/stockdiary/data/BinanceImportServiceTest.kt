@@ -665,9 +665,10 @@ class BinanceImportServiceTest {
     }
 
     @Test
-    fun 壳与底层现货同时存在时只让壳承载理财总量() {
-        // 两行同底层：壳（活期 0.00007908）+ 现货（0.0005），理财总量 0.002474。
-        // 只允许壳被补齐，现货行保持原值——否则活期那笔会被记两遍。
+    fun 同一底层资产的现货与理财壳折叠成一行_其余归零() {
+        // 旧口径「只抬高承载行、其余行原样保留」会让同一个币在列表里留两行且数值错配
+        // （用户实测：USDCUSDT 43.56 + LDUSDC 0.0043，而官方只有 USDC 43.56723483 一条）。
+        // 现在整组折叠成一行，被折掉的行归零，由 buildPreview 把库里对应的旧资产清零。
         val merged = mergeEarnIntoBalances(
             balances = listOf(
                 balance("LDPAXG", free = 0.00007908),
@@ -675,9 +676,10 @@ class BinanceImportServiceTest {
             ),
             earn = listOf(earn("PAXG", 0.002474))
         )
-        assertEquals(2, merged.size)
-        assertEquals(0.002474, merged.first { it.asset == "LDPAXG" }.total, 1e-12)
-        assertEquals(0.0005, merged.first { it.asset == "PAXG" }.total, 1e-12)
+        // 折叠后只剩一行有钱，数量取现货合计与理财口径中的较大值
+        assertEquals(0.002474, merged.single { it.total != 0.0 }.total, 1e-12)
+        // 另一行必须归零（它是「已并入主行」的标记）
+        assertEquals(0.0, merged.first { it.asset == "LDPAXG" }.total, 1e-12)
     }
 
     @Test
@@ -736,5 +738,129 @@ class BinanceImportServiceTest {
         )
         assertFalse(merged.first { it.asset == "BTC" }.isEarnLocked)
         assertFalse(merged.first { it.asset == "LDUSDT" }.isEarnLocked)
+    }
+
+    // ---------- 用户实测对账：数量必须和币安逐条一致，且 NPV 口径不被打破 ----------
+
+    @Test
+    fun 同一底层资产的现货与理财壳不再拆成两条() {
+        // 用户实测：App 里出现 USDCUSDT 43.56238 与 LDUSDC 0.00430459 两行，
+        // 而币安官方 Simple Earn 只有 USDC 43.56723483 一条（用户明确「我只有理财」）。
+        // 分组折叠后：承载行 = 持仓量最大的那行，数量取 max(组内合计, 理财总量)。
+        val merged = mergeEarnIntoBalances(
+            balances = listOf(
+                balance("USDC", free = 43.56238),
+                balance("LDUSDC", free = 0.00430459)
+            ),
+            earn = listOf(earn("USDC", 43.56723483))
+        )
+        assertEquals(1, merged.count { it.total != 0.0 })
+        // 承载行是持仓量更大的现货行，数量与官方完全一致
+        assertEquals("USDC", merged.first { it.total != 0.0 }.asset)
+        assertEquals(43.56723483, merged.first { it.total != 0.0 }.total, 1e-9)
+        assertEquals(0.0, merged.first { it.asset == "LDUSDC" }.total, 1e-12)
+    }
+
+    @Test
+    fun 借币负债不再被现货抵消_净值仍然正确() = runBlocking {
+        // 用户实测：官方 USDT 142.0590224，其中 17.4775654 是借来的。
+        // 旧实现落成 124.58（把欠币抵消掉了，用户核对时对不上官方）。现在两者分列：
+        // 主行与官方一致、欠币单独成行； summed 起来仍等于真实净资产，绝不能两边都不减。
+        val merged = mergeEarnIntoBalances(
+            balances = listOf(balance("LDUSDT", free = 124.581457)),
+            earn = listOf(earn("USDT", 142.0590224))
+        ) + listOf(
+            BinanceBalance(
+                asset = "USDT",
+                free = -17.4775654,
+                locked = 0.0,
+                kind = BinanceBalance.Kind.LOAN_DEBT
+            )
+        )
+        val preview = service.buildPreview(merged, existingAssets = emptyList())
+        val bySymbol = preview.items.associateBy { it.symbol }
+        assertEquals(142.0590224, bySymbol["LDUSDT"]!!.quantity, 1e-9)
+        assertEquals(-17.4775654, bySymbol["USDT#loan"]!!.quantity, 1e-9)
+        // 核心不变量：分列 ≠ 虚增，净资产仍须等于净额口径 124.581457
+        assertEquals(124.581457, preview.items.sumOf { it.quantity }, 1e-6)
+    }
+
+    @Test
+    fun 重复导入不会每导一次多一条负债() = runBlocking {
+        // 负债不再剥后缀落库，symbol 是稳定唯一键 USDT#loan：
+        // 第二次导入应命中上一次写进去的那行（UPDATE/UNCHANGED），而不是再插一条负债。
+        val loanRow = BinanceBalance(
+            asset = "USDT",
+            free = -17.4775654,
+            locked = 0.0,
+            kind = BinanceBalance.Kind.LOAN_DEBT
+        )
+        val first = service.buildPreview(listOf(loanRow), existingAssets = emptyList())
+        assertEquals(BinanceImportService.ItemStatus.NEW, first.items.single().status)
+
+        val stored = cryptoAsset(id = 1, symbol = "USDT#loan", balance = -17.4775654)
+        val second = service.buildPreview(listOf(loanRow), existingAssets = listOf(stored))
+        assertEquals(
+            BinanceImportService.ItemStatus.UNCHANGED,
+            second.items.single().status
+        )
+    }
+
+    @Test
+    fun 老口径落库的负债行被认领_不会与新版并存() = runBlocking {
+        // 升级前负债按剥掉后缀的交易对落库（symbol=USDT、余额为负）。升级后 key 变成
+        // USDT#loan，若不认领旧行就会新增一条，同一笔欠款记两遍。
+        val loanRow = BinanceBalance(
+            asset = "USDT",
+            free = -17.4775654,
+            locked = 0.0,
+            kind = BinanceBalance.Kind.LOAN_DEBT
+        )
+        val legacy = cryptoAsset(id = 1, symbol = "USDT", balance = -17.4775654)
+        val preview = service.buildPreview(listOf(loanRow), existingAssets = listOf(legacy))
+        val item = preview.items.single()
+        assertEquals(1L, item.existing!!.id)
+        // 认领后走 UPDATE（值变了）或 UNCHANGED（值没变），绝不应该是 NEW
+        assertFalse(
+            "老负债行应被认领为 UPDATE，而不是新增一条",
+            item.status == BinanceImportService.ItemStatus.NEW
+        )
+    }
+
+    @Test
+    fun 被折叠的零数量行不会混进预览() = runBlocking {
+        // 折叠产生的 0 数量成员会被 buildPreview 的 dust 过滤挡掉，
+        // 否则预览里会出现「新增 0 数量」的垃圾行。
+        val merged = mergeEarnIntoBalances(
+            balances = listOf(
+                balance("USDC", free = 43.56238),
+                balance("LDUSDC", free = 0.00430459)
+            ),
+            earn = listOf(earn("USDC", 43.56723483))
+        )
+        val preview = service.buildPreview(merged, existingAssets = emptyList())
+        assertEquals(1, preview.items.size)
+        assertEquals(43.56723483, preview.items.single().quantity, 1e-9)
+    }
+
+    @Test
+    fun 折叠后的旧行在库里被清零() = runBlocking {
+        // 合并只改承载行的数量不足以让用户少看到一行：库里的旧 LDUSDC 必须被清零，
+        // 否则同一个币仍是两行、同一笔钱被算两遍。
+        val merged = mergeEarnIntoBalances(
+            balances = listOf(
+                balance("USDC", free = 43.56238),
+                balance("LDUSDC", free = 0.00430459)
+            ),
+            earn = listOf(earn("USDC", 43.56723483))
+        )
+        val staleRow = cryptoAsset(id = 7, symbol = "LDUSDC", balance = 0.00430459)
+        val preview = service.buildPreview(merged, existingAssets = listOf(staleRow))
+
+        assertEquals(listOf(staleRow), preview.supersededAssets)
+
+        service.commit(preview, account = "币安", prices = emptyMap())
+        // 旧行被更新成 0：既少一行，也不重复计钱
+        coVerify { repo.updateBalance(7L, 0.0) }
     }
 }

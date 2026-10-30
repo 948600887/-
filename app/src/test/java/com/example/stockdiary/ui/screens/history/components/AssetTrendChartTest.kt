@@ -82,12 +82,13 @@ class AssetTrendChartTest {
 
     @Test
     fun `trendXLabelIndices一周八点按双日稀疏_不逐日排满`() {
-        // 1周视图：8 个点、跨度 7 天。放得下也不逐日排满——按 2 天步长只留 4 个刻度
+        // 1周视图：8 个点、跨度 7 天。放得下也不逐日排满——按理想步长 2 正向等距只留 4 个刻度，
+        // 首端对齐（含首日 10-17），全程等距，不末尾硬塞今天（旧实现会前疏后密）。
         val n = 8
         val positions = List(n) { it * 100f }
         val widths = List(n) { 50f }
         val dates = List(n) { LocalDate.of(2026, 10, 17).plusDays(it.toLong()) }
-        assertEquals(listOf(1, 3, 5, 7), trendXLabelIndices(dates, positions, widths, minGap = 8f))
+        assertEquals(listOf(0, 2, 4, 6), trendXLabelIndices(dates, positions, widths, minGap = 8f))
     }
 
     @Test
@@ -104,13 +105,14 @@ class AssetTrendChartTest {
     @Test
     fun `trendXLabelIndices窄屏宽标签八点保底四个均匀刻度`() {
         // 复现真机 bug：绘图区 ~196px、8 个快照等距(间隔 28px)、标签宽 55px。
-        // maxTicks 保底 4 选出 4 个自然刻度(idx 0,2,4,6)，但像素间距不足被重叠保护砍成 [0,4]；
-        // 兜底 thinEvenly(8, 4) 回退到均匀索引，最终保住 4 个刻度。
+        // 选档改为「按理想步长正向等距生成」：8 天理想步长 2 → 10-17/10-19/10-21/10-23
+        // 四个等距刻度(idx 0,2,4,6)，重叠保护在窄屏砍成 [0,4] 后，保底回退到自然档
+        // 已产出的等距 tick 映射(kept)，最终仍是 4 个**等距**刻度，不再前疏后密。
         val n = 8
         val positions = List(n) { it * 28f }
         val widths = List(n) { 55f }
         val dates = List(n) { LocalDate.of(2026, 10, 17).plusDays(it.toLong()) }
-        assertEquals(listOf(0, 3, 6, 7), trendXLabelIndices(dates, positions, widths, minGap = 8f))
+        assertEquals(listOf(0, 2, 4, 6), trendXLabelIndices(dates, positions, widths, minGap = 8f))
     }
 
     @Test
@@ -154,8 +156,9 @@ class AssetTrendChartTest {
 
     @Test
     fun `一个月跨度按周一稀疏_不硬标首末`() {
-        // 10/01~10/31 逐日快照：同花顺「本月」只标自然周界（周一），
-        // 不因为 10/01 和 10/31 是首末就硬塞两个标签
+        // 10/01~10/30 逐日快照：按理想步长（≈9~10 天）正向等距只留 4 个刻度，
+        // 首端对齐（含 10/01），全程等距（不再是旧实现末尾硬塞今天导致的前疏后密）。
+        // 不强制周一对齐——同花顺「等距 3~5 个」的核心诉求是均匀，步长随跨度自适应。
         val (dates, positions, widths) = dailyChart(LocalDate.of(2026, 10, 1), days = 30, spacingPx = 30f)
 
         val kept = trendXLabelIndices(dates, positions, widths, minGap = 8f)
@@ -163,12 +166,12 @@ class AssetTrendChartTest {
         val expectedDates = kept.map { dates[it] }
         assertEquals(
             listOf(
-                LocalDate.of(2026, 10, 5), LocalDate.of(2026, 10, 12),
-                LocalDate.of(2026, 10, 19), LocalDate.of(2026, 10, 26)
+                LocalDate.of(2026, 10, 1), LocalDate.of(2026, 10, 11),
+                LocalDate.of(2026, 10, 21), LocalDate.of(2026, 10, 31)
             ),
             expectedDates
         )
-        expectedDates.forEach { assertEquals(java.time.DayOfWeek.MONDAY, it.dayOfWeek) }
+        // 不强制周一对齐：同花顺「等距 3~5 个」的核心诉求是均匀，步长随跨度自适应。
     }
 
     @Test
@@ -216,18 +219,18 @@ class AssetTrendChartTest {
     fun `十二天全部视图只留四个刻度_截图回归`() {
         // 用户截图：10/15~10/26 共 12 天快照、选中「全部」。
         // 旧逻辑「放得下就全画」把 12 个日期全画出来，首尾还贴字；
-        // 同花顺规则下按 3 天步长只留 4 个，且每个都落在真实快照上
+        // 同花顺规则下按理想步长 3 正向等距只留 4 个，首端对齐含首日、全程等距。
         val (dates, positions, widths) = dailyChart(
             LocalDate.of(2026, 10, 15), days = 11, spacingPx = 80f, labelWidth = 55f
         )
 
         val kept = trendXLabelIndices(dates, positions, widths, minGap = 8f)
 
-        assertEquals(listOf(2, 5, 8, 11), kept)
+        assertEquals(listOf(0, 3, 6, 9), kept)
         assertEquals(
             listOf(
-                LocalDate.of(2026, 10, 17), LocalDate.of(2026, 10, 20),
-                LocalDate.of(2026, 10, 23), LocalDate.of(2026, 10, 26)
+                LocalDate.of(2026, 10, 15), LocalDate.of(2026, 10, 18),
+                LocalDate.of(2026, 10, 21), LocalDate.of(2026, 10, 24)
             ),
             kept.map { dates[it] }
         )

@@ -169,42 +169,28 @@ internal fun trendXLabelIndices(
     if (kept.isEmpty()) return thinEvenly(n, maxTicks)
     val natural = kept.sorted().filterWithOverlapGuard(positions, labelWidths, minGap)
     // 重叠保护在「窄屏 + 宽标签」下可能把自然刻度砍到 < MIN_X_LABELS（用户真机看到「只 2 个」）。
-    // 同花顺资产曲线「4~5 个刻度」优先于绝对不叠字：保底回退到均匀索引（间距最大），
-    // 宁可极窄屏下轻微靠近，也不让刻度退化成 2 个。常规设备 natural 已 >=4，走这分支不影响。
+    // 同花顺资产曲线「4~5 个刻度」优先于绝对不叠字：保底回退到自然档已产出的等距 tick 映射
+    // （keep 来自 selectTrendTickDates，本身是等日期步长），绝不按 index 抽稀（那会前疏后密）。
+    // 常规设备 natural 已 >=4，走前面分支不影响。
     if (natural.size >= MIN_X_LABELS) return natural
+    if (kept.size >= MIN_X_LABELS) return kept.sorted()
     return thinEvenly(n, maxTicks)
 }
 
 /**
- * 候选步长：[dayStep] > 0 为日/周档，否则为月档。
- * 列表顺序即优先级：刻度数打平时优先保留更细的步长（信息更多）。
+ * 月/季/半年/年档锚定的自然日历边界。日/周档改由 [selectTrendTickDates] 按理想步长
+ * 正向等距生成（首端对齐），不再依赖固定步长投票表，保证刻度均匀、不出现「前疏后密」。
  */
-private data class TrendTickStep(
-    val dayStep: Long = 0L,
-    val monthStep: Int = 0,
-    val alignToWeekStart: Boolean = false,
-    val monthAnchor: TrendMonthAnchor = TrendMonthAnchor.MONTH_START
-)
-
 private enum class TrendMonthAnchor { MONTH_START, QUARTER_START, HALF_YEAR_START, YEAR_START }
 
-private val TREND_TICK_STEPS = listOf(
-    TrendTickStep(dayStep = 1L),
-    TrendTickStep(dayStep = 2L),
-    TrendTickStep(dayStep = 3L),
-    TrendTickStep(dayStep = 7L, alignToWeekStart = true),
-    TrendTickStep(dayStep = 14L, alignToWeekStart = true),
-    TrendTickStep(monthStep = 1),
-    TrendTickStep(monthStep = 2),
-    TrendTickStep(monthStep = 3, monthAnchor = TrendMonthAnchor.QUARTER_START),
-    TrendTickStep(monthStep = 6, monthAnchor = TrendMonthAnchor.HALF_YEAR_START),
-    TrendTickStep(monthStep = 12, monthAnchor = TrendMonthAnchor.YEAR_START),
-    TrendTickStep(monthStep = 24, monthAnchor = TrendMonthAnchor.YEAR_START)
-)
-
 /**
- * 选出刻度数最接近 [TARGET_X_LABELS]、且不超过 [maxTicks] 的自然步长。
- * 例：12 天 → 每 3 天；26 天 → 每周（周一）；87 天 → 每月 1 号；多年 → 1/1、7/1。
+ * 选出刻度数最接近 [TARGET_X_LABELS]、且不超过 [maxTicks] 的等距刻度序列。
+ * - 跨度较长（> ~2 个月）走月/季/半年/年自然档（每月 1 号、1/1、7/1 这类等距节点）；
+ * - 短数据走日/周档：按理想步长从首日起**正向等距**生成（首端对齐，末节点常不=今天）。
+ *
+ * 关键点：刻度必须**等距**。旧实现锚定「最后一天」倒推、再在末尾把「今天」硬塞进去，
+ * 导致末段间隔忽然变短（用户看到「前疏后密」）。正向等距生成从根上规避这个问题，
+ * 与同花顺「横轴标签等距、3~5 个」的观感一致。
  */
 private fun selectTrendTickDates(
     first: java.time.LocalDate,
@@ -212,57 +198,88 @@ private fun selectTrendTickDates(
     maxTicks: Int
 ): List<java.time.LocalDate> {
     val target = minOf(TARGET_X_LABELS, maxTicks)
-    var best: List<java.time.LocalDate>? = null
-    var bestDistance = Int.MAX_VALUE
-    for (step in TREND_TICK_STEPS) {
-        val ticks = generateTrendTicks(step, first, last)
-        if (ticks.isEmpty() || ticks.size > maxTicks) continue
-        val distance = abs(ticks.size - target)
-        if (distance < bestDistance) {
-            best = ticks
-            bestDistance = distance
+    val spanDays = java.time.temporal.ChronoUnit.DAYS.between(first, last).toInt()
+    if (spanDays <= 0) return listOf(first)
+
+    // 长数据：月/季/半年/年自然档，本身等距（每月 1 号、每半年 1/1·7/1）
+    if (spanDays >= 60) {
+        val monthCandidates = listOf(
+            generateMonthTicks(first, last, 1, TrendMonthAnchor.MONTH_START),
+            generateMonthTicks(first, last, 2, TrendMonthAnchor.MONTH_START),
+            generateMonthTicks(first, last, 3, TrendMonthAnchor.QUARTER_START),
+            generateMonthTicks(first, last, 6, TrendMonthAnchor.HALF_YEAR_START),
+            generateMonthTicks(first, last, 12, TrendMonthAnchor.YEAR_START)
+        ).filter { it.size in 2..maxTicks }
+        if (monthCandidates.isNotEmpty()) {
+            return monthCandidates.minByOrNull { abs(it.size - target) } ?: monthCandidates.first()
         }
     }
-    if (best != null) return best
 
-    // 跨度极长、现有档位都太密：从 24 个月起继续加倍，直到落进预算
-    var months = 24
-    while (months <= 1200) {
-        val ticks = generateMonthTicks(first, last, months, TrendMonthAnchor.YEAR_START)
-        if (ticks.isNotEmpty() && ticks.size <= maxTicks) return ticks
-        months *= 2
+    // 短数据：理想步长使刻度数接近 target，在附近 ±2 内选「size 正好落进预算」的最密档，
+    // 保证等距（首端起正向生成，不在末尾硬塞今天，避免前疏后密）。
+    val idealStep = kotlin.math.round(spanDays.toDouble() / (target - 1)).toLong().coerceAtLeast(1L)
+    val steps = buildList {
+        add(idealStep)
+        for (delta in 1..2) {
+            add(idealStep - delta)
+            add(idealStep + delta)
+        }
+    }.filter { it >= 1L }
+    val dayCandidates = steps.mapNotNull { step ->
+        val ticks = generateDayTicksForward(first, last, step, alignToWeekStart = step % 7L == 0L)
+        if (ticks.size in 2..maxTicks) ticks else null
     }
-    return listOf(last)
+    if (dayCandidates.isNotEmpty()) {
+        return dayCandidates.minByOrNull { abs(it.size - target) } ?: dayCandidates.first()
+    }
+
+    // 兜底：直接等距抽稀到 maxTicks（极端稀疏数据）
+    return resampleEvenlyByDate(listOf(first, last), maxTicks)
 }
 
-private fun generateTrendTicks(
-    step: TrendTickStep,
-    first: java.time.LocalDate,
-    last: java.time.LocalDate
-): List<java.time.LocalDate> = if (step.dayStep > 0L) {
-    generateDayTicks(first, last, step.dayStep, step.alignToWeekStart)
-} else {
-    generateMonthTicks(first, last, step.monthStep, step.monthAnchor)
+/**
+ * 把 tick 列表按日期等距缩到 [maxTicks] 个：保留首末、中间按等日步长取点。
+ * 用于「自然档产出的 tick 数略超预算」时——抽稀后仍是等日期步长，
+ * 不会像按 index 抽稀那样出现「前疏后密」（末段间隔忽然变短）。
+ */
+private fun resampleEvenlyByDate(
+    ticks: List<java.time.LocalDate>,
+    maxTicks: Int
+): List<java.time.LocalDate> {
+    if (ticks.size <= maxTicks) return ticks
+    val span = java.time.temporal.ChronoUnit.DAYS.between(ticks.first(), ticks.last())
+    val stepDays = kotlin.math.round(span.toDouble() / (maxTicks - 1)).toLong().coerceAtLeast(1L)
+    val out = mutableListOf<java.time.LocalDate>()
+    var d = ticks.first()
+    while (!d.isAfter(ticks.last())) {
+        out.add(d)
+        d = d.plusDays(stepDays)
+    }
+    // 收尾：若最后没正好停在末 tick，补上末 tick，保证右端有标签且间隔不过突兀
+    if (out.isEmpty() || out.last() != ticks.last()) out.add(ticks.last())
+    // 防御：极端情况下仍可能 > maxTicks
+    while (out.size > maxTicks) out.removeAt(1)
+    return out
 }
 
-/** 日/周档以最后一天为锚点向前倒推；周档先退到周一，保证落在自然周界上 */
-private fun generateDayTicks(
+/** 日/周档从首日起正向等距生成直到超过末日；周档首端对齐到不早于首日的周一 */
+private fun generateDayTicksForward(
     first: java.time.LocalDate,
     last: java.time.LocalDate,
     dayStep: Long,
     alignToWeekStart: Boolean
 ): List<java.time.LocalDate> {
-    var anchor = if (alignToWeekStart) {
-        last.minusDays((last.dayOfWeek.value - 1).toLong())
-    } else {
-        last
-    }
+    val start = if (alignToWeekStart) {
+        val monday = first.minusDays((first.dayOfWeek.value - 1).toLong())
+        if (monday.isBefore(first)) monday.plusDays(7) else monday
+    } else first
     val ticks = mutableListOf<java.time.LocalDate>()
-    while (!anchor.isBefore(first)) {
-        ticks.add(anchor)
-        anchor = anchor.minusDays(dayStep)
+    var d = start
+    while (!d.isAfter(last)) {
+        ticks.add(d)
+        d = d.plusDays(dayStep)
     }
-    return ticks.asReversed()
+    return ticks
 }
 
 /** 月及以上档锚定自然日历边界（1 号 / 季初 / 1 月与 7 月 / 1 月 1 日） */

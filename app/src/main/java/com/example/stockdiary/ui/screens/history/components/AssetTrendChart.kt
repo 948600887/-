@@ -167,7 +167,12 @@ internal fun trendXLabelIndices(
         if (cursor < n) kept.add(cursor)
     }
     if (kept.isEmpty()) return thinEvenly(n, maxTicks)
-    return kept.sorted().filterWithOverlapGuard(positions, labelWidths, minGap)
+    val natural = kept.sorted().filterWithOverlapGuard(positions, labelWidths, minGap)
+    // 重叠保护在「窄屏 + 宽标签」下可能把自然刻度砍到 < MIN_X_LABELS（用户真机看到「只 2 个」）。
+    // 同花顺资产曲线「4~5 个刻度」优先于绝对不叠字：保底回退到均匀索引（间距最大），
+    // 宁可极窄屏下轻微靠近，也不让刻度退化成 2 个。常规设备 natural 已 >=4，走这分支不影响。
+    if (natural.size >= MIN_X_LABELS) return natural
+    return thinEvenly(n, maxTicks)
 }
 
 /**

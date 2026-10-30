@@ -91,15 +91,26 @@ class AssetTrendChartTest {
     }
 
     @Test
-    fun `trendXLabelIndices极窄画布只保留一个刻度_不叠字`() {
-        // 4 个点间距只有 10px、标签宽 50px：即便 maxTicks 已保底 4 个预算，
-        // 物理上仍放不下第二个标签；重叠兜底 filterWithOverlapGuard 从左到右扫描，
-        // 只保留首标签（不叠字优先于「凑够 4 个」）。这是极端窄屏的退化兜底，
-        // 正常手机绘图区放得下 4 个 M/d 标签，不会走到这里。
+    fun `trendXLabelIndices极窄画布保底仍返回四个均匀刻度_数量优先于不叠字`() {
+        // 4 个点间距只有 10px、标签宽 50px：物理上放不下第二个标签，重叠保护只留首标签。
+        // 但同花顺「4~5 个刻度」优先于绝对不叠字，natural(< MIN_X_LABELS=4) 触发兜底，
+        // 回退到均匀索引 thinEvenly 保住 4 个刻度（真机绘图区放得下 4 个 M/d 标签，不会走到这）。
         val positions = listOf(0f, 10f, 20f, 30f)
         val widths = List(4) { 50f }
         val dates = List(4) { LocalDate.of(2026, 10, 21).plusDays(it.toLong()) }
-        assertEquals(listOf(0), trendXLabelIndices(dates, positions, widths, minGap = 8f))
+        assertEquals(listOf(0, 1, 2, 3), trendXLabelIndices(dates, positions, widths, minGap = 8f))
+    }
+
+    @Test
+    fun `trendXLabelIndices窄屏宽标签八点保底四个均匀刻度`() {
+        // 复现真机 bug：绘图区 ~196px、8 个快照等距(间隔 28px)、标签宽 55px。
+        // maxTicks 保底 4 选出 4 个自然刻度(idx 0,2,4,6)，但像素间距不足被重叠保护砍成 [0,4]；
+        // 兜底 thinEvenly(8, 4) 回退到均匀索引，最终保住 4 个刻度。
+        val n = 8
+        val positions = List(n) { it * 28f }
+        val widths = List(n) { 55f }
+        val dates = List(n) { LocalDate.of(2026, 10, 17).plusDays(it.toLong()) }
+        assertEquals(listOf(0, 3, 6, 7), trendXLabelIndices(dates, positions, widths, minGap = 8f))
     }
 
     @Test

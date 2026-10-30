@@ -331,11 +331,11 @@ fun Double.isZero(): Boolean = this == 0.0
 
 // ========== 图表/日历通用格式化 ==========
 
-/** 将 yyyy-MM-dd 日期简化为 M/d */
+/** 将 yyyy-MM-dd 日期简化为 MM-DD（两位数月-日、连字符），对齐同花顺资产曲线横轴格式 */
 fun String.formatDateLabel(): String {
     return try {
         val date = LocalDate.parse(this, DateFormats.ISO_DATE_FORMATTER)
-        "${date.monthValue}/${date.dayOfMonth}"
+        String.format("%02d-%02d", date.monthValue, date.dayOfMonth)
     } catch (e: Exception) { this }
 }
 

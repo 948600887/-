@@ -51,6 +51,9 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.stockdiary.data.importer.BinanceImportService
 import com.example.stockdiary.data.importer.estimatedValueCny
+import com.example.stockdiary.data.importer.isLoanCollateralSymbol
+import com.example.stockdiary.data.importer.isLoanDebtSymbol
+import androidx.compose.ui.graphics.Color
 import com.example.stockdiary.di.AppContainer
 import com.example.stockdiary.ui.components.import.ImportAccountField
 import com.example.stockdiary.ui.components.import.ImportCommitSummary
@@ -444,6 +447,11 @@ private fun BinancePreviewItemRow(
     item: BinanceImportService.PreviewItem,
     priceOf: (String) -> Double?
 ) {
+    // 借币负债 / 抵押资产在预览里是带 #loan / #collateral 后缀的独立 symbol，
+    // 不与同币种现货合并抵消——这里据此打标签，让用户一眼看到「负债」和「抵押」。
+    val isLoanDebt = isLoanDebtSymbol(item.symbol)
+    val isCollateral = isLoanCollateralSymbol(item.symbol)
+
     val (statusText, statusColor) = when (item.status) {
         BinanceImportService.ItemStatus.NEW -> "新增" to AppTheme.colors.profitGreen
         BinanceImportService.ItemStatus.UPDATE ->
@@ -469,21 +477,21 @@ private fun BinancePreviewItemRow(
                 // 两个都显示：前者好认，后者是真正落库/取价的代码
                 // LD 理财/锁仓壳（LDBNB 等）明确打「锁仓」标，与现货区分开
                 // （P1 已让它们分属不同 symbol，这里再补视觉区分）
+                // 借币负债 / 抵押资产也分别打「借币」「抵押」标，避免被误读成普通持仓
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(item.name, fontWeight = FontWeight.Medium)
                     if (BinanceAPI.isEarnProduct(item.name)) {
                         Spacer(Modifier.width(6.dp))
-                        Text(
-                            "锁仓",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onTertiaryContainer,
-                            modifier = Modifier
-                                .background(
-                                    MaterialTheme.colorScheme.tertiaryContainer,
-                                    MaterialTheme.shapes.extraSmall
-                                )
-                                .padding(horizontal = 6.dp, vertical = 2.dp)
-                        )
+                        BinanceKindTag("锁仓", MaterialTheme.colorScheme.onTertiaryContainer, MaterialTheme.colorScheme.tertiaryContainer)
+                    }
+                    if (isLoanDebt) {
+                        Spacer(Modifier.width(6.dp))
+                        // 负债用红（与 AssetCards 的 isDebt→lossRed 同一语义）：红=应还/减少
+                        BinanceKindTag("借币", AppTheme.colors.lossRed, AppTheme.colors.lossRed.copy(alpha = 0.16f))
+                    }
+                    if (isCollateral) {
+                        Spacer(Modifier.width(6.dp))
+                        BinanceKindTag("抵押", MaterialTheme.colorScheme.tertiary, MaterialTheme.colorScheme.tertiaryContainer)
                     }
                 }
                 Text(
@@ -493,7 +501,12 @@ private fun BinancePreviewItemRow(
                 )
             }
             Column(horizontalAlignment = Alignment.End) {
-                Text(item.quantity.formatTrim(CRYPTO_DECIMALS), fontWeight = FontWeight.Bold)
+                // 借币负债是负数，用红突出「这是欠币安的」；抵押/普通资产用默认色
+                Text(
+                    item.quantity.formatTrim(CRYPTO_DECIMALS),
+                    fontWeight = FontWeight.Bold,
+                    color = if (isLoanDebt) AppTheme.colors.lossRed else MaterialTheme.colorScheme.onSurface
+                )
                 Text(
                     valueCny?.let { "≈ ¥${it.format(2)}" } ?: "市值 —",
                     style = MaterialTheme.typography.bodySmall,
@@ -503,4 +516,22 @@ private fun BinancePreviewItemRow(
             }
         }
     }
+}
+
+/**
+ * 预览行里的小标签（锁仓 / 借币 / 抵押）。
+ *
+ * @param textColor 文字色（语义色：红色=负债、tertiary=锁仓/抵押）
+ * @param bgColor   底纹色（语义色的低透明度版本，避免实色块太刺眼）
+ */
+@Composable
+private fun BinanceKindTag(text: String, textColor: Color, bgColor: Color) {
+    Text(
+        text,
+        style = MaterialTheme.typography.labelSmall,
+        color = textColor,
+        modifier = Modifier
+            .background(bgColor, MaterialTheme.shapes.extraSmall)
+            .padding(horizontal = 6.dp, vertical = 2.dp)
+    )
 }

@@ -206,11 +206,29 @@ open class BinanceImportViewModel(
                 // 误当「待补齐的理财量」抹掉（负债必须作为独立负余额进入按代码 sumOf）。
                 val loanBalances = buildList {
                     for (debt in loan.debts) {
-                        add(BinanceBalance(asset = debt.asset, free = -debt.debt, locked = 0.0))
+                        // 借币负债：标记 LOAN_DEBT，预览内核会映射成带 #loan 后缀的独立 symbol，
+                        // 不再与同币种现货合并抵消（用户能在核对页清楚看到「借币负债」这一项）。
+                        add(
+                            BinanceBalance(
+                                asset = debt.asset,
+                                free = -debt.debt,
+                                locked = 0.0,
+                                kind = BinanceBalance.Kind.LOAN_DEBT
+                            )
+                        )
                         val collateralCoin = debt.collateralCoin
                         val collateralAmount = debt.collateralAmount
                         if (!collateralCoin.isNullOrBlank() && collateralAmount > 0.0) {
-                            add(BinanceBalance(asset = collateralCoin, free = 0.0, locked = collateralAmount))
+                            // 抵押资产：标记 LOAN_COLLATERAL，预览独立成行（带 #collateral 后缀），
+                            // 不与同币种现货抵消；用户能直接看到「抵押了 X」而不是被并进现货余额。
+                            add(
+                                BinanceBalance(
+                                    asset = collateralCoin,
+                                    free = 0.0,
+                                    locked = collateralAmount,
+                                    kind = BinanceBalance.Kind.LOAN_COLLATERAL
+                                )
+                            )
                         }
                     }
                 }

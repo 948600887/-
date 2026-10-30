@@ -29,11 +29,29 @@ import javax.crypto.spec.SecretKeySpec
 data class BinanceBalance(
     val asset: String,
     val free: Double,
-    val locked: Double
+    val locked: Double,
+    /** 余额来源。默认 SPOT；借币负债(LOAN_DEBT)与抵押资产(LOAN_COLLATERAL)带标记，
+     *  让导入预览内核能把它们与同币种现货区分开、独立成行，而不是按 symbol 合并抵消。 */
+    val kind: Kind = Kind.SPOT
 ) {
     /** 可用 + 冻结 = 该资产的实际持有量 */
     val total: Double
         get() = free + locked
+
+    /** 余额来源种类。预览内核按它决定 symbol 是否需要加负债/抵押后缀（避免与现货抵消）。 */
+    enum class Kind {
+        /** 现货 / 理财合并后的普通余额 */
+        SPOT,
+
+        /** 理财（Simple Earn）持仓，由 mergeEarnIntoBalances 产出；展示层按 isEarnProduct 另行打标 */
+        EARN,
+
+        /** 活期借币（Flexible Loan）的负债，值为负，预览里应显示为「借币负债」 */
+        LOAN_DEBT,
+
+        /** 借币时抵押给币安的担保资产，值仍为正（用户自己的钱、只是被锁定），预览里应显示为「抵押」 */
+        LOAN_COLLATERAL
+    }
 }
 
 /**

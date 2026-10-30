@@ -34,6 +34,25 @@ import kotlin.math.abs
  * 的 CRYPTO 取价直接用 `symbol.uppercase()` 当币安交易对查价。映射错了，
  * 导入的资产就永远同步不到行情。这里统一拼成 `<基础资产>USDT`，与既有加密资产同格式。
  */
+/**
+ * 借币负债 / 抵押资产的预览 symbol 后缀。
+ *
+ * 为什么需要后缀：SnapshotAlignment.align 按 symbol 合并同代码余额，借币负债
+ * （USDT -50.8）若用真实交易对 symbol 会和现货 USDT 142.52 合并成净 91.7，
+ * 用户就看不到独立的「借币负债」项、只看到被抵消的净数字。给它们加后缀让 align
+ * 不去重、独立成行；落库时用 [stripLoanSuffix] 把后缀还原成真实交易对，
+ * 仍按币安净额口径合并（净值正确，且不污染行情同步的取价键）。
+ */
+private const val LOAN_DEBT_SUFFIX = "#loan"
+private const val LOAN_COLLATERAL_SUFFIX = "#collateral"
+
+/** 预览 symbol 还原成真实交易对（去掉借币/抵押后缀），供落库与取价使用 */
+internal fun stripLoanSuffix(symbol: String): String = symbol.substringBefore('#')
+
+/** 预览 symbol 是否代表借币负债 / 抵押资产（带对应后缀） */
+internal fun isLoanDebtSymbol(symbol: String): Boolean = symbol.endsWith(LOAN_DEBT_SUFFIX)
+internal fun isLoanCollateralSymbol(symbol: String): Boolean = symbol.endsWith(LOAN_COLLATERAL_SUFFIX)
+
 class BinanceImportService(
     private val assetRepository: AssetRepository
 ) {
@@ -128,10 +147,19 @@ class BinanceImportService(
                 // getCryptoPrice / priceKeyFor 的 LD→底层逻辑（两条路径都已支持 LD 代码），
                 // 改完定价不断。稳定币（priceKeyFor 返回 null）回落 baseAssetToSymbol
                 // （USDT→USDT）。name 始终存原始代码（LDBNB / BNB），展示层不受影响。
-                symbol = if (BinanceAPI.isEarnProduct(balance.asset)) {
-                    balance.asset
-                } else {
-                    priceKeyFor(balance.asset) ?: baseAssetToSymbol(balance.asset)
+                // 借币负债 / 抵押资产带 kind 标记，用带后缀的独立 symbol 跳过 align 的
+                // 同代码合并（否则会与同币种现货抵消成净数字，用户看不到独立的负债/抵押项）。
+                // 其余（现货 / 理财壳）走原逻辑：LD 壳用原始 LD 代码、其它补 USDT 交易对。
+                symbol = when (balance.kind) {
+                    BinanceBalance.Kind.LOAN_DEBT ->
+                        (priceKeyFor(balance.asset) ?: baseAssetToSymbol(balance.asset)) + LOAN_DEBT_SUFFIX
+                    BinanceBalance.Kind.LOAN_COLLATERAL ->
+                        (priceKeyFor(balance.asset) ?: baseAssetToSymbol(balance.asset)) + LOAN_COLLATERAL_SUFFIX
+                    else -> if (BinanceAPI.isEarnProduct(balance.asset)) {
+                        balance.asset
+                    } else {
+                        priceKeyFor(balance.asset) ?: baseAssetToSymbol(balance.asset)
+                    }
                 },
                 name = balance.asset,
                 quantity = balance.total
@@ -200,7 +228,9 @@ class BinanceImportService(
      */
     private fun PreviewItem.toCommitRow(prices: Map<String, Double>): SnapshotAlignment.CommitRow =
         SnapshotAlignment.CommitRow(
-            symbol = symbol,
+            // 落库用真实交易对：去掉借币/抵押后缀，让负债与同币种现货按币安净额口径合并
+            // （净值正确，且行情同步拿到的取价键仍是真实交易对、不会 400）。
+            symbol = stripLoanSuffix(symbol),
             name = name,
             quantity = quantity,
             status = status.toKernelStatus(),

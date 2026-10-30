@@ -6,6 +6,7 @@ import com.example.stockdiary.data.importer.estimatedValueCny
 import com.example.stockdiary.data.importer.mergeEarnIntoBalances
 import com.example.stockdiary.data.importer.priceKeyFor
 import com.example.stockdiary.data.importer.referencePriceForImport
+import com.example.stockdiary.data.importer.stripLoanSuffix
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.network.BinanceAPI
@@ -493,41 +494,64 @@ class BinanceImportServiceTest {
     }
 
     @Test
-    fun 借币负债作为负余额追加在理财合并之后_与现货净额抵消() = runBlocking {
-        // 锁定 BinanceImportViewModel.fetch 的真实组装顺序：先 mergeEarnIntoBalances（max 规则，
-        // 不能把负余额当「待补齐的理财量」覆盖掉），再追加借币负余额。
-        // 现货/理财 USDT 142.52 + 借币 -50.80033811 → 净 91.71966189（币安总览净额口径）。
-        // 若有人把 loan 负余额错误地塞进 mergeEarnIntoBalances，max 规则会把它抹掉、净资产虚高。
-        val merged = mergeEarnIntoBalances(
-            balances = listOf(balance("USDT", free = 142.52)),
-            earn = emptyList()
-        ) + listOf(BinanceBalance(asset = "USDT", free = -50.80033811, locked = 0.0))
-
-        val preview = service.buildPreview(merged, existingAssets = emptyList())
-        assertEquals(1, preview.items.size)
-        assertEquals("USDT", preview.items[0].symbol)
-        assertEquals(142.52 - 50.80033811, preview.items[0].quantity, 1e-9)
-    }
-
-    @Test
-    fun 借币抵押资产作为正余额追加_净资产等于资产减负债() = runBlocking {
-        // 抵押 0.5 BTC 借 50.80033811 USDT：
-        // 现货/理财 USDT 142.52 + 借币 -50.80033811 → 净 91.71966189（USDT）
-        // 抵押 BTC 0.5 作为正余额（locked 态）追加 → BTCUSDT = 0.5（用户资产回归）。
-        // 若抵押资产没抓，BTCUSDT 压根不会出现，净资产被低估 0.5 BTC。
-        // 锁定 fetch 的真实组装顺序：抵押与负债都追加在 mergeEarnIntoBalances 之后。
+    fun 借币负债带标记后预览独立成行_不与现货抵消() = runBlocking {
+        // 关键回归：借币负债若不带标记会和现货 USDT 合并成净 91.7（用户看不到负债项，
+        // 只会看到被抵消的净数字）。带 LOAN_DEBT 后映射成 USDT#loan 独立 symbol，
+        // 与现货 USDT 142.52 各成一行、不再抵消——核对页能直接看到「借币负债 -50.80033811」。
+        // 若有人把 kind 丢掉（退回纯负余额），align 又会按 symbol 合并抵消，正是本 bug。
         val merged = mergeEarnIntoBalances(
             balances = listOf(balance("USDT", free = 142.52)),
             earn = emptyList()
         ) + listOf(
-            BinanceBalance(asset = "USDT", free = -50.80033811, locked = 0.0),
-            BinanceBalance(asset = "BTC", free = 0.0, locked = 0.5)  // 抵押资产（锁定态）
+            BinanceBalance(
+                asset = "USDT",
+                free = -50.80033811,
+                locked = 0.0,
+                kind = BinanceBalance.Kind.LOAN_DEBT
+            )
         )
+
         val preview = service.buildPreview(merged, existingAssets = emptyList())
         val bySymbol = preview.items.associateBy { it.symbol }
         assertEquals(2, preview.items.size)
-        assertEquals(142.52 - 50.80033811, bySymbol["USDT"]!!.quantity, 1e-9)
-        assertEquals(0.5, bySymbol["BTCUSDT"]!!.quantity, 1e-9)
+        assertEquals(142.52, bySymbol["USDT"]!!.quantity, 1e-9)
+        assertEquals(-50.80033811, bySymbol["USDT#loan"]!!.quantity, 1e-9)
+    }
+
+    @Test
+    fun 借币抵押与负债都带标记_预览各自独立成行() = runBlocking {
+        // 抵押 0.5 BTC 借 50.80033811 USDT：预览里三者独立成行——
+        // USDT 现货 142.52、USDT#loan 负债 -50.8、BTCUSDT#collateral 抵押 0.5，
+        // 互相不抵消（用户能分别看到资产、负债、抵押，而非被并成净数字）。
+        // 落库时 #loan / #collateral 后缀被 stripLoanSuffix 还原成真实交易对，
+        // 负债与现货 USDT 仍按币安净额口径合并（净资产 = 资产 − 欠币）。
+        val merged = mergeEarnIntoBalances(
+            balances = listOf(balance("USDT", free = 142.52)),
+            earn = emptyList()
+        ) + listOf(
+            BinanceBalance(
+                asset = "USDT",
+                free = -50.80033811,
+                locked = 0.0,
+                kind = BinanceBalance.Kind.LOAN_DEBT
+            ),
+            BinanceBalance(
+                asset = "BTC",
+                free = 0.0,
+                locked = 0.5,
+                kind = BinanceBalance.Kind.LOAN_COLLATERAL
+            )  // 抵押资产（锁定态）
+        )
+        val preview = service.buildPreview(merged, existingAssets = emptyList())
+        val bySymbol = preview.items.associateBy { it.symbol }
+        assertEquals(3, preview.items.size)
+        assertEquals(142.52, bySymbol["USDT"]!!.quantity, 1e-9)
+        assertEquals(-50.80033811, bySymbol["USDT#loan"]!!.quantity, 1e-9)
+        assertEquals(0.5, bySymbol["BTCUSDT#collateral"]!!.quantity, 1e-9)
+
+        // 落库 symbol 还原：负债 / 抵押项都回到真实交易对，与现货合并、净值正确
+        assertEquals("USDT", stripLoanSuffix("USDT#loan"))
+        assertEquals("BTCUSDT", stripLoanSuffix("BTCUSDT#collateral"))
     }
 
     @Test

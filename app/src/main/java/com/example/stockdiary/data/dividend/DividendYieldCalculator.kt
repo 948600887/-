@@ -24,7 +24,6 @@ object DividendYieldCalculator {
     ): Double {
         if (currentPrice <= 0 || dividends.isEmpty()) return 0.0
 
-        // 获取最近12个月的分红记录
         // 含边界：正好 12 个月前那天也算在 TTM 内（isAfter 严格大于会漏掉它）
         val twelveMonthsAgo = today.minusMonths(12)
 
@@ -39,7 +38,6 @@ object DividendYieldCalculator {
             }
         }
         
-        // 计算每十股分红总和
         val totalDividendPerTenShares = recentDividends.sumOf {
             dividend -> dividend.dividendPerShare.toDoubleOrNull() ?: 0.0
         }
@@ -195,7 +193,6 @@ object DividendYieldCalculator {
         val validYearlyDividends = yearlyDividends.filterKeys { it > 0 }
         if (validYearlyDividends.isEmpty()) return 0.0
         
-        // 计算平均每年分红
         val avgYearlyDividend = validYearlyDividends.values
             .map { yearDividends -> 
                 yearDividends.sumOf { dividend ->

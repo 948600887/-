@@ -113,7 +113,6 @@ class StockDataManager(
     // 数据源实例缓存
     private val dataSourceCache = ConcurrentHashMap<String, StockDataSource>()
 
-    // 初始化PriceCacheManager
     init {
         PriceCacheManager.init(context)
     }
@@ -221,7 +220,6 @@ class StockDataManager(
                     yesterdayClose = persistedCache.prevClose,
                     timestamp = System.currentTimeMillis()
                 )
-                // 更新内存缓存
                 cache[symbol] = CacheItem(stockData, System.currentTimeMillis())
                 AppLogger.d("使用持久化缓存数据: $symbol", TAG)
                 return Result.success(stockData)
@@ -232,7 +230,6 @@ class StockDataManager(
         val netAvailable = networkAvailable ?: isNetworkAvailable()
         if (!netAvailable) {
             AppLogger.w("网络连接不可用", TAG)
-            // 返回旧缓存或失败
             val oldCache = cache[symbol]
             if (oldCache != null) {
                 return Result.success(oldCache.data)

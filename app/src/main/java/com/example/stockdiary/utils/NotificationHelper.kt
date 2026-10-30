@@ -223,7 +223,6 @@ object NotificationHelper {
         }
     }
 
-    // 设置每日提醒
     fun setDailyReminder(context: Context, hour: Int, minute: Int): Boolean {
         return try {
             // setAlarmClock 不需要 SCHEDULE_EXACT_ALARM 权限（Android 12+ 推荐方式），
@@ -252,7 +251,6 @@ object NotificationHelper {
                     PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
                 )
 
-                // 设置提醒时间
                 val now = LocalDateTime.now()
                 var scheduledTime = now.withHour(hour).withMinute(minute).withSecond(0).withNano(0)
 

@@ -44,6 +44,9 @@ open class BinanceImportViewModel(
     private val credentialsManager: BinanceCredentialsManager
 ) : ImportWizardViewModel<BinanceImportViewModel.UiState>(BinanceImportViewModel.UiState()) {
 
+    /** 当前密钥是否以明文存储（Keystore 不可用），UI 据此向用户告警 */
+    val isPlaintextStorage: Boolean get() = credentialsManager.isPlaintextFallback
+
     enum class Step { INPUT, FETCHING, PREVIEW, COMMITTING, RESULT }
 
     data class UiState(

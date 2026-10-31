@@ -24,6 +24,7 @@ import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -191,6 +192,32 @@ private fun BinanceInputStep(
                             "请使用开启了「读取」权限、关闭了「交易/提币」权限的 API Key。",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+
+        if (viewModel.isPlaintextStorage) {
+            Spacer(Modifier.height(12.dp))
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.35f)
+                )
+            ) {
+                Row(modifier = Modifier.padding(12.dp)) {
+                    Icon(
+                        Icons.Default.Warning,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        "本设备不支持加密存储，币安密钥将以明文保存在本机。已 root 的设备可读，" +
+                            "建议仅在可信环境使用，或尽快更换支持加密存储的设备。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onErrorContainer
                     )
                 }
             }

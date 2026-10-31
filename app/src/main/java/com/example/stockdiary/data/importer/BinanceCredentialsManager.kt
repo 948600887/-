@@ -34,6 +34,13 @@ class BinanceCredentialsManager private constructor(context: Context) {
     /** 真正使用的存储：加密优先，明文兜底 */
     private val prefs: SharedPreferences = buildPrefs()
 
+    /**
+     * 是否因 Android Keystore 不可用而回退到明文 SharedPreferences。
+     * true 时密钥以明文落盘（已 root 设备可读），UI 应据此向用户告警。
+     */
+    var isPlaintextFallback: Boolean = false
+        private set
+
     private fun buildPrefs(): SharedPreferences {
         return try {
             // security-crypto 1.0.0 的 create 用「masterKeyAlias 字符串」而非 MasterKey 对象，
@@ -65,7 +72,13 @@ class BinanceCredentialsManager private constructor(context: Context) {
             enc
         } catch (e: Exception) {
             // Keystore 不可用：退化明文，与旧版一致，绝不崩
+            isPlaintextFallback = true
             AppLogger.w("EncryptedSharedPreferences 不可用，币安密钥回退明文存储: ${e.message}", TAG)
+            AppLogger.w(
+                "【安全警告】本设备 Android Keystore 不可用，币安 API Key/Secret 将以明文保存在 SharedPreferences，" +
+                    "已 root 的设备可读。建议尽快更换支持加密存储的设备，或仅在可信环境使用币安导入。",
+                TAG
+            )
             appContext.getSharedPreferences(PREFS_NAME_LEGACY, Context.MODE_PRIVATE)
         }
     }

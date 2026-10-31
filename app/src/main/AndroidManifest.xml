@@ -14,8 +14,6 @@
     <application
         android:name=".StockDiaryApplication"
         android:allowBackup="false"
-        android:fullBackupContent="@xml/full_backup_content"
-        android:dataExtractionRules="@xml/data_extraction_rules"
         android:icon="@mipmap/ic_launcher"
         android:label="金库"
         android:networkSecurityConfig="@xml/network_security_config"

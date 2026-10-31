@@ -366,7 +366,7 @@ object LogDiagnostics {
             clipData = ClipData.newUri(context.contentResolver, "诊断报告", uri)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
-        context.startActivity(Intent.createChooser(intent, "分享诊断报告"))
+        context.startActivity(Intent.createChooser(intent, "分享诊断报告（含个人资产信息，请谨慎）"))
     }
 
     /**

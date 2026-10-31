@@ -22,6 +22,9 @@ object EastmoneySkillApi {
     
     private const val TAG = "EastmoneySkillApi"
     private const val BASE_URL = "https://mkapi2.dgcfs.com/finskillshub/api/claw/"
+    // ⚠️ 安全提示：此 Key 在编译期注入 BuildConfig，会随 APK 一同分发，逆向即可提取、冒用开发者配额。
+    // 真正的根治方案是改为「App 调用自家后端、由服务端持钥代理转发」——纯客户端无法消除该暴露面。
+    // 这里保留运行时可覆盖（var），便于后续接入远端配置下发；当前为空时 [isApiKeyConfigured] 自动移出候选源。
     internal var apiKey: String = BuildConfig.EASTMONEY_SKILL_API_KEY
 
     internal var client: OkHttpClient = NetworkClient.defaultClient.newBuilder()

@@ -22,6 +22,7 @@ import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.data.dividend.DividendYieldCalculator
 import com.example.stockdiary.data.dividend.DividendIncomeCalculator
 import com.example.stockdiary.ui.components.SingleLineText
+import com.example.stockdiary.data.importer.stripLoanSuffix
 import com.example.stockdiary.ui.dialogs.AdjustPositionDialog
 import com.example.stockdiary.ui.dialogs.EditAssetDialog
 import com.example.stockdiary.ui.theme.*
@@ -93,7 +94,9 @@ fun AssetDetailScreen(
                                 fontWeight = FontWeight.Bold
                             )
                             currentAsset.symbol?.let {
-                                Text(text = it, style = MaterialTheme.typography.labelSmall, color = AppTheme.colors.onSurfaceVariant)
+                                // 抵押/借币行 symbol 带 #collateral / #loan 后缀（库内唯一键），
+                                // 详情页副标题只展示交易对，避免把英文后缀裸给用户看
+                                Text(text = stripLoanSuffix(it), style = MaterialTheme.typography.labelSmall, color = AppTheme.colors.onSurfaceVariant)
                             }
                         }
                     } else {

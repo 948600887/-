@@ -17,6 +17,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.stockdiary.data.importer.isLoanCollateralSymbol
 import com.example.stockdiary.data.importer.isLoanDebtSymbol
+import com.example.stockdiary.data.importer.stripLoanSuffix
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.network.BinanceAPI
@@ -299,11 +300,20 @@ fun StockAssetItem(
                     style = MaterialTheme.typography.bodyLarge,
                     fontWeight = FontWeight.SemiBold
                 )
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    asset.symbol?.let {
-                        Text(it, style = MaterialTheme.typography.bodySmall, color = AppTheme.colors.onSurfaceVariant)
-                        Text("•", style = MaterialTheme.typography.bodySmall, color = AppTheme.colors.onSurfaceVariant)
-                    }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                // 抵押/借币行的 symbol 带 #collateral / #loan 后缀（库内稳定唯一键，保证重复导入命中同一行），
+                // 但展示时已有中文「抵押」「借币」标签，裸英文后缀既冗余又会让这行被拉长、
+                // 把末尾的「数量」挤到右侧市值文字下面盖住（2026-10-31 排查：XAUT 抵押行数量看不见）。
+                // 这里剥掉后缀只显示交易对，并给单行省略号兜底，任何长基础代码都不会再溢出隐藏数量。
+                asset.symbol?.let { rawSymbol ->
+                    SingleLineText(
+                        stripLoanSuffix(rawSymbol),
+                        modifier = Modifier.weight(1f, fill = false),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = AppTheme.colors.onSurfaceVariant
+                    )
+                    Text("•", style = MaterialTheme.typography.bodySmall, color = AppTheme.colors.onSurfaceVariant)
+                }
                     // 负债没有「持仓数量」的概念，balance 就是欠多少钱。
                     // 加密货币数量常见 6~10 位小数（如 0.1234567890），必须给足位数，否则会被舍成 0 或 0.12。
                     // 其余类型统一走 quantityPrecisionFor（股票 0 位、基金/其它 2 位）：

@@ -339,25 +339,38 @@ class BinanceImportServiceTest {
         service.commit(preview, account = "币安", prices = mapOf("BNBUSDT" to 600.0))
 
         val asset = captured.captured.single()
-        // 落库 symbol 是原始 LD 代码 LDBNB（不是底层交易对 BNBUSDT，否则与现货撞键被合并）；
-        // name 也保留原始 LD 代码
-        assertEquals("LDBNB", asset.symbol)
-        assertEquals("LDBNB", asset.name)
+        // 落库 symbol 现为底层交易对 BNBUSDT（LD 前缀已剥，活期与现货合并为同一底层）；
+        // name 同步剥前缀为 BNB。取价键仍是 BNBUSDT，按底层价预填
+        assertEquals("BNBUSDT", asset.symbol)
+        assertEquals("BNB", asset.name)
         assertEquals(600.0, asset.currentPrice!!, 1e-9)
         assertEquals(1200.0, asset.totalValue, 1e-9)
     }
 
     @Test
-    fun LD与现货不撞去重键_各自独立落库() = runBlocking {
-        // P1 修复：LD 理财壳（LDBNB）落库用原始代码 LDBNB，而不是底层交易对 BNBUSDT，
-        // 否则会和现货 BNB（symbol=BNBUSDT）撞同一个去重键、被 SnapshotAlignment 合并成一行
+    fun LD壳与现货合并成同一底层行_数量求和() = runBlocking {
+        // 活期理财壳（LDBNB）与现货 BNB 是同一底层资产的两个视图，现在合并成一行：
+        // 数量 = 现货 1.0 + 活期 2.0 = 3.0，symbol 统一为底层交易对 BNBUSDT（不再有 LD 裸码）
         val preview = service.buildPreview(
             balances = listOf(balance("LDBNB", free = 2.0), balance("BNB", free = 1.0)),
             existingAssets = emptyList()
         )
-        assertEquals(2, preview.items.size)
-        val symbols = preview.items.map { it.symbol }.toSet()
-        assertTrue("LD 与现货必须分属不同 symbol", symbols.contains("LDBNB") && symbols.contains("BNBUSDT"))
+        assertEquals(1, preview.items.size)
+        assertEquals("BNBUSDT", preview.items[0].symbol)
+        assertEquals(3.0, preview.items[0].quantity, 1e-9)
+    }
+
+    @Test
+    fun 合并后落库symbol与name均不含LD前缀() = runBlocking {
+        // LDBNB 活期壳与 BNB 现货合并后，预览的 symbol 应是底层交易对 BNBUSDT、name 为 BNB，
+        // 不再出现 LD 裸码
+        val preview = service.buildPreview(
+            balances = listOf(balance("LDBNB", free = 2.0), balance("BNB", free = 1.0)),
+            existingAssets = emptyList()
+        )
+        val item = preview.items.single()
+        assertEquals("BNBUSDT", item.symbol)
+        assertEquals("BNB", item.name)
     }
 
     @Test
@@ -579,7 +592,7 @@ class BinanceImportServiceTest {
         assertEquals(-30.0, asset.totalValue, 1e-9)
     }
 
-    // ---------- 理财持仓合并（取最大值，绝不重复计） ----------
+    // ---------- 理财持仓合并（现货+活期取较大值+定期直接相加，既不重复也不漏） ----------
 
     private fun earn(asset: String, amount: Double, locked: Boolean = false) =
         com.example.stockdiary.network.BinanceEarnPosition(
@@ -595,11 +608,11 @@ class BinanceImportServiceTest {
     }
 
     @Test
-    fun 理财已在现货里时不会重复计() {
-        // 现货 USDC 43.46 与对账单 Earn 的 USDC 43.46 完全一致 → 合并后仍是 43.46，
-        // 绝不能相加成 86.92（那等于把同一笔钱记两遍）
+    fun 理财已在账户里时不会重复计() {
+        // 活期理财以 LDUSDC 壳形式落在账户里（43.46），simple-earn 接口也报 43.46 →
+        // 二者取较大值仍是 43.46，绝不能相加成 86.92（那等于把同一笔钱记两遍）
         val merged = mergeEarnIntoBalances(
-            balances = listOf(balance("USDC", free = 43.46)),
+            balances = listOf(balance("LDUSDC", free = 43.46)),
             earn = listOf(earn("USDC", 43.46))
         )
         assertEquals(1, merged.size)
@@ -607,13 +620,28 @@ class BinanceImportServiceTest {
     }
 
     @Test
+    fun 仅定期锁仓_现货无此笔_不再漏算() {
+        // 真实场景：账户只有 USDT 现货 57.0，另有 34.5 在 Simple Earn 定期锁仓
+        // （账户余额里没有、只在 simple-earn 接口返回）。旧 max(账户, 理财全量) 会取 57.0
+        // 把定期漏掉；现在定期是独立金库直接相加 → 57.0 + 34.5 = 91.5
+        val merged = mergeEarnIntoBalances(
+            balances = listOf(balance("USDT", free = 57.0)),
+            earn = listOf(earn("USDT", 34.5, locked = true))
+        )
+        assertEquals(1, merged.size)
+        assertEquals(91.5, merged[0].total, 1e-9)
+        assertTrue(merged[0].isEarnLocked)
+    }
+
+    @Test
     fun 现货只有一部分时用理财数量补齐() {
-        // 实测场景：现货只体现 57.4，理财口径是 91.75 → 补齐到 91.75
+        // 现货钱包与活期理财是互不重叠的两间钱包：现货 57.4 与活期理财 91.75 各自独立，
+        // 求和 = 149.15（而非取较大值 91.75，那样会把 57.4 现货整块漏掉）。
         val merged = mergeEarnIntoBalances(
             balances = listOf(balance("USDT", free = 57.4)),
             earn = listOf(earn("USDT", 91.75))
         )
-        assertEquals(91.75, merged[0].total, 1e-9)
+        assertEquals(149.15, merged[0].total, 1e-9)
     }
 
     @Test
@@ -629,12 +657,13 @@ class BinanceImportServiceTest {
 
     @Test
     fun 同一资产的活期与定期先合计再比较() {
-        // 活期 10 + 定期 30 = 40 > 现货 5 → 取 40
+        // 现货 / 活期 / 定期是三间互不重叠的钱包：现货 5 + 活期 10 + 定期 30 = 45，
+        // 三者独立求和（活期壳与理财接口同笔取 max 防重复，但现货不并入该 max、不被吞掉）。
         val merged = mergeEarnIntoBalances(
             balances = listOf(balance("USDT", free = 5.0)),
             earn = listOf(earn("USDT", 10.0), earn("USDT", 30.0, locked = true))
         )
-        assertEquals(40.0, merged[0].total, 1e-9)
+        assertEquals(45.0, merged[0].total, 1e-9)
     }
 
     // ---------- 理财壳（LD 前缀）与底层币必须匹配得上 ----------
@@ -676,34 +705,38 @@ class BinanceImportServiceTest {
             ),
             earn = listOf(earn("PAXG", 0.002474))
         )
-        // 折叠后只剩一行有钱，数量取现货合计与理财口径中的较大值
-        assertEquals(0.002474, merged.single { it.total != 0.0 }.total, 1e-12)
+        // 折叠后只剩一行有钱：数量 = 现货 0.0005 + max(账户活期壳 0.00007908, 理财活期 0.002474)
+        assertEquals(0.002974, merged.single { it.total != 0.0 }.total, 1e-12)
         // 另一行必须归零（它是「已并入主行」的标记）
         assertEquals(0.0, merged.first { it.asset == "LDPAXG" }.total, 1e-12)
     }
 
     @Test
     fun LDO不是理财壳_按原资产名匹配() {
-        // Lido DAO 的现货代号是 LDO，不能被当成「LD + O」的理财壳剥掉前缀
+        // Lido DAO 的现货代号是 LDO，不能被当成「LD + O」的理财壳剥掉前缀；
+        // 账户里的 LDO 是纯现货（没有 LD 壳），earn 也不会返回它，落库仍为裸 LDO、不被误并
         val merged = mergeEarnIntoBalances(
             balances = listOf(balance("LDO", free = 10.0)),
-            earn = listOf(earn("LDO", 20.0))
+            earn = emptyList()
         )
         assertEquals(1, merged.size)
-        assertEquals(20.0, merged[0].total, 1e-9)
+        assertEquals("LDO", merged[0].asset)
+        assertEquals(10.0, merged[0].total, 1e-9)
     }
 
     // ---------- 活期/定期区分（isEarnLocked）必须随合并透传 ----------
 
     @Test
     fun 定期理财持仓把承载行标记为锁仓() {
-        // 定期(locked=true) earn → 合并后的 LD 壳承载行 isEarnLocked 应为 true
+        // 定期(locked=true) earn → 合并后的 LD 壳承载行 isEarnLocked 应为 true；
+        // 活期壳 124.3460405 与定期锁仓 141.023539 是独立金库，求和 = 265.3695795（不可漏锁仓）
         val merged = mergeEarnIntoBalances(
             balances = listOf(balance("LDUSDT", free = 124.3460405)),
             earn = listOf(earn("USDT", 141.023539, locked = true))
         )
         assertEquals(1, merged.size)
         assertEquals("LDUSDT", merged[0].asset)
+        assertEquals(265.3695795, merged[0].total, 1e-9)
         assertTrue("定期持仓应标记 isEarnLocked=true", merged[0].isEarnLocked)
     }
 
@@ -720,12 +753,12 @@ class BinanceImportServiceTest {
 
     @Test
     fun 同资产活期与定期并存时标记为锁仓() {
-        // 活期 10 + 定期 30：只要任一笔定期，承载行就标 true（展示层据此显示「锁仓」）
+        // 现货 5 + 活期 10 + 定期 30：三间钱包独立求和 = 45（不可漏定期），承载行标 true
         val merged = mergeEarnIntoBalances(
             balances = listOf(balance("USDT", free = 5.0)),
             earn = listOf(earn("USDT", 10.0), earn("USDT", 30.0, locked = true))
         )
-        assertEquals(40.0, merged[0].total, 1e-9)
+        assertEquals(45.0, merged[0].total, 1e-9)
         assertTrue("含定期持仓应标记 isEarnLocked=true", merged[0].isEarnLocked)
     }
 
@@ -746,18 +779,20 @@ class BinanceImportServiceTest {
     fun 同一底层资产的现货与理财壳不再拆成两条() {
         // 用户实测：App 里出现 USDCUSDT 43.56238 与 LDUSDC 0.00430459 两行，
         // 而币安官方 Simple Earn 只有 USDC 43.56723483 一条（用户明确「我只有理财」）。
-        // 分组折叠后：承载行 = 持仓量最大的那行，数量取 max(组内合计, 理财总量)。
+        // 分组折叠后：现货 USDC 43.56238 与活期壳 LDUSDC 0.00430459 合并成一行，
+        // 数量 = 现货 + max(账户活期壳, 理财活期) = 43.56238 + 0.00430459 = 43.56668459。
+        // （earn 的活期口径须是真实理财量 0.00430459，而非把 USDC 全部持仓当理财重算）
         val merged = mergeEarnIntoBalances(
             balances = listOf(
                 balance("USDC", free = 43.56238),
                 balance("LDUSDC", free = 0.00430459)
             ),
-            earn = listOf(earn("USDC", 43.56723483))
+            earn = listOf(earn("USDC", 0.00430459))
         )
         assertEquals(1, merged.count { it.total != 0.0 })
-        // 承载行是持仓量更大的现货行，数量与官方完全一致
+        // 承载行是持仓量更大的现货行
         assertEquals("USDC", merged.first { it.total != 0.0 }.asset)
-        assertEquals(43.56723483, merged.first { it.total != 0.0 }.total, 1e-9)
+        assertEquals(43.56668459, merged.first { it.total != 0.0 }.total, 1e-9)
         assertEquals(0.0, merged.first { it.asset == "LDUSDC" }.total, 1e-12)
     }
 
@@ -779,7 +814,7 @@ class BinanceImportServiceTest {
         )
         val preview = service.buildPreview(merged, existingAssets = emptyList())
         val bySymbol = preview.items.associateBy { it.symbol }
-        assertEquals(142.0590224, bySymbol["LDUSDT"]!!.quantity, 1e-9)
+        assertEquals(142.0590224, bySymbol["USDT"]!!.quantity, 1e-9)
         assertEquals(-17.4775654, bySymbol["USDT#loan"]!!.quantity, 1e-9)
         // 核心不变量：分列 ≠ 虚增，净资产仍须等于净额口径 124.581457
         assertEquals(124.581457, preview.items.sumOf { it.quantity }, 1e-6)
@@ -829,18 +864,19 @@ class BinanceImportServiceTest {
 
     @Test
     fun 被折叠的零数量行不会混进预览() = runBlocking {
-        // 折叠产生的 0 数量成员会被 buildPreview 的 dust 过滤挡掉，
-        // 否则预览里会出现「新增 0 数量」的垃圾行。
+        // 现货 USDC 43.56238 与活期壳 LDUSDC 0.00430459 折叠成一行：数量 = 现货 + 活期壳
+        // （壳即理财活期口径，与 simple-earn 接口一致）= 43.56668459。被折掉的 LDUSDC 0 行
+        // 会被 dust 过滤挡掉，预览里只剩一条有数量的行。
         val merged = mergeEarnIntoBalances(
             balances = listOf(
                 balance("USDC", free = 43.56238),
                 balance("LDUSDC", free = 0.00430459)
             ),
-            earn = listOf(earn("USDC", 43.56723483))
+            earn = listOf(earn("USDC", 0.00430459))
         )
         val preview = service.buildPreview(merged, existingAssets = emptyList())
         assertEquals(1, preview.items.size)
-        assertEquals(43.56723483, preview.items.single().quantity, 1e-9)
+        assertEquals(43.56668459, preview.items.single().quantity, 1e-9)
     }
 
     @Test
@@ -852,7 +888,7 @@ class BinanceImportServiceTest {
                 balance("USDC", free = 43.56238),
                 balance("LDUSDC", free = 0.00430459)
             ),
-            earn = listOf(earn("USDC", 43.56723483))
+            earn = listOf(earn("USDC", 0.00430459))
         )
         val staleRow = cryptoAsset(id = 7, symbol = "LDUSDC", balance = 0.00430459)
         val preview = service.buildPreview(merged, existingAssets = listOf(staleRow))

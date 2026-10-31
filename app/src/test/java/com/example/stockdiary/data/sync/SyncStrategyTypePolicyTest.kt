@@ -1,5 +1,7 @@
 package com.example.stockdiary.data.sync
 
+import com.example.stockdiary.data.contract.SyncStrategy
+
 import com.example.stockdiary.database.AssetType
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue

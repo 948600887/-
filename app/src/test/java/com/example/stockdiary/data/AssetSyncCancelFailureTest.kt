@@ -5,7 +5,7 @@ import com.example.stockdiary.data.price.StockDataManager
 import com.example.stockdiary.data.repository.AssetRepository
 import com.example.stockdiary.data.repository.DividendRepository
 import com.example.stockdiary.data.sync.AssetSyncManager
-import com.example.stockdiary.data.sync.SyncErrorType
+import com.example.stockdiary.data.contract.SyncErrorType
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.network.UnifiedPriceService

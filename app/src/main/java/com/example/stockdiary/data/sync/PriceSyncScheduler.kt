@@ -1,5 +1,7 @@
 package com.example.stockdiary.data.sync
 
+import com.example.stockdiary.data.contract.SyncStrategy
+
 import android.content.Context
 import androidx.work.*
 import com.example.stockdiary.utils.AppLogger

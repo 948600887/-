@@ -1,5 +1,8 @@
 package com.example.stockdiary.data.sync
 
+import com.example.stockdiary.data.contract.SyncErrorType
+import com.example.stockdiary.data.contract.SyncStrategy
+
 import com.example.stockdiary.common.DateFormats
 import com.example.stockdiary.data.repository.AssetRepository
 import android.content.Context

@@ -1,6 +1,6 @@
 package com.example.stockdiary.network.model
 
-import com.example.stockdiary.data.sync.SyncStrategy
+import com.example.stockdiary.data.contract.SyncStrategy
 import com.example.stockdiary.network.base.MarketData
 import com.example.stockdiary.network.base.PriceData
 

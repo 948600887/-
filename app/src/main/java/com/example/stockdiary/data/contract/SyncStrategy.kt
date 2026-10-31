@@ -1,14 +1,24 @@
-package com.example.stockdiary.data.sync
+package com.example.stockdiary.data.contract
 
+import com.example.stockdiary.database.AssetType
 import java.io.IOException
+import java.net.ConnectException
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
 import java.time.DayOfWeek
 import java.time.LocalDateTime
 import java.time.LocalTime
 import java.time.ZoneId
-import com.example.stockdiary.database.AssetType
 import kotlin.math.min
+
+/**
+ * 同步策略（交易时段判定 / 错误分类 / 退避重试），原位于 [com.example.stockdiary.data.sync.SyncStrategy]。
+ *
+ * 抽到中立的 data.contract 包是因为它同时被 **network 层**（`DataModels` 做「是否盘中」展示）
+ * 与 **data.sync 层** 依赖。原先 network.model 直接 import `data.sync.SyncStrategy`，
+ * 造成「网络层 → 数据层」的层级倒置；抽到共享内核叶子包后，network 只依赖 contract，
+ * 不再触及 data.sync。
+ */
 
 /**
  * 同步错误类型
@@ -92,7 +102,7 @@ object SyncStrategy {
         return when (error) {
             is UnknownHostException,
             is SocketTimeoutException,
-            is java.net.ConnectException -> SyncErrorType.NETWORK
+            is ConnectException -> SyncErrorType.NETWORK
             is IOException -> {
                 val message = error.message?.lowercase() ?: ""
                 when {

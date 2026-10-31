@@ -9,11 +9,8 @@ import com.example.stockdiary.data.importer.HoldingSnapshotService
 import com.example.stockdiary.data.importer.ImageTextRecognizer
 import com.example.stockdiary.data.importer.OcrStatementService
 import com.example.stockdiary.data.repository.AssetRepository
-import com.example.stockdiary.network.BinanceAccountAPI
 import io.mockk.coEvery
 import io.mockk.mockk
-import io.mockk.mockkObject
-import io.mockk.unmockkObject
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.awaitCancellation
@@ -110,55 +107,52 @@ class ImportWizardCancellationTest {
 
     @Test
     fun `币安拉取进行中取消会复位 fetching 与 step`() = runBlocking {
-        mockkObject(BinanceAccountAPI)
-        try {
-            // 底层 suspend 桩成永不返回的挂起（可取消），停在「正在拉取」
-            coEvery { BinanceAccountAPI.getAccount(any(), any()) } coAnswers { awaitCancellation() }
+        // init 块（BinanceImportViewModel:80）会异步读已存密钥并回填：
+        // relaxed mock 的 getApiKey() 返回 null → 把 apiKey/apiSecret 清空。
+        // 若不对齐时序，全量跑时 IO 线程可能在 onApiKeyChange("k") 之后、fetch()
+        // 捕获状态之前把 apiKey 清掉，使 fetch() 命中空白守卫提前 return，
+        // fetching 永不置位、回归测试误报。这里给 credentialsManager 一个可观测的
+        // 哨兵返回值，等 init 回填完成（apiKey == 哨兵）再设真实 key，保证时序确定。
+        val credentialsManager = mockk<BinanceCredentialsManager>(relaxed = true)
+        coEvery { credentialsManager.getApiKey() } returns "PRESET_KEY"
+        coEvery { credentialsManager.getApiSecret() } returns "PRESET_SECRET"
 
-            // init 块（BinanceImportViewModel:80）会异步读已存密钥并回填：
-            // relaxed mock 的 getApiKey() 返回 null → 把 apiKey/apiSecret 清空。
-            // 若不对齐时序，全量跑时 IO 线程可能在 onApiKeyChange("k") 之后、fetch()
-            // 捕获状态之前把 apiKey 清掉，使 fetch() 命中空白守卫提前 return，
-            // fetching 永不置位、回归测试误报。这里给 credentialsManager 一个可观测的
-            // 哨兵返回值，等 init 回填完成（apiKey == 哨兵）再设真实 key，保证时序确定。
-            val credentialsManager = mockk<BinanceCredentialsManager>(relaxed = true)
-            coEvery { credentialsManager.getApiKey() } returns "PRESET_KEY"
-            coEvery { credentialsManager.getApiSecret() } returns "PRESET_SECRET"
+        val service = mockk<BinanceImportService>(relaxed = true)
+        // 拉取编排已下沉到 BinanceImportService.fetchAccount（见审计 H2），
+        // 底层 suspend 桩成永不返回的挂起（可取消），停在「正在拉取」
+        coEvery { service.fetchAccount(any(), any()) } coAnswers { awaitCancellation() }
 
-            val vm = CancelableBinanceVm(
-                context = mockk(relaxed = true),
-                repository = mockk(relaxed = true),
-                service = mockk(relaxed = true),
-                credentialsManager = credentialsManager
-            )
-            // 等 init 异步回填密钥（说明 init 协程已 settle，之后设的 key 不会被覆盖）
-            val initSettled = waitUntil { vm.uiState.value.apiKey == "PRESET_KEY" }
-            assertTrue("init 异步回填密钥未完成，测试时序不可靠", initSettled)
+        val vm = CancelableBinanceVm(
+            context = mockk(relaxed = true),
+            repository = mockk(relaxed = true),
+            service = service,
+            credentialsManager = credentialsManager
+        )
+        // 等 init 异步回填密钥（说明 init 协程已 settle，之后设的 key 不会被覆盖）
+        val initSettled = waitUntil { vm.uiState.value.apiKey == "PRESET_KEY" }
+        assertTrue("init 异步回填密钥未完成，测试时序不可靠", initSettled)
 
-            vm.onApiKeyChange("k")
-            vm.onApiSecretChange("s")
-            vm.fetch()
+        vm.onApiKeyChange("k")
+        vm.onApiSecretChange("s")
+        vm.fetch()
 
-            // 等到 IO 协程把 fetching 置位（已进入 getAccount 挂起）
-            val reachedFetching = waitUntil { vm.uiState.value.fetching }
-            assertTrue("fetch 后 fetching 未置位，说明协程未真正进入拉取", reachedFetching)
-            assertTrue(
-                "fetch 后 step 应为 FETCHING",
-                vm.uiState.value.step == BinanceImportViewModel.Step.FETCHING
-            )
+        // 等到 IO 协程把 fetching 置位（已进入 fetchAccount 挂起）
+        val reachedFetching = waitUntil { vm.uiState.value.fetching }
+        assertTrue("fetch 后 fetching 未置位，说明协程未真正进入拉取", reachedFetching)
+        assertTrue(
+            "fetch 后 step 应为 FETCHING",
+            vm.uiState.value.step == BinanceImportViewModel.Step.FETCHING
+        )
 
-            // 模拟「关弹窗 / 离开」取消在途协程（只取消，不走 reset）
-            vm.cancelJobForTest()
+        // 模拟「关弹窗 / 离开」取消在途协程（只取消，不走 reset）
+        vm.cancelJobForTest()
 
-            // 取消后 onCancel 必须把进度态复位，弹窗才不会卡在转圈
-            val recovered = waitUntil {
-                !vm.uiState.value.fetching && vm.uiState.value.step == BinanceImportViewModel.Step.INPUT
-            }
-            assertTrue("取消后 fetching/step 未复位，弹窗会卡在「正在拉取…」", recovered)
-            assertNull("取消不应残留 error（与复位语义一致）", vm.uiState.value.error)
-        } finally {
-            unmockkObject(BinanceAccountAPI)
+        // 取消后 onCancel 必须把进度态复位，弹窗才不会卡在转圈
+        val recovered = waitUntil {
+            !vm.uiState.value.fetching && vm.uiState.value.step == BinanceImportViewModel.Step.INPUT
         }
+        assertTrue("取消后 fetching/step 未复位，弹窗会卡在「正在拉取…」", recovered)
+        assertNull("取消不应残留 error（与复位语义一致）", vm.uiState.value.error)
     }
 
     @Test

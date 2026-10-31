@@ -9,20 +9,13 @@ import androidx.lifecycle.viewModelScope
 import com.example.stockdiary.data.repository.AssetRepository
 import com.example.stockdiary.data.importer.BinanceCredentialsManager
 import com.example.stockdiary.data.importer.BinanceImportService
-import com.example.stockdiary.data.importer.mergeEarnIntoBalances
-import com.example.stockdiary.data.importer.priceKeyFor
 import com.example.stockdiary.data.sync.AssetSyncManager
 import com.example.stockdiary.data.sync.refreshTodaySnapshotAfterImport
 import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.di.AppContainer
-import com.example.stockdiary.network.BinanceAccountAPI
-import com.example.stockdiary.network.BinanceBalance
 import com.example.stockdiary.utils.AppLogger
-import com.example.stockdiary.utils.ExchangeRateManager
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
-import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -127,6 +120,9 @@ open class BinanceImportViewModel(
     /**
      * 拉取账户余额 → 与库里对齐 → 进预览。
      *
+     * 编排逻辑（签名 HTTP 拉取 + 余额合并 + 借币负债建模 + 取价 + 预览对齐）已下沉到
+     * [BinanceImportService.fetchAccount]，这里只负责触发与状态映射（见审计 H2）。
+     *
      * 拉取成功后把密钥存下来，下次进入自动预填。**只在成功后存**：
      * 存一个无效密钥没有意义，还会让下次带着错密钥直接拉取。
      */
@@ -153,156 +149,55 @@ open class BinanceImportViewModel(
             updateState { state ->
                 state.copy(fetching = true, error = null, preview = null, result = null, step = Step.FETCHING)
             }
-            val accountResult = BinanceAccountAPI.getAccount(current.apiKey, current.apiSecret)
+            val outcome = service.fetchAccount(current.apiKey, current.apiSecret)
 
-            val balances = accountResult.getOrElse { err ->
-                // 币安的拒绝原因（密钥无效/IP 不在白名单/权限不足）就在 message 里，
-                // 原样带给用户，这是排障的唯一线索
-                updateState { state ->
-                    state.copy(fetching = false, step = Step.INPUT, error = err.message ?: "拉取失败")
+            when (outcome) {
+                is BinanceImportService.FetchOutcome.AccountError -> {
+                    // 币安的拒绝原因（密钥无效/IP 不在白名单/权限不足）就在 message 里，
+                    // 原样带给用户，这是排障的唯一线索。账户接口被拒：不存密钥。
+                    updateState { state ->
+                        state.copy(fetching = false, step = Step.INPUT, error = outcome.message)
+                    }
+                    return@launchIo
                 }
-                return@launchIo
-            }
 
-            // 拉到了再存密钥：见方法注释
-            credentialsManager.save(current.apiKey, current.apiSecret)
+                is BinanceImportService.FetchOutcome.Ok -> {
+                    // 拉到了再存密钥：见方法注释（只在成功后存，避免存无效密钥）
+                    credentialsManager.save(current.apiKey, current.apiSecret)
 
-            // 理财持仓单拉：官方对账单证实钱可能在 Earn 里而不在现货余额里，只导现货会少算。
-            // 失败（含 API Key 未开通权限）内部降级为空列表，绝不中断导入。
-            //
-            // 借币（Flexible Loan）负债单拉：币安不把借币计入现货余额，只走独立的
-            // /sapi/v2/loan/... 接口。不拉这笔，导入的资产只有「借来的钱」、没有「欠的钱」，
-            // 净资产被虚高（诊断实锤用户有 USDT 活期借币 -50.8 而此前完全没导入）。
-            //
-            // 汇率强制刷新、批量取价、理财持仓、借币负债四条互不依赖，并发执行省掉三次串行往返。
-            // 汇率用 force=true：默认走 6 小时 TTL，实测 00:04 那次导入就沿用了 19:01 抓的
-            // 6.6702（比真实价低约 6%），导入是用户主动触发的低频动作，值得多打这一次请求。
-            val spotPriceMap: Map<String, Double>
-            val mergedBalances: List<BinanceBalance>
-            val earnWarning: String?
-            val loanWarning: String?
-            val loanNote: String?
-            coroutineScope {
-                val refreshDeferred = async(Dispatchers.IO) { ExchangeRateManager.refresh(force = true) }
-                val earnDeferred = async(Dispatchers.IO) {
-                    BinanceAccountAPI.getEarnPositions(current.apiKey, current.apiSecret)
-                }
-                val loanDeferred = async(Dispatchers.IO) {
-                    BinanceAccountAPI.getLoans(current.apiKey, current.apiSecret)
-                }
-                val pairs = balances.mapNotNull { priceKeyFor(it.asset) }.distinct()
-                val pricesDeferred = async(Dispatchers.IO) { BinanceAccountAPI.getPrices(pairs) }
-                refreshDeferred.await()
-                val earn = earnDeferred.await()
-                val loan = loanDeferred.await()
-                spotPriceMap = pricesDeferred.await()
-                // 先合并理财（取最大值、绝不重复计），再**追加**借币负债：
-                // 借币负债表示成负余额追加在 earn 合并之后，避免被 mergeEarnIntoBalances 的
-                // max 规则误当成「待补齐的理财量」覆盖掉（负债必须作为独立的负余额进入
-                // SnapshotAlignment 的按代码 sumOf，才能与同代码持仓自然抵消 / 落成纯负资产）。
-                // 借币订单同时含「负债」与「抵押资产」两部分，两者都必须转成余额：
-                // - 借款（loanCoin/totalDebt）是负债，转成负余额；
-                // - 抵押给币安的资产（collateralCoin/collateralAmount）仍是用户自己的钱、
-                //   只是被锁定，必须转成正余额（locked 态）加回，否则净资产只减借来的、
-                //   没加回押出去的，被严重低估。
-                // 两者都追加在 mergeEarnIntoBalances 之后：负余额不能被 earn 的 max 规则
-                // 误当「待补齐的理财量」抹掉（负债必须作为独立负余额进入按代码 sumOf）。
-                val loanBalances = buildList {
-                    for (debt in loan.debts) {
-                        // 借币负债：标记 LOAN_DEBT，预览内核会映射成带 #loan 后缀的独立 symbol，
-                        // 不再与同币种现货合并抵消（用户能在核对页清楚看到「借币负债」这一项）。
-                        add(
-                            BinanceBalance(
-                                asset = debt.asset,
-                                free = -debt.debt,
-                                locked = 0.0,
-                                kind = BinanceBalance.Kind.LOAN_DEBT
-                            )
-                        )
-                        val collateralCoin = debt.collateralCoin
-                        val collateralAmount = debt.collateralAmount
-                        if (!collateralCoin.isNullOrBlank() && collateralAmount > 0.0) {
-                            // 抵押资产：标记 LOAN_COLLATERAL，预览独立成行（带 #collateral 后缀），
-                            // 不与同币种现货抵消；用户能直接看到「抵押了 X」而不是被并进现货余额。
-                            add(
-                                BinanceBalance(
-                                    asset = collateralCoin,
-                                    free = 0.0,
-                                    locked = collateralAmount,
-                                    kind = BinanceBalance.Kind.LOAN_COLLATERAL
-                                )
+                    if (outcome.preview.items.isEmpty()) {
+                        // 一条不剩：账户为空或只剩 dust 零头。
+                        // 停在 INPUT 说清楚原因，别给个空预览页让用户以为出错了
+                        val hint = buildString {
+                            append("可能账户为空或只剩dust零头。")
+                            // 理财没拉全时，'账户为空' 很可能只是现货为空（钱都在 Earn 里），必须点明
+                            if (outcome.earnWarning != null) append(outcome.earnWarning)
+                            // 借币没拉到时，净资产会比真实偏低（没扣负债），同样要点明
+                            if (outcome.loanWarning != null) append(outcome.loanWarning)
+                        }
+                        updateState { state ->
+                            state.copy(
+                                fetching = false,
+                                step = Step.INPUT,
+                                error = "账户里没有可导入的持仓。$hint",
+                                prices = emptyMap()
                             )
                         }
+                        return@launchIo
+                    }
+
+                    updateState { state ->
+                        state.copy(
+                            fetching = false,
+                            step = Step.PREVIEW,
+                            preview = outcome.preview,
+                            prices = outcome.priceMap,
+                            earnWarning = outcome.earnWarning,
+                            loanWarning = outcome.loanWarning,
+                            loanNote = outcome.loanNote
+                        )
                     }
                 }
-                mergedBalances = mergeEarnIntoBalances(balances, earn.positions) + loanBalances
-                // 理财没拉全 = 总资产会少算，必须带到预览页说清楚（不能静默降级）
-                earnWarning = earn.warning
-                // 借币没拉到 = 净资产会虚高，同样必须明示
-                loanWarning = loan.warning
-                // 借币（含抵押）拉到了：预览页用信息卡片明示已把抵押资产与负债都计入，
-                // 净资产按币安净额口径。直接回答「抵押资产为什么没出现在导入里」。
-                loanNote = if (loan.debts.isNotEmpty()) {
-                    "已计入借币抵押资产与负债，净资产按币安净额口径（资产 − 欠币）计算。"
-                } else {
-                    null
-                }
-            }
-
-            // 理财独有的资产在上面那批取价时还不知道，补一次小额批量请求（通常个位数）。
-            // 补不到价也不阻断：估不出价的资产按「保留」处理，市值等行情同步再补。
-            val missingPairs = mergedBalances
-                .mapNotNull { priceKeyFor(it.asset) }
-                .distinct()
-                .filterNot { spotPriceMap.containsKey(it) }
-            val priceMap = if (missingPairs.isEmpty()) {
-                spotPriceMap
-            } else {
-                spotPriceMap + BinanceAccountAPI.getPrices(missingPairs)
-            }
-            // 只取库里已有的加密货币资产来对齐：导入只可能命中这一类
-            val existing = repository.getAssetsByTypes(listOf(AssetType.CRYPTO))
-            // 不做任何市值过滤：零碎资产也一并导入。
-            // 「按金额隐藏小币」属于展示层偏好（仪表盘的隐藏低价值虚拟货币），
-            // 不应该在导入环节静默丢掉用户真实持仓——导入是记账，不是展示。
-            val preview = service.buildPreview(mergedBalances, existing)
-
-            AppLogger.i(
-                "币安账户拉取：${balances.size} 项 → 合并后 ${preview.items.size} 条",
-                "BinanceImportVM"
-            )
-
-            if (preview.items.isEmpty()) {
-                // 一条不剩：账户为空或只剩 dust 零头。
-                // 停在 INPUT 说清楚原因，别给个空预览页让用户以为出错了
-                val hint = buildString {
-                    append("可能账户为空或只剩dust零头。")
-                    // 理财没拉全时，'账户为空' 很可能只是现货为空（钱都在 Earn 里），必须点明
-                    if (earnWarning != null) append(earnWarning)
-                    // 借币没拉到时，净资产会比真实偏低（没扣负债），同样要点明
-                    if (loanWarning != null) append(loanWarning)
-                }
-                updateState { state ->
-                    state.copy(
-                        fetching = false,
-                        step = Step.INPUT,
-                        error = "账户里没有可导入的持仓。$hint",
-                        prices = emptyMap()
-                    )
-                }
-                return@launchIo
-            }
-
-            updateState { state ->
-                state.copy(
-                    fetching = false,
-                    step = Step.PREVIEW,
-                    preview = preview,
-                    prices = priceMap,
-                    earnWarning = earnWarning,
-                    loanWarning = loanWarning,
-                    loanNote = loanNote
-                )
             }
         }
     }

@@ -4,10 +4,14 @@ import com.example.stockdiary.data.repository.AssetRepository
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.network.BinanceAPI
+import com.example.stockdiary.network.BinanceAccountAPI
 import com.example.stockdiary.network.BinanceBalance
 import com.example.stockdiary.network.BinanceEarnPosition
 import com.example.stockdiary.utils.AppLogger
 import com.example.stockdiary.utils.ExchangeRateManager
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlin.math.abs
 
 /**
@@ -142,6 +146,148 @@ class BinanceImportService(
         val updated: Int,
         val skipped: Int
     )
+
+    /**
+     * [fetchAccount] 的结果。
+     *
+     * - [AccountError]：账户接口被拒（密钥无效 / IP 不在白名单 / 权限不足），message 即
+     *   币安的拒绝原因，原样带回去给用户排障（这是唯一线索，绝不能丢）。
+     * - [Ok]：拉取成功（理财/借币接口仍可降级，warning 非空时只意味着少算一块，
+     *   不阻断导入）。[Ok.preview] 可能为空（账户空/只余 dust），由调用方决定如何提示。
+     */
+    sealed interface FetchOutcome {
+        data class AccountError(val message: String) : FetchOutcome
+        data class Ok(
+            val preview: Preview,
+            val priceMap: Map<String, Double>,
+            val earnWarning: String?,
+            val loanWarning: String?,
+            val loanNote: String?
+        ) : FetchOutcome
+    }
+
+    /**
+     * 拉取币安账户 → 合并理财/借币负债 → 与库里对齐生成预览。**不写库**。
+     *
+     * 把原本散在 [com.example.stockdiary.ui.viewmodels.BinanceImportViewModel] 里的
+     * 「签名 HTTP 拉取 + 余额合并 + 借币负债建模 + 取价 + 预览对齐」整段编排下沉到这里
+     * （见审计 H2：VM 不应直接调 BinanceAccountAPI 并承担业务编排），ViewModel 只负责
+     * 触发与状态映射。BinanceAccountAPI / ExchangeRateManager 均为 object，故本方法
+     * 直接调用即可，DI 零改动。
+     *
+     * @param apiKey    用户填的 API Key（仅用于本次拉取，不在此持久化——持久化由调用方决定）
+     * @param apiSecret 用户填的 API Secret
+     */
+    suspend fun fetchAccount(apiKey: String, apiSecret: String): FetchOutcome {
+        val accountResult = BinanceAccountAPI.getAccount(apiKey, apiSecret)
+        val balances = accountResult.getOrElse { err ->
+            // 币安的拒绝原因（密钥无效/IP 不在白名单/权限不足）就在 message 里，原样带回用户
+            return FetchOutcome.AccountError(err.message ?: "拉取失败")
+        }
+
+        // 理财持仓单拉：官方对账单证实钱可能在 Earn 里而不在现货余额里，只导现货会少算。
+        // 失败（含 API Key 未开通权限）内部降级为空列表，绝不中断导入。
+        // 借币（Flexible Loan）负债单拉：币安不把借币计入现货余额，只走独立的 /sapi/v2/loan... 接口。
+        //   不拉这笔，导入的资产只有「借来的钱」、没有「欠的钱」，净资产被虚高。
+        // 汇率强制刷新、批量取价、理财持仓、借币负债四条互不依赖，并发执行省掉三次串行往返。
+        // 汇率用 force=true：默认走 6 小时 TTL，导入是用户主动触发的低频动作，值得多打这一次请求。
+        val spotPriceMap: Map<String, Double>
+        val mergedBalances: List<BinanceBalance>
+        val earnWarning: String?
+        val loanWarning: String?
+        val loanNote: String?
+        coroutineScope {
+            val refreshDeferred = async(Dispatchers.IO) { ExchangeRateManager.refresh(force = true) }
+            val earnDeferred = async(Dispatchers.IO) {
+                BinanceAccountAPI.getEarnPositions(apiKey, apiSecret)
+            }
+            val loanDeferred = async(Dispatchers.IO) {
+                BinanceAccountAPI.getLoans(apiKey, apiSecret)
+            }
+            val pairs = balances.mapNotNull { priceKeyFor(it.asset) }.distinct()
+            val pricesDeferred = async(Dispatchers.IO) { BinanceAccountAPI.getPrices(pairs) }
+            refreshDeferred.await()
+            val earn = earnDeferred.await()
+            val loan = loanDeferred.await()
+            spotPriceMap = pricesDeferred.await()
+            // 先合并理财（取最大值、绝不重复计），再**追加**借币负债：
+            // 借币负债表示成负余额追加在 earn 合并之后，避免被 mergeEarnIntoBalances 的
+            // max 规则误当成「待补齐的理财量」覆盖掉（负债必须作为独立的负余额进入
+            // SnapshotAlignment 的按代码 sumOf，才能与同代码持仓自然抵消 / 落成纯负资产）。
+            // 借币订单同时含「负债」与「抵押资产」两部分，两者都必须转成余额：
+            // - 借款（loanCoin/totalDebt）是负债，转成负余额；
+            // - 抵押给币安的资产（collateralCoin/collateralAmount）仍是用户自己的钱、只是被锁定，
+            //   必须转成正余额（locked 态）加回，否则净资产只减借来的、没加回押出去的，被严重低估。
+            // 两者都追加在 mergeEarnIntoBalances 之后：负余额不能被 earn 的 max 规则误当
+            // 「待补齐的理财量」抹掉。
+            val loanBalances = buildList {
+                for (debt in loan.debts) {
+                    add(
+                        BinanceBalance(
+                            asset = debt.asset,
+                            free = -debt.debt,
+                            locked = 0.0,
+                            kind = BinanceBalance.Kind.LOAN_DEBT
+                        )
+                    )
+                    val collateralCoin = debt.collateralCoin
+                    val collateralAmount = debt.collateralAmount
+                    if (!collateralCoin.isNullOrBlank() && collateralAmount > 0.0) {
+                        add(
+                            BinanceBalance(
+                                asset = collateralCoin,
+                                free = 0.0,
+                                locked = collateralAmount,
+                                kind = BinanceBalance.Kind.LOAN_COLLATERAL
+                            )
+                        )
+                    }
+                }
+            }
+            mergedBalances = mergeEarnIntoBalances(balances, earn.positions) + loanBalances
+            // 理财没拉全 = 总资产会少算，必须带回预览页说清楚（不能静默降级）
+            earnWarning = earn.warning
+            // 借币没拉到 = 净资产会虚高，同样必须明示
+            loanWarning = loan.warning
+            // 借币（含抵押）拉到了：预览页用信息卡片明示已把抵押资产与负债都计入，
+            // 净资产按币安净额口径。直接回答「抵押资产为什么没出现在导入里」。
+            loanNote = if (loan.debts.isNotEmpty()) {
+                "已计入借币抵押资产与负债，净资产按币安净额口径（资产 − 欠币）计算。"
+            } else {
+                null
+            }
+        }
+
+        // 理财独有的资产在上面那批取价时还不知道，补一次小额批量请求（通常个位数）。
+        // 补不到价也不阻断：估不出价的资产按「保留」处理，市值等行情同步再补。
+        val missingPairs = mergedBalances
+            .mapNotNull { priceKeyFor(it.asset) }
+            .distinct()
+            .filterNot { spotPriceMap.containsKey(it) }
+        val priceMap = if (missingPairs.isEmpty()) {
+            spotPriceMap
+        } else {
+            spotPriceMap + BinanceAccountAPI.getPrices(missingPairs)
+        }
+
+        // 只取库里已有的加密货币资产来对齐：导入只可能命中这一类
+        val existing = assetRepository.getAssetsByTypes(listOf(AssetType.CRYPTO))
+        // 不做任何市值过滤：零碎资产也一并导入（导入是记账，不是展示）。
+        val preview = buildPreview(mergedBalances, existing)
+
+        AppLogger.i(
+            "币安账户拉取：${balances.size} 项 → 合并后 ${preview.items.size} 条",
+            "BinanceImport"
+        )
+
+        return FetchOutcome.Ok(
+            preview = preview,
+            priceMap = priceMap,
+            earnWarning = earnWarning,
+            loanWarning = loanWarning,
+            loanNote = loanNote
+        )
+    }
 
     /**
      * 把币安余额对齐到库里资产，产出预览。**不写库**。

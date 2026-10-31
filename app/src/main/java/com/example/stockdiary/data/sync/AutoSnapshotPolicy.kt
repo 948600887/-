@@ -61,7 +61,7 @@ fun planSnapshotDedup(snapshots: List<AssetSnapshot>): List<Long> {
             // timestamp 最大者保留；timestamp 相等（同时写入）时保留 id 较大者（后插入）
             val keeper = sameDay.maxWithOrNull(
                 compareBy<AssetSnapshot> { it.timestamp }.thenBy { it.id }
-            )!!
+            ) ?: return@flatMap emptyList()
             sameDay.filter { it.id != keeper.id }.map { it.id }
         }
         .sorted()

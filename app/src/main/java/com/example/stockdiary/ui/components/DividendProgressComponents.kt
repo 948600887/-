@@ -234,8 +234,7 @@ fun MonthlyCashFlowCard(
 
             // 选中月份的明细：醒目地展示「本月收了多少」
             val monthData = progress.monthly.firstOrNull { it.month == selectedMonth }
-            val hasMonthData = monthData != null && (monthData.received > 0 || monthData.scheduled > 0)
-            if (!hasMonthData) {
+            if (monthData == null || (monthData.received <= 0 && monthData.scheduled <= 0)) {
                 Text(
                     "${selectedMonth}月 暂无派息",
                     style = MaterialTheme.typography.titleSmall,
@@ -251,7 +250,7 @@ fun MonthlyCashFlowCard(
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
                         buildString {
-                            append("已收 ¥${monthData!!.received.format(2)}")
+                            append("已收 ¥${monthData.received.format(2)}")
                             if (monthData.scheduled > 0) append(" · 待收 ¥${monthData.scheduled.format(2)}")
                         },
                         style = MaterialTheme.typography.titleMedium,

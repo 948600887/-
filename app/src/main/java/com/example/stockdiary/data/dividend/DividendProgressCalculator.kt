@@ -208,7 +208,8 @@ object DividendProgressCalculator {
                         // 「下一笔」找的是下一次除息什么时候发生，与年份无关——
                         // 年末排定、次年初除息的那笔恰恰最该显示。
                         // 排序键与比较对象同为除息日，避免挑错。
-                        if (earliestScheduled == null || exDate < earliestScheduled!!.first) {
+                        val es = earliestScheduled
+                        if (es == null || exDate < es.first) {
                             earliestScheduled = Pair(exDate, amount)
                         }
                     }
@@ -228,8 +229,9 @@ object DividendProgressCalculator {
                 )
             } ?: predictNext(asset.name, symbol, records, balance, asset.currency, today)
 
+            val nxt = next
             if (candidate != null && candidate.daysUntil >= 0 &&
-                (next == null || candidate.daysUntil < next!!.daysUntil)
+                (nxt == null || candidate.daysUntil < nxt.daysUntil)
             ) {
                 next = candidate
             }

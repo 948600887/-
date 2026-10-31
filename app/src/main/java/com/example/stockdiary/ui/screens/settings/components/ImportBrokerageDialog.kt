@@ -34,10 +34,11 @@ fun ImportBrokerageDialog(
     )
     val state by viewModel.uiState.collectAsStateWithLifecycle()
 
-    if (state.error != null) {
+    val importError = state.error
+    if (importError != null) {
         ImportErrorDialog(
             title = "导入未完成",
-            message = state.error!!,
+            message = importError,
             onDismiss = { viewModel.clearError() },
             rawText = state.ocrRawText,
             // 交割单的错误弹窗旧行为：标题不加粗、无「知道了」确认按钮、

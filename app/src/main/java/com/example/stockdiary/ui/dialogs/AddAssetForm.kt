@@ -56,8 +56,8 @@ import java.time.LocalDate
 import java.time.ZoneOffset
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
-import com.example.stockdiary.network.FundAPI
-import com.example.stockdiary.network.model.StockData
+import com.example.stockdiary.data.repository.FundQuote
+import com.example.stockdiary.data.repository.StockQuote
 import com.example.stockdiary.ui.components.DialogSectionHeader
 import com.example.stockdiary.ui.components.DialogTypeChip
 import com.example.stockdiary.ui.theme.AppTheme
@@ -307,8 +307,8 @@ internal fun DetectedCategoryLabel(category: CodeCategory) {
 /** 代码查询的三种结果：命中股票 / 命中基金 / 出错 */
 @Composable
 internal fun LookupResultCards(
-    stockInfo: StockData?,
-    fundInfo: FundAPI.FundInfo?,
+    stockInfo: StockQuote?,
+    fundInfo: FundQuote?,
     loadError: String?,
     category: CodeCategory?
 ) {

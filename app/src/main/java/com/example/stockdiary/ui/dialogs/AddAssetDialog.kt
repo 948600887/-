@@ -31,11 +31,10 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
-import com.example.stockdiary.network.FundAPI
-import com.example.stockdiary.network.SinaStockAPI
-import com.example.stockdiary.network.UnifiedPriceService
-import com.example.stockdiary.network.model.AssetPrice
-import com.example.stockdiary.network.model.StockData
+import com.example.stockdiary.data.repository.AssetQuoteRepository
+import com.example.stockdiary.data.repository.FundQuote
+import com.example.stockdiary.data.repository.StockQuote
+import com.example.stockdiary.di.LocalAppContainer
 import com.example.stockdiary.ui.components.DialogSectionHeader
 import com.example.stockdiary.utils.StockCodeManager
 import com.example.stockdiary.utils.StockCodeManager.CodeCategory
@@ -62,6 +61,9 @@ fun AddAssetDialog(
      */
     existingAssets: List<Asset> = emptyList()
 ) {
+    // 行情/基金查询收口层（审计 H1：UI 不再直接调 network 层）
+    val quotes = LocalAppContainer.current.assetQuoteRepository
+
     var selectedType by remember { mutableStateOf(AssetType.STOCK) }
     var name by remember { mutableStateOf("") }
     var symbol by remember { mutableStateOf("") }
@@ -78,8 +80,8 @@ fun AddAssetDialog(
     var dueDate by remember { mutableStateOf<String?>(null) }
     var isLoading by remember { mutableStateOf(false) }
     var loadError by remember { mutableStateOf<String?>(null) }
-    var fundInfo by remember { mutableStateOf<FundAPI.FundInfo?>(null) }
-    var stockInfo by remember { mutableStateOf<StockData?>(null) }
+    var fundInfo by remember { mutableStateOf<FundQuote?>(null) }
+    var stockInfo by remember { mutableStateOf<StockQuote?>(null) }
     // 用户是否手动选过类型：一旦手动选过，就不再用代码自动识别去覆盖他的选择——
     // 否则选了「股票」输入 ETF 代码会被自动改回「基金」，用户明明想手动指定却总被改（#21）。
     var userPickedType by remember { mutableStateOf(false) }
@@ -181,13 +183,13 @@ fun AddAssetDialog(
         }
     }
 
-    // 股票/场内基金代码 → 行情回显：统一走行情门面 [UnifiedPriceService]
-    // （60s TTL 内存缓存 + 单飞去重 + 多源容错），不再直连任何单个 API。
+    // 股票/场内基金代码 → 行情回显：统一走行情门面（经 [AssetQuoteRepository]，
+    // 60s TTL 内存缓存 + 单飞去重 + 多源容错），不再直连任何单个 API。
     // 返回 false 表示没取到，由调用方决定提示文案或降级路径。
     suspend fun tryStockAPI(formattedCode: String): Boolean {
-        val result = UnifiedPriceService.getPrice(formattedCode, AssetType.STOCK)
+        val result = quotes.getStockQuote(formattedCode)
         if (result.isSuccess) {
-            val info = (result.getOrNull() as? AssetPrice.Stock)?.data
+            val info = result.getOrNull()
             stockInfo = info
             fundInfo = null
             loadError = null
@@ -201,25 +203,18 @@ fun AddAssetDialog(
     // 优先用 FundAPI（无 Referer 头，不会被天天基金反爬拦截），EnhancedFundAPI 兜底
     suspend fun tryFundAPI() {
         try {
-            // 先用 FundAPI（与 AddStockDialog 一致，已确认可用）
-            val fundApiResult = FundAPI.getFundInfo(symbol)
-            if (fundApiResult != null && fundApiResult.name.isNotEmpty()) {
-                fundInfo = FundAPI.FundInfo(
-                    code = fundApiResult.code.ifEmpty { symbol },
-                    name = fundApiResult.name,
-                    price = fundApiResult.price,
-                    netWorth = fundApiResult.price,
-                    changePercent = fundApiResult.changePercent,
-                    date = fundApiResult.date
-                )
+            // 先用 FundAPI（与 AddStockDialog 一致，已确认可用），结果经仓库映射成 FundQuote
+            val fundQuote = quotes.getFundInfo(symbol)
+            if (fundQuote != null && fundQuote.name.isNotEmpty()) {
+                fundInfo = fundQuote
                 stockInfo = null
                 loadError = null
-                applyAutoFill(fundApiResult.name, fundApiResult.price)
+                applyAutoFill(fundQuote.name, fundQuote.price)
                 return
             }
 
             // FundAPI 失败，尝试带缓存的版本
-            val result = FundAPI.getFundInfoWithCache(symbol)
+            val result = quotes.getFundInfoWithCache(symbol)
             if (result.isSuccess) {
                 val info = result.getOrNull()
                 fundInfo = info
@@ -229,7 +224,7 @@ fun AddAssetDialog(
             } else {
                 // 两个基金API都失败，走行情门面兜底（股票/场内基金行情）
                 try {
-                    if (!tryStockAPI(SinaStockAPI.formatStockCode(symbol))) {
+                    if (!tryStockAPI(quotes.formatStockCode(symbol))) {
                         loadError = "未找到该代码，请手动输入名称"
                     }
                 } catch (e: CancellationException) {
@@ -268,7 +263,7 @@ fun AddAssetDialog(
                 // 无法识别但用户选了股票，走行情门面兜底
                 isLoading = true
                 try {
-                    if (!tryStockAPI(SinaStockAPI.formatStockCode(symbol))) {
+                    if (!tryStockAPI(quotes.formatStockCode(symbol))) {
                         loadError = "未找到该代码，请手动输入名称"
                     }
                 } catch (e: CancellationException) {
@@ -297,7 +292,7 @@ fun AddAssetDialog(
             when (cat) {
                 CodeCategory.STOCK, CodeCategory.ETF, CodeCategory.LOF, CodeCategory.EXCHANGE_FUND -> {
                     // 股票/场内基金 → 走行情门面（多源容错 + 60s TTL + 单飞）
-                    if (!tryStockAPI(SinaStockAPI.formatStockCode(symbol))) {
+                    if (!tryStockAPI(quotes.formatStockCode(symbol))) {
                         // 门面取价失败，尝试天天基金（可能是被误判的场外基金）
                         if (cat == CodeCategory.EXCHANGE_FUND) {
                             tryFundAPI()

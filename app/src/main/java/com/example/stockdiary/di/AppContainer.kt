@@ -3,6 +3,7 @@ package com.example.stockdiary.di
 import android.content.Context
 import androidx.compose.runtime.staticCompositionLocalOf
 import com.example.stockdiary.data.repository.AssetRepository
+import com.example.stockdiary.data.repository.AssetQuoteRepository
 import com.example.stockdiary.data.importer.BinanceCredentialsManager
 import com.example.stockdiary.data.importer.BinanceImportService
 import com.example.stockdiary.data.prefs.DashboardPreferencesManager
@@ -55,6 +56,8 @@ class AppContainer(val context: Context) {
     /** 币安现货持仓导入：拉余额 → 按交易对合并 → 落库（按需触发，不后台自动） */
     val binanceImportService: BinanceImportService by lazy { BinanceImportService(assetRepository) }
     val crashRecoveryManager: CrashRecoveryManager by lazy { CrashRecoveryManager.getInstance() }
+    /** 行情 / 基金查询收口层（审计 H1：UI 通过它取行情，不直接调 network 层） */
+    val assetQuoteRepository: AssetQuoteRepository by lazy { AssetQuoteRepository() }
 }
 
 val LocalAppContainer = staticCompositionLocalOf<AppContainer> {

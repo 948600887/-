@@ -14,6 +14,7 @@ import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.net.URLDecoder
+import java.util.concurrent.CopyOnWriteArrayList
 
 /**
  * 币安签名与 symbol 映射的回归。
@@ -218,7 +219,10 @@ class BinanceAccountAPITest {
         // 回归根因：SAPI 与现货 REST 是两套基址，SAPI 不在 /api/v3 之下。旧代码把现货基址
         // （含 /api/v3）拼到 SAPI 路径前，生成 /api/v3/sapi/v1/... 这种不存在的路径，被网关回
         // 空 body 404，理财活期/定期永远拉不到、且伪装成「接口未开通」。这里钉死真实发出的路径。
-        val recorded = mutableListOf<String>()
+        // 不能用普通 mutableListOf：getEarnPositions 用两个并发 async 在 Dispatchers.IO 上各自发请求，
+        // 两条 recorded.add 会并发执行，ArrayList 非线程安全会偶发丢一条（满负载争用时 recorded.size 变 1）。
+        // 用 CopyOnWriteArrayList 保证并发 add 不丢，否则这条用例在全量套件下偶发失败。
+        val recorded = CopyOnWriteArrayList<String>()
         val interceptor = object : Interceptor {
             override fun intercept(chain: Interceptor.Chain): Response {
                 recorded.add(chain.request().url.encodedPath)

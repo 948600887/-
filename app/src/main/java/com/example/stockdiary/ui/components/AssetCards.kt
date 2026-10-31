@@ -20,7 +20,6 @@ import com.example.stockdiary.data.importer.isLoanDebtSymbol
 import com.example.stockdiary.data.importer.stripLoanSuffix
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
-import com.example.stockdiary.network.BinanceAPI
 import com.example.stockdiary.network.BinanceHostGate
 import com.example.stockdiary.utils.ExchangeRateManager
 import com.example.stockdiary.utils.StockCodeManager
@@ -78,14 +77,6 @@ fun PortfolioOverviewCard(
                     // 语义是反的。改成 error 色（Material 里代表需要注意的负面数值）。
                     Text("负债 ${totalLiabilities.formatMoney()}", style = MaterialTheme.typography.bodyMedium, color = AppTheme.colors.error)
                 }
-                // 用户最容易算错的一件事：顶部大数是总资产，净资产已经减过负债。
-                // 这里显式写一句，省得有人拿列表逐项加总去对总资产、然后发现对不上。
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    "净资产 = 总资产 − 负债，负债不计入净资产",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = AppTheme.colors.onSurfaceVariant
-                )
             }
             Spacer(modifier = Modifier.height(12.dp))
             HorizontalDivider(color = AppTheme.colors.outline.copy(alpha = 0.3f))
@@ -325,23 +316,9 @@ fun StockAssetItem(
                         else "${asset.balance.format(quantityPrecisionFor(asset.type, asset.symbol))}$unitLabel",
                         style = MaterialTheme.typography.bodySmall, color = AppTheme.colors.onSurfaceVariant
                     )
-                    // 币安理财/锁仓产品以 LD 壳标识（如 LDBNB、LDUSDT）；但 LDO 这类
-                    // 恰好以 LD 开头的真实现货不能误标。统一复用 BinanceAPI.isEarnProduct
-                    // （内部有 BINANCE_LD_EXCEPTIONS），避免两处各写一套前缀判断（#12）
-                    if (asset.type == AssetType.CRYPTO &&
-                        asset.symbol?.let { BinanceAPI.isEarnProduct(it) } == true
-                    ) {
-                        Text("•", style = MaterialTheme.typography.bodySmall, color = AppTheme.colors.onSurfaceVariant)
-                        // 活期（随时赎回）标「理财」、定期/锁仓标「锁仓」——按 Asset.isEarnLocked
-                        // 区分（币安 Simple Earn 的 locked 字段一路透传而来）。旧数据该列默认 false，
-                        // 即回落成「理财」，比旧版「一律锁仓」更贴合多数持仓。
-                        Text(
-                            if (asset.isEarnLocked) "锁仓" else "理财",
-                            style = MaterialTheme.typography.bodySmall,
-                            fontWeight = FontWeight.SemiBold,
-                            color = AppTheme.colors.lossRed
-                        )
-                    }
+                    // 理财/锁仓不再单独打标签：活期与现货本就是同一底层资产、已合并成一行，
+                    // 仅借币/抵押（下方）保留标签，避免误导。
+
                     // 借币负债 / 抵押资产以 #loan / #collateral 后缀独立成行（2026-10-30 起不再并入
                     // 同币种现货），否则用户会对着一条负数孤单的 USDT 不知道它是什么。
                     val loanLabel = asset.symbol?.let {

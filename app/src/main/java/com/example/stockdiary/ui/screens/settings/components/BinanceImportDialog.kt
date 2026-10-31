@@ -64,7 +64,6 @@ import com.example.stockdiary.ui.components.import.ImportResultStep
 import com.example.stockdiary.ui.components.import.ImportWizardScaffold
 import com.example.stockdiary.ui.theme.AppTheme
 import com.example.stockdiary.ui.viewmodels.BinanceImportViewModel
-import com.example.stockdiary.network.BinanceAPI
 import com.example.stockdiary.utils.CRYPTO_DECIMALS
 import com.example.stockdiary.utils.format
 import com.example.stockdiary.utils.formatTrim
@@ -475,20 +474,10 @@ private fun BinancePreviewItemRow(
             Column(modifier = Modifier.weight(1f)) {
                 // name 是基础资产名（BTC），symbol 是交易对（BTCUSDT）——
                 // 两个都显示：前者好认，后者是真正落库/取价的代码
-                // LD 理财/锁仓壳（LDBNB 等）明确打「锁仓」标，与现货区分开
-                // （P1 已让它们分属不同 symbol，这里再补视觉区分）
-                // 借币负债 / 抵押资产也分别打「借币」「抵押」标，避免被误读成普通持仓
+                // LD 理财/锁仓壳已剥前缀、与现货合并成一行，不再单独打「理财/锁仓」标；
+                // 仅借币负债 / 抵押资产分别打「借币」「抵押」标，避免被误读成普通持仓
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(item.name, fontWeight = FontWeight.Medium)
-                    if (BinanceAPI.isEarnProduct(item.name)) {
-                        Spacer(Modifier.width(6.dp))
-                        // 活期（随时赎回）标「理财」、定期/锁仓标「锁仓」，按 isEarnLocked 区分
-                        BinanceKindTag(
-                            if (item.isEarnLocked) "锁仓" else "理财",
-                            MaterialTheme.colorScheme.onTertiaryContainer,
-                            MaterialTheme.colorScheme.tertiaryContainer
-                        )
-                    }
                     if (isLoanDebt) {
                         Spacer(Modifier.width(6.dp))
                         // 负债用红（与 AssetCards 的 isDebt→lossRed 同一语义）：红=应还/减少

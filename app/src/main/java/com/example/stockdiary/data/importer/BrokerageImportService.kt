@@ -12,6 +12,7 @@ import com.example.stockdiary.database.StockDatabase
 import com.example.stockdiary.database.Transaction
 import com.example.stockdiary.database.TransactionType
 import com.example.stockdiary.utils.AppLogger
+import com.example.stockdiary.utils.NumberFormatUtils
 import com.example.stockdiary.utils.StockCodeManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -213,8 +214,11 @@ class BrokerageImportService internal constructor(private val context: Context) 
 
         val holding = runCatching {
             assetDao.getAllAssetsSync()
-                .filter { !it.symbol.isNullOrBlank() && it.name.isNotBlank() }
-                .map { SymbolResolver.NameSymbol(it.name, it.symbol!!) }
+                .mapNotNull { asset ->
+                    val symbol = asset.symbol
+                    if (symbol.isNullOrBlank() || asset.name.isBlank()) null
+                    else SymbolResolver.NameSymbol(asset.name, symbol)
+                }
         }.onFailure { AppLogger.w("读取持仓失败: ${it.message}", "BrokerageImport") }
             .getOrDefault(emptyList())
 
@@ -360,34 +364,15 @@ class BrokerageImportService internal constructor(private val context: Context) 
      * 第二步：基于列名关键字自动猜测列映射（中英文兼容）。
      */
     /**
-     * 解析金额 / 数量：先去掉千分位分隔符与空格。
+     * 解析金额 / 数量，委托到统一的 [NumberFormatUtils.parseNumber]
+     * （去千分位/全角逗号/空格 + 括号负 + 全角/异体负号归一）。
      *
      * 券商导出的 CSV 常带千分位（数量 "1,000"、手续费 "1,234.56"）。
      * 从前数量解析不出来会整行跳过（至少还有报错），但手续费走 `?: 0.0`
      * —— **静默按 0 算**，成本悄悄少一块，用户完全看不出来。
-     * 与 GalaxyStatementParser 的 toNumber 同口径（那边的 CSV 本来就带千分位）。
+     * 与 GalaxyStatementParser.toNumber / FundEStatementParser.parseNumber 同口径。
      */
-    internal fun parseNumber(raw: String): Double? {
-        var s = raw.trim()
-            .replace(",", "")
-            .replace("，", "")
-            .replace(" ", "")
-        if (s.isEmpty()) return null
-
-        // 括号负：(5.00) → -5.00，海外券商账单常见写法
-        val parenthesized = s.startsWith("(") && s.endsWith(")")
-        if (parenthesized) s = s.substring(1, s.length - 1)
-
-        // 全角 / 异体负号归一：－ — ー 一 −
-        // OCR 与部分券商导出会用这些字形表示负号（负手续费、数量冲正等），
-        // 不归一的话 toDoubleOrNull 直接返回 null。与 GalaxyStatementParser.toNumber 同口径。
-        for (dash in charArrayOf('－', '—', 'ー', '一', '−')) {
-            s = s.replace(dash, '-')
-        }
-
-        val value = s.toDoubleOrNull() ?: return null
-        return if (parenthesized) -value else value
-    }
+    internal fun parseNumber(raw: String): Double? = NumberFormatUtils.parseNumber(raw)
 
     fun guessColumnMapping(headers: List<String>): ColumnMapping {
         fun findIndex(pattern: String): Int {

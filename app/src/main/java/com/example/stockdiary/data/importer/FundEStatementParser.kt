@@ -2,6 +2,7 @@ package com.example.stockdiary.data.importer
 
 import com.example.stockdiary.data.dividend.DividendDateValidator
 import com.example.stockdiary.utils.ExchangeRateManager
+import com.example.stockdiary.utils.NumberFormatUtils
 
 /**
  * 「基金E账户」导出表解析器（纯函数，输入二维表，可直接 JVM 单测）。
@@ -182,13 +183,8 @@ object FundEStatementParser {
         )
     }
 
-    /** 去掉千分位与中文逗号再转数字："10,025.31" → 10025.31 */
-    internal fun parseNumber(text: String): Double? =
-        text.replace(",", "")
-            .replace("，", "")
-            .replace(" ", "")
-            .trim()
-            .toDoubleOrNull()
+    /** 数字解析统一委托到 [NumberFormatUtils.parseNumber]（含千分位/全角/括号负/异体负号） */
+    internal fun parseNumber(text: String): Double? = NumberFormatUtils.parseNumber(text)
 
     /** "2026/10/08"、"2026年10月8日" → "2026-10-08" */
     internal fun normalizeDate(text: String): String? {

@@ -1,6 +1,7 @@
 package com.example.stockdiary.data.importer
 
 import com.example.stockdiary.database.TransactionType
+import com.example.stockdiary.utils.NumberFormatUtils
 import kotlin.math.abs
 import kotlin.math.max
 
@@ -115,17 +116,11 @@ object GalaxyStatementParser {
     /** 名称内部的空白 */
     private val INNER_BLANK_REGEX = Regex("""\s+""")
 
-    /** 被 OCR 认成负号的那些字形 */
-    private val NEGATIVE_GLYPH_REGEX = Regex("""[-－—一ー]""")
-
     /**
-     * 把文本里的数字解析成 Double。
-     *
-     * 除了去千分位，还要把 OCR 认错的负号（中文「一」、全角破折号）还原成半角减号——
-     * 真实截图里 `-486.40` 被认成 `一486.40`，不归一化的话这笔金额直接解析失败。
+     * 把文本里的数字解析成 Double，委托到统一的 [NumberFormatUtils.parseNumber]
+     * （去千分位 + 全角/异体负号归一），避免与别的导入源口径不一致。
      */
-    internal fun toNumber(raw: String): Double? =
-        raw.replace(NEGATIVE_GLYPH_REGEX, "-").replace(",", "").toDoubleOrNull()
+    internal fun toNumber(raw: String): Double? = NumberFormatUtils.parseNumber(raw)
 
     /** 首行之后最多向后看几行去找详情行 */
     private const val DETAIL_SEARCH_WINDOW = 4
@@ -211,7 +206,8 @@ object GalaxyStatementParser {
                 }
             }
 
-            if (anchor == null) {
+            val anchorNow = anchor
+            if (anchorNow == null) {
                 if (REPO_REGEX.containsMatchIn(line)) {
                     repoLines++
                 } else if (FIRST_LINE_KEYWORD_REGEX.containsMatchIn(line)) {
@@ -221,11 +217,12 @@ object GalaxyStatementParser {
                 i++
                 continue
             }
-            // 后续只读。上面在 lambda 里赋值过，智能转换失效，这里显式取非空
-            val matched = anchor!!
+            // anchorNow 已是局部非空 val，可直接安全使用（原 anchor!! 因上游 lambda 赋值禁用智能转换）
+            val matched = anchorNow
 
-            if (inlineDetail != null) {
-                result.add(buildTransaction(matched, inlineDetail!!, null, year, rowNo))
+            val inlineNow = inlineDetail
+            if (inlineNow != null) {
+                result.add(buildTransaction(matched, inlineNow, null, year, rowNo))
                 rowNo++
                 i += 1 + consumed
                 continue

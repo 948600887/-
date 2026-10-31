@@ -2,7 +2,8 @@ package com.example.stockdiary.data.sync
 
 import com.example.stockdiary.data.repository.AssetRepository
 import com.example.stockdiary.data.repository.DividendRepository
-import com.example.stockdiary.data.repository.PendingPriceWrite
+import com.example.stockdiary.data.contract.PendingPriceWrite
+import com.example.stockdiary.data.contract.withHeartbeat
 import android.app.ActivityManager
 import android.content.ComponentCallbacks2
 import android.content.Context

@@ -14,29 +14,13 @@ import com.example.stockdiary.database.StockDatabase
 import com.example.stockdiary.database.SnapshotDao
 import com.example.stockdiary.database.Transaction
 import com.example.stockdiary.database.TransactionType
-import com.example.stockdiary.data.sync.planSnapshotDedup
+import com.example.stockdiary.data.contract.PendingPriceWrite
+import com.example.stockdiary.data.contract.planSnapshotDedup
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import java.time.LocalDate
 import kotlinx.coroutines.CancellationException
 import java.util.Collections
-
-/**
- * 一条「待落库的价格」意图。
- *
- * 同步侧拿到价后**不立刻写库**，先把意图放进批量缓冲，凑够一批才整体落盘
- * （见 [AssetRepository.updatePricesInTransaction]）：单独一次 UPDATE 就会让 Room 的
- * 观察查询整表重查重发一次，逐个写即「每只标的 = 一次整页重组」。
- *
- * @param symbol 落价按代码匹配（与单条 [AssetRepository.updatePriceBySymbol] 同一口径）
- * @param price 现价；非正/NaN 在落库前被拦，不会把市值清零
- * @param millionCopiesIncome 场外基金的万份收益，股票/加密为 null
- */
-data class PendingPriceWrite(
-    val symbol: String,
-    val price: Double,
-    val millionCopiesIncome: Double? = null
-)
 
 class AssetRepository private constructor(
     private val assetDao: AssetDao,

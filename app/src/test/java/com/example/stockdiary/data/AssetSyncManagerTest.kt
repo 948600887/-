@@ -381,7 +381,7 @@ class AssetSyncManagerTest {
 
         // 捕获批量落库的入参：必须被调用，且 3 条一条不少。
         // 用集合而非有序列表断言：三个标的是并发抓取的，完成顺序不固定。
-        val slot = slot<List<com.example.stockdiary.data.repository.PendingPriceWrite>>()
+        val slot = slot<List<com.example.stockdiary.data.contract.PendingPriceWrite>>()
         coVerify { repository.updatePricesInTransaction(capture(slot)) }
         val writes = slot.captured
         assertEquals("不足一批的落价意图被丢弃了", 3, writes.size)
@@ -430,7 +430,7 @@ class AssetSyncManagerTest {
         job.cancelAndJoin()
 
         // 取消路径也必须把缓冲区里已抓到的那条写掉，否则它白抓了
-        val slot = slot<List<com.example.stockdiary.data.repository.PendingPriceWrite>>()
+        val slot = slot<List<com.example.stockdiary.data.contract.PendingPriceWrite>>()
         coVerify(atLeast = 1) { repository.updatePricesInTransaction(capture(slot)) }
         assertTrue(
             "取消后应把已抓到的 fund_010001 落库，实际=${slot.captured.map { it.symbol }}",

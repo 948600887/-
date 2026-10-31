@@ -1,7 +1,6 @@
 package com.example.stockdiary.data.sync
 
 import com.example.stockdiary.database.Asset
-import com.example.stockdiary.database.AssetSnapshot
 
 /**
  * 自动快照的准入判定与快照表去重计划。纯函数、无 IO 无时钟（[now] 由调用方注入）。
@@ -13,10 +12,6 @@ import com.example.stockdiary.database.AssetSnapshot
  * 中间每天 15:10 的快照全是同一批旧价：月度收益被拉平、波动率样本被零收益污染，
  * 与 2026-10-18 之前「逐日回填补快照」造出的同值假快照同族（那次是 date/时刻
  * 双写，这次是同值单写，危害同级）。所以建之前先问 [shouldCreateAutoSnapshot]。
- *
- * [planSnapshotDedup] 处理另一宗历史遗留：同日多行快照。旧版回填 + `getSnapshotByDate`
- * 无 ORDER BY 只删一条，导致库里可能存在同 date 多行；`createSnapshot` 已改为按
- * date 删全量，但存量行需要一次性修复（见 AssetRepository.repairDuplicateSnapshots）。
  */
 
 /** 价格「还算新鲜」的窗口：24 小时。手动刷新一般每天一次，日内自动同步的用户价格总是新的 */
@@ -42,27 +37,4 @@ fun shouldCreateAutoSnapshot(
     if (holdings.isEmpty()) return false
     val freshCount = holdings.count { it.lastSyncTime > 0 && now - it.lastSyncTime <= staleThresholdMs }
     return freshCount * 2 > holdings.size
-}
-
-/**
- * 快照表去重计划：同日多行时**保留 timestamp 最大的一条**（最后一次写入为准，
- * 与 createSnapshot「同日覆盖」的语义一致），返回其余待删行的 id 升序列表。
- *
- * 纯函数：只读入参列表做决策，删除动作由调用方执行——这样去重策略本身可被单测钉死，
- * 不需要 Robolectric 跑真库。
- */
-fun planSnapshotDedup(snapshots: List<AssetSnapshot>): List<Long> {
-    if (snapshots.isEmpty()) return emptyList()
-    return snapshots
-        .groupBy { it.date }
-        .values
-        .filter { it.size > 1 }
-        .flatMap { sameDay ->
-            // timestamp 最大者保留；timestamp 相等（同时写入）时保留 id 较大者（后插入）
-            val keeper = sameDay.maxWithOrNull(
-                compareBy<AssetSnapshot> { it.timestamp }.thenBy { it.id }
-            ) ?: return@flatMap emptyList()
-            sameDay.filter { it.id != keeper.id }.map { it.id }
-        }
-        .sorted()
 }

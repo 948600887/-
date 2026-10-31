@@ -6,7 +6,7 @@ import com.example.stockdiary.data.dividend.DividendRecord
 import com.example.stockdiary.data.dividend.DividendService
 import com.example.stockdiary.network.EastmoneyDividendApiService
 import com.example.stockdiary.network.FundDividendApiService
-import com.example.stockdiary.data.sync.withHeartbeat
+import com.example.stockdiary.data.contract.withHeartbeat
 import com.example.stockdiary.data.dividend.isFetchedToday
 import com.example.stockdiary.data.dividend.shouldRefetchOtc
 import android.annotation.SuppressLint

@@ -1,7 +1,7 @@
 package com.example.stockdiary.data.dividend
 
 import com.example.stockdiary.data.repository.DividendRepository
-import com.example.stockdiary.data.sync.withHeartbeat
+import com.example.stockdiary.data.contract.withHeartbeat
 import com.example.stockdiary.utils.StockCodeManager
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType

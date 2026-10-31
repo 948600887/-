@@ -3,6 +3,7 @@ package com.example.stockdiary.data.sync
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetSnapshot
 import com.example.stockdiary.database.AssetType
+import com.example.stockdiary.data.contract.planSnapshotDedup
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue

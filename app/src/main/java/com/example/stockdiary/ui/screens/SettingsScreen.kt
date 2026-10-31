@@ -1,7 +1,7 @@
 package com.example.stockdiary.ui.screens
 
 import com.example.stockdiary.common.DateFormats
-import com.example.stockdiary.data.sync.SyncStrategy
+import com.example.stockdiary.data.contract.SyncStrategy
 import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Build
@@ -76,6 +76,7 @@ import com.example.stockdiary.ui.theme.rememberThemeMode
 import com.example.stockdiary.ui.theme.ThemeManager
 import com.example.stockdiary.ui.viewmodels.HoldingSnapshotViewModel
 import com.example.stockdiary.ui.viewmodels.SettingsViewModel
+import com.example.stockdiary.ui.viewmodels.createSettingsViewModelFactory
 
 import com.example.stockdiary.utils.format
 import kotlinx.coroutines.launch
@@ -95,7 +96,7 @@ fun SettingsScreen(
             context.packageManager.getPackageInfo(context.packageName, 0).versionName
         }.getOrNull() ?: "1.0.0"
     }
-    val viewModel: SettingsViewModel = viewModel(factory = SettingsViewModel.factory(container))
+    val viewModel: SettingsViewModel = viewModel(factory = createSettingsViewModelFactory(container))
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     // 仪表盘偏好保留独立流（跨页面共享的整块偏好，写入路径与 UiState 不同，见 VM KDoc）
     val dashboardPrefs by viewModel.dashboardPreferences.collectAsStateWithLifecycle()

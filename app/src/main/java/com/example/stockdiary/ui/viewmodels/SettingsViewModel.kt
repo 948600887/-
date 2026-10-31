@@ -5,9 +5,6 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import androidx.lifecycle.ViewModel
-import androidx.lifecycle.ViewModelProvider
-import androidx.lifecycle.viewmodel.initializer
-import androidx.lifecycle.viewmodel.viewModelFactory
 import androidx.lifecycle.viewModelScope
 import com.example.stockdiary.common.Result
 import com.example.stockdiary.data.repository.AssetRepository
@@ -22,7 +19,6 @@ import com.example.stockdiary.database.AssetSnapshot
 import com.example.stockdiary.data.repository.DividendRepository
 import com.example.stockdiary.data.repository.TransactionRepository
 import com.example.stockdiary.database.Transaction
-import com.example.stockdiary.di.AppContainer
 import com.example.stockdiary.utils.AppLogger
 import com.example.stockdiary.utils.DataSourceHealth
 import com.example.stockdiary.utils.DataSourceHealthChecker
@@ -53,67 +49,9 @@ class SettingsViewModel(
     private val priceSyncPreferencesManager: PriceSyncPreferencesManager
 ) : ViewModel() {
 
-    /**
-     * 设置页状态机。
-     *
-     * 原为「UiState(10 字段) + 9 个附加流」混用：数据类列表/导出/删除/体检走 UiState，
-     * 而价格同步与每日提醒的 8 个快照字段各自为政（开关 ×4、上次同步时间、提醒开关、
-     * 时/分、提醒错误），写入点散落在 setReminderEnabled / setReminderTime /
-     * setAutoPriceSyncEnabled / refreshPriceSyncState 等处；UI 同层 collect 十条流，
-     * 一次 refreshPriceSyncState 要连发八次、整页重组八遍。
-     *
-     * 合流判断：
-     * - 8 个同步/提醒快照字段并入本 UiState——它们同属「持久化设置的内存镜像」，
-     *   由 [refreshPriceSyncState] 整组刷新、由设置页同一个 remember 块整组消费，
-     *   合起来后一次刷新只发射一次（原来八次）；
-     * - [dashboardPreferences] **刻意保留独立流**：它是跨页面共享的整块偏好
-     *   （日历写月度生活费、仪表盘/持仓写分红缓存），与 Dashboard/Portfolio 两个 VM
-     *   保持同样的「preferences 独立流」先例；且它的写入路径（config sheet 整块提交）
-     *   与 UiState 其余字段（一次性动作驱动）语义不同，混在一起只会让「谁改了什么」更难读。
-     */
-    data class UiState(
-        /**
-         * 只保留计数，不保留整表。
-         *
-         * 设置页真正只需要「清除数据」确认框里的资产条数；导出时再按需查库。
-         * 原先把 assets/snapshots/transactions 三张全量表常驻在这里，
-         * 老用户（几百天快照、上千条交易）会白占内存、且每次发信整页重组。
-         */
-        val assetCount: Int = 0,
-        val snapshotCount: Int = 0,
-        val transactionCount: Int = 0,
-        /** 分红条数：导出对话框用它决定「分红明细」是否可点（空库不该导出一个空文件） */
-        val dividendCount: Int = 0,
-        val isExporting: Boolean = false,
-        val isDeleting: Boolean = false,
-        val isCheckingHealth: Boolean = false,
-        val dataSourceHealth: List<DataSourceHealth>? = null,
-        /** 体检结果摘要（列表行 subtitle 用）；未体检时为 null */
-        val dataSourceHealthSummary: String? = null,
-        /** 汇率快照：放大后的可观察状态，刷新后界面才会重组（原先直接读单例，刷新不反映） */
-        val usdRate: Double = 0.0,
-        val usdRateUpdatedAt: Long = 0L,
-        val isRefreshingRate: Boolean = false,
-        val exportResult: Result<String>? = null,
-        val deleteResult: Result<Unit>? = null,
-        val errorMessage: String? = null,
-        // ---- 价格同步快照：与 PriceSyncPreferencesManager 磁盘值一一对应 ----
-        val autoPriceSyncEnabled: Boolean = false,
-        val lastPriceSyncTime: Long = 0L,
-        /** 盘中是否也自动刷股票/场内基金。关=仅盘后刷(默认) */
-        val stockIntradaySyncEnabled: Boolean = false,
-        /** 是否自动刷虚拟货币。关=只手动刷(默认) */
-        val cryptoAutoSyncEnabled: Boolean = false,
-        // ---- 每日提醒快照：与 NotificationHelper 内部状态一一对应 ----
-        val reminderEnabled: Boolean = false,
-        val reminderHour: Int = 8,
-        val reminderMinute: Int = 0,
-        /** 提醒是否真的排上了（无精确闹钟权限时会失败，需要给用户可见反馈） */
-        val reminderError: String? = null
-    )
 
     private val _uiState = MutableStateFlow(
-        UiState(
+        SettingsUiState(
             autoPriceSyncEnabled = priceSyncPreferencesManager.isAutoSyncEnabled(),
             lastPriceSyncTime = priceSyncPreferencesManager.getLastSyncTimeMillis(),
             stockIntradaySyncEnabled = priceSyncPreferencesManager.isStockIntradaySyncEnabled(),
@@ -125,11 +63,11 @@ class SettingsViewModel(
             usdRateUpdatedAt = ExchangeRateManager.getLastRefreshTimeMillis()
         )
     )
-    val uiState: StateFlow<UiState> = _uiState.asStateFlow()
+    val uiState: StateFlow<SettingsUiState> = _uiState.asStateFlow()
 
     /**
-     * 自定义仪表盘偏好。保留独立流的理由见 [UiState] KDoc：跨页面共享的整块偏好，
-     * 写入路径与 UiState 其余字段不同。
+     * 自定义仪表盘偏好。保留独立流的理由见 [SettingsUiState] KDoc：跨页面共享的整块偏好，
+     * 写入路径与 SettingsUiState 其余字段不同。
      */
     private val _dashboardPreferences = MutableStateFlow(dashboardPreferencesManager.loadPreferences())
     val dashboardPreferences: StateFlow<DashboardPreferences> = _dashboardPreferences.asStateFlow()
@@ -205,7 +143,7 @@ class SettingsViewModel(
 
     init {
         // Room Flow 在数据库异常时会向收集者抛错，不兜住会让 viewModelScope 崩溃
-        // 只收集计数，不把整表塞进 UiState（见 UiState.assetCount 的 KDoc）。
+        // 只收集计数，不把整表塞进 SettingsUiState（见 SettingsUiState.assetCount 的 KDoc）。
         // Room 仍会发全量列表，但 map 成 Int 后立刻丢弃，不跨重组持有。
         viewModelScope.launch {
             try {
@@ -615,7 +553,7 @@ class SettingsViewModel(
      * 清除数据）改过磁盘后，内存里的值就过期了。进入设置页或清除数据后调用，
      * 保证界面显示的是真实值。
      *
-     * 八个字段已在同一 UiState 里，整组刷新合并为**一次** update：原先八条流各写一次，
+     * 八个字段已在同一 SettingsUiState 里，整组刷新合并为**一次** update：原先八条流各写一次，
      * UI 要连收八个状态、整页重组八遍（设置页的 remember 块同时 key 着其中七个值）。
      */
     fun refreshPriceSyncState() {
@@ -634,7 +572,7 @@ class SettingsViewModel(
      * 进入页面时一次性重读所有「磁盘镜像」：价格同步/提醒 + 仪表盘偏好 + 汇率。
      *
      * 原先分成 refreshPriceSyncState + reloadDashboardPreferences 两次 launch、两次 IO、
-     * 两次 update ⇒ 设置页要重组两遍。这里合并成一次 IO、两次写入（UiState 与偏好流各一次，
+     * 两次 update ⇒ 设置页要重组两遍。这里合并成一次 IO、两次写入（SettingsUiState 与偏好流各一次，
      * 两个流本来就分属不同消费方）。
      */
     fun refreshOnEnter() {
@@ -674,7 +612,7 @@ class SettingsViewModel(
      * 手动刷新汇率（6 小时 TTL，用户看到旧值时能自己刷）。
      *
      * 汇率是单例里的普通字段，界面原先直接 `ExchangeRateManager.getRate()` 读——
-     * 刷新后值变了但没有任何可观察状态，页面不会重组。这里把结果写回 UiState。
+     * 刷新后值变了但没有任何可观察状态，页面不会重组。这里把结果写回 SettingsUiState。
      */
     fun refreshExchangeRate() {
         if (_uiState.value.isRefreshingRate) return
@@ -715,25 +653,5 @@ class SettingsViewModel(
             }
         }
     }
-
-    companion object {
-        /**
-         * 工厂统一用 lifecycle 的 viewModelFactory DSL：initializer 按请求的 modelClass 自动匹配，
-         * 免去手写 create(modelClass) 逐个 cast 的样板（原 9 个 VM 各一份，漏改一个就是运行期 ClassCastException）。
-         */
-        fun factory(container: AppContainer): ViewModelProvider.Factory = viewModelFactory {
-            initializer {
-                SettingsViewModel(
-                    appContext = container.context.applicationContext,
-                    assetRepository = container.assetRepository,
-                    dividendRepository = container.dividendRepository,
-                    transactionRepository = container.transactionRepository,
-                    dataExporter = container.dataExporter,
-                    dashboardPreferencesManager = container.dashboardPreferencesManager,
-                    dataSourceHealthChecker = DataSourceHealthChecker,
-                    priceSyncPreferencesManager = container.priceSyncPreferencesManager
-                )
-            }
-        }
-    }
 }
+

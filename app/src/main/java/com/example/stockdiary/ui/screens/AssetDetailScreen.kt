@@ -33,6 +33,7 @@ import com.example.stockdiary.utils.StockCodeManager
 import com.example.stockdiary.utils.format
 import com.example.stockdiary.utils.formatMoney
 import com.example.stockdiary.utils.CRYPTO_DECIMALS
+import com.example.stockdiary.utils.formatCryptoQuantity
 import com.example.stockdiary.utils.formatTrim
 import com.example.stockdiary.utils.pricePrecisionFor
 import com.example.stockdiary.utils.shareUnitWord
@@ -195,7 +196,9 @@ fun AssetDetailScreen(
                             DetailRow("账户", a.account)
                             val holdingText = when {
                                 a.type == AssetType.STOCK -> a.balance.format(0)
-                                a.type == AssetType.CRYPTO -> a.balance.formatTrim(CRYPTO_DECIMALS)
+                                // 加密货币数量固定 8 位（保留尾随 0）：与持仓页 formatCryptoQuantity 同口径，
+                                // 否则同一笔资产在两页显示的位数不一样
+                                a.type == AssetType.CRYPTO -> a.balance.formatCryptoQuantity()
                                 else -> a.balance.format(2)
                             }
                             DetailRow("持仓", "$holdingText${if (a.type == AssetType.STOCK) "股" else "份"}")

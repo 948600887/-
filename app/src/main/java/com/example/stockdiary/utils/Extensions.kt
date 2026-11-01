@@ -135,6 +135,23 @@ const val MONEY_DIGITS = 2
  * 所有加密货币精度都由这个常量驱动——将来要改成 12 位只动这一行。 */
 const val CRYPTO_DECIMALS = 10
 
+/**
+ * 加密货币**数量**的展示小数位：用户明确要求「统一显示到小数点后八位」。
+ *
+ * ## 为什么不复用 [CRYPTO_DECIMALS]
+ *
+ * [CRYPTO_DECIMALS] 同时驱动**价格**精度与写库变更判定，改它会连带改掉价格显示
+ * （67000.12 变成 67000.12000000，更难读）甚至影响导入的「变/未变」比较。
+ * 展示精度是产品口径、计算精度是数据口径，两者必须解耦，所以单独一个常量。
+ *
+ * ## 为什么是 8 位而不是 [CRYPTO_DECIMALS] 位
+ *
+ * 币安现货数量的实际精度上限就是 8 位（`0.00000000` 形态），用户看到的「有些显示 8 位、
+ * 有些只显示 7 位」纯粹是 [formatTrim] 去掉尾随 0 造成的视觉不一致（`0.0006068` vs
+ * `127.13507288`），并不是数据精度不同。固定 8 位后一列数字的小数点能对齐，一眼可比。
+ */
+const val CRYPTO_QUANTITY_DISPLAY_DIGITS = 8
+
 /** 报价精度：加密货币给足 [CRYPTO_DECIMALS] 位（低价山寨币可能是 0.0000000001 量级，按 2 位会显示成 ¥0.00），
  * 基金与 ETF 显示到厘（3 位），其余显示到分（2 位）。
  *
@@ -169,6 +186,41 @@ fun Double.formatTrim(digits: Int): String {
     // 与 createDecimalFormat 同一口径（固定 '.'），否则德语设备 format 出 ',' 而这里按 '.' 截
     val sep = DecimalFormatSymbols(Locale.US).decimalSeparator
     return s.trimEnd('0').trimEnd(sep)
+}
+
+/**
+ * 加密货币**数量**的展示格式：**固定 [CRYPTO_QUANTITY_DISPLAY_DIGITS] 位小数、保留尾随 0**。
+ *
+ * ```
+ * 0.0006068    → "0.00060680"      // 以前 formatTrim 会显示成 0.0006068（少两位，看着像精度不同）
+ * 127.13507288 → "127.13507288"
+ * 1.0          → "1.00000000"      // 以前显示 "1"
+ * 0.0          → "0.00000000"
+ * -50.80033811 → "-50.80033811"    // 借币负债行
+ * ```
+ *
+ * ## 为什么不直接用 [formatTrim]
+ *
+ * [formatTrim] 会 trim 掉尾随 0，于是同一列里 `0.0006068`（7 位）和 `127.13507288`（8 位）
+ * 看起来「精度不一致」——这正是用户报的「为什么有些显示、有些没有」。数量是要逐行对齐比对的
+ * 数字，位宽统一比省几个 0 重要；价格相反（见 [pricePrecisionFor]），所以**价格仍走 formatTrim**。
+ *
+ * ## 为什么还要一条 1e-9 兜底
+ *
+ * 币安的最小精度可能到 `1e-9`（`0.000000001`）。固定 8 位会把它舍成 `0.00000000`，
+ * 用户会以为这笔 dust 凭空消失、甚至以为导入丢了钱。所以只要「原值非 0 但 8 位舍成了 0」，
+ * 就退回 [formatTrim]（[CRYPTO_DECIMALS] 位）保住有效位——宁可这一行位数不齐，也不能显示成 0。
+ *
+ * 小数分隔符固定 `.`（[format] 内部就是 `DecimalFormatSymbols(Locale.US)`），
+ * 不受系统 locale 影响；负数带 `-`，与其它格式化入口一致。
+ */
+fun Double.formatCryptoQuantity(): String {
+    // ±0 明确给「0.00000000」：-0.0 直接走格式化会得到 "-0.00000000"，负数零没有业务含义
+    if (this == 0.0) return 0.0.format(CRYPTO_QUANTITY_DISPLAY_DIGITS)
+    val fixed = format(CRYPTO_QUANTITY_DISPLAY_DIGITS)
+    // 8 位把非 0 的极小值舍成了 0（如 1e-9、4e-9）→ 退回 trim 保有效位，绝不显示成 0
+    if (fixed.toDoubleOrNull() == 0.0) return formatTrim(CRYPTO_DECIMALS)
+    return fixed
 }
 
 /** 币种符号：原币价格没有符号时会被当成人民币读（USD 报价显示成 67000 而不是 $67000） */

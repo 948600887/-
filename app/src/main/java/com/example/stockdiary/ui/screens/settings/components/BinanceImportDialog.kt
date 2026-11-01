@@ -65,9 +65,8 @@ import com.example.stockdiary.ui.components.import.ImportResultStep
 import com.example.stockdiary.ui.components.import.ImportWizardScaffold
 import com.example.stockdiary.ui.theme.AppTheme
 import com.example.stockdiary.ui.viewmodels.BinanceImportViewModel
-import com.example.stockdiary.utils.CRYPTO_DECIMALS
 import com.example.stockdiary.utils.format
-import com.example.stockdiary.utils.formatTrim
+import com.example.stockdiary.utils.formatCryptoQuantity
 
 /**
  * 同步币安资产全屏 Dialog：填密钥 → 拉取 → 预览核对 → 完成。
@@ -481,7 +480,10 @@ private fun BinancePreviewItemRow(
     val (statusText, statusColor) = when (item.status) {
         BinanceImportService.ItemStatus.NEW -> "新增" to AppTheme.colors.profitGreen
         BinanceImportService.ItemStatus.UPDATE ->
-            "覆盖 ${item.existing?.balance?.formatTrim(CRYPTO_DECIMALS) ?: 0.0.formatTrim(CRYPTO_DECIMALS)} → ${item.quantity.formatTrim(CRYPTO_DECIMALS)}" to
+            // 数量固定 8 位（formatCryptoQuantity）：旧口径的 formatTrim 会把尾随 0 去掉，
+            // 于是「覆盖 0 → 0.00000299」与「覆盖 0 → 127.13507288」看着位数不一样，
+            // 用户会以为小数位被截断了。币安持仓全是加密货币，这里整屏统一 8 位。
+            "覆盖 ${item.existing?.balance?.formatCryptoQuantity() ?: 0.0.formatCryptoQuantity()} → ${item.quantity.formatCryptoQuantity()}" to
                 MaterialTheme.colorScheme.tertiary
         BinanceImportService.ItemStatus.UNCHANGED -> "未变" to MaterialTheme.colorScheme.onSurfaceVariant
     }
@@ -522,9 +524,10 @@ private fun BinancePreviewItemRow(
                 )
             }
             Column(horizontalAlignment = Alignment.End) {
-                // 借币负债是负数，用红突出「这是欠币安的」；抵押/普通资产用默认色
+                // 借币负债是负数，用红突出「这是欠币安的」；抵押/普通资产用默认色。
+                // 数量固定 8 位（formatCryptoQuantity），与上方「覆盖 A → B」同口径
                 Text(
-                    item.quantity.formatTrim(CRYPTO_DECIMALS),
+                    item.quantity.formatCryptoQuantity(),
                     fontWeight = FontWeight.Bold,
                     color = if (isLoanDebt) AppTheme.colors.lossRed else MaterialTheme.colorScheme.onSurface
                 )

@@ -514,16 +514,17 @@ class BinanceAccountAPITest {
         val pageSize = 100
         val recordedCurrent = CopyOnWriteArrayList<Int>()
 
-        fun buildRows(n: Int, startAsset: Int) = buildString {
+        // total 用「真实总条数」101（第 1 页 100 + 第 2 页 1），走 total 精确翻页路径
+        fun buildRows(n: Int, startAsset: Int, total: Int = n) = buildString {
             append("{\"rows\":[")
             append(
                 (0 until n).joinToString(",") {
                     """{"asset":"EARN${startAsset + it}","totalAmount":"1.0"}"""
                 }
             )
-            append("],\"total\":$n}")
+            append("],\"total\":$total}")
         }
-        val flexiblePage1 = buildRows(pageSize, 0) // 满一页 100 行 → 触发翻页
+        val flexiblePage1 = buildRows(pageSize, 0, pageSize + 1) // 满一页 100 行、total=101 → 触发翻页
         val flexiblePage2 = """{"rows":[{"asset":"USDT","totalAmount":"144.99343452"}],"total":101}"""
 
         val client = OkHttpClient.Builder()
@@ -561,14 +562,11 @@ class BinanceAccountAPITest {
     }
 
     /**
-     * 边界：持仓数恰好等于一页上限（100 行，无第 2 页真实数据）时，翻页只会多发一次
-     * 「末页探测」空请求后停止，不会失控翻到 [MAX_EARN_PAGES] 上限。
-     *
-     * 这条钉死「末页判定」：`rowCount < EARN_PAGE_SIZE` 即停。若误写成「永远继续」会打到
-     * 50 页上限才停，这条会失败（recordedCurrent 含 >2）。
+     * 边界：持仓数恰好等于一页上限（100 行）且接口 `total=100` 时，total 精确翻页应
+     * **只发 1 次请求就停**，不再靠「多打一页空请求探测末页」——这正是 total 驱动的收益。
      */
     @Test
-    fun 刚好一页持仓时只拉到末页探测为止() = runBlocking {
+    fun 刚好一页持仓时按total精确停止_不多打空请求() = runBlocking {
         val pageSize = 100
         val recordedCurrent = CopyOnWriteArrayList<Int>()
         val flexiblePage1 = buildString {
@@ -586,7 +584,7 @@ class BinanceAccountAPITest {
                     val body = when {
                         path.contains("/flexible/") -> {
                             recordedCurrent.add(current)
-                            // 第 1 页满 100 行；第 2 页起返回空 rows（币安末页真实行为）→ 触发停止
+                            // 只有第 1 页有数据；若请求第 2 页则返回空（用来暴露「是否白打空请求」）
                             if (current <= 1) flexiblePage1 else """{"rows":[],"total":0}"""
                         }
                         else -> """{"rows":[],"total":0}"""
@@ -605,8 +603,55 @@ class BinanceAccountAPITest {
         val fetch = BinanceAccountAPI.getEarnPositions("dummyKey", "dummySecret", client)
         assertTrue(fetch.failures.isEmpty())
         assertEquals(pageSize, fetch.positions.size)
-        // 满页 100 + 一次末页空探测 = 2 次请求，证明没有失控翻到安全上限
-        assertTrue("末页探测后必须停止翻页（最多 2 次）", recordedCurrent.size <= 2)
+        // total=100 且已拉 100 行 → 第 1 页即判定拉全，绝不该再请求第 2 页
+        assertEquals("恰好满一页时只发 1 次请求（不白打空请求）", 1, recordedCurrent.size)
+    }
+
+    /**
+     * 回退路径：接口**没给 `total`**（字段缺失/为 0）时，仍要靠「本页行数 < 单页上限」启发式
+     * 翻页拉全——保证 total 字段哪天消失也不会退回「只拉第一页」的老 bug。
+     */
+    @Test
+    fun 接口无total字段时回退启发式仍能翻页拉全() = runBlocking {
+        val pageSize = 100
+        val recordedCurrent = CopyOnWriteArrayList<Int>()
+        // 两条都刻意不写 total（optInt 默认 0 → 视为未知）
+        val page1 = buildString {
+            append("{\"rows\":[")
+            append((0 until pageSize).joinToString(",") { """{"asset":"EARN$it","totalAmount":"1.0"}""" })
+            append("]}")
+        }
+        val page2 = """{"rows":[{"asset":"USDT","totalAmount":"144.99343452"}]}"""
+        val client = OkHttpClient.Builder()
+            .addInterceptor(object : Interceptor {
+                override fun intercept(chain: Interceptor.Chain): Response {
+                    val url = chain.request().url
+                    val q = url.query ?: ""
+                    val current = q.substringAfter("current=").substringBefore("&").toIntOrNull() ?: 1
+                    val path = url.encodedPath
+                    val body = when {
+                        path.contains("/flexible/") -> {
+                            recordedCurrent.add(current)
+                            if (current <= 1) page1 else page2
+                        }
+                        else -> """{"rows":[]}"""
+                    }
+                    return Response.Builder()
+                        .request(chain.request())
+                        .protocol(Protocol.HTTP_1_1)
+                        .code(200)
+                        .message("OK")
+                        .body(body.toResponseBody("application/json".toMediaType()))
+                        .build()
+                }
+            })
+            .build()
+
+        val fetch = BinanceAccountAPI.getEarnPositions("dummyKey", "dummySecret", client)
+        assertTrue("total 缺失属于正常回退，不该报失败", fetch.failures.isEmpty())
+        assertTrue("回退路径也必须发出 current=2", recordedCurrent.contains(2))
+        assertEquals("100 + 1 = 101", 101, fetch.positions.size)
+        assertEquals(144.99343452, fetch.positions.single { it.asset == "USDT" }.amount, 1e-8)
     }
 
     // ---------- 借币（Flexible Loan）负债接口 ----------
@@ -690,6 +735,47 @@ class BinanceAccountAPITest {
         assertEquals(50.80033811, result.debts[0].debt, 1e-9)
         assertTrue(result.failures.isEmpty())
         assertEquals(null, result.warning)
+    }
+
+    @Test
+    fun 借币在途超过单页上限时翻页拉全() = runBlocking {
+        // 与 earn 同源的潜在截断 bug：旧 fetchLoanPage 写死 current=1，借币 > 100 会被截断。
+        // 这里造满一页 100 + 第 2 页 1，total=101，验证翻页后拿到 101 笔。
+        val pageSize = 100
+        val recordedCurrent = CopyOnWriteArrayList<Int>()
+        val page1 = buildString {
+            append("{\"rows\":[")
+            append(
+                (0 until pageSize).joinToString(",") {
+                    """{"loanCoin":"USDT","totalDebt":"0.1","collateralCoin":"BNB","collateralAmount":"0.01"}"""
+                }
+            )
+            append("],\"total\":101}")
+        }
+        val page2 = """{"rows":[{"loanCoin":"USDT","totalDebt":"0.1"}],"total":101}"""
+        val client = OkHttpClient.Builder()
+            .addInterceptor(object : Interceptor {
+                override fun intercept(chain: Interceptor.Chain): Response {
+                    val url = chain.request().url
+                    val q = url.query ?: ""
+                    val current = q.substringAfter("current=").substringBefore("&").toIntOrNull() ?: 1
+                    recordedCurrent.add(current)
+                    val body = if (current <= 1) page1 else page2
+                    return Response.Builder()
+                        .request(chain.request())
+                        .protocol(Protocol.HTTP_1_1)
+                        .code(200)
+                        .message("OK")
+                        .body(body.toResponseBody("application/json".toMediaType()))
+                        .build()
+                }
+            })
+            .build()
+
+        val result = BinanceAccountAPI.getLoans("dummyKey", "dummySecret", client)
+        assertTrue("翻页必须发出 current=2", recordedCurrent.contains(2))
+        assertTrue(result.failures.isEmpty())
+        assertEquals("100 + 1 = 101 笔负债", 101, result.debts.size)
     }
 
     @Test

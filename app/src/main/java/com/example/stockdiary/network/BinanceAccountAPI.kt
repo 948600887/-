@@ -112,7 +112,13 @@ internal data class EarnParseResult(
     val missingRows: Boolean = false,
     val badRows: List<String> = emptyList(),
     val emptyRows: Int = 0,
-    val rowCount: Int = 0
+    val rowCount: Int = 0,
+    /**
+     * 币安返回的 `total` 字段（接口声明的持仓总数）。> 0 时 [fetchEarnPage] 用它精确决定翻页数，
+     * 不再靠「本页行数 < 单页上限」猜末页——能正确处理「恰好满一页」不白打下一页空请求，
+     * 也能在「接口实际条数 ≠ 本页行数之和」时仍拉全。解析不到时为 0（视为未知，回退启发式）。
+     */
+    val total: Int = 0
 ) {
     /**
      * 这一页「是否伪装成了成功」。
@@ -534,11 +540,14 @@ object BinanceAccountAPI {
     }
 
     /**
-     * 拉一页借币在途负债。
+     * 拉借币在途负债（**全部分页**，与 [fetchEarnPage] 同口径）。
      *
      * 非 2xx（未开通权限 / 接口下线 / 被地区限制）与空响应都**抛异常**，由 [getLoans]
      * 收成 Result 并把原因带回预览页——绝不在这里静默返回空列表，那等于把「少算一块负债」
      * 伪装成「本来就没有」。
+     *
+     * 旧实现写死 `current=1`，在途借币 > 100 时会被截断（与 earn 同源的潜在 bug）。
+     * 现改为翻页：优先用响应 `total` 精确翻页，`total` 不可用时回退到「本页行数 < 单页上限」。
      */
     private suspend fun fetchLoanPage(
         url: String,
@@ -546,34 +555,55 @@ object BinanceAccountAPI {
         apiSecret: String,
         httpClient: OkHttpClient
     ): List<BinanceLoanDebt> {
-        val timestamp = System.currentTimeMillis()
-        // current/size 必须参与签名：它们是 query 的一部分，缺了会被判签名无效
-        // （与 fetchEarnPage 同口径，size 复用 EARN_PAGE_SIZE：真实账户的在途借币通常个位数）
-        val query = "current=1&size=$EARN_PAGE_SIZE&timestamp=$timestamp&recvWindow=$RECV_WINDOW"
-        val signature = sign(apiSecret, query)
-        val request = Request.Builder()
-            // 日志只记端点路径，url 里的 signature 由 secret 派生，绝不落盘
-            .url("$url?$query&signature=$signature")
-            .addHeader("X-MBX-APIKEY", apiKey)
-            .addHeader("User-Agent", "Mozilla/5.0")
-            .build()
+        val all = mutableListOf<BinanceLoanDebt>()
+        var current = 1
+        var rowsFetched = 0
+        var total: Int? = null
+        while (current <= MAX_EARN_PAGES) {
+            val timestamp = System.currentTimeMillis()
+            // current/size 必须参与签名：它们是 query 的一部分，缺了会被判签名无效
+            // （与 fetchEarnPage 同口径，size 复用 EARN_PAGE_SIZE：真实账户的在途借币通常个位数）
+            val query =
+                "current=$current&size=$EARN_PAGE_SIZE&timestamp=$timestamp&recvWindow=$RECV_WINDOW"
+            val signature = sign(apiSecret, query)
+            val request = Request.Builder()
+                // 日志只记端点路径，url 里的 signature 由 secret 派生，绝不落盘
+                .url("$url?$query&signature=$signature")
+                .addHeader("X-MBX-APIKEY", apiKey)
+                .addHeader("User-Agent", "Mozilla/5.0")
+                .build()
 
-        val response = httpClient.newCall(request).execute()
-        response.use { resp ->
-            val body = resp.body?.string()
-                ?: throw IOException("币安返回了空响应")
-            if (!resp.isSuccessful) {
-                // 诊断：把币安真实 HTTP 码与响应体落盘（不含密钥/签名，安全），便于排查
-                // 404/403/-2015 等。注意只记端点路径常量，绝不记带 signature 的完整请求 URL。
-                AppLogger.d(
-                    "币安借币接口 ${url} 返回 HTTP ${resp.code}，响应体=$body",
-                    "BinanceAccountAPI"
-                )
-                // 币安的 msg 说明原因（权限不足/参数错），不含密钥，可以带出去
-                throw binanceError(body, resp.code)
+            val body = httpClient.newCall(request).execute().use { resp ->
+                val b = resp.body?.string()
+                    ?: throw IOException("币安返回了空响应")
+                if (!resp.isSuccessful) {
+                    // 诊断：把币安真实 HTTP 码与响应体落盘（不含密钥/签名，安全），便于排查
+                    // 404/403/-2015 等。注意只记端点路径常量，绝不记带 signature 的完整请求 URL。
+                    AppLogger.d(
+                        "币安借币接口 ${url} 返回 HTTP ${resp.code}，响应体=$b",
+                        "BinanceAccountAPI"
+                    )
+                    // 币安的 msg 说明原因（权限不足/参数错），不含密钥，可以带出去
+                    throw binanceError(b, resp.code)
+                }
+                b
             }
-            return parseLoanOrders(body)
+            all.addAll(parseLoanOrders(body))
+            // 借币响应同样含 total / rows，优先用 total 精确翻页，否则回退到「本页行数 < 单页上限」
+            val (pageTotal, rowCount) = try {
+                val json = JSONObject(body)
+                json.optInt("total", 0) to (json.optJSONArray("rows")?.length() ?: 0)
+            } catch (_: Exception) {
+                0 to all.size
+            }
+            if (total == null && pageTotal > 0) total = pageTotal
+            rowsFetched += rowCount
+            val lastPage = rowCount < EARN_PAGE_SIZE
+            val exhausted = total != null && rowsFetched >= total
+            if (lastPage || exhausted) break
+            current++
         }
+        return all
     }
 
     /**
@@ -673,8 +703,10 @@ object BinanceAccountAPI {
      * `current=1` 第一页，当某接口持仓数 > 100 时，第 2 页及之后的持仓（含 USDT 等）
      * 被整批漏掉——表现就是「导入后持仓比币安 App 少一大块、却零警告」。真机已实锤：
      * 用户活期理财返回 100 行（恰好一页上限）但 USDT(144.99) 不在其中，合并 `新增 0 项`。
-     * 现改为翻页循环：从 page=1 递增 `current`，直到某页返回行数 < [EARN_PAGE_SIZE]（即末页）
-     * 或触达 [MAX_EARN_PAGES] 安全上限才停，确保分页前的持仓一枚不漏。
+     * 现改为翻页循环：从 page=1 递增 `current`，**优先用币安返回的 `total` 字段精确翻页**
+     * （已拉行数 >= total 即停，避免恰好满一页时多打一页空请求），`total` 不可用时回退到
+     * 「本页行数 < [EARN_PAGE_SIZE]（即末页）」启发式；同时触达 [MAX_EARN_PAGES] 安全上限
+     * 才强制停，确保分页前的持仓一枚不漏。
      *
      * ## 失败绝不连坐
      *
@@ -697,8 +729,10 @@ object BinanceAccountAPI {
         val allPositions = mutableListOf<BinanceEarnPosition>()
         val allFailures = mutableListOf<String>()
         var current = 1
-        var hasMore = true
-        while (hasMore && current <= MAX_EARN_PAGES) {
+        var rowsFetched = 0
+        // 币安声明的总条数：优先用它精确翻页；为 0/负数时视为未知，回退到「本页行数 < 单页上限」启发式
+        var total: Int? = null
+        while (current <= MAX_EARN_PAGES) {
             val parsed = try {
                 fetchEarnSinglePage(url, apiKey, apiSecret, httpClient, locked, current)
             } catch (e: CancellationException) {
@@ -720,8 +754,12 @@ object BinanceAccountAPI {
             if (parsed.hasShapeProblem || parsed.bodyNotJson != null) {
                 allFailures.addAll(parsed.failures(kind))
             }
-            // 末页判定：本页返回行数 < 单页上限 → 没有下一页了（>= 上限说明后面可能还有）
-            hasMore = parsed.rowCount >= EARN_PAGE_SIZE
+            // 首条带 total 的页定下总数；之后用「已拉行数 >= 总数」判定拉全，避免多打空页
+            if (total == null && parsed.total > 0) total = parsed.total
+            rowsFetched += parsed.rowCount
+            val lastPage = parsed.rowCount < EARN_PAGE_SIZE
+            val exhausted = total != null && rowsFetched >= total
+            if (lastPage || exhausted) break
             current++
         }
         return EarnPageOutcome(positions = allPositions, failures = allFailures)
@@ -828,11 +866,14 @@ object BinanceAccountAPI {
      */
     internal fun parseEarnPositions(body: String, locked: Boolean): EarnParseResult {
         return try {
-            val rows = JSONObject(body).optJSONArray("rows")
+            val bodyJson = JSONObject(body)
+            val rows = bodyJson.optJSONArray("rows")
             if (rows == null) {
                 // 响应体里连 rows 数组都没有：接口形状变了，一条都没拿到，绝不是「没有持仓」
                 return EarnParseResult(positions = emptyList(), missingRows = true)
             }
+            // 币安声明的持仓总数；解析不到（字段缺失/非数字）按 0 处理，由调用方回退到启发式翻页
+            val total = bodyJson.optInt("total", 0)
             val primary = if (locked) "amount" else "totalAmount"
             val fallback = if (locked) "totalAmount" else "amount"
             val positions = mutableListOf<BinanceEarnPosition>()
@@ -869,7 +910,8 @@ object BinanceAccountAPI {
                 positions = positions,
                 badRows = badRows,
                 emptyRows = emptyRows,
-                rowCount = rows.length()
+                rowCount = rows.length(),
+                total = total
             )
         } catch (e: CancellationException) {
             throw e

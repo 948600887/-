@@ -106,7 +106,10 @@ fun DashboardConfigSheet(
                 modifier = Modifier.padding(bottom = 16.dp)
             )
 
-            SectionTitle("摘要组件")
+            // 按「页面」分组而非「组件类型」：资产页面（首页卡片）、持仓页面（持仓列表/
+            // 类别可见性与排序）、历史页面（默认周期）。这样每栏只含「会影响那一页」的开关，
+            // 不再把「控制持仓页的类别开关」和「控制首页的卡片开关」混在同一栏里，避免歧义。
+            SectionTitle("资产页面")
             SwitchPreference(
                 title = "显示总资产",
                 checked = localPrefs.showTotalAssets,
@@ -132,10 +135,6 @@ fun DashboardConfigSheet(
                 checked = localPrefs.showAssetGrowth,
                 onCheckedChange = { emit(localPrefs.copy(showAssetGrowth = it)) }
             )
-
-            HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-
-            SectionTitle("收入组件")
             SwitchPreference(
                 title = "显示收息进度",
                 checked = localPrefs.showDividendProgress,
@@ -154,7 +153,7 @@ fun DashboardConfigSheet(
 
             HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
 
-            SectionTitle("资产类别")
+            SectionTitle("持仓页面")
             SwitchPreference(
                 title = "显示银行存款",
                 checked = localPrefs.showBankDeposits,
@@ -180,9 +179,6 @@ fun DashboardConfigSheet(
                 checked = localPrefs.showLiabilities,
                 onCheckedChange = { emit(localPrefs.copy(showLiabilities = it)) }
             )
-
-            HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-
             SwitchPreference(
                 title = "隐藏低价值虚拟货币",
                 checked = localPrefs.hideLowValueCrypto,
@@ -216,7 +212,7 @@ fun DashboardConfigSheet(
 
             HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
 
-            SectionTitle("默认排序")
+            SectionTitle("持仓页面·默认排序")
             SortOrder.entries.forEach { sortOrder ->
                 Row(
                     modifier = Modifier
@@ -247,7 +243,7 @@ fun DashboardConfigSheet(
 
             HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
 
-            SectionTitle("默认历史周期")
+            SectionTitle("历史页面·默认历史周期")
             // 用 FlowRow：6 个周期 chip 横排在窄屏会被裁掉/溢出，改成自动换行更整齐。
             FlowRow(
                 modifier = Modifier.fillMaxWidth(),
@@ -271,8 +267,9 @@ fun DashboardConfigSheet(
                 }
             }
 
-            Spacer(modifier = Modifier.height(16.dp))
+            HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
 
+            SectionTitle("全局")
             OutlinedButton(
                 onClick = {
                     // 「恢复默认」只重置本 sheet 负责的那部分配置（卡片显示开关 / 类别开关 /

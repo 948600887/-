@@ -6,6 +6,8 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -13,10 +15,12 @@ import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
+import java.io.InterruptedIOException
 import java.net.ConnectException
 import java.net.SocketTimeoutException
 import java.net.URLEncoder
 import java.net.UnknownHostException
+import java.util.Locale
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 
@@ -79,6 +83,54 @@ data class BinanceEarnPosition(
 )
 
 /**
+ * 币安接口失败的三大类——决定给用户看**哪一条**排障建议。
+ *
+ * ## 为什么必须分类，而不是一律「请检查 API Key 权限」
+ *
+ * 打同一个接口失败有三种完全不同的原因，排障动作也完全不同：
+ *
+ * - [NETWORK]：超时 / DNS 解析不了 / 连不上 / 连接被中断。→ 用户该查网络与代理节点；
+ * - [SERVER_OR_RATE_LIMIT]：HTTP 429 / 418（限流、IP 被临时封）或 5xx（币安服务端抖动）。
+ *   → 与用户的 API Key **一点关系都没有**，等几分钟就好；
+ * - [PERMISSION_OR_OTHER]：401 / 403 / -2015（没开「读取」权限）、451（地区限制）、参数错。
+ *   → 这时才该提示用户去翻 API Key 勾选项、IP 白名单、地区限制。
+ *
+ * 旧文案一律说「请确认 API Key 已勾选读取权限、IP 白名单与地区限制都放行」，
+ * 网络抖动和被限流的用户照着折腾一整轮也解决不了问题（真机日志实锤：第 2 页失败原因是
+ * `SocketTimeoutException`，提示却让用户去查 IP 白名单）。
+ */
+enum class BinanceFailureKind {
+
+    /** 网络类：超时 / DNS 解析不了 / 连不上 / 连接中断 */
+    NETWORK,
+
+    /** 限流或服务端异常：HTTP 418 / 429 / 5xx。**刻意不重试**——币安限流时重试会加重封禁 */
+    SERVER_OR_RATE_LIMIT,
+
+    /** 权限 / 地区 / 参数等「用户侧可修」的失败：401 / 403 / -2015 / 451 */
+    PERMISSION_OR_OTHER
+}
+
+/**
+ * 币安返回**非 2xx** 时的失败。
+ *
+ * 单独一个类型（而不是裸 [Exception]）是为了让上层能**按 HTTP 状态码**分类，
+ * 而不是去 message 里 `contains("429")` 猜——猜字符串既脆又容易误判
+ * （币安业务码本身就可能是 -1003、-2015 这些数字）。
+ *
+ * 注意：它**不是** [IOException]，所以 [BinanceAccountAPI] 的单页重试不会重试它
+ * （限流/权限失败重试一百次也一样，只会白刷接口、加重限流）。
+ *
+ * @param httpCode    HTTP 状态码（如 429 / 418 / 500 / 403 / 451）
+ * @param binanceCode 币安响应体里的 `code`（缺省时回落 httpCode）
+ */
+internal class BinanceApiException(
+    val httpCode: Int,
+    val binanceCode: Int,
+    message: String
+) : Exception(message)
+
+/**
  * 一个理财接口（活期 / 定期）的拉取结果：拿到多少条，以及这一页出了什么问题。
  *
  * 与 [BinanceEarnFetch] 的分工：那是「两个接口汇总后给调用方」的结果，
@@ -87,10 +139,16 @@ data class BinanceEarnPosition(
  *
  * @param positions 本页解析出的持仓（部分成功时非空）
  * @param failures  本页的人话问题（请求失败 / 响应形状不对 / 行内字段缺失）；空 = 本页完全正常
+ * @param failureKind 失败的类别（网络 / 限流或服务端 / 权限）。由 [BinanceAccountAPI.fetchEarnPage]
+ *        在 catch 里按**异常类型**判定后透传，**绝不靠字符串 include 硬猜**——失败文案里本来
+ *        就有「超时」这类词，猜字符串迟早猜错。首个非「权限类」的失败决定最终文案分支。
+ * @param httpCode 限流/服务端类失败对应的 HTTP 状态码，仅用于文案里给出可核对的信息
  */
 internal data class EarnPageOutcome(
     val positions: List<BinanceEarnPosition>,
-    val failures: List<String>
+    val failures: List<String>,
+    val failureKind: BinanceFailureKind = BinanceFailureKind.PERMISSION_OR_OTHER,
+    val httpCode: Int? = null
 )
 
 /**
@@ -150,12 +208,28 @@ internal data class EarnParseResult(
  *
  * @param positions 成功拉到的持仓（活期 + 定期；失败的那半边为空）
  * @param failures  失败的人话原因（如「活期：币安拒绝请求（-2015）：…」）；空 = 全部成功
+ * @param failureKind 失败的类别（网络 / 限流或服务端 / 权限），决定 [warning] 走哪条排障建议。
+ *        网络与限流都**不该**让用户去翻 API Key 权限——那是纯粹的误导。
+ * @param httpCode 限流/服务端类失败对应的 HTTP 状态码（用于文案里写明「HTTP 429」）。
  */
 data class BinanceEarnFetch(
     val positions: List<BinanceEarnPosition>,
-    val failures: List<String>
+    val failures: List<String>,
+    val failureKind: BinanceFailureKind = BinanceFailureKind.PERMISSION_OR_OTHER,
+    val httpCode: Int? = null
 ) {
-    /** 给用户看的一句话；全部拉取成功时为 null */
+    /**
+     * 给用户看的一句话；全部拉取成功时为 null。
+     *
+     * ## 为什么要按失败原因分流（2026-11-01 修，2026-11-02 补 5xx/429）
+     *
+     * 旧文案不管什么原因都让用户去确认「读取 / Enable Reading」权限与 IP 白名单。
+     * 但真机上失败的真实原因大多是这两类，**与权限毫无关系**：
+     * - `SocketTimeoutException`（网络/代理抖了一下）；
+     * - HTTP 429 / 418 / 5xx（币安限流或服务端异常，等几分钟就好）。
+     * 用户照着「检查权限」的提示去翻 API Key 设置只会白折腾，而且越查越怀疑自己。
+     * 所以三类失败各给各的建议，权限/地区提示只在真正是权限问题时才出现。
+     */
     val warning: String?
         get() = if (failures.isEmpty()) {
             null
@@ -164,7 +238,16 @@ data class BinanceEarnFetch(
                 // 一条都没拿到才是「只导入现货」；拿到一部分时数据照导，别误导用户
                 (if (positions.isEmpty()) "本次只导入现货，总资产会少算；"
                 else "本次仍会导入已拉到的那部分，其余的会少算；") +
-                "请确认 API Key 已勾选「读取 / Enable Reading」、IP 白名单与地区限制都放行后重新拉取。"
+                when (failureKind) {
+                    BinanceFailureKind.NETWORK ->
+                        "网络或代理不稳定（超时/连不上），请检查网络后重新拉取。"
+                    BinanceFailureKind.SERVER_OR_RATE_LIMIT ->
+                        "币安接口限流或服务端异常" +
+                            (httpCode?.let { "（HTTP $it）" } ?: "") +
+                            "，请过几分钟再试。"
+                    BinanceFailureKind.PERMISSION_OR_OTHER ->
+                        "请确认 API Key 已勾选「读取 / Enable Reading」、IP 白名单与地区限制都放行后重新拉取。"
+                }
         }
 }
 
@@ -238,10 +321,15 @@ data class BinanceLoanDebt(
  *
  * @param debts    成功拉到的负债（正数，调用方转负）
  * @param failures 失败的人话原因；空 = 全部成功
+ * @param failureKind 失败类别（网络 / 限流或服务端 / 权限），与 [BinanceEarnFetch.warning] 同口径。
+ *        借币接口同样会被 429 限流或被代理拖超时，一律叫用户去查「Loan 读取权限」是同一类误导。
+ * @param httpCode 限流/服务端类失败对应的 HTTP 状态码
  */
 data class BinanceLoanFetch(
     val debts: List<BinanceLoanDebt>,
-    val failures: List<String>
+    val failures: List<String>,
+    val failureKind: BinanceFailureKind = BinanceFailureKind.PERMISSION_OR_OTHER,
+    val httpCode: Int? = null
 ) {
     /** 给用户看的一句话；全部拉取成功时为 null */
     val warning: String?
@@ -249,7 +337,16 @@ data class BinanceLoanFetch(
             null
         } else {
             "借币负债没拉到（${failures.joinToString("；")}）。本次不计入借币负债，净资产会虚高；" +
-                "请确认 API Key 已勾选 Loan 读取权限、IP 白名单与地区限制都放行后重新拉取。"
+                when (failureKind) {
+                    BinanceFailureKind.NETWORK ->
+                        "网络或代理不稳定（超时/连不上），请检查网络后重新拉取。"
+                    BinanceFailureKind.SERVER_OR_RATE_LIMIT ->
+                        "币安接口限流或服务端异常" +
+                            (httpCode?.let { "（HTTP $it）" } ?: "") +
+                            "，请过几分钟再试。"
+                    BinanceFailureKind.PERMISSION_OR_OTHER ->
+                        "请确认 API Key 已勾选 Loan 读取权限、IP 白名单与地区限制都放行后重新拉取。"
+                }
         }
 }
 
@@ -330,6 +427,139 @@ object BinanceAccountAPI {
     private const val RECV_WINDOW = 60000
 
     private val client = NetworkClient.binanceClient
+
+    /**
+     * 单页请求的默认重试退避（毫秒）：**最多 2 次重试、共 3 次尝试**，退避 500ms → 1200ms。
+     *
+     * ## 为什么要重试
+     *
+     * 真机日志实锤（2026-11-01 20:59:52）：「币安理财接口[活期] 第2页拉取失败，停止翻页：
+     * SocketTimeoutException」——一次弱网抖动就让整块（USDT 144.99 在第 2 页）漏掉，
+     * 用户侧表现为「导入的资产比币安 App 少」，且毫无办法。单页请求是最小可重试单位，
+     * 重试两次的成本（最坏 1.7s + 两次请求）远小于漏掉一笔持仓。
+     *
+     * ## 为什么做成可注入参数
+     *
+     * 单测要能**真实覆盖**重试逻辑，又不能干等 1.7 秒（绝不用 Thread.sleep 撑时间）。
+     * 测试传空列表（不重试）或全 0（立即重试）即可，生产走这个默认值。
+     */
+    internal val DEFAULT_PAGE_RETRY_BACKOFF_MS: List<Long> = listOf(500L, 1200L)
+
+    /**
+     * 判定一次失败是否属**网络类**（超时 / 连不上 / DNS 解析不了 / 连接被中断）。
+     *
+     * ## 为什么不能靠 message 猜
+     *
+     * 失败文案里本来就带「超时」这类词（例如「第2页拉取失败（timeout）」），在拼接处
+     * `contains("timeout")` 看着能用，但只要有人调整文案就静默失效，而且区分不了
+     * 「币安拒绝请求（-2015）: Invalid API-key」这种**权限**问题。所以判定只认异常类型，
+     * 由 [fetchEarnPage] 在 catch 里算好、经 [EarnPageOutcome.failureKind] 一路透传。
+     *
+     * 反过来也要注意：`IOException` 不等于网络失败。本文件里「币安返回了空响应」也是
+     * [IOException]，那是响应异常，不是连不上——它不该被引导用户去查网络/代理。
+     */
+    internal fun isNetworkFailure(e: Throwable): Boolean {
+        // 三种最典型的连不上：读超时、DNS 解析不了、TCP 连接被拒
+        if (e is SocketTimeoutException || e is UnknownHostException || e is ConnectException) {
+            return true
+        }
+        // OkHttp 的 callTimeout / 连接中断都以 InterruptedIOException 收尾（含 "timeout"）
+        if (e is InterruptedIOException) return true
+        // 其余 IOException（含 OkHttp 的 "unexpected end of stream"、"connection reset" 等）
+        // 按类名 + message 关键词兜底判定，绝不把权限类失败算成网络失败。
+        val text = (e::class.simpleName.orEmpty() + " " + e.message.orEmpty()).lowercase(Locale.US)
+        return NETWORK_FAILURE_KEYWORDS.any { text.contains(it) }
+    }
+
+    /** [isNetworkFailure] 的关键词表（小写比对）。刻意窄：宁可漏判成「权限类」，也不误判。 */
+    private val NETWORK_FAILURE_KEYWORDS = listOf(
+        "sockettimeout",
+        "unknownhost",
+        "connectexception",
+        "connect timed out",
+        "failed to connect",
+        "connection reset",
+        "connection refused",
+        "unexpected end of stream",
+        "timeout",
+        "interrupted"
+    )
+
+    /**
+     * 把一次失败归到 [BinanceFailureKind] 三类之一——**只认类型与状态码，不猜字符串**。
+     *
+     * 顺序敏感：先判网络（IO 层异常可能是任意状态码下的连接问题），再判限流/服务端，
+     * 剩下的才是权限/地区/参数。
+     *
+     * 注意 418 / 429 / 5xx 是**币安侧的临时状态**（限流、IP 临时封、服务端抖动），
+     * 用户侧没有任何可改的设置；451（地区限制）与 401/403/-2015（权限）才是用户可修的，
+     * 所以 451 归 [BinanceFailureKind.PERMISSION_OR_OTHER]，保住原有的「换代理节点」提示。
+     */
+    internal fun classifyFailure(e: Throwable): BinanceFailureKind = when {
+        isNetworkFailure(e) -> BinanceFailureKind.NETWORK
+        e is BinanceApiException && (e.httpCode == 418 || e.httpCode == 429 || e.httpCode >= 500) ->
+            BinanceFailureKind.SERVER_OR_RATE_LIMIT
+        else -> BinanceFailureKind.PERMISSION_OR_OTHER
+    }
+
+    /**
+     * 把「单页请求」包进重试：**最多 [retryDelaysMs].size 次重试**，退避取列表里的值。
+     *
+     * ## 契约
+     *
+     * - [CancellationException] **原样抛出**，绝不重试（不能把「用户关掉弹窗」记成网络失败）；
+     * - 只重试 [IOException]（超时 / 连不上 / DNS / 连接中断 / 响应体为空都算 IO 层；
+     *   [binanceError] 抛的是普通 [Exception]，HTTP 4xx 与币安业务码**不重试**——重试一百次
+     *   也还是权限不足，只会白刷接口）；
+     * - 每次重试之间都 `ensureActive()` 检查协程是否已取消，取消了立刻停手；
+     * - 重试成功记一条 DEBUG（第 N 页第 k 次尝试成功），便于真机日志一眼看出「是重试救回来的」。
+     *
+     * @param kind    人话标签（活期/定期/借币），只用于日志
+     * @param page    页号，只用于日志
+     * @param block   实际的单页请求；必须**幂等**（只是拉数据，不写库）
+     * @return block 的返回值（第一次成功即返回）
+     * @throws Exception 非网络类异常，或重试用尽后的最后一次异常
+     */
+    private suspend fun <T> retryPageRequest(
+        kind: String,
+        page: Int,
+        retryDelaysMs: List<Long>,
+        block: suspend () -> T
+    ): T {
+        var attempt = 0
+        while (true) {
+            try {
+                val result = block()
+                if (attempt > 0) {
+                    // 第 attempt+1 次尝试成功：真机日志里一眼可见「这页是靠重试救回来的」
+                    AppLogger.d(
+                        "币安${kind}接口 第${page}页 第${attempt + 1}次尝试成功",
+                        "BinanceAccountAPI"
+                    )
+                }
+                return result
+            } catch (e: CancellationException) {
+                // 取消不重试、不包装：原样上抛
+                throw e
+            } catch (e: Exception) {
+                // 重试判据用「是不是 IO 层异常」：这不是分类，而是「换个时机可能就好了」。
+                // 币安的 HTTP 4xx / 业务码走 binanceError（普通 Exception）→ 不重试。
+                if (e !is IOException || attempt >= retryDelaysMs.size) throw e
+                val delayMs = retryDelaysMs[attempt]
+                attempt++
+                // 重试之间必须检查取消：切后台/关弹窗后不该继续打接口
+                currentCoroutineContext().ensureActive()
+                AppLogger.d(
+                    "币安${kind}接口 第${page}页 第${attempt}次尝试失败（${e::class.simpleName}），" +
+                        "${delayMs}ms 后重试",
+                    "BinanceAccountAPI"
+                )
+                if (delayMs > 0L) delay(delayMs)
+                // 退避期间可能被取消：下一轮请求前再确认一次协程仍活跃
+                currentCoroutineContext().ensureActive()
+            }
+        }
+    }
 
     /**
      * HMAC-SHA256 签名，输出小写 hex。
@@ -472,19 +702,32 @@ object BinanceAccountAPI {
     suspend fun getEarnPositions(apiKey: String, apiSecret: String): BinanceEarnFetch =
         getEarnPositions(apiKey, apiSecret, client)
 
-    /** internal 重载：允许单测注入假 client，与 [getAccount] 同惯例 */
+    /**
+     * internal 重载：允许单测注入假 client，与 [getAccount] 同惯例。
+     *
+     * @param retryDelaysMs 单页失败后的重试退避（毫秒）。默认 [DEFAULT_PAGE_RETRY_BACKOFF_MS]
+     *        （500 / 1200，共 3 次尝试）；**单测传空列表即「不重试」、传全 0 即「立即重试」**，
+     *        这样重试逻辑可以被真实覆盖，又不必让单测干等 1.7 秒（绝不能靠 Thread.sleep 撑时间）。
+     */
     internal suspend fun getEarnPositions(
         apiKey: String,
         apiSecret: String,
-        httpClient: OkHttpClient
+        httpClient: OkHttpClient,
+        retryDelaysMs: List<Long> = DEFAULT_PAGE_RETRY_BACKOFF_MS
     ): BinanceEarnFetch = withContext(Dispatchers.IO) {
         // 两个接口互不依赖，并发取省一次串行往返；各自失败互不影响。
         // 不用 runCatching：它会连 CancellationException 一起吞掉（项目铁律：取消不吞）。
         val flexible = async {
-            fetchEarnOrFailure(EARN_FLEXIBLE_URL, apiKey, apiSecret, httpClient, locked = false)
+            fetchEarnOrFailure(
+                EARN_FLEXIBLE_URL, apiKey, apiSecret, httpClient, locked = false,
+                retryDelaysMs = retryDelaysMs
+            )
         }
         val lockedPositions = async {
-            fetchEarnOrFailure(EARN_LOCKED_URL, apiKey, apiSecret, httpClient, locked = true)
+            fetchEarnOrFailure(
+                EARN_LOCKED_URL, apiKey, apiSecret, httpClient, locked = true,
+                retryDelaysMs = retryDelaysMs
+            )
         }
         // 诊断探针（非集成）：权限全开却 simple-earn 拉不到 USDT 时，顺手探一下 Staking，
         // 排除「这笔钱其实在锁仓质押而非 Simple Earn」。只记日志、绝不并入合并链路。
@@ -495,9 +738,35 @@ object BinanceAccountAPI {
 
         BinanceEarnFetch(
             positions = flexibleResult.positions + lockedResult.positions,
-            failures = flexibleResult.failures + lockedResult.failures
+            failures = flexibleResult.failures + lockedResult.failures,
+            // 首个「非权限类」失败决定文案分支：网络/限流比权限更可能是真因，也更好排查。
+            // 两边都是权限类时自然是权限提示（保持原行为）。
+            failureKind = firstActionableKind(flexibleResult, lockedResult),
+            httpCode = firstActionableHttpCode(flexibleResult, lockedResult)
         )
     }
+
+    /**
+     * 从两个接口的结果里挑出「该优先提示」的失败类别：非 [BinanceFailureKind.PERMISSION_OR_OTHER] 优先。
+     *
+     * 活期先于定期，是为了让结果稳定可测（不随并发实际完成顺序漂移）。
+     */
+    private fun firstActionableKind(
+        flexible: EarnPageOutcome,
+        locked: EarnPageOutcome
+    ): BinanceFailureKind = when {
+        flexible.failureKind != BinanceFailureKind.PERMISSION_OR_OTHER -> flexible.failureKind
+        locked.failureKind != BinanceFailureKind.PERMISSION_OR_OTHER -> locked.failureKind
+        else -> BinanceFailureKind.PERMISSION_OR_OTHER
+    }
+
+    /** 与 [firstActionableKind] 同源：取该失败对应的 HTTP 状态码，供文案写「HTTP 429」 */
+    private fun firstActionableHttpCode(flexible: EarnPageOutcome, locked: EarnPageOutcome): Int? =
+        when {
+            flexible.failureKind != BinanceFailureKind.PERMISSION_OR_OTHER -> flexible.httpCode
+            locked.failureKind != BinanceFailureKind.PERMISSION_OR_OTHER -> locked.httpCode
+            else -> null
+        }
 
     /**
      * 拉取活期借币（Flexible Loan）负债（只读）。
@@ -520,22 +789,33 @@ object BinanceAccountAPI {
     suspend fun getLoans(apiKey: String, apiSecret: String): BinanceLoanFetch =
         getLoans(apiKey, apiSecret, client)
 
-    /** internal 重载：允许单测注入假 client，与 [getAccount] 同惯例 */
+    /**
+     * internal 重载：允许单测注入假 client，与 [getAccount] 同惯例。
+     *
+     * @param retryDelaysMs 单页失败后的重试退避（毫秒），语义同 [getEarnPositions]。
+     */
     internal suspend fun getLoans(
         apiKey: String,
         apiSecret: String,
-        httpClient: OkHttpClient
+        httpClient: OkHttpClient,
+        retryDelaysMs: List<Long> = DEFAULT_PAGE_RETRY_BACKOFF_MS
     ): BinanceLoanFetch = withContext(Dispatchers.IO) {
         try {
-            val debts = fetchLoanPage(LOAN_FLEXIBLE_URL, apiKey, apiSecret, httpClient)
+            val debts = fetchLoanPage(LOAN_FLEXIBLE_URL, apiKey, apiSecret, httpClient, retryDelaysMs)
             BinanceLoanFetch(debts = debts, failures = emptyList())
         } catch (e: CancellationException) {
             // 协程取消必须原样重抛：横竖都不能把「用户关掉弹窗」记成一次权限失败
             throw e
         } catch (e: Exception) {
-            // 降级：不阻断导入，只把原因带回预览页
+            // 降级：不阻断导入，只把原因带回预览页。
+            // 失败类别决定文案：限流/服务端异常与网络问题都不该让用户去查 Loan 权限
             warnLoanFailure(e)
-            BinanceLoanFetch(debts = emptyList(), failures = listOf(e.message ?: "拉取失败"))
+            BinanceLoanFetch(
+                debts = emptyList(),
+                failures = listOf(e.message ?: "拉取失败"),
+                failureKind = classifyFailure(e),
+                httpCode = (e as? BinanceApiException)?.httpCode
+            )
         }
     }
 
@@ -548,63 +828,96 @@ object BinanceAccountAPI {
      *
      * 旧实现写死 `current=1`，在途借币 > 100 时会被截断（与 earn 同源的潜在 bug）。
      * 现改为翻页：优先用响应 `total` 精确翻页，`total` 不可用时回退到「本页行数 < 单页上限」。
+     *
+     * 每页走 [retryPageRequest]：与 earn 同源的单页重试（弱网下一次超时不该把整块负债丢掉）。
      */
     private suspend fun fetchLoanPage(
         url: String,
         apiKey: String,
         apiSecret: String,
-        httpClient: OkHttpClient
+        httpClient: OkHttpClient,
+        retryDelaysMs: List<Long>
     ): List<BinanceLoanDebt> {
         val all = mutableListOf<BinanceLoanDebt>()
         var current = 1
         var rowsFetched = 0
         var total: Int? = null
         while (current <= MAX_EARN_PAGES) {
-            val timestamp = System.currentTimeMillis()
-            // current/size 必须参与签名：它们是 query 的一部分，缺了会被判签名无效
-            // （与 fetchEarnPage 同口径，size 复用 EARN_PAGE_SIZE：真实账户的在途借币通常个位数）
-            val query =
-                "current=$current&size=$EARN_PAGE_SIZE&timestamp=$timestamp&recvWindow=$RECV_WINDOW"
-            val signature = sign(apiSecret, query)
-            val request = Request.Builder()
-                // 日志只记端点路径，url 里的 signature 由 secret 派生，绝不落盘
-                .url("$url?$query&signature=$signature")
-                .addHeader("X-MBX-APIKEY", apiKey)
-                .addHeader("User-Agent", "Mozilla/5.0")
-                .build()
-
-            val body = httpClient.newCall(request).execute().use { resp ->
-                val b = resp.body?.string()
-                    ?: throw IOException("币安返回了空响应")
-                if (!resp.isSuccessful) {
-                    // 诊断：把币安真实 HTTP 码与响应体落盘（不含密钥/签名，安全），便于排查
-                    // 404/403/-2015 等。注意只记端点路径常量，绝不记带 signature 的完整请求 URL。
-                    AppLogger.d(
-                        "币安借币接口 ${url} 返回 HTTP ${resp.code}，响应体=$b",
-                        "BinanceAccountAPI"
-                    )
-                    // 币安的 msg 说明原因（权限不足/参数错），不含密钥，可以带出去
-                    throw binanceError(b, resp.code)
-                }
-                b
+            val page = retryPageRequest("借币", current, retryDelaysMs) {
+                fetchLoanSinglePage(url, apiKey, apiSecret, httpClient, current)
             }
-            all.addAll(parseLoanOrders(body))
+            all.addAll(page.debts)
             // 借币响应同样含 total / rows，优先用 total 精确翻页，否则回退到「本页行数 < 单页上限」
-            val (pageTotal, rowCount) = try {
-                val json = JSONObject(body)
-                json.optInt("total", 0) to (json.optJSONArray("rows")?.length() ?: 0)
-            } catch (_: Exception) {
-                0 to all.size
-            }
-            if (total == null && pageTotal > 0) total = pageTotal
-            rowsFetched += rowCount
-            val lastPage = rowCount < EARN_PAGE_SIZE
+            if (total == null && page.pageTotal > 0) total = page.pageTotal
+            rowsFetched += page.rowCount
+            val lastPage = page.rowCount < EARN_PAGE_SIZE
             val exhausted = total != null && rowsFetched >= total
             if (lastPage || exhausted) break
             current++
         }
         return all
     }
+
+    /**
+     * 拉借币接口的第 [page] 页（`current=page`）。
+     *
+     * 从 [fetchLoanPage] 的循环体里抽出来，好让**单页请求**能被 [retryPageRequest] 包住重试
+     * （重试的最小单位必须是「一次请求」，不能整段翻页重来——那会把已拉到的页重复累加）。
+     */
+    private fun fetchLoanSinglePage(
+        url: String,
+        apiKey: String,
+        apiSecret: String,
+        httpClient: OkHttpClient,
+        page: Int
+    ): LoanPageResult {
+        val timestamp = System.currentTimeMillis()
+        // current/size 必须参与签名：它们是 query 的一部分，缺了会被判签名无效
+        // （与 fetchEarnPage 同口径，size 复用 EARN_PAGE_SIZE：真实账户的在途借币通常个位数）
+        val query =
+            "current=$page&size=$EARN_PAGE_SIZE&timestamp=$timestamp&recvWindow=$RECV_WINDOW"
+        val signature = sign(apiSecret, query)
+        val request = Request.Builder()
+            // 日志只记端点路径，url 里的 signature 由 secret 派生，绝不落盘
+            .url("$url?$query&signature=$signature")
+            .addHeader("X-MBX-APIKEY", apiKey)
+            .addHeader("User-Agent", "Mozilla/5.0")
+            .build()
+
+        val body = httpClient.newCall(request).execute().use { resp ->
+            val b = resp.body?.string()
+                ?: throw IOException("币安返回了空响应")
+            if (!resp.isSuccessful) {
+                // 诊断：把币安真实 HTTP 码与响应体落盘（不含密钥/签名，安全），便于排查
+                // 404/403/-2015 等。注意只记端点路径常量，绝不记带 signature 的完整请求 URL。
+                AppLogger.d(
+                    "币安借币接口 ${url} 返回 HTTP ${resp.code}，响应体=$b",
+                    "BinanceAccountAPI"
+                )
+                // 币安的 msg 说明原因（权限不足/参数错），不含密钥，可以带出去。
+                // 注意：这里抛的是普通 Exception（不是 IOException）→ 不会被当成网络失败重试。
+                throw binanceError(b, resp.code)
+            }
+            b
+        }
+        val debts = parseLoanOrders(body)
+        val (pageTotal, rowCount) = try {
+            val json = JSONObject(body)
+            json.optInt("total", 0) to (json.optJSONArray("rows")?.length() ?: 0)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            0 to debts.size
+        }
+        return LoanPageResult(debts = debts, pageTotal = pageTotal, rowCount = rowCount)
+    }
+
+    /** [fetchLoanSinglePage] 的搬运容器：本页负债 + 本页声明的总数 + 本页行数 */
+    private data class LoanPageResult(
+        val debts: List<BinanceLoanDebt>,
+        val pageTotal: Int,
+        val rowCount: Int
+    )
 
     /**
      * 解析借币负债响应：`{"rows":[{"loanCoin":"USDT","totalDebt":"50.80033811",...}],"total":N}`。
@@ -679,10 +992,11 @@ object BinanceAccountAPI {
         apiKey: String,
         apiSecret: String,
         httpClient: OkHttpClient,
-        locked: Boolean
+        locked: Boolean,
+        retryDelaysMs: List<Long>
     ): EarnPageOutcome =
         try {
-            fetchEarnPage(url, apiKey, apiSecret, httpClient, locked)
+            fetchEarnPage(url, apiKey, apiSecret, httpClient, locked, retryDelaysMs)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -690,7 +1004,10 @@ object BinanceAccountAPI {
             warnEarnFailure(kind, e)
             EarnPageOutcome(
                 positions = emptyList(),
-                failures = listOf("$kind：${e.message ?: "拉取失败"}")
+                failures = listOf("$kind：${e.message ?: "拉取失败"}"),
+                // 整条接口都没拉成时也要分流：网络/限流不该让用户去翻 API Key 权限
+                failureKind = classifyFailure(e),
+                httpCode = (e as? BinanceApiException)?.httpCode
             )
         }
 
@@ -717,33 +1034,56 @@ object BinanceAccountAPI {
      *
      * HTTP 200 但响应形状异常时，本页不抛（交给 [parseEarnPositions] 部分成功），
      * 但已解析出的持仓照常带回去，形状问题也记进 failures。
+     *
+     * ## 单页重试
+     *
+     * 每页都经 [retryPageRequest] 包一层（最多 2 次重试，退避见 [DEFAULT_PAGE_RETRY_BACKOFF_MS]）。
+     * 重试的最小单位是**一页**，不是整段翻页——整段重来会把已拉到的页重复累加。
+     * 重试用尽仍失败才走原来的「保留已拉到的页、记 failure、停止翻页」契约。
+     *
+     * @param retryDelaysMs 单页重试退避（毫秒），空列表 = 不重试（单测用）
      */
     private suspend fun fetchEarnPage(
         url: String,
         apiKey: String,
         apiSecret: String,
         httpClient: OkHttpClient,
-        locked: Boolean
+        locked: Boolean,
+        retryDelaysMs: List<Long> = DEFAULT_PAGE_RETRY_BACKOFF_MS
     ): EarnPageOutcome {
         val kind = earnKindLabel(locked)
         val allPositions = mutableListOf<BinanceEarnPosition>()
         val allFailures = mutableListOf<String>()
+        // 首个非「权限类」的失败决定最终文案分支（网络 / 限流），并记住它的 HTTP 码
+        var failureKind = BinanceFailureKind.PERMISSION_OR_OTHER
+        var failureHttpCode: Int? = null
         var current = 1
         var rowsFetched = 0
         // 币安声明的总条数：优先用它精确翻页；为 0/负数时视为未知，回退到「本页行数 < 单页上限」启发式
         var total: Int? = null
         while (current <= MAX_EARN_PAGES) {
             val parsed = try {
-                fetchEarnSinglePage(url, apiKey, apiSecret, httpClient, locked, current)
+                // 单页重试：弱网下一次 SocketTimeout 不该让整块持仓从此消失
+                retryPageRequest(kind, current, retryDelaysMs) {
+                    fetchEarnSinglePage(url, apiKey, apiSecret, httpClient, locked, current)
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                // 翻页中途某页失败：保留已拉到的，记录原因，停止翻页。
+                // 翻页中途某页失败（且重试用尽）：保留已拉到的，记录原因，停止翻页。
                 // 绝不让「第 2 页挂了」把第 1 页已拉到的数据一起连坐丢光。
                 allFailures.add(
                     "$kind：第${current}页拉取失败（${e.message ?: "未知错误"}），" +
                         "已拉到的前 ${current - 1} 页照常导入"
                 )
+                // 网络/限流类失败单独归类：决定 warning 走「检查网络」「等几分钟」还是「检查权限/IP」
+                val pageKind = classifyFailure(e)
+                if (failureKind == BinanceFailureKind.PERMISSION_OR_OTHER &&
+                    pageKind != BinanceFailureKind.PERMISSION_OR_OTHER
+                ) {
+                    failureKind = pageKind
+                    failureHttpCode = (e as? BinanceApiException)?.httpCode
+                }
                 AppLogger.w(
                     "币安理财接口[$kind] 第${current}页拉取失败，停止翻页：${e::class.simpleName}",
                     "BinanceAccountAPI"
@@ -762,7 +1102,12 @@ object BinanceAccountAPI {
             if (lastPage || exhausted) break
             current++
         }
-        return EarnPageOutcome(positions = allPositions, failures = allFailures)
+        return EarnPageOutcome(
+            positions = allPositions,
+            failures = allFailures,
+            failureKind = failureKind,
+            httpCode = failureHttpCode
+        )
     }
 
     /**
@@ -810,12 +1155,17 @@ object BinanceAccountAPI {
             }
             val parsed = parseEarnPositions(body, locked)
             val kind = earnKindLabel(locked)
+            // 诊断：在原有「响应 N 行 → 有效 M 行」后面直接标出 USDT 在不在本页，以及本页前 3 个资产。
+            // 目的：真机「USDT 144.99 到底在不在 simple-earn 返回里」这个问题，一眼可判——
+            // 在 → 是我们合并/落库丢了；不在 → 是接口侧没给（权限/地区/钱不在这里），别再改合并公式。
             AppLogger.d(
                 "币安理财接口[$kind] 第${page}页 响应 ${parsed.rowCount} 行 → 有效 ${parsed.positions.size} 行" +
                     (if (parsed.emptyRows > 0) "，空壳 ${parsed.emptyRows} 行" else "") +
                     (if (parsed.badRows.isNotEmpty()) {
                         "，被跳过 ${parsed.badRows.size} 行（${parsed.badRows.joinToString("、")}）"
-                    } else ""),
+                    } else "") +
+                    "，含USDT=${describeUsdt(parsed.positions)}" +
+                    "，本页前3个资产=${describeHeadAssets(parsed.positions)}",
                 "BinanceAccountAPI"
             )
             // 形状异常（非 JSON / 无 rows / 行内缺字段）**或接口回了 200 但 0 条有效持仓**时，
@@ -842,6 +1192,34 @@ object BinanceAccountAPI {
 
     /** 活期 / 定期的人话标签（用于失败原因与诊断日志） */
     private fun earnKindLabel(locked: Boolean): String = if (locked) "定期" else "活期"
+
+    /**
+     * 诊断用：本页有没有 USDT，有就带上金额（`是(144.99343452)` / `否`）。
+     *
+     * 只进日志、不参与任何判定——它是给「USDT 到底在不在接口返回里」这个反复排查的问题
+     * 一个确定性答案，而不是又一次靠猜。
+     */
+    private fun describeUsdt(positions: List<BinanceEarnPosition>): String {
+        val usdt = positions.firstOrNull { it.asset.uppercase(Locale.US) == "USDT" }
+            ?: return "否"
+        return "是(${formatAmount(usdt.amount)})"
+    }
+
+    /** 诊断用：本页前 3 个资产（`USDT:144.99、BUSD:12.3…`），看清接口到底给了什么 */
+    private fun describeHeadAssets(positions: List<BinanceEarnPosition>): String {
+        if (positions.isEmpty()) return "无"
+        return positions.take(3).joinToString("、") {
+            "${it.asset}:${formatAmount(it.amount)}"
+        }
+    }
+
+    /**
+     * 把金额格式化成诊断日志里好读的形态：最多 8 位小数、去掉尾随 0。
+     *
+     * 固定用 [Locale.US]：日志是要拿去 grep 的，绝不能让某些语言环境把小数点变成逗号。
+     */
+    private fun formatAmount(value: Double): String =
+        String.format(Locale.US, "%.8f", value).trimEnd('0').trimEnd('.')
 
     /**
      * 解析理财持仓响应：`{"rows":[{...}],"total":N}`。
@@ -1144,7 +1522,7 @@ object BinanceAccountAPI {
      * internal：行情门面的加密货币取价也走这套口径（同样要区分"被地区限制"和"代码写错"），
      * 错误提示只此一份实现。
      */
-    internal fun binanceError(body: String, httpCode: Int): Exception {
+    internal fun binanceError(body: String, httpCode: Int): BinanceApiException {
         // 地区限制：币安按条款 "b. Eligibility" 挡部分地区/IP，常返回 451 或
         // {"code":0,"msg":"Service unavailable from a restricted location..."}。
         // 只给英文原文用户不知道该干嘛，补一句可操作的中文——换允许地区的代理节点即可。
@@ -1155,14 +1533,26 @@ object BinanceAccountAPI {
             val msg = obj.optString("msg").ifBlank { "HTTP $httpCode" }
             val isGeo = httpCode == 451 ||
                 msg.contains("restricted location", true) ||
-                msg.contains("Eligibility", true) ||
-                msg.contains("Service unavailable", true)
-            Exception("币安拒绝请求（$code）：$msg" + if (isGeo) geoHint else "")
+                msg.contains("Eligibility", true)
+            // 注意这里**不**认裸的 "Service unavailable"：503/500 的响应体常常就写着
+            // "Service Unavailable"，那种是服务端抖动（等几分钟），让用户去换代理节点是
+            // 另一种误导——正是本轮在消除的同一类问题。真正的 451 由状态码兜住。
+            // httpCode 单独带着：上层要按 418/429/5xx 分流出「限流或服务端异常」文案，
+            // 不能去 message 里 contains("429") 猜（币安业务码本身也是数字，会误判）
+            BinanceApiException(
+                httpCode = httpCode,
+                binanceCode = code,
+                message = "币安拒绝请求（$code）：$msg" + if (isGeo) geoHint else ""
+            )
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             // 非 JSON body（451 有时返回纯文本/HTML）：按状态码兜底，451 同样给地区提示
-            Exception("币安请求失败（HTTP $httpCode）" + if (httpCode == 451) geoHint else "")
+            BinanceApiException(
+                httpCode = httpCode,
+                binanceCode = httpCode,
+                message = "币安请求失败（HTTP $httpCode）" + if (httpCode == 451) geoHint else ""
+            )
         }
     }
 

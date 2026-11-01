@@ -886,6 +886,11 @@ class BinanceImportServiceTest {
      * 同时用户还有一笔 USDT 借币负债、一笔 USDC 抵押。归组键会先剥掉 `#loan`/`#collateral`
      * 后缀，负债行与现货 USDT 因此同键 —— 一旦被折叠判定命中，负债行会被写成 0：
      * 净资产凭空虚高 50.8 USDT（欠币安的钱凭空消失）、抵押资产凭空少 43.57 USDC。
+     *
+     * ⚠️ 2026-11-01 更新：本用例原来断言「现货行 id=1 应被清零」——那**正是**真机 P0 的
+     * 症状（commit 先把 USDT 主行写成 142.08、再被同一 id 的清零行写成 0，用户看到数量变 0，
+     * 下次预览满屏「覆盖 0 → X」）。主行是本次导入的权威数据，绝不能被清零，
+     * 因此这里改为断言清零名单为空，同时仍然钉住「负债/抵押行一动都不动」。
      */
     @Test
     fun 借币负债行不被当成被折叠的旧行清零() = runBlocking {
@@ -917,15 +922,144 @@ class BinanceImportServiceTest {
         val preview = service.buildPreview(merged, existingAssets = listOf(spot, debt, collateral))
 
         assertEquals(
-            "只应清零被折叠的现货行，负债/抵押行必须留下",
-            listOf(1L),
+            "负债/抵押行必须留下；现货 USDT 主行是本次导入的权威数据，同样不得清零",
+            emptyList<Long>(),
             preview.supersededAssets.map { it.id }
         )
 
         service.commit(preview, account = "币安", prices = emptyMap())
-        // 负债行数量没变 → UNCHANGED 跳过，绝不能被写成 0
+        // 负债/抵押行数量没变 → UNCHANGED 跳过，绝不能被写成 0
         coVerify(exactly = 0) { repo.updateBalance(2L, any()) }
         coVerify(exactly = 0) { repo.updateBalance(3L, any()) }
+        // 主行数量必须被写成币安实际数量（而不是 0）——这正是 P0 的核心不变量
+        coVerify(exactly = 1) { repo.updateBalance(1L, 142.08565983) }
+        coVerify(exactly = 0) { repo.updateBalance(1L, 0.0) }
+    }
+
+    /**
+     * 真机 P0 端到端回归：现货 + 活期理财壳折叠成一行时，上一轮写进库里的主行**不得被清零**。
+     *
+     * 故障现象（诊断日志 2026-11-01）：连续两次导入都是「共 145 条，新增 0，覆盖 136，未变 9」，
+     * 两次完全一致；资产数量变 0，下次预览满屏「覆盖 0 → 0.00000299」。
+     * 根因：折叠行剥掉 LD 前缀后与主行同 symbol，`findSupersededAssets` 把主行也当成旧行，
+     * commit 于是「先写对、再清零」。
+     */
+    @Test
+    fun 折叠后主行不被清零_数量按币安实际写入() = runBlocking {
+        // 币安真实形状：现货 BNB 0.0006 + 活期理财壳 LDBNB，折叠成 BNBUSDT 一行
+        val merged = mergeEarnIntoBalances(
+            balances = listOf(
+                balance("BNB", free = 0.0006),
+                balance("LDBNB", free = 0.0)
+            ),
+            earn = emptyList()
+        )
+        // 上一轮导入写进库的主行（数量已是「被清零后」的 0，正是用户看到的现象）
+        val mainRow = cryptoAsset(id = 11, symbol = "BNBUSDT", balance = 0.0)
+        val preview = service.buildPreview(merged, existingAssets = listOf(mainRow))
+
+        assertTrue(
+            "主行 BNBUSDT 本次要落库，绝不能进清零名单",
+            preview.supersededAssets.none { it.id == 11L }
+        )
+        assertEquals("BNBUSDT", preview.items.single().symbol)
+        assertEquals(0.0006, preview.items.single().quantity, 1e-12)
+
+        service.commit(preview, account = "币安", prices = emptyMap())
+        // 唯一一次写入就是币安实际数量；绝不能出现同一 id 的 0 写入
+        coVerify(exactly = 1) { repo.updateBalance(11L, 0.0006) }
+        coVerify(exactly = 0) { repo.updateBalance(11L, 0.0) }
+    }
+
+    /**
+     * 落库顺序契约：**清零行在前、主行在后**。
+     *
+     * `SnapshotAlignment.commit` 是按 rows 顺序逐行 `updateBalance`，同一个 id 出现两次
+     * 就是「后写覆盖前写」。正常情况下同一个 id 不会同时出现在 `supersededAssets` 与
+     * `items` 里（`findSupersededAssets` 已排除 importedSymbols），所以顺序是**最后一道
+     * 防线**，没有任何真实数据能走到它——只能手工构造 Preview 来钉。
+     *
+     * 为什么值得钉：真机 P0 就是顺序错的后果（items 在先 → 写成 0）。这条用例把
+     * 「新鲜数量最后落库」变成一条可执行的不变量，而不是注释里的承诺。
+     */
+    @Test
+    fun 同一行既在清零名单又是主行时_主行数量最后落库() = runBlocking {
+        val row = cryptoAsset(id = 99L, symbol = "BNBUSDT", balance = 0.0)
+        // 按调用顺序记下每次写入的数量，用来断言「谁覆盖了谁」
+        val writes = mutableListOf<Double>()
+        coEvery { repo.updateBalance(99L, any()) } coAnswers {
+            writes.add(secondArg())
+        }
+
+        val preview = BinanceImportService.Preview(
+            items = listOf(
+                BinanceImportService.PreviewItem(
+                    symbol = "BNBUSDT",
+                    name = "BNB",
+                    quantity = 0.0006,
+                    existing = row,
+                    status = BinanceImportService.ItemStatus.UPDATE
+                )
+            ),
+            supersededAssets = listOf(row)
+        )
+
+        service.commit(preview, account = "币安", prices = emptyMap())
+
+        assertEquals(
+            "清零行必须先写、主行后写：最终落库值必须是币安实际数量，不能是 0",
+            listOf(0.0, 0.0006),
+            writes
+        )
+    }
+
+    /**
+     * 端到端「连续两次导入」收敛性：第二轮必须判为**未变**。
+     *
+     * 真机症状是「连续两次导入都是覆盖 136、未变 9，两次一模一样」——因为第一轮写进去的
+     * 数量被同一轮的清零行覆盖成 0，第二轮看起来「每条都变了」。
+     *
+     * 这里用一个有状态的假仓库（记住上一轮实际写进去的值）把两轮串起来跑：第一轮落库
+     * → 把落库结果当作第二轮的库内状态 → 第二轮必须是 UNCHANGED、且无待落库项。
+     * 只要「写对再清零」复发，第二轮立刻重新变成 UPDATE，这条用例就会红。
+     */
+    @Test
+    fun 连续两次导入时第二轮判为未变_不再满屏覆盖() = runBlocking {
+        val store = mutableMapOf<Long, Double>(1L to 0.0)
+        coEvery { repo.updateBalance(any(), any()) } coAnswers {
+            store[firstArg<Long>()] = secondArg()
+        }
+
+        val merged = mergeEarnIntoBalances(
+            balances = listOf(balance("BNB", free = 0.0006), balance("LDBNB", free = 0.0)),
+            earn = emptyList()
+        )
+
+        // 第一轮：库里是「上一轮被清零后的 0」，正是用户真机的起点
+        val round1 = service.buildPreview(merged, existingAssets = listOf(cryptoAsset(1L, "BNBUSDT", 0.0)))
+        service.commit(round1, account = "币安", prices = emptyMap())
+        assertEquals(
+            "第一轮必须把币安实际数量写进库（而不是写 0）",
+            0.0006,
+            store.getValue(1L),
+            1e-12
+        )
+
+        // 第二轮：库里已是上一轮写入的值
+        val round2 = service.buildPreview(
+            merged,
+            existingAssets = listOf(cryptoAsset(1L, "BNBUSDT", store.getValue(1L)))
+        )
+        assertEquals(
+            "第二轮应判为未变（收敛），不该再「覆盖」一次",
+            BinanceImportService.ItemStatus.UNCHANGED,
+            round2.items.single().status
+        )
+        assertEquals("第二轮不该有任何待落库项", 0, round2.pendingCount)
+        assertTrue(
+            "第二轮同样不得把主行清零",
+            round2.supersededAssets.none { it.id == 1L }
+        )
     }
 
     @Test

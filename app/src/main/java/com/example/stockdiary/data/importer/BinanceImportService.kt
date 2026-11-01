@@ -12,6 +12,7 @@ import com.example.stockdiary.utils.ExchangeRateManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import java.util.Locale
 import kotlin.math.abs
 
 /**
@@ -129,6 +130,12 @@ class BinanceImportService(
          * 为什么必须清零：合并只改 quantity 不足以让列表少一行——旧行留在库里还是
          * 一条独立资产，用户看到的仍是「同一个币两行」，而且它们的数量已经计入了新行，
          * 留着就是同一笔钱记两遍（正是 USDC / LDUSDC 那个现象）。
+         *
+         * ## 绝不能包含 [items] 自己（2026-11-01 P0）
+         *
+         * 折叠行剥掉 LD 前缀后与主行同 symbol（`LDBNB` 与 `BNB` 都映射成 `BNBUSDT`），
+         * 一旦按「同底层」把主行也选进来，commit 就会「先把数量写对、再用清零行写 0」，
+         * 每次导入都把资产清空。所以 [findSupersededAssets] 必须排除 `items` 的 symbol。
          */
         val supersededAssets: List<Asset> = emptyList()
     ) {
@@ -351,8 +358,14 @@ class BinanceImportService(
 
         return Preview(
             items = items,
-            // 同一底层资产折叠成一行后，被折掉那行在库里的旧资产要清零（见 [Preview.supersededAssets]）
-            supersededAssets = findSupersededAssets(balances, existingAssets)
+            // 同一底层资产折叠成一行后，被折掉那行在库里的旧资产要清零（见 [Preview.supersededAssets]）。
+            // 第三个参数**必须**传「本次要落库的 symbol 集合」：折叠行剥掉 LD 前缀后与主行同
+            // symbol，不排除它就会把主行自己当成「要清零的旧行」——见 [findSupersededAssets]。
+            supersededAssets = findSupersededAssets(
+                balances = balances,
+                existingAssets = existingAssets,
+                importedSymbols = items.map { it.symbol }.toSet()
+            )
         )
     }
 
@@ -373,7 +386,14 @@ class BinanceImportService(
         prices: Map<String, Double> = emptyMap()
     ): CommitResult {
         val result = SnapshotAlignment.commit(
-            rows = preview.items.map { it.toCommitRow(prices) } + preview.supersededAssets.map { it.toZeroRow() },
+            // ⚠️ 顺序是防御性设计，不是随手排的：**清零行在前、本次主行在后**。
+            // [SnapshotAlignment.commit] 按列表顺序逐行 updateBalance，同一 id 出现两次就是
+            // 「后写覆盖前写」。若某条旧行同时出现在两个列表里（正常不会——[Preview.supersededAssets]
+            // 已排除 items 的 symbol），让「本次从币安拉到的新鲜数量」最后落库才是唯一正确的
+            // 结果。反过来（items 在前）就是真机 P0：先把数量写对、再被清零行写 0，
+            // 每次导入都清空资产，下次预览满屏「覆盖 0 → X」。
+            rows = preview.supersededAssets.map { it.toZeroRow() } +
+                preview.items.map { it.toCommitRow(prices) },
             writer = writer,
             account = account,
             policy = commitPolicy
@@ -676,6 +696,9 @@ internal fun mergeEarnIntoBalances(
     }
 
     var folded = 0
+    // 诊断：USDT 的三个分量（现货 / 活期 / 定期）。只在 key=="USDT" 时填，末尾拼进日志。
+    // 目的：真机反复排查「USDT 到底被哪一步算少了」时，一眼看到分量，不必再猜。
+    var usdtDetail: String? = null
     val merged = mutableListOf<BinanceBalance>()
     val accountKeys = groupIndices.keys
     groupIndices.forEach { (key, indices) ->
@@ -683,6 +706,9 @@ internal fun mergeEarnIntoBalances(
         // 单一来源且理财也无此资产：原样透传（保留它的 free/locked 原貌），典型是纯现货
         if (members.size == 1 && key !in earnFlex && key !in earnLock) {
             merged.add(members[0])
+            if (key == USDT_ASSET) {
+                usdtDetail = "现货=${fmtAmount(members[0].total)}、活期=0（账户无理财壳、接口无此资产）、定期=0"
+            }
             return@forEach
         }
         val carrier = pickCarrier(members)
@@ -695,6 +721,11 @@ internal fun mergeEarnIntoBalances(
         // 定期/锁仓：账户余额里没有，恒为独立金库，直接相加（修复「仅定期、现货无此笔」漏算）
         val lock = earnLock[key] ?: 0.0
         val total = spotTotal + flex + lock
+        if (key == USDT_ASSET) {
+            usdtDetail = "现货=${fmtAmount(spotTotal)}、" +
+                "活期=max(壳${fmtAmount(flexAccount)},接口${fmtAmount(earnFlex[key] ?: 0.0)})=>${fmtAmount(flex)}、" +
+                "定期=${fmtAmount(lock)}"
+        }
         merged.add(
             BinanceBalance(
                 asset = carrier.asset,
@@ -721,6 +752,11 @@ internal fun mergeEarnIntoBalances(
         if (asset !in known) {
             // 账户完全没有该底层：活期 + 定期一起兜底补进来（账户漏的这里补全）
             val amount = (earnFlex[asset] ?: 0.0) + (earnLock[asset] ?: 0.0)
+            if (asset == USDT_ASSET) {
+                usdtDetail = "现货=0（账户无该资产）、" +
+                    "活期=max(壳0,接口${fmtAmount(earnFlex[asset] ?: 0.0)})=>${fmtAmount(earnFlex[asset] ?: 0.0)}、" +
+                    "定期=${fmtAmount(earnLock[asset] ?: 0.0)}"
+            }
             merged.add(
                 BinanceBalance(
                     asset = asset,
@@ -735,11 +771,24 @@ internal fun mergeEarnIntoBalances(
 
     AppLogger.i(
         "币安理财持仓合并： ${balances.size} 项 + 理财 ${allEarnKeys.size} 个资产 → " +
-            "折叠 $folded 行、新增 $added 项",
+            "折叠 $folded 行、新增 $added 项" +
+            // 只在 USDT 有关时追加分量：它是总资产里占比最大、也是真机反复对不上的那一笔
+            (usdtDetail?.let { "；USDT 分量：$it" } ?: ""),
         "BinanceImport"
     )
     return merged
 }
+
+/** 诊断日志里专门盯的资产：真机「总资产对不上」几乎都从它开始查 */
+private const val USDT_ASSET = "USDT"
+
+/**
+ * 把金额格式化成诊断日志里好读的形态：最多 8 位小数、去掉尾随 0。
+ *
+ * 固定用 [Locale.US]：日志是要拿去 grep 的，绝不能让某些语言环境把小数点变成逗号。
+ */
+private fun fmtAmount(value: Double): String =
+    String.format(Locale.US, "%.8f", value).trimEnd('0').trimEnd('.')
 
 /**
  * 从同一底层资产的多行里挑出**承载**那一行：持仓量最大的优先，持平则优先 LD 壳。
@@ -796,10 +845,33 @@ private fun underlyingKeyOf(symbol: String): String {
  *
  * 为什么限定「同底层还有别的行有钱」：币安会把历史接触过的币都列成 0 余额，
  * 那些行只是 dust，不该把用户手动建的同类持仓一并清掉。
+ *
+ * ## ⚠️ 为什么必须排除 importedSymbols（2026-11-01 真机 P0）
+ *
+ * 折叠出来的 0 数量行保留**原始资产名**（`LDBNB`），而 [symbolForBalance] 会把它剥成
+ * 底层交易对 `BNBUSDT`——与主行（现货 `BNB` → `BNBUSDT`）**映射到同一个 symbol**，
+ * 于是 [underlyingKeyOf] 也把两者算成同一个底层 `BNB`。「库里同底层」这个判据因此无法
+ * 区分「被折掉的历史旧行」与「本次正要写入的主行」，会顺手把主行也选进清零名单。
+ *
+ * 后果是 [BinanceImportService.commit] 先把主行数量写对、紧接着同一 id 的清零行再写 0，
+ * 后写覆盖前写 —— 每次导入都「写对再清零」：用户看到资产数量变 0，下次预览里几乎所有
+ * 条目都是「覆盖 0 → 0.00000299」。真机日志实锤：连续两次导入都「共 145 条，覆盖 136，
+ * 未变 9」，两次完全一样，就是因为上一轮写进去的数量被自己清掉了。
+ *
+ * 所以这里要传入「本次导入真正要落库的 symbol 集合」（`preview.items` 的 symbol），
+ * 只清零**同底层、但本次不作为任何 item 落库**的历史行（典型：历史版本落过的 LD 裸码行
+ * `LDBNB`；主行 `BNBUSDT` 本次要落库，必须排除）。
+ *
+ * @param balances        本次导入的余额（已过 [mergeEarnIntoBalances]，折叠行数量为 0）
+ * @param existingAssets  库里已有的加密货币资产
+ * @param importedSymbols 本次要落库的 symbol 集合（`preview.items.map { it.symbol }`）。
+ *                        **刻意不给默认值**：这是 P0 的关键参数，任何新调用方都必须明确回答
+ *                        「哪些行是本次要写入的」，否则又会把主行清零。
  */
 internal fun findSupersededAssets(
     balances: List<BinanceBalance>,
-    existingAssets: List<Asset>
+    existingAssets: List<Asset>,
+    importedSymbols: Set<String>
 ): List<Asset> {
     if (existingAssets.isEmpty()) return emptyList()
     // 这次导入里「有钱」的底层资产键（归并后只剩这些底层，LD 壳已并入）
@@ -819,9 +891,14 @@ internal fun findSupersededAssets(
     // 后缀再归组，于是 USDT#loan 与 USDT 同键——一旦命中折叠判定就会被写成 0，
     // 欠币安的钱凭空消失、净资产虚高（真机组合：USDT 现货行与 LDUSDT 壳被折叠，
     // 同时用户还有一笔 USDT 借币）。它们从来不是「被折进主行的旧行」。
+    //
+    // importedSymbols 里的行同样必须**排除**：这些是本次导入的主行（fresh 数据的唯一权威），
+    // 由 commit 的 items 分支按币安实际数量写入；把它们当旧行清零就是 P0「主行被清零」。
     return existingAssets.filter { asset ->
         val symbol = asset.symbol ?: return@filter false
         if (isLoanDebtSymbol(symbol) || isLoanCollateralSymbol(symbol)) return@filter false
+        // 本次要落库的主行：绝不在这里清零（折叠行剥 LD 后与主行同 symbol，见上面的长注释）
+        if (symbol in importedSymbols) return@filter false
         underlyingKeyOf(symbol) in foldedUnderlying
     }
 }

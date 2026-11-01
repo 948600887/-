@@ -1,6 +1,7 @@
 package com.example.stockdiary.network
 
 import com.example.stockdiary.data.importer.baseAssetToSymbol
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
 import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaType
@@ -14,8 +15,13 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.InterruptedIOException
+import java.net.ConnectException
+import java.net.SocketTimeoutException
 import java.net.URLDecoder
+import java.net.UnknownHostException
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * 币安签名与 symbol 映射的回归。
@@ -654,7 +660,547 @@ class BinanceAccountAPITest {
         assertEquals(144.99343452, fetch.positions.single { it.asset == "USDT" }.amount, 1e-8)
     }
 
+    // ---------- 单页重试：弱网抖一次不该让整块持仓消失 ----------
+
+    /**
+     * 构造一个「活期第 2 页首次请求抛 SocketTimeoutException、重试起正常」的假 client。
+     *
+     * @return 生成的 client + 第 2 页的请求尝试次数计数器（用来断言真的重试了）
+     */
+    private fun clientWithFlakySecondPage(
+        flexiblePage1: String,
+        flexiblePage2: String
+    ): Pair<OkHttpClient, AtomicInteger> {
+        val page2Attempts = AtomicInteger(0)
+        val client = OkHttpClient.Builder()
+            .addInterceptor(object : Interceptor {
+                override fun intercept(chain: Interceptor.Chain): Response {
+                    val url = chain.request().url
+                    val current = (url.query ?: "")
+                        .substringAfter("current=")
+                        .substringBefore("&")
+                        .toIntOrNull() ?: 1
+                    val path = url.encodedPath
+                    // 只有活期接口参与本用例；定期与 Staking 探针回空数组，不干扰断言
+                    if (!path.contains("/flexible/")) {
+                        return jsonResponse(chain.request(), """{"rows":[],"total":0}""")
+                    }
+                    if (current <= 1) {
+                        return jsonResponse(chain.request(), flexiblePage1)
+                    }
+                    // 第 2 页：**第一次**抛读超时（真机 20:59:52 就是这个异常），之后正常
+                    if (page2Attempts.incrementAndGet() == 1) {
+                        throw SocketTimeoutException("timeout")
+                    }
+                    return jsonResponse(chain.request(), flexiblePage2)
+                }
+            })
+            .build()
+        return client to page2Attempts
+    }
+
+    /** 拼一个 200 + application/json 的假响应 */
+    private fun jsonResponse(request: okhttp3.Request, body: String): Response =
+        Response.Builder()
+            .request(request)
+            .protocol(Protocol.HTTP_1_1)
+            .code(200)
+            .message("OK")
+            .body(body.toResponseBody("application/json".toMediaType()))
+            .build()
+
+    /**
+     * 真机根因回归：活期第 2 页**首次**抛 `SocketTimeoutException`，重试后返回正常数据 → 仍拉全。
+     *
+     * 诊断日志 2026-11-01 20:59:52：「币安理财接口[活期] 第2页拉取失败，停止翻页：
+     * SocketTimeoutException」——一次弱网抖动就让 USDT（144.99，在第 2 页）整块漏掉，
+     * 用户侧表现为「导入的资产比币安 App 少」。修复后单页最多重试 2 次（共 3 次尝试），
+     * 第 2 次尝试成功即照常翻页，USDT 不再漏。
+     *
+     * 注意退避传 0：重试会引入真实 delay，单测绝不能靠 Thread.sleep 撑时间。
+     */
+    @Test
+    fun 活期第2页首次超时_重试后仍拉全() = runBlocking {
+        val pageSize = 100
+        val page1 = buildString {
+            append("{\"rows\":[")
+            append((0 until pageSize).joinToString(",") { """{"asset":"EARN$it","totalAmount":"1.0"}""" })
+            append("],\"total\":101}")
+        }
+        val page2 = """{"rows":[{"asset":"USDT","totalAmount":"144.99343452"}],"total":101}"""
+        val (client, page2Attempts) = clientWithFlakySecondPage(page1, page2)
+
+        val fetch = BinanceAccountAPI.getEarnPositions(
+            "dummyKey",
+            "dummySecret",
+            client,
+            retryDelaysMs = listOf(0L, 0L)
+        )
+
+        assertEquals("第 2 页应尝试 2 次（首次超时 + 重试成功）", 2, page2Attempts.get())
+        assertTrue("重试成功后不该再报失败", fetch.failures.isEmpty())
+        assertEquals("第1页满100 + 第2页1 = 101，一条都不该漏", 101, fetch.positions.size)
+        val usdt = fetch.positions.single { it.asset == "USDT" }
+        assertEquals(144.99343452, usdt.amount, 1e-8)
+    }
+
+    /**
+     * 重试用尽仍失败时，契约不变：保留已拉到的页、记 failure、**提示按网络类分流**。
+     *
+     * 真机教训：第 2 页明明是 `SocketTimeoutException`（网络），旧文案却让用户去确认
+     * 「读取 / Enable Reading」权限与 IP 白名单——用户照着翻了一整轮 API Key 设置也解决不了。
+     */
+    @Test
+    fun 单页超时重试用尽后_提示网络问题而不是权限() = runBlocking {
+        val client = OkHttpClient.Builder()
+            .addInterceptor(object : Interceptor {
+                override fun intercept(chain: Interceptor.Chain): Response {
+                    val path = chain.request().url.encodedPath
+                    if (path.contains("/flexible/")) {
+                        // 活期一直超时：重试用尽后必须放弃翻页
+                        throw SocketTimeoutException("timeout")
+                    }
+                    return jsonResponse(chain.request(), """{"rows":[],"total":0}""")
+                }
+            })
+            .build()
+
+        // retryDelaysMs 传空 = 不重试，避免单测等真实退避；重试路径由上一个用例覆盖
+        val fetch = BinanceAccountAPI.getEarnPositions(
+            "dummyKey",
+            "dummySecret",
+            client,
+            retryDelaysMs = emptyList()
+        )
+
+        assertFalse(fetch.failures.isEmpty())
+        val warning = fetch.warning
+        assertNotNull("失败必须给出用户能看到的原因", warning)
+        assertTrue(
+            "超时属网络问题，提示必须指向网络/代理：实际=$warning",
+            warning!!.contains("网络或代理不稳定")
+        )
+        assertFalse(
+            "网络问题不该让用户去翻 API Key 权限/白名单：实际=$warning",
+            warning.contains("Enable Reading")
+        )
+    }
+
+    // ---------- 重试的**边界**：哪些异常绝不重试 ----------
+    // 上面两条证明「IO 失败会重试」，下面两条证明「取消」与「业务/权限错误」不会被重试。
+    // 少了它们，把 `retryPageRequest` 写成「catch (e: Exception) 一律重试 3 次」也能过测试，
+    // 而那会造成两个真机问题：用户关掉导入弹窗后仍继续打接口；-2015 权限不足白刷 3 次。
+
+    /**
+     * 协程取消必须**原样抛出、绝不重试**。
+     *
+     * 「用户关掉导入弹窗」在协程里就是 [CancellationException]。如果它被
+     * `catch (e: Exception)` 当成可重试异常吞掉，真机表现是：弹窗已关，后台还在按
+     * 500ms→1200ms 退避继续发签名请求，并且被记成一次「失败」影响后续提示。
+     *
+     * 判据取两件事：**只发出 1 次请求**（没重试）+ 抛出来的仍是 CancellationException（没被包装）。
+     */
+    @Test
+    fun 协程取消不被重试_且原样抛出() = runBlocking {
+        // 只数**活期接口**的请求次数：`getEarnPositions` 还会并发拉定期、并额外发一次
+        // Staking 诊断探针，把它们算进来就分不清「重试」和「另一个接口」了
+        val attempts = AtomicInteger(0)
+        val client = OkHttpClient.Builder()
+            .addInterceptor(object : Interceptor {
+                override fun intercept(chain: Interceptor.Chain): Response {
+                    val path = chain.request().url.encodedPath
+                    if (!path.contains("/simple-earn/flexible/")) {
+                        return jsonResponse(chain.request(), """{"rows":[],"total":0}""")
+                    }
+                    attempts.incrementAndGet()
+                    throw CancellationException("用户关掉了导入弹窗")
+                }
+            })
+            .build()
+
+        // 捕获 Throwable：CancellationException 在协程里是「取消」而非「失败」，
+        // 用 catch (e: Exception) 也接得到，但写全 Throwable 免得将来换成别的取消类型漏掉。
+        val thrown: Throwable? = try {
+            BinanceAccountAPI.getEarnPositions("dummyKey", "dummySecret", client, retryDelaysMs = listOf(0L, 0L))
+            null
+        } catch (e: Throwable) {
+            e
+        }
+
+        assertEquals("取消不该被重试：活期接口应只发出 1 次请求", 1, attempts.get())
+        assertTrue(
+            "取消必须原样抛出（不能被包装成普通失败）：实际=${thrown?.javaClass?.name}",
+            thrown is CancellationException
+        )
+    }
+
+    /**
+     * 币安业务 / 权限错误（HTTP 4xx、业务码 -2015）**绝不重试**。
+     *
+     * 关键实现细节：[BinanceAccountAPI.binanceError] 返回的是普通 [Exception]，不是
+     * `IOException`，而 `retryPageRequest` 只在 `e is IOException` 时重试。这里直接从
+     * 外部可观测行为钉住这条：401/-2015 只发 1 次请求。
+     *
+     * 顺带钉住文案分流没有把权限建议一起弄丢：-2015 属权限类，必须**仍然**提示
+     * 「Enable Reading / IP 白名单」，且**不能**改口说成网络问题。
+     */
+    @Test
+    fun 币安业务错误不重试_且提示仍指向权限() = runBlocking {
+        val attempts = AtomicInteger(0)
+        val client = OkHttpClient.Builder()
+            .addInterceptor(object : Interceptor {
+                override fun intercept(chain: Interceptor.Chain): Response {
+                    // 只拦活期/定期这两个理财接口；Staking 探针回空数组免得干扰
+                    if (!chain.request().url.encodedPath.contains("/simple-earn/")) {
+                        return jsonResponse(chain.request(), """{"rows":[],"total":0}""")
+                    }
+                    attempts.incrementAndGet()
+                    return Response.Builder()
+                        .request(chain.request())
+                        .protocol(Protocol.HTTP_1_1)
+                        .code(401)
+                        .message("Unauthorized")
+                        .body(
+                            """{"code":-2015,"msg":"Invalid API-key, IP, or permissions for action."}"""
+                                .toResponseBody("application/json".toMediaType())
+                        )
+                        .build()
+                }
+            })
+            .build()
+
+        val fetch = BinanceAccountAPI.getEarnPositions("dummyKey", "dummySecret", client, retryDelaysMs = listOf(0L, 0L))
+
+        assertEquals(
+            "-2015 是权限不足，重试 3 次也还是 -2015：活期+定期各只该请求 1 次",
+            2,
+            attempts.get()
+        )
+        val warning = fetch.warning
+        assertNotNull("失败必须给出用户能看到的原因", warning)
+        assertTrue(
+            "权限类失败仍必须给出权限/IP 白名单建议：实际=$warning",
+            warning!!.contains("Enable Reading")
+        )
+        assertFalse(
+            "权限类失败不该被引导去查网络：实际=$warning",
+            warning.contains("网络或代理不稳定")
+        )
+    }
+
+    /**
+     * 网络类判定只认网络异常：[BinanceAccountAPI.isNetworkFailure] 的分类表。
+     *
+     * 这条是文案分流的唯一依据，而它必须**不依赖文案字符串**（否则改文案就静默失效）。
+     * 逐类各取一个代表，尤其是「[BinanceAccountAPI.binanceError] 的返回值不算网络」
+     * —— 那正是把用户骗去翻 API Key 设置的根因。
+     */
+    @Test
+    fun 网络类失败判定只认网络异常_权限错误不算网络() {
+        assertTrue("读超时属网络", BinanceAccountAPI.isNetworkFailure(SocketTimeoutException("timeout")))
+        assertTrue("DNS 解析不了属网络", BinanceAccountAPI.isNetworkFailure(UnknownHostException("api.binance.com")))
+        assertTrue("TCP 连不上属网络", BinanceAccountAPI.isNetworkFailure(ConnectException("Connection refused")))
+        assertTrue("callTimeout 收尾成 InterruptedIOException，也属网络", BinanceAccountAPI.isNetworkFailure(InterruptedIOException("timeout")))
+
+        val denied = BinanceAccountAPI.binanceError(
+            """{"code":-2015,"msg":"Invalid API-key, IP, or permissions for action."}""",
+            401
+        )
+        assertFalse(
+            "binanceError 抛的是普通 Exception（权限/业务错误），绝不能算成网络失败",
+            BinanceAccountAPI.isNetworkFailure(denied)
+        )
+        // 「响应体为空」在本文件里也是 IOException：它会被重试（换个时机可能就好了），
+        // 但**不该**引导用户去查网络/代理——它不是连不上。
+        assertFalse(
+            "空响应是响应异常而非连不上，不该提示网络",
+            BinanceAccountAPI.isNetworkFailure(java.io.IOException("币安返回了空响应"))
+        )
+    }
+
+    /**
+     * 生产默认退避必须**非空且非零**：空列表等于静默关掉重试，全 0 等于热循环打接口。
+     *
+     * 这条不是形式主义：真机那次就是「一次 SocketTimeout 让 USDT 整块消失」，
+     * 如果将来有人为了「让单测快一点」把默认值改成空列表，重试会在生产里悄悄失效，
+     * 而所有单测（都显式注入退避）依然全绿。
+     */
+    @Test
+    fun 生产默认退避非空且非零() {
+        val defaults = BinanceAccountAPI.DEFAULT_PAGE_RETRY_BACKOFF_MS
+        assertTrue("默认必须真的重试（空列表 = 静默关掉重试）", defaults.isNotEmpty())
+        assertTrue("退避不能是 0，否则失败时会热循环打接口：实际=$defaults", defaults.all { it > 0L })
+    }
+
+    // ---------- 文案分流三类齐全：网络 / 限流或服务端 / 权限 ----------
+    // 三类失败给用户的动作完全不同：查网络、等几分钟、查权限。任何一类被归错，
+    // 用户就会照着错误的建议白折腾（这正是这轮 bug 的形态）。下面三条端到端钉住
+    // 「只有本类关键词出现、另两类关键词都不出现」——用真实文案断言，而不是看代码。
+
+    /** 网络类的关键词（只在网络提示里出现） */
+    private val networkKeyword = "网络或代理不稳定"
+
+    /** 限流/服务端类的关键词（只在限流提示里出现） */
+    private val rateLimitKeyword = "币安接口限流或服务端异常"
+
+    /** 权限类的关键词（只在权限提示里出现） */
+    private val permissionKeyword = "Enable Reading"
+
+    /** 造一个「活期 + 定期都回指定 HTTP 失败」的假 client，并统计理财接口的请求次数 */
+    private fun clientAlwaysFailing(
+        code: Int,
+        body: String
+    ): Pair<OkHttpClient, AtomicInteger> {
+        val attempts = AtomicInteger(0)
+        val client = OkHttpClient.Builder()
+            .addInterceptor(object : Interceptor {
+                override fun intercept(chain: Interceptor.Chain): Response {
+                    // 只拦两个理财接口；Staking 诊断探针回空数组，不干扰计数
+                    if (!chain.request().url.encodedPath.contains("/simple-earn/")) {
+                        return jsonResponse(chain.request(), """{"rows":[],"total":0}""")
+                    }
+                    attempts.incrementAndGet()
+                    return Response.Builder()
+                        .request(chain.request())
+                        .protocol(Protocol.HTTP_1_1)
+                        .code(code)
+                        .message("Failed")
+                        .body(body.toResponseBody("application/json".toMediaType()))
+                        .build()
+                }
+            })
+            .build()
+        return client to attempts
+    }
+
+    /**
+     * 网络类：超时 → 只提示网络，不许提权限、不许提限流。
+     *
+     * 真机原话：「第2页拉取失败，停止翻页：SocketTimeoutException」，旧文案却让用户去
+     * 确认 API Key 权限与 IP 白名单。
+     */
+    @Test
+    fun 失败文案分流_网络类只提示网络() = runBlocking {
+        val client = OkHttpClient.Builder()
+            .addInterceptor(object : Interceptor {
+                override fun intercept(chain: Interceptor.Chain): Response {
+                    if (chain.request().url.encodedPath.contains("/simple-earn/")) {
+                        throw SocketTimeoutException("timeout")
+                    }
+                    return jsonResponse(chain.request(), """{"rows":[],"total":0}""")
+                }
+            })
+            .build()
+
+        val fetch = BinanceAccountAPI.getEarnPositions(
+            "dummyKey", "dummySecret", client, retryDelaysMs = emptyList()
+        )
+        val warning = fetch.warning!!
+
+        assertTrue("必须提示网络：实际=$warning", warning.contains(networkKeyword))
+        assertFalse("网络问题不该提权限：实际=$warning", warning.contains(permissionKeyword))
+        assertFalse("网络问题不该提限流：实际=$warning", warning.contains(rateLimitKeyword))
+    }
+
+    /**
+     * 权限类：HTTP 401 + `-2015` → 仍然提示权限/IP 白名单（既有能力不能丢），
+     * 且不说成网络或限流。
+     */
+    @Test
+    fun 失败文案分流_权限类只提示权限() = runBlocking {
+        val (client, _) = clientAlwaysFailing(
+            401,
+            """{"code":-2015,"msg":"Invalid API-key, IP, or permissions for action."}"""
+        )
+
+        val fetch = BinanceAccountAPI.getEarnPositions(
+            "dummyKey", "dummySecret", client, retryDelaysMs = listOf(0L, 0L)
+        )
+        val warning = fetch.warning!!
+
+        assertTrue("权限问题必须提示权限/IP 白名单：实际=$warning", warning.contains(permissionKeyword))
+        assertFalse("权限问题不该说成网络：实际=$warning", warning.contains(networkKeyword))
+        assertFalse("权限问题不该说成限流：实际=$warning", warning.contains(rateLimitKeyword))
+    }
+
+    /**
+     * 限流/服务端类：HTTP 429 → 提示「限流或服务端异常（HTTP 429），请过几分钟再试」，
+     * 不再叫用户去翻 API Key 权限（限流与用户的 Key 设置毫无关系）。
+     *
+     * 同时钉住第二条要求：**429 绝不重试**（币安限流时重试会加重封禁）。
+     * 理财接口共两个（活期+定期），各只该请求 1 次 → 总计 2 次，不因"可重试"变成 6 次。
+     */
+    @Test
+    fun 失败文案分流_限流类只提示限流且不重试() = runBlocking {
+        val (client, attempts) = clientAlwaysFailing(
+            429,
+            """{"code":-1003,"msg":"Too many requests; current limit is 1200 requests per minute."}"""
+        )
+
+        val fetch = BinanceAccountAPI.getEarnPositions(
+            "dummyKey", "dummySecret", client, retryDelaysMs = listOf(0L, 0L)
+        )
+        val warning = fetch.warning!!
+
+        assertTrue("必须提示限流/服务端异常：实际=$warning", warning.contains(rateLimitKeyword))
+        assertTrue("必须带上 HTTP 状态码，便于用户核对：实际=$warning", warning.contains("HTTP 429"))
+        assertTrue("必须告诉用户过几分钟再试：实际=$warning", warning.contains("请过几分钟再试"))
+        assertFalse("限流不该提权限：实际=$warning", warning.contains(permissionKeyword))
+        assertFalse("限流不该说成网络：实际=$warning", warning.contains(networkKeyword))
+        assertEquals("429 绝不重试：两个理财接口各 1 次，共 2 次", 2, attempts.get())
+    }
+
+    /**
+     * 5xx 同样归「服务端异常」：币安网关抖动时用户什么都改不了，只该等。
+     * 用 503（最典型的服务端不可用）而不是 500，顺带覆盖 `>= 500` 的判定分支。
+     */
+    @Test
+    fun 失败文案分流_服务端5xx归限流类() = runBlocking {
+        val (client, attempts) = clientAlwaysFailing(503, """{"code":0,"msg":"Service Unavailable"}""")
+
+        val fetch = BinanceAccountAPI.getEarnPositions(
+            "dummyKey", "dummySecret", client, retryDelaysMs = listOf(0L, 0L)
+        )
+        val warning = fetch.warning!!
+
+        assertTrue("5xx 属服务端异常：实际=$warning", warning.contains(rateLimitKeyword))
+        assertTrue("必须带上 HTTP 状态码：实际=$warning", warning.contains("HTTP 503"))
+        assertFalse("5xx 不该提权限：实际=$warning", warning.contains(permissionKeyword))
+        // 响应体恰好写着 "Service Unavailable" 时，绝不能被当成「地区被限制」去劝用户换代理节点
+        assertFalse("5xx 不该说成地区限制：实际=$warning", warning.contains("地区被币安限制"))
+        assertEquals("5xx 不重试（重试也还是服务端异常）：两个接口各 1 次", 2, attempts.get())
+    }
+
+    /**
+     * 418（币安「IP 被临时封禁」）也必须归「限流/服务端」类，而不是权限类。
+     *
+     * 币安对超频的惩罚是 418 而不是 429（`{"code":-1003,"msg":"Way too many requests; IP banned
+     * until ..."}`），两者在用户侧的动作完全一样：**等**。工程师的用例只覆盖了 429/503，
+     * 418 这条分支（`httpCode == 418`）没有被任何用例走到——这里补上。
+     */
+    @Test
+    fun 失败文案分流_418IP临时封也归限流类且不重试() = runBlocking {
+        val (client, attempts) = clientAlwaysFailing(
+            418,
+            """{"code":-1003,"msg":"Way too many requests; IP banned until 1730000000000."}"""
+        )
+
+        val fetch = BinanceAccountAPI.getEarnPositions(
+            "dummyKey", "dummySecret", client, retryDelaysMs = listOf(0L, 0L)
+        )
+        val warning = fetch.warning!!
+
+        assertTrue("418 属限流：实际=$warning", warning.contains(rateLimitKeyword))
+        assertTrue("必须带上 HTTP 418：实际=$warning", warning.contains("HTTP 418"))
+        assertFalse("IP 临时封与 API Key 权限无关：实际=$warning", warning.contains(permissionKeyword))
+        assertEquals("418 绝不重试（重试只会延长封禁）：两个接口各 1 次", 2, attempts.get())
+    }
+
+    /**
+     * 回归守卫：451 地区限制**仍要**给「换代理节点」的可操作提示。
+     *
+     * 本轮工程师收紧了 `isGeo`（删掉 `msg.contains("Service unavailable")`），风险是
+     * 把真正的 451 一起收紧掉。451 由**状态码**兜住，所以仍然命中；这条用例从
+     * `getEarnPositions` 的**用户可见文案**这一端钉住它（`BinanceAccountAPIGateTest`
+     * 只钉了 `getAccount` 的异常 message，是另一条路）。
+     *
+     * 同时反向钉住：451 是「用户可修」的（换节点），**不能**被归到「限流/服务端，等几分钟」，
+     * 也**不能**被说成网络问题。
+     */
+    @Test
+    fun 失败文案分流_451地区限制仍提示换代理节点() = runBlocking {
+        val (client, attempts) = clientAlwaysFailing(
+            451,
+            """{"code":0,"msg":"Service unavailable from a restricted location."}"""
+        )
+
+        val fetch = BinanceAccountAPI.getEarnPositions(
+            "dummyKey", "dummySecret", client, retryDelaysMs = listOf(0L, 0L)
+        )
+        val warning = fetch.warning!!
+
+        assertTrue(
+            "451 必须给出可操作的地区提示（换代理节点）：实际=$warning",
+            warning.contains("更换到允许地区的节点")
+        )
+        assertFalse("451 不是服务端抖动，不能说成限流/等几分钟：实际=$warning", warning.contains(rateLimitKeyword))
+        assertFalse("451 不是网络抖动：实际=$warning", warning.contains(networkKeyword))
+        assertEquals("451 不重试：两个接口各 1 次", 2, attempts.get())
+    }
+
     // ---------- 借币（Flexible Loan）负债接口 ----------
+
+    /**
+     * 借币接口的 429 限流：同样不重试，且提示「等几分钟」而不是叫用户去查 Loan 权限。
+     *
+     * `BinanceLoanFetch.warning` 本轮也加了三分支，但**没有任何用例覆盖它**（工程师的
+     * 借币用例只走 404 → 权限分支）。借币失败会静默降级成"空负债"（净资产虚高整笔欠款），
+     * 文案错了用户根本不知道该等还是该改权限。
+     */
+    @Test
+    fun 借币429限流不重试_提示等几分钟而不是查Loan权限() = runBlocking {
+        val loanAttempts = AtomicInteger(0)
+        val client = OkHttpClient.Builder()
+            .addInterceptor(object : Interceptor {
+                override fun intercept(chain: Interceptor.Chain): Response {
+                    if (!chain.request().url.encodedPath.contains("/loan/")) {
+                        return jsonResponse(chain.request(), """{"rows":[],"total":0}""")
+                    }
+                    loanAttempts.incrementAndGet()
+                    return Response.Builder()
+                        .request(chain.request())
+                        .protocol(Protocol.HTTP_1_1)
+                        .code(429)
+                        .message("Too Many Requests")
+                        .body(
+                            """{"code":-1003,"msg":"Too many requests; current limit is 1200 requests per minute."}"""
+                                .toResponseBody("application/json".toMediaType())
+                        )
+                        .build()
+                }
+            })
+            .build()
+
+        val result = BinanceAccountAPI.getLoans(
+            "dummyKey", "dummySecret", client, retryDelaysMs = listOf(0L, 0L)
+        )
+        val warning = result.warning!!
+
+        assertEquals("借币 429 绝不重试（重试会加重币安封禁）", 1, loanAttempts.get())
+        assertTrue("必须提示限流：实际=$warning", warning.contains(rateLimitKeyword))
+        assertTrue("必须带上 HTTP 429：实际=$warning", warning.contains("HTTP 429"))
+        assertFalse("限流与 Loan 读取权限无关：实际=$warning", warning.contains("Loan 读取权限"))
+        assertTrue("借币失败仍须明示净资产会虚高：实际=$warning", warning.contains("净资产会虚高"))
+    }
+
+    /**
+     * 借币接口超时：提示网络，而不是「请确认 API Key 已勾选 Loan 读取权限」。
+     *
+     * 退避传空列表 = 不重试（重试本身由 `借币单页超时后重试成功_负债不丢` 覆盖），
+     * 这里只验「重试用尽后的分流文案」。
+     */
+    @Test
+    fun 借币超时提示网络_不叫用户去查Loan权限() = runBlocking {
+        val client = OkHttpClient.Builder()
+            .addInterceptor(object : Interceptor {
+                override fun intercept(chain: Interceptor.Chain): Response {
+                    if (!chain.request().url.encodedPath.contains("/loan/")) {
+                        return jsonResponse(chain.request(), """{"rows":[],"total":0}""")
+                    }
+                    throw SocketTimeoutException("timeout")
+                }
+            })
+            .build()
+
+        val result = BinanceAccountAPI.getLoans(
+            "dummyKey", "dummySecret", client, retryDelaysMs = emptyList()
+        )
+        val warning = result.warning!!
+
+        assertTrue("超时属网络类：实际=$warning", warning.contains(networkKeyword))
+        assertFalse("网络问题不该叫用户去查 Loan 权限：实际=$warning", warning.contains("Loan 读取权限"))
+        assertFalse("网络问题不该说成限流：实际=$warning", warning.contains(rateLimitKeyword))
+    }
 
     @Test
     fun 借币负债解析totalDebt与loanCoin_并解析抵押资产() {
@@ -776,6 +1322,42 @@ class BinanceAccountAPITest {
         assertTrue("翻页必须发出 current=2", recordedCurrent.contains(2))
         assertTrue(result.failures.isEmpty())
         assertEquals("100 + 1 = 101 笔负债", 101, result.debts.size)
+    }
+
+    /**
+     * 借币接口也走单页重试：弱网下一次超时不该把整块负债丢掉。
+     *
+     * 工程师的重试用例只覆盖了理财（earn）路径，借币路径（`fetchLoanSinglePage` +
+     * `retryPageRequest`）**没有任何用例**。漏这条的后果特别严重：借币失败会降级成
+     * 「空负债」，净资产直接虚高整笔欠款（真机 USDT 借币 50.80），而且是静默的。
+     */
+    @Test
+    fun 借币单页超时后重试成功_负债不丢() = runBlocking {
+        val attempts = AtomicInteger(0)
+        val client = OkHttpClient.Builder()
+            .addInterceptor(object : Interceptor {
+                override fun intercept(chain: Interceptor.Chain): Response {
+                    if (!chain.request().url.encodedPath.contains("/loan/")) {
+                        return jsonResponse(chain.request(), """{"rows":[],"total":0}""")
+                    }
+                    // 首次超时，重试时返回真机那笔 USDT 借币
+                    if (attempts.incrementAndGet() == 1) {
+                        throw SocketTimeoutException("timeout")
+                    }
+                    return jsonResponse(
+                        chain.request(),
+                        """{"rows":[{"loanCoin":"USDT","totalDebt":"50.80033811"}],"total":1}"""
+                    )
+                }
+            })
+            .build()
+
+        val result = BinanceAccountAPI.getLoans("dummyKey", "dummySecret", client, retryDelaysMs = listOf(0L, 0L))
+
+        assertEquals("借币单页也应重试：首次超时 + 重试成功 = 2 次请求", 2, attempts.get())
+        assertTrue("重试救回来之后不该降级成空负债：实际=${result.failures}", result.failures.isEmpty())
+        assertEquals(1, result.debts.size)
+        assertEquals(50.80033811, result.debts[0].debt, 1e-9)
     }
 
     @Test

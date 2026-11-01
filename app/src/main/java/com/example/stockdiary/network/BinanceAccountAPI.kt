@@ -289,10 +289,17 @@ object BinanceAccountAPI {
         LOAN_SAPI_BASE + "/loan/flexible/ongoing/orders"
 
     /**
-     * 理财持仓单页条数。真实账户的理财标的通常是个位数到几十个，
-     * 100 足以一页取完，不必做分页循环（多页 = 多轮签名请求，收益极小）。
+     * 理财持仓单页条数（币安 simple-earn 接口 `size` 参数）。
+     * 与 [fetchEarnPage] 配合做翻页：拉到一页满 [EARN_PAGE_SIZE] 行就继续拉下一页，
+     * 直到某页行数不足一页（末页）为止——确保持仓数 > 单页上限时后面的页不被漏掉。
      */
     private const val EARN_PAGE_SIZE = 100
+
+    /**
+     * 理财持仓翻页的**安全上限**：每页至多 [EARN_PAGE_SIZE] 条，上限 50 页 = 5000 条，
+     * 远超任何真实账户的理财标的数，纯粹防止接口异常（如某页永远返回满页）导致死循环。
+     */
+    private const val MAX_EARN_PAGES = 50
 
     /** 批量最新价接口（公开免签）。走 data-api.binance.vision（不做地区封锁），用于导入时估算市值 */
     private const val PRICE_URL = APIEndpoints.Binance.MARKET_DATA_BASE_URL + APIEndpoints.Binance.TICKER
@@ -658,17 +665,26 @@ object BinanceAccountAPI {
         }
 
     /**
-     * 拉一页理财持仓。
+     * 拉一个理财接口（活期 / 定期）的**全部分页**。
      *
-     * 非 2xx（未开通权限 / 接口下线 / 被地区限制）与空响应都**抛异常**，由
-     * [fetchEarnOrFailure] 收成 Result 并把原因带回预览页——绝不在这里静默返回空列表，
-     * 那等于把「少算一块」伪装成「本来就没有」。
+     * ## 为什么要从「拉一页」改成「翻页拉全」
      *
-     * HTTP 200 也**不再一定算成功**：响应体形状不对（无 rows / 行内字段缺失）时，
-     * 已解析出的持仓照常带回去（不浪费），同时把形状问题记进 [EarnPageOutcome.failures]。
+     * 币安 simple-earn 接口按页返回，单页上限 [EARN_PAGE_SIZE]（100）。旧实现写死只拉
+     * `current=1` 第一页，当某接口持仓数 > 100 时，第 2 页及之后的持仓（含 USDT 等）
+     * 被整批漏掉——表现就是「导入后持仓比币安 App 少一大块、却零警告」。真机已实锤：
+     * 用户活期理财返回 100 行（恰好一页上限）但 USDT(144.99) 不在其中，合并 `新增 0 项`。
+     * 现改为翻页循环：从 page=1 递增 `current`，直到某页返回行数 < [EARN_PAGE_SIZE]（即末页）
+     * 或触达 [MAX_EARN_PAGES] 安全上限才停，确保分页前的持仓一枚不漏。
      *
-     * 每页都留一条诊断日志（行数 → 有效行数 → 被跳过的原因），下一轮真机导入就能
-     * 一眼判定「接口根本没给 / 给了但形状不对 / 给了但字段改名了 / 真的没有持仓」。
+     * ## 失败绝不连坐
+     *
+     * 翻页中途某页失败（非 2xx / 网络异常）时，**前面已拉到的页照常保留**（部分成功），
+     * 失败原因记进 [EarnPageOutcome.failures] 由预览页提示用户，绝不把「少算一块」
+     * 伪装成「本来就没有」——这是 [fetchEarnPage] 一贯的契约。取消（CancellationException）
+     * 原样重抛，横竖不能把「用户关弹窗」记成一次权限失败。
+     *
+     * HTTP 200 但响应形状异常时，本页不抛（交给 [parseEarnPositions] 部分成功），
+     * 但已解析出的持仓照常带回去，形状问题也记进 failures。
      */
     private suspend fun fetchEarnPage(
         url: String,
@@ -677,9 +693,60 @@ object BinanceAccountAPI {
         httpClient: OkHttpClient,
         locked: Boolean
     ): EarnPageOutcome {
+        val kind = earnKindLabel(locked)
+        val allPositions = mutableListOf<BinanceEarnPosition>()
+        val allFailures = mutableListOf<String>()
+        var current = 1
+        var hasMore = true
+        while (hasMore && current <= MAX_EARN_PAGES) {
+            val parsed = try {
+                fetchEarnSinglePage(url, apiKey, apiSecret, httpClient, locked, current)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // 翻页中途某页失败：保留已拉到的，记录原因，停止翻页。
+                // 绝不让「第 2 页挂了」把第 1 页已拉到的数据一起连坐丢光。
+                allFailures.add(
+                    "$kind：第${current}页拉取失败（${e.message ?: "未知错误"}），" +
+                        "已拉到的前 ${current - 1} 页照常导入"
+                )
+                AppLogger.w(
+                    "币安理财接口[$kind] 第${current}页拉取失败，停止翻页：${e::class.simpleName}",
+                    "BinanceAccountAPI"
+                )
+                break
+            }
+            allPositions.addAll(parsed.positions)
+            if (parsed.hasShapeProblem || parsed.bodyNotJson != null) {
+                allFailures.addAll(parsed.failures(kind))
+            }
+            // 末页判定：本页返回行数 < 单页上限 → 没有下一页了（>= 上限说明后面可能还有）
+            hasMore = parsed.rowCount >= EARN_PAGE_SIZE
+            current++
+        }
+        return EarnPageOutcome(positions = allPositions, failures = allFailures)
+    }
+
+    /**
+     * 拉理财接口的第 [page] 页（`current=page`）。
+     *
+     * 非 2xx（未开通权限 / 接口下线 / 被地区限制）与空响应**抛异常**，由 [fetchEarnPage]
+     * 决定如何降级（保留已拉到的页）；2xx 但响应形状异常时不抛，照常返回 [EarnParseResult]
+     * （部分成功由调用方处理）。每页都留一条诊断日志，下一轮真机导入即可一眼判定
+     * 「接口根本没给 / 给了但形状不对 / 真的没有持仓」。
+     */
+    private suspend fun fetchEarnSinglePage(
+        url: String,
+        apiKey: String,
+        apiSecret: String,
+        httpClient: OkHttpClient,
+        locked: Boolean,
+        page: Int
+    ): EarnParseResult {
         val timestamp = System.currentTimeMillis()
         // current/size 必须参与签名：它们是 query 的一部分，缺了会被判签名无效
-        val query = "current=1&size=$EARN_PAGE_SIZE&timestamp=$timestamp&recvWindow=$RECV_WINDOW"
+        val query =
+            "current=$page&size=$EARN_PAGE_SIZE&timestamp=$timestamp&recvWindow=$RECV_WINDOW"
         val signature = sign(apiSecret, query)
         val request = Request.Builder()
             // 日志只记端点路径，url 里的 signature 由 secret 派生，绝不落盘
@@ -706,21 +773,16 @@ object BinanceAccountAPI {
             val parsed = parseEarnPositions(body, locked)
             val kind = earnKindLabel(locked)
             AppLogger.d(
-                "币安理财接口[$kind] 响应 ${parsed.rowCount} 行 → 有效 ${parsed.positions.size} 行" +
+                "币安理财接口[$kind] 第${page}页 响应 ${parsed.rowCount} 行 → 有效 ${parsed.positions.size} 行" +
                     (if (parsed.emptyRows > 0) "，空壳 ${parsed.emptyRows} 行" else "") +
                     (if (parsed.badRows.isNotEmpty()) {
                         "，被跳过 ${parsed.badRows.size} 行（${parsed.badRows.joinToString("、")}）"
                     } else ""),
                 "BinanceAccountAPI"
             )
-            // 形状异常（非 JSON / 无 rows / 行内缺字段 / JSON 解析抛异常）**或接口回了 200 但 0 条
-            // 有效持仓**时，把响应体原文截前 600 字落盘：响应体是币安回包，不含签名/密钥，安全。
-            // 下一轮真机导入即可一眼看到币安到底回了什么：
-            //   - 错误码 JSON（权限/签名/地区）→ 直接定位；
-            //   - 干净的 {"rows":[],"total":0} → 说明这笔钱不在 Simple Earn 活期/定期（可能在
-            //     Staking / 其他理财，或确实没持仓），指向「换个接口拉」而非「权限没开」；
-            //   - HTML 墙 → 地区/网关拦截。
-            // 用户已确认读取权限全开却 earn 进不来，最可能是后两类，必须靠这行原文判定，不能靠猜。
+            // 形状异常（非 JSON / 无 rows / 行内缺字段）**或接口回了 200 但 0 条有效持仓**时，
+            // 把响应体原文截前 600 字落盘：响应体是币安回包，不含签名/密钥，安全。下一轮真机导入
+            // 即可一眼看到币安到底回了什么（错误码 JSON / 干净空数组 / HTML 墙）。
             if (parsed.positions.isEmpty() || parsed.hasShapeProblem || parsed.bodyNotJson != null) {
                 val snippet = body.take(600).replace("\r", " ").replace("\n", " ")
                 val reason = when {
@@ -732,11 +794,11 @@ object BinanceAccountAPI {
                         "返回 0 条有效持仓(钱可能不在 Simple Earn 活期/定期)"
                 }
                 AppLogger.w(
-                    "币安理财接口[$kind] $reason，响应体前600字=$snippet",
+                    "币安理财接口[$kind] 第${page}页 $reason，响应体前600字=$snippet",
                     "BinanceAccountAPI"
                 )
             }
-            return EarnPageOutcome(positions = parsed.positions, failures = parsed.failures(kind))
+            return parsed
         }
     }
 

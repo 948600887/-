@@ -496,6 +496,119 @@ class BinanceAccountAPITest {
         assertEquals(0.01, fetch.positions.single { it.asset == "BNB" }.amount, 1e-8)
     }
 
+    // ---------- 理财持仓分页：持仓数 > 单页上限时必须翻页拉全 ----------
+
+    /**
+     * 复现真机根因：用户活期理财持仓 > 100，旧代码只拉 `current=1` 第一页，
+     * 第 2 页（含 USDT 144.99）整批被漏，预览页零警告。
+     *
+     * 这里用满一页（100 行）+ 一页少量（含 USDT）的响应，验证：
+     * 1. 翻页真的发出了 `current=2` 请求；
+     * 2. 第 2 页的 USDT 能被拉到，不漏。
+     *
+     * 注意 `EARN_PAGE_SIZE` 是 `private const val`，本测试文件无法引用，这里硬编码 100
+     * 并钉死——若改动 [BinanceAccountAPI.EARN_PAGE_SIZE] 必须同步更新此处的 100。
+     */
+    @Test
+    fun 理财持仓超过单页上限时翻页拉全_不漏第2页() = runBlocking {
+        val pageSize = 100
+        val recordedCurrent = CopyOnWriteArrayList<Int>()
+
+        fun buildRows(n: Int, startAsset: Int) = buildString {
+            append("{\"rows\":[")
+            append(
+                (0 until n).joinToString(",") {
+                    """{"asset":"EARN${startAsset + it}","totalAmount":"1.0"}"""
+                }
+            )
+            append("],\"total\":$n}")
+        }
+        val flexiblePage1 = buildRows(pageSize, 0) // 满一页 100 行 → 触发翻页
+        val flexiblePage2 = """{"rows":[{"asset":"USDT","totalAmount":"144.99343452"}],"total":101}"""
+
+        val client = OkHttpClient.Builder()
+            .addInterceptor(object : Interceptor {
+                override fun intercept(chain: Interceptor.Chain): Response {
+                    val url = chain.request().url
+                    val q = url.query ?: ""
+                    val current = q.substringAfter("current=").substringBefore("&").toIntOrNull() ?: 1
+                    val path = url.encodedPath
+                    val body = when {
+                        path.contains("/flexible/") -> {
+                            recordedCurrent.add(current)
+                            if (current <= 1) flexiblePage1 else flexiblePage2
+                        }
+                        else -> """{"rows":[],"total":0}""" // locked / staking 探针：空，不干扰断言
+                    }
+                    return Response.Builder()
+                        .request(chain.request())
+                        .protocol(Protocol.HTTP_1_1)
+                        .code(200)
+                        .message("OK")
+                        .body(body.toResponseBody("application/json".toMediaType()))
+                        .build()
+                }
+            })
+            .build()
+
+        val fetch = BinanceAccountAPI.getEarnPositions("dummyKey", "dummySecret", client)
+        assertTrue("翻页必须发出 current=2 请求，否则第 2 页持仓会漏", recordedCurrent.contains(2))
+        assertTrue("接口按文档回数据时不该有失败", fetch.failures.isEmpty())
+        assertEquals("第1页满100 + 第2页1 = 101", 101, fetch.positions.size)
+        val usdt = fetch.positions.single { it.asset == "USDT" }
+        assertEquals(144.99343452, usdt.amount, 1e-8)
+        assertFalse(usdt.locked)
+    }
+
+    /**
+     * 边界：持仓数恰好等于一页上限（100 行，无第 2 页真实数据）时，翻页只会多发一次
+     * 「末页探测」空请求后停止，不会失控翻到 [MAX_EARN_PAGES] 上限。
+     *
+     * 这条钉死「末页判定」：`rowCount < EARN_PAGE_SIZE` 即停。若误写成「永远继续」会打到
+     * 50 页上限才停，这条会失败（recordedCurrent 含 >2）。
+     */
+    @Test
+    fun 刚好一页持仓时只拉到末页探测为止() = runBlocking {
+        val pageSize = 100
+        val recordedCurrent = CopyOnWriteArrayList<Int>()
+        val flexiblePage1 = buildString {
+            append("{\"rows\":[")
+            append((0 until pageSize).joinToString(",") { """{"asset":"EARN$it","totalAmount":"1.0"}""" })
+            append("],\"total\":$pageSize}")
+        }
+        val client = OkHttpClient.Builder()
+            .addInterceptor(object : Interceptor {
+                override fun intercept(chain: Interceptor.Chain): Response {
+                    val url = chain.request().url
+                    val q = url.query ?: ""
+                    val current = q.substringAfter("current=").substringBefore("&").toIntOrNull() ?: 1
+                    val path = url.encodedPath
+                    val body = when {
+                        path.contains("/flexible/") -> {
+                            recordedCurrent.add(current)
+                            // 第 1 页满 100 行；第 2 页起返回空 rows（币安末页真实行为）→ 触发停止
+                            if (current <= 1) flexiblePage1 else """{"rows":[],"total":0}"""
+                        }
+                        else -> """{"rows":[],"total":0}"""
+                    }
+                    return Response.Builder()
+                        .request(chain.request())
+                        .protocol(Protocol.HTTP_1_1)
+                        .code(200)
+                        .message("OK")
+                        .body(body.toResponseBody("application/json".toMediaType()))
+                        .build()
+                }
+            })
+            .build()
+
+        val fetch = BinanceAccountAPI.getEarnPositions("dummyKey", "dummySecret", client)
+        assertTrue(fetch.failures.isEmpty())
+        assertEquals(pageSize, fetch.positions.size)
+        // 满页 100 + 一次末页空探测 = 2 次请求，证明没有失控翻到安全上限
+        assertTrue("末页探测后必须停止翻页（最多 2 次）", recordedCurrent.size <= 2)
+    }
+
     // ---------- 借币（Flexible Loan）负债接口 ----------
 
     @Test

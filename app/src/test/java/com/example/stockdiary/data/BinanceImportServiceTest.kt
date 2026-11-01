@@ -879,6 +879,55 @@ class BinanceImportServiceTest {
         assertEquals(43.56668459, preview.items.single().quantity, 1e-9)
     }
 
+    /**
+     * 借币负债行**绝不能**被当成「被折叠的旧行」清零。
+     *
+     * 真机组合：同一个 USDT 在币安被拆成现货行与活期壳行（会被折叠成一条、其余归零），
+     * 同时用户还有一笔 USDT 借币负债、一笔 USDC 抵押。归组键会先剥掉 `#loan`/`#collateral`
+     * 后缀，负债行与现货 USDT 因此同键 —— 一旦被折叠判定命中，负债行会被写成 0：
+     * 净资产凭空虚高 50.8 USDT（欠币安的钱凭空消失）、抵押资产凭空少 43.57 USDC。
+     */
+    @Test
+    fun 借币负债行不被当成被折叠的旧行清零() = runBlocking {
+        val merged = mergeEarnIntoBalances(
+            balances = listOf(
+                balance("USDT", free = 0.0),
+                balance("LDUSDT", free = 124.59510564),
+                balance("USDC", free = 0.0),
+                balance("LDUSDC", free = 0.0)
+            ),
+            earn = listOf(earn("USDT", 142.08565983), earn("USDC", 43.57300526))
+        ) + listOf(
+            BinanceBalance(
+                asset = "USDT",
+                free = -50.80033811,
+                locked = 0.0,
+                kind = BinanceBalance.Kind.LOAN_DEBT
+            ),
+            BinanceBalance(
+                asset = "USDC",
+                free = 0.0,
+                locked = 43.56582541,
+                kind = BinanceBalance.Kind.LOAN_COLLATERAL
+            )
+        )
+        val spot = cryptoAsset(id = 1, symbol = "USDT", balance = 124.59510564)
+        val debt = cryptoAsset(id = 2, symbol = "USDT#loan", balance = -50.80033811)
+        val collateral = cryptoAsset(id = 3, symbol = "USDCUSDT#collateral", balance = 43.56582541)
+        val preview = service.buildPreview(merged, existingAssets = listOf(spot, debt, collateral))
+
+        assertEquals(
+            "只应清零被折叠的现货行，负债/抵押行必须留下",
+            listOf(1L),
+            preview.supersededAssets.map { it.id }
+        )
+
+        service.commit(preview, account = "币安", prices = emptyMap())
+        // 负债行数量没变 → UNCHANGED 跳过，绝不能被写成 0
+        coVerify(exactly = 0) { repo.updateBalance(2L, any()) }
+        coVerify(exactly = 0) { repo.updateBalance(3L, any()) }
+    }
+
     @Test
     fun 折叠后的旧行在库里被清零() = runBlocking {
         // 合并只改承载行的数量不足以让用户少看到一行：库里的旧 LDUSDC 必须被清零，

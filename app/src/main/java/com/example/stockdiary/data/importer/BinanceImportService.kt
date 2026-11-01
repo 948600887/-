@@ -245,8 +245,10 @@ class BinanceImportService(
                 }
             }
             mergedBalances = mergeEarnIntoBalances(balances, earn.positions) + loanBalances
-            // 理财没拉全 = 总资产会少算，必须带回预览页说清楚（不能静默降级）
-            earnWarning = earn.warning
+            // 理财没拉全 = 总资产会少算，必须带回预览页说清楚（不能静默降级）。
+            // HTTP 失败之外还有半种静默：接口回 200 但 rows 为空，而账户里明摆着有
+            // LD 理财壳（壳本身就是理财持仓的铁证）——两者自相矛盾，同样要说清楚。
+            earnWarning = earn.warning ?: earnMissingHint(balances, earn.positions)
             // 借币没拉到 = 净资产会虚高，同样必须明示
             loanWarning = loan.warning
             // 借币（含抵押）拉到了：预览页用信息卡片明示已把抵押资产与负债都计入，
@@ -625,6 +627,13 @@ internal fun earnMergeKey(asset: String): String {
  * - 活期理财在「账户 LD 壳」与「simple-earn 接口」两个来源里各描述一次。账户壳可能因
  *   借币抵消而偏小（实测 `LDUSDT` 壳 124.58、接口全量 142.06，差额即被押进抵押金库的份额），
  *   所以取两者**较大值**，既不会漏（借币偏移）也不会重复（同一笔钱记两遍）；
+ *
+ *   ⚠️ 这条 max 要生效，**前提是 simple-earn 接口真的给了数据**。真机出现过「壳 124.59、
+ *   官方 142.08」的差额：那不是合并算错，而是接口侧一条都没返回（HTTP 200 但 rows 为空时
+ *   旧代码完全静默），max 只剩壳值可拿。合并规则本身的正确性由
+ *   `BinanceEarnUsdtReproTest` 用真机形状的同一组数字钉死（喂 142.08 必出 142.08），
+ *   接口契约由 `BinanceAccountAPITest.理财接口按官方文档返回时能拿到官方全量` 钉死。
+ *   再遇到「数量比官方少」，先去预览页看 [earnMissingHint] / 理财警告，别再改这里的规则。
  * - **定期 / 锁仓理财不在账户余额里**，是独立金库，永远**直接相加**——旧实现用单一的
  *   `max(账户, 理财全量)` 会在「仅定期、现货无此笔」时把定期漏掉，导致总资产少算一块。
  *
@@ -804,7 +813,56 @@ internal fun findSupersededAssets(
         .toSet()
     if (foldedUnderlying.isEmpty()) return emptyList()
     // 库里同一底层、且这次被折叠掉的旧行 → 清零（含历史 LD 壳 LDBNB → 已并入底层 BNB）
-    return existingAssets.filter { it.symbol != null && underlyingKeyOf(it.symbol) in foldedUnderlying }
+    //
+    // 借币负债 / 抵押行必须**排除**：它们带 #loan / #collateral 后缀，是刻意独立成行的
+    // （不与同币种现货抵消、也不参与现货/理财壳的折叠），而 [underlyingKeyOf] 会先剥掉
+    // 后缀再归组，于是 USDT#loan 与 USDT 同键——一旦命中折叠判定就会被写成 0，
+    // 欠币安的钱凭空消失、净资产虚高（真机组合：USDT 现货行与 LDUSDT 壳被折叠，
+    // 同时用户还有一笔 USDT 借币）。它们从来不是「被折进主行的旧行」。
+    return existingAssets.filter { asset ->
+        val symbol = asset.symbol ?: return@filter false
+        if (isLoanDebtSymbol(symbol) || isLoanCollateralSymbol(symbol)) return@filter false
+        underlyingKeyOf(symbol) in foldedUnderlying
+    }
+}
+
+/**
+ * 理财接口**一条都没返回**、但账户里明明有理财壳时的提示。
+ *
+ * ## 为什么必须有这一条
+ *
+ * [com.example.stockdiary.network.BinanceAccountAPI.getEarnPositions] 只有 HTTP 失败
+ * 才记进 `failures`。接口返回 200 但 `rows` 为空时，它被当成「用户没有理财持仓」而静默
+ * 降级——可 `/api/v3/account` 里的 LD 壳（LDUSDT 124.59）本身就是理财持仓的铁证。
+ * 两者同时出现即自相矛盾：账户里有一笔壳，说明接口一定少给了数据。
+ *
+ * 真机实测正是这个组合：账户 LDUSDT 壳 124.59510564，而官方 USDT 活期是
+ * 142.08565983 —— 差的 17.49055419 是被押进抵押金库的那部分份额，只有 simple-earn
+ * 接口报得出来。没有这条提示，用户只看到 124.59，既不知道少了、也不知道为什么少。
+ *
+ * 提示里刻意用**底层资产名**（LDUSDT → USDT）：LD 是币安内部的持仓壳代码，
+ * 用户核对时看的是官方 App 上的 USDT，裸 LD 码只会让人对不上（项目一贯口径）。
+ *
+ * @param balances  `/api/v3/account` 的原始余额（未过滤）
+ * @param positions simple-earn 接口拉到的持仓
+ * @return 自相矛盾时的人话提示；否则 null（真的没有理财持仓，或接口给回了数据）
+ */
+internal fun earnMissingHint(
+    balances: List<BinanceBalance>,
+    positions: List<BinanceEarnPosition>
+): String? {
+    if (positions.isNotEmpty()) return null
+    // 只有「壳里有钱」才算铁证：币安会把历史接触过的资产全列成 0 余额，
+    // 那些 0 壳不代表用户真的持有理财
+    val shells = balances
+        .filter { BinanceAPI.isEarnProduct(it.asset) && it.total != 0.0 }
+        .map { it.asset.uppercase().removePrefix("LD") }
+        .distinct()
+    if (shells.isEmpty()) return null
+    return "账户里有理财持仓（${shells.joinToString("、")}），但 simple-earn 接口一条都没返回。" +
+        "本次只按账户壳的数量导入，被押进抵押金库的那部分份额会被漏掉（总资产会少算）；" +
+        "请确认 API Key 已勾选「读取 / Enable Reading」与 Simple Earn 权限、" +
+        "IP 白名单与地区限制都放行后重新拉取。"
 }
 
 /**

@@ -10,6 +10,7 @@ import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -252,6 +253,242 @@ class BinanceAccountAPITest {
             "SAPI 绝不能带 /api/v3 前缀（那是现货基址，拼上去路径不存在→404）",
             recorded.none { it.contains("/api/v3/") }
         )
+    }
+
+    // ---------- 理财持仓解析：字段口径必须与币安现行文档一致 ----------
+
+    /**
+     * 官方 `GET /sapi/v1/simple-earn/flexible/position` 的响应形状（逐字段照抄文档）。
+     *
+     * 钉死这一条是为了让「理财数量不对」这类问题能一眼分清责任：
+     * 若币安按文档回数据而 App 取不到，锅在 App；若这条绿而真机还是少，
+     * 那就是接口侧（权限/地区/接口）没给数据，与解析无关。
+     */
+    private val officialFlexibleBody = """
+        {
+          "rows": [
+            {
+              "totalAmount": "142.08565983",
+              "tierAnnualPercentageRate": {"0-5BTC": 0.05, "5-10BTC": 0.03},
+              "latestAnnualPercentageRate": "0.0702",
+              "yesterdayAirdropPercentageRate": "0.02599895",
+              "asset": "USDT",
+              "airDropAsset": "BETH",
+              "canRedeem": true,
+              "collateralAmount": "17.49055419",
+              "productId": "USDT001",
+              "yesterdayRealTimeRewards": "0.10293829",
+              "cumulativeBonusRewards": "0.22759183",
+              "cumulativeRealTimeRewards": "0.22759183",
+              "cumulativeTotalRewards": "0.45459183",
+              "autoSubscribe": true
+            }
+          ],
+          "total": 1
+        }
+    """.trimIndent()
+
+    /** 官方 `GET /sapi/v1/simple-earn/locked/position` 的响应形状（定期行的数量在 amount） */
+    private val officialLockedBody = """
+        {
+          "rows": [
+            {
+              "positionId": "123123",
+              "projectId": "Axs*90",
+              "asset": "BNB",
+              "amount": "0.01000000",
+              "purchaseTime": "1646182276000",
+              "duration": "60",
+              "accrualDays": "4",
+              "rewardAsset": "BNB",
+              "APY": "0.23",
+              "isRenewable": true,
+              "isAutoRenew": true,
+              "redeemDate": "1732182276000"
+            }
+          ],
+          "total": 1
+        }
+    """.trimIndent()
+
+    @Test
+    fun 活期理财持仓按官方文档形状解析() {
+        // 活期的数量在 totalAmount（不是 amount），且文档里那个 tierAnnualPercentageRate
+        // 是嵌套对象——解析不能因为它而整页失效。
+        val parsed = BinanceAccountAPI.parseEarnPositions(officialFlexibleBody, locked = false)
+        assertEquals(1, parsed.positions.size)
+        assertEquals("USDT", parsed.positions[0].asset)
+        assertEquals(142.08565983, parsed.positions[0].amount, 1e-8)
+        assertFalse("活期持仓 locked 应为 false", parsed.positions[0].locked)
+        assertFalse("按文档回数据时不该报任何形状问题", parsed.hasShapeProblem)
+    }
+
+    @Test
+    fun 定期理财持仓按官方文档形状解析() {
+        // 定期的数量在 amount（字段与活期不同），解析必须按 locked 取对应字段
+        val parsed = BinanceAccountAPI.parseEarnPositions(officialLockedBody, locked = true)
+        assertEquals(1, parsed.positions.size)
+        assertEquals("BNB", parsed.positions[0].asset)
+        assertEquals(0.01, parsed.positions[0].amount, 1e-8)
+        assertTrue("定期持仓 locked 应为 true", parsed.positions[0].locked)
+        assertFalse("按文档回数据时不该报任何形状问题", parsed.hasShapeProblem)
+    }
+
+    // ---------- 「HTTP 200 但形状不对」绝不能再伪装成成功 ----------
+
+    @Test
+    fun 响应体没有rows数组时算失败() {
+        // 真机嫌疑最大的一条：网关/接口返回 200，但响应体不是 {"rows":[...]} 形状。
+        // 旧实现直接 return emptyList()，调用方无从分辨「接口形状变了」与「用户没有理财」，
+        // 于是预览页零警告、数量却比官方少一截。
+        val parsed = BinanceAccountAPI.parseEarnPositions(
+            """{"code":-2015,"msg":"Invalid API-key, IP, or permissions for action."}""",
+            locked = false
+        )
+        assertTrue("没有 rows 数组必须被识别成形状问题", parsed.hasShapeProblem)
+        assertTrue(parsed.failures("活期").any { it.contains("没有 rows 数组") })
+    }
+
+    @Test
+    fun 响应体不是JSON对象时算失败() {
+        // 地区限制页常返回 HTML/空串；旧实现会抛异常后被吞成空列表，同样零提示
+        val parsed = BinanceAccountAPI.parseEarnPositions(
+            "<html><body>Service unavailable</body></html>",
+            locked = false
+        )
+        assertTrue("HTML 响应必须被识别成形状问题", parsed.hasShapeProblem)
+        assertTrue(parsed.failures("活期").any { it.contains("不是 JSON") })
+    }
+
+    @Test
+    fun rows为空数组不算失败() {
+        // {"rows":[],"total":0} 是「真的没有理财持仓」，绝不能报假警报
+        val parsed = BinanceAccountAPI.parseEarnPositions("""{"rows":[],"total":0}""", locked = false)
+        assertTrue(parsed.positions.isEmpty())
+        assertFalse("空 rows 是真的没有持仓，不是形状问题", parsed.hasShapeProblem)
+        assertTrue(parsed.failures("活期").isEmpty())
+    }
+
+    @Test
+    fun 行内缺数量字段时算失败_但要带出原因() {
+        // 币安若把活期的数量字段改了名，整行会被跳过（旧实现 continue 就吞了）
+        val parsed = BinanceAccountAPI.parseEarnPositions(
+            """{"rows":[{"asset":"USDT","totalAmountOld":"142.08565983"}],"total":1}""",
+            locked = false
+        )
+        assertTrue("缺数量字段必须被报出来", parsed.hasShapeProblem)
+        assertTrue(
+            parsed.failures("活期").any { it.contains("缺数量字段") }
+        )
+        assertTrue(parsed.positions.isEmpty())
+    }
+
+    @Test
+    fun 行内缺资产名时算失败() {
+        val parsed = BinanceAccountAPI.parseEarnPositions(
+            """{"rows":[{"totalAmount":"142.08565983"}],"total":1}""",
+            locked = false
+        )
+        assertTrue(parsed.hasShapeProblem)
+        assertTrue(parsed.failures("活期").any { it.contains("缺资产名") })
+    }
+
+    @Test
+    fun 部分行坏了时好行照留_同时报问题() {
+        // 部分成功：好行必须留下（丢掉等于少算），坏行必须报（否则用户不知道少了）
+        val parsed = BinanceAccountAPI.parseEarnPositions(
+            """
+            {"rows":[
+                {"asset":"USDT","totalAmount":"142.08565983"},
+                {"asset":"USDC","totalAmountOld":"43.57300526"}
+            ],"total":2}
+            """.trimIndent(),
+            locked = false
+        )
+        assertEquals(142.08565983, parsed.positions.single().amount, 1e-8)
+        assertTrue("坏行必须被报出来", parsed.hasShapeProblem)
+        assertTrue(parsed.failures("活期").any { it.contains("1/2 行被跳过") })
+    }
+
+    @Test
+    fun 数量为0的空壳行不算失败() {
+        // 已赎回的空壳行数量是 0，属正常状态，不该给用户报假警报
+        val parsed = BinanceAccountAPI.parseEarnPositions(
+            """{"rows":[{"asset":"USDT","totalAmount":"0.00000000"}],"total":1}""",
+            locked = false
+        )
+        assertTrue(parsed.positions.isEmpty())
+        assertEquals(1, parsed.emptyRows)
+        assertFalse("空壳行不是形状问题", parsed.hasShapeProblem)
+    }
+
+    @Test
+    fun 非对象行不再把整页带崩() {
+        // 旧实现用 getJSONObject(i)，非对象行会抛出、被外层 catch 成「整页失效」
+        val parsed = BinanceAccountAPI.parseEarnPositions(
+            """{"rows":["oops",{"asset":"USDT","totalAmount":"142.08565983"}],"total":2}""",
+            locked = false
+        )
+        assertEquals(142.08565983, parsed.positions.single().amount, 1e-8)
+        assertTrue(parsed.failures("活期").any { it.contains("不是对象") })
+    }
+
+    @Test
+    fun 接口回200但形状不对时_getEarnPositions把问题带给用户() = runBlocking {
+        // 端到端：HTTP 200 + 无 rows 的响应，不能再伪装成「全部成功」。
+        // 这是本次根因排查的关键——用户预览页必须看得见东西，否则下一轮还是靠猜。
+        val client = OkHttpClient.Builder()
+            .addInterceptor(object : Interceptor {
+                override fun intercept(chain: Interceptor.Chain): Response =
+                    Response.Builder()
+                        .request(chain.request())
+                        .protocol(Protocol.HTTP_1_1)
+                        .code(200)
+                        .message("OK")
+                        .body(
+                            """{"data":[],"success":true}"""
+                                .toResponseBody("application/json".toMediaType())
+                        )
+                        .build()
+            })
+            .build()
+
+        val fetch = BinanceAccountAPI.getEarnPositions("dummyKey", "dummySecret", client)
+        assertTrue(fetch.positions.isEmpty())
+        assertEquals("两个接口各一条形状问题", 2, fetch.failures.size)
+        assertNotNull("必须给出用户能看到的原因", fetch.warning)
+        assertTrue(fetch.warning!!.contains("没有 rows 数组"))
+    }
+
+    @Test
+    fun 理财接口按官方文档返回时能拿到官方全量() = runBlocking {
+        // 决定性：接口按文档回 142.08565983 时，App 端到端拿到的就是 142.08565983。
+        // 这条绿 = 请求 URL/签名/解析三段都没问题（真机若仍少，原因在接口侧）。
+        val client = OkHttpClient.Builder()
+            .addInterceptor(object : Interceptor {
+                override fun intercept(chain: Interceptor.Chain): Response {
+                    val body = if (chain.request().url.encodedPath.contains("/locked/")) {
+                        officialLockedBody
+                    } else {
+                        officialFlexibleBody
+                    }
+                    return Response.Builder()
+                        .request(chain.request())
+                        .protocol(Protocol.HTTP_1_1)
+                        .code(200)
+                        .message("OK")
+                        .body(body.toResponseBody("application/json".toMediaType()))
+                        .build()
+                }
+            })
+            .build()
+
+        val fetch = BinanceAccountAPI.getEarnPositions("dummyKey", "dummySecret", client)
+        assertTrue("接口按文档回数据时不该有失败", fetch.failures.isEmpty())
+        val usdt = fetch.positions.single { it.asset == "USDT" }
+        assertEquals(142.08565983, usdt.amount, 1e-8)
+        assertFalse(usdt.locked)
+        assertEquals(0.01, fetch.positions.single { it.asset == "BNB" }.amount, 1e-8)
     }
 
     // ---------- 借币（Flexible Loan）负债接口 ----------

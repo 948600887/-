@@ -79,6 +79,60 @@ data class BinanceEarnPosition(
 )
 
 /**
+ * 一个理财接口（活期 / 定期）的拉取结果：拿到多少条，以及这一页出了什么问题。
+ *
+ * 与 [BinanceEarnFetch] 的分工：那是「两个接口汇总后给调用方」的结果，
+ * 这是单个接口内部的搬运容器——**部分成功也要两边都留住**：
+ * 形状坏的行丢掉了，但好行已经解析出来了，绝不能为了报问题把好数据一起扔掉。
+ *
+ * @param positions 本页解析出的持仓（部分成功时非空）
+ * @param failures  本页的人话问题（请求失败 / 响应形状不对 / 行内字段缺失）；空 = 本页完全正常
+ */
+internal data class EarnPageOutcome(
+    val positions: List<BinanceEarnPosition>,
+    val failures: List<String>
+)
+
+/**
+ * [parseEarnPositions] 的结果：持仓 + 逐项诊断。
+ *
+ * 存在的意义是把「真的没有理财持仓」和「接口给了但我们没读懂」分开。旧实现一律
+ * 返回空列表，两者无从分辨，结果是真机上「少了一块」却零提示（见 [parseEarnPositions]）。
+ *
+ * @param positions  解析出的持仓
+ * @param bodyNotJson 响应体连 JSON 对象都不是（HTML / 空串 / JSON 数组…/解析异常）时给异常类名
+ * @param missingRows 响应体里没有 rows 数组（接口形状可能已变）
+ * @param badRows     因**形状问题**被跳过的行及其原因（缺资产名 / 缺数量字段）
+ * @param emptyRows   因数量 ≤ 0 被跳过的行数（已赎回空壳，属正常，不算问题）
+ * @param rowCount    rows 里的总行数
+ */
+internal data class EarnParseResult(
+    val positions: List<BinanceEarnPosition>,
+    val bodyNotJson: String? = null,
+    val missingRows: Boolean = false,
+    val badRows: List<String> = emptyList(),
+    val emptyRows: Int = 0,
+    val rowCount: Int = 0
+) {
+    /**
+     * 这一页「是否伪装成了成功」。
+     *
+     * 只有形状类问题算：空壳行（数量为 0）与「rows 是空数组」都是真实状态，不算。
+     */
+    val hasShapeProblem: Boolean
+        get() = bodyNotJson != null || missingRows || badRows.isNotEmpty()
+
+    /** 可直接给用户看的问题清单（[hasShapeProblem] 为 false 时为空） */
+    fun failures(kind: String): List<String> = buildList {
+        bodyNotJson?.let { add("$kind：响应体不是 JSON（$it），接口形状可能已变") }
+        if (missingRows) add("$kind：响应体里没有 rows 数组，接口形状可能已变")
+        if (badRows.isNotEmpty()) {
+            add("$kind：${badRows.size}/$rowCount 行被跳过（${badRows.joinToString("、")}）")
+        }
+    }
+}
+
+/**
  * 理财持仓的拉取结果：拿到多少条，以及哪些接口没拉成。
  *
  * ## 为什么要把失败带出来
@@ -100,7 +154,10 @@ data class BinanceEarnFetch(
         get() = if (failures.isEmpty()) {
             null
         } else {
-            "理财持仓没拉全（${failures.joinToString("；")}）。本次只导入现货，总资产会少算；" +
+            "理财持仓没拉全（${failures.joinToString("；")}）。" +
+                // 一条都没拿到才是「只导入现货」；拿到一部分时数据照导，别误导用户
+                (if (positions.isEmpty()) "本次只导入现货，总资产会少算；"
+                else "本次仍会导入已拉到的那部分，其余的会少算；") +
                 "请确认 API Key 已勾选「读取 / Enable Reading」、IP 白名单与地区限制都放行后重新拉取。"
         }
 }
@@ -420,12 +477,8 @@ object BinanceAccountAPI {
         val lockedResult = lockedPositions.await()
 
         BinanceEarnFetch(
-            positions = flexibleResult.getOrDefault(emptyList()) +
-                lockedResult.getOrDefault(emptyList()),
-            failures = buildList {
-                flexibleResult.exceptionOrNull()?.let { add("活期：${it.message ?: "拉取失败"}") }
-                lockedResult.exceptionOrNull()?.let { add("定期：${it.message ?: "拉取失败"}") }
-            }
+            positions = flexibleResult.positions + lockedResult.positions,
+            failures = flexibleResult.failures + lockedResult.failures
         )
     }
 
@@ -572,7 +625,11 @@ object BinanceAccountAPI {
     }
 
     /**
-     * 拉一个理财接口，把异常收成 [Result]（失败不抛给调用方，但保留原因）。
+     * 拉一个理财接口，把异常收成 [EarnPageOutcome]（失败不抛给调用方，但保留原因）。
+     *
+     * 为什么不用 [Result]：一条接口既要带「拉到的持仓」又要带「形状问题的原因」，
+     * Result 只能二选一（成了就没地方放失败、败了就丢掉已解析出的持仓）。
+     * 部分成功时两边都要留住——部分数据照导、问题照报。
      *
      * 取消必须原样重抛：横竖都不能把「用户关掉弹窗」记成一次权限失败。
      */
@@ -582,14 +639,18 @@ object BinanceAccountAPI {
         apiSecret: String,
         httpClient: OkHttpClient,
         locked: Boolean
-    ): Result<List<BinanceEarnPosition>> =
+    ): EarnPageOutcome =
         try {
-            Result.success(fetchEarnPage(url, apiKey, apiSecret, httpClient, locked))
+            fetchEarnPage(url, apiKey, apiSecret, httpClient, locked)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            warnEarnFailure(if (locked) "定期" else "活期", e)
-            Result.failure(e)
+            val kind = earnKindLabel(locked)
+            warnEarnFailure(kind, e)
+            EarnPageOutcome(
+                positions = emptyList(),
+                failures = listOf("$kind：${e.message ?: "拉取失败"}")
+            )
         }
 
     /**
@@ -598,6 +659,12 @@ object BinanceAccountAPI {
      * 非 2xx（未开通权限 / 接口下线 / 被地区限制）与空响应都**抛异常**，由
      * [fetchEarnOrFailure] 收成 Result 并把原因带回预览页——绝不在这里静默返回空列表，
      * 那等于把「少算一块」伪装成「本来就没有」。
+     *
+     * HTTP 200 也**不再一定算成功**：响应体形状不对（无 rows / 行内字段缺失）时，
+     * 已解析出的持仓照常带回去（不浪费），同时把形状问题记进 [EarnPageOutcome.failures]。
+     *
+     * 每页都留一条诊断日志（行数 → 有效行数 → 被跳过的原因），下一轮真机导入就能
+     * 一眼判定「接口根本没给 / 给了但形状不对 / 给了但字段改名了 / 真的没有持仓」。
      */
     private suspend fun fetchEarnPage(
         url: String,
@@ -605,7 +672,7 @@ object BinanceAccountAPI {
         apiSecret: String,
         httpClient: OkHttpClient,
         locked: Boolean
-    ): List<BinanceEarnPosition> {
+    ): EarnPageOutcome {
         val timestamp = System.currentTimeMillis()
         // current/size 必须参与签名：它们是 query 的一部分，缺了会被判签名无效
         val query = "current=1&size=$EARN_PAGE_SIZE&timestamp=$timestamp&recvWindow=$RECV_WINDOW"
@@ -632,38 +699,97 @@ object BinanceAccountAPI {
                 // 币安的 msg 说明原因（权限不足/参数错），不含密钥，可以带出去
                 throw binanceError(body, resp.code)
             }
-            return parseEarnPositions(body, locked)
+            val parsed = parseEarnPositions(body, locked)
+            val kind = earnKindLabel(locked)
+            AppLogger.d(
+                "币安理财接口[$kind] 响应 ${parsed.rowCount} 行 → 有效 ${parsed.positions.size} 行" +
+                    (if (parsed.emptyRows > 0) "，空壳 ${parsed.emptyRows} 行" else "") +
+                    (if (parsed.badRows.isNotEmpty()) {
+                        "，被跳过 ${parsed.badRows.size} 行（${parsed.badRows.joinToString("、")}）"
+                    } else ""),
+                "BinanceAccountAPI"
+            )
+            return EarnPageOutcome(positions = parsed.positions, failures = parsed.failures(kind))
         }
     }
+
+    /** 活期 / 定期的人话标签（用于失败原因与诊断日志） */
+    private fun earnKindLabel(locked: Boolean): String = if (locked) "定期" else "活期"
 
     /**
      * 解析理财持仓响应：`{"rows":[{...}],"total":N}`。
      *
      * 活期行用 `totalAmount`、定期行用 `amount`，两个字段名不一致，按 [locked] 取对应字段，
      * 取不到就退回另一个（接口微调时不至于整页失效）。
+     *
+     * ## 为什么要把「解析出了问题」也返回出去（而不是只返回持仓列表）
+     *
+     * 曾经的返回值是裸 [List]，于是下面这几种情况**全部伪装成成功**（旧代码 `return emptyList()`），
+     * 用户侧表现就是「数量比官方少一截，但预览页干干净净、零警告」——真机就是这个现象：
+     * 官方 USDT 活期 142.08565983，App 只到 124.59510564，而预览页没有任何提示。
+     *
+     * - HTTP 200 但响应体不是 JSON 对象（网关/地区页返回 HTML、空串、JSON 数组…）；
+     * - HTTP 200 但响应体里**没有 rows 数组**（接口形状变了）；
+     * - rows 里有行、但行内缺资产名或数量字段（改了字段名 / 非对象行）。
+     *
+     * 只有「rows 存在且为空数组」才是真的没有理财持仓，那不是问题；
+     * 「某行数量为 0」也不是问题（已赎回的空壳，本来就没有钱）。
+     *
+     * @return 解析出的持仓 + 逐项诊断；[EarnParseResult.failures] 给出可直接给用户看的原因
      */
-    internal fun parseEarnPositions(body: String, locked: Boolean): List<BinanceEarnPosition> {
+    internal fun parseEarnPositions(body: String, locked: Boolean): EarnParseResult {
         return try {
-            val rows = JSONObject(body).optJSONArray("rows") ?: return emptyList()
-            val result = mutableListOf<BinanceEarnPosition>()
+            val rows = JSONObject(body).optJSONArray("rows")
+            if (rows == null) {
+                // 响应体里连 rows 数组都没有：接口形状变了，一条都没拿到，绝不是「没有持仓」
+                return EarnParseResult(positions = emptyList(), missingRows = true)
+            }
+            val primary = if (locked) "amount" else "totalAmount"
+            val fallback = if (locked) "totalAmount" else "amount"
+            val positions = mutableListOf<BinanceEarnPosition>()
+            val badRows = mutableListOf<String>()
+            var emptyRows = 0
             for (i in 0 until rows.length()) {
-                val obj = rows.getJSONObject(i)
+                // 用 opt 而非 get：非对象行只该跳过这一行，不该把整页带崩（旧代码会整页失效）
+                val obj = rows.optJSONObject(i)
+                if (obj == null) {
+                    badRows.add("第${i + 1}行不是对象")
+                    continue
+                }
                 val asset = obj.optString("asset")
-                val primary = if (locked) "amount" else "totalAmount"
-                val fallback = if (locked) "totalAmount" else "amount"
                 val raw = obj.optString(primary).takeIf { it.isNotBlank() }
                     ?: obj.optString(fallback)
-                val amount = raw.toDoubleOrNull() ?: continue
-                // 数量为 0 的行（已赎回空壳）没有导入意义，交给现货侧的 dust 过滤口径
-                if (asset.isBlank() || amount <= 0.0) continue
-                result.add(BinanceEarnPosition(asset = asset, amount = amount, locked = locked))
+                val amount = raw.toDoubleOrNull()
+                if (amount == null) {
+                    // 两个数量字段都没有（或不可解析）：这是数据丢失，必须让用户知道
+                    badRows.add("第${i + 1}行缺数量字段 $primary/$fallback")
+                    continue
+                }
+                if (asset.isBlank()) {
+                    badRows.add("第${i + 1}行缺资产名")
+                    continue
+                }
+                if (amount <= 0.0) {
+                    // 数量为 0 的空壳行（已赎回）：属正常，不计失败，只记进诊断日志
+                    emptyRows++
+                    continue
+                }
+                positions.add(BinanceEarnPosition(asset = asset, amount = amount, locked = locked))
             }
-            result
+            EarnParseResult(
+                positions = positions,
+                badRows = badRows,
+                emptyRows = emptyRows,
+                rowCount = rows.length()
+            )
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             AppLogger.e("解析币安理财持仓失败: ${e::class.simpleName}", e, "BinanceAccountAPI")
-            emptyList()
+            EarnParseResult(
+                positions = emptyList(),
+                bodyNotJson = e::class.simpleName ?: "解析失败"
+            )
         }
     }
 

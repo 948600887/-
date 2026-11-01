@@ -217,7 +217,8 @@ class CalendarViewModelTest {
         // 打桩放在构造之后：默认标签「资产日历」那轮生成同样会读分红记录并写下
         // 非空 dividends（但 calendarData 全 0），打桩过早会让等待条件被错误的
         // 步骤满足——高负载下表现为 expected 1000.0 but was 0.0 的偶发失败。
-        val recDate = vm.uiState.value.currentMonth.atDay(15)
+        // 必须用本月内 <= today 的日期：生产只聚合"已到账"分红（date !isAfter(today)），钉 15 号在每月 1–14 号运行会被过滤成 0.0
+        val recDate = vm.uiState.value.currentMonth.atDay(1)
         coEvery { divRepo.getDividendsBySymbol(any(), any()) } returns listOf(
             DividendRecord(
                 exDividendDate = recDate.toString(),
@@ -458,7 +459,8 @@ class CalendarViewModelTest {
         val vm = buildVm(assets = listOf(a1, a2))
         waitUntil { vm.uiState.value.assets.size == 2 }
 
-        val recDate = vm.uiState.value.currentMonth.atDay(15)
+        // 必须用本月内 <= today 的日期：生产只聚合"已到账"分红（date !isAfter(today)），钉 15 号在每月 1–14 号运行会被过滤成 0.0
+        val recDate = vm.uiState.value.currentMonth.atDay(1)
         coEvery { divRepo.getDividendsBySymbol(any(), any()) } returns listOf(
             DividendRecord(
                 exDividendDate = recDate.toString(),

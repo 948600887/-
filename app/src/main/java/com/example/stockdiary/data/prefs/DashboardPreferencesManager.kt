@@ -31,6 +31,12 @@ data class DashboardPreferences(
     val showNextPayout: Boolean = true,
     /** 是否显示「月度现金流」卡片。默认 true */
     val showMonthlyCashFlow: Boolean = true,
+    /**
+     * 是否显示历史页的「月度增值」卡片（逐月收益柱状图）。默认 true。
+     * 与首页的「资产增值」卡片是**两个独立的东西**：那个由 [showAssetGrowth] 控制，
+     * 这个只影响历史页面。开关放在自定义仪表盘的「历史页面」分组里，互不干扰。
+     */
+    val showHistoryMonthlyGrowth: Boolean = true,
     val showBankDeposits: Boolean = true,
     val showStocks: Boolean = true,
     val showFunds: Boolean = true,
@@ -99,6 +105,7 @@ class DashboardPreferencesManager(context: Context) {
         private const val KEY_SHOW_DIVIDEND_PROGRESS = "show_dividend_progress"
         private const val KEY_SHOW_NEXT_PAYOUT = "show_next_payout"
         private const val KEY_SHOW_MONTHLY_CASH_FLOW = "show_monthly_cash_flow"
+        private const val KEY_SHOW_HISTORY_MONTHLY_GROWTH = "show_history_monthly_growth"
         private const val KEY_SHOW_BANK_DEPOSITS = "show_bank_deposits"
         private const val KEY_SHOW_STOCKS = "show_stocks"
         private const val KEY_SHOW_FUNDS = "show_funds"
@@ -156,6 +163,7 @@ class DashboardPreferencesManager(context: Context) {
             showDividendProgress = prefs.getBoolean(KEY_SHOW_DIVIDEND_PROGRESS, true),
             showNextPayout = prefs.getBoolean(KEY_SHOW_NEXT_PAYOUT, true),
             showMonthlyCashFlow = prefs.getBoolean(KEY_SHOW_MONTHLY_CASH_FLOW, true),
+            showHistoryMonthlyGrowth = prefs.getBoolean(KEY_SHOW_HISTORY_MONTHLY_GROWTH, true),
             showBankDeposits = prefs.getBoolean(KEY_SHOW_BANK_DEPOSITS, true),
             showStocks = prefs.getBoolean(KEY_SHOW_STOCKS, true),
             showFunds = prefs.getBoolean(KEY_SHOW_FUNDS, true),
@@ -188,6 +196,7 @@ class DashboardPreferencesManager(context: Context) {
             putBoolean(KEY_SHOW_DIVIDEND_PROGRESS, preferences.showDividendProgress)
             putBoolean(KEY_SHOW_NEXT_PAYOUT, preferences.showNextPayout)
             putBoolean(KEY_SHOW_MONTHLY_CASH_FLOW, preferences.showMonthlyCashFlow)
+            putBoolean(KEY_SHOW_HISTORY_MONTHLY_GROWTH, preferences.showHistoryMonthlyGrowth)
             putBoolean(KEY_SHOW_BANK_DEPOSITS, preferences.showBankDeposits)
             putBoolean(KEY_SHOW_STOCKS, preferences.showStocks)
             putBoolean(KEY_SHOW_FUNDS, preferences.showFunds)

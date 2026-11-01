@@ -75,6 +75,21 @@ class HistoryViewModel(
     private val _uiState = MutableStateFlow(UiState())
     val uiState: StateFlow<UiState> = _uiState.asStateFlow()
 
+    /**
+     * 用户偏好（含 [com.example.stockdiary.data.prefs.DashboardPreferences.showHistoryMonthlyGrowth]
+     * 等历史页相关开关）。只在构造期加载一次，进入历史页时由 [reloadPreferences] 从磁盘刷新，
+     * 否则在「设置 → 自定义仪表盘」改完开关返回本页不会生效（与 DashboardViewModel 同源问题）。
+     */
+    private val _preferences = MutableStateFlow(dashboardPreferencesManager.loadPreferences())
+    val preferences: StateFlow<com.example.stockdiary.data.prefs.DashboardPreferences> = _preferences.asStateFlow()
+
+    /** 进入历史页时从磁盘重读偏好，使刚改的开关（如「显示月度增值」）立即生效 */
+    fun reloadPreferences() {
+        viewModelScope.launch(Dispatchers.IO) {
+            _preferences.value = dashboardPreferencesManager.loadPreferences()
+        }
+    }
+
     private val _selectedPeriod = MutableStateFlow(defaultPeriod)
 
     /** 用户是否在本次会话内手动选过周期；选过就不再被「默认周期」覆盖（见 [reloadDefaultPeriod]） */

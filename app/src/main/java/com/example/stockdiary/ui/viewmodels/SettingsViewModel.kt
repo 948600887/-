@@ -457,6 +457,7 @@ class SettingsViewModel(
                         showDividendProgress = preferences.showDividendProgress,
                         showNextPayout = preferences.showNextPayout,
                         showMonthlyCashFlow = preferences.showMonthlyCashFlow,
+                        showHistoryMonthlyGrowth = preferences.showHistoryMonthlyGrowth,
                         showBankDeposits = preferences.showBankDeposits,
                         showStocks = preferences.showStocks,
                         showFunds = preferences.showFunds,

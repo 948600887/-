@@ -58,6 +58,9 @@ fun HistoryScreen(
     val container = LocalAppContainer.current
     val viewModel: HistoryViewModel = viewModel(factory = HistoryViewModel.factory(container))
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val preferences by viewModel.preferences.collectAsStateWithLifecycle()
+    // 进入本页时重读偏好，让「设置 → 自定义仪表盘」里改的开关立即生效
+    LaunchedEffect(Unit) { viewModel.reloadPreferences() }
 
     val snackbarHostState = remember { SnackbarHostState() }
     var showSaveDialog by remember { mutableStateOf(false) }
@@ -158,7 +161,9 @@ fun HistoryScreen(
                         // 2 份历史快照」而非整块消失——否则用户会以为功能丢了。
                         historyRiskCard(stats = uiState.statistics)
 
-                        historyMonthlyReturnChart(monthlyReturns = uiState.monthlyReturns)
+                        if (preferences.showHistoryMonthlyGrowth) {
+                            historyMonthlyReturnChart(monthlyReturns = uiState.monthlyReturns)
+                        }
                         historyAssetDistribution(latest = latest)
                     }
                 }

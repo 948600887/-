@@ -3,8 +3,6 @@ package com.example.stockdiary.ui.screens.settings.components
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -12,13 +10,14 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -39,11 +38,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Surface
 import com.example.stockdiary.data.prefs.DashboardPreferences
 import com.example.stockdiary.data.prefs.SortOrder
 import kotlinx.coroutines.delay
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DashboardConfigSheet(
     preferences: DashboardPreferences,
@@ -243,12 +245,19 @@ fun DashboardConfigSheet(
 
             HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
 
-            SectionTitle("历史页面·默认历史周期")
-            // 用 FlowRow：6 个周期 chip 横排在窄屏会被裁掉/溢出，改成自动换行更整齐。
-            FlowRow(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+            SectionTitle("历史页面")
+            SwitchPreference(
+                title = "显示月度增值",
+                checked = localPrefs.showHistoryMonthlyGrowth,
+                onCheckedChange = { emit(localPrefs.copy(showHistoryMonthlyGrowth = it)) }
+            )
+            // 6 个周期 chip 用紧凑自定义芯片（见 CompactPeriodChip）排成一行，极窄屏兜底用
+            // horizontalScroll 不换行（而非被挤到第二行）。
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 val periods = listOf(
                     "1W" to "1周",
@@ -259,10 +268,10 @@ fun DashboardConfigSheet(
                     "ALL" to "全部"
                 )
                 periods.forEach { (value, label) ->
-                    FilterChip(
+                    CompactPeriodChip(
                         selected = localPrefs.defaultPeriod == value,
                         onClick = { emit(localPrefs.copy(defaultPeriod = value)) },
-                        label = { Text(label, style = MaterialTheme.typography.labelSmall) }
+                        label = label
                     )
                 }
             }
@@ -348,5 +357,36 @@ private fun SwitchPreference(
             checked = checked,
             onCheckedChange = onCheckedChange
         )
+    }
+}
+
+/**
+ * 紧凑的周期选择 chip：固定高度 32dp、水平内边距 12dp，比 M3 默认 FilterChip 更窄，
+ * 让「1周/1月/3月/6月/1年/全部」六个在常规手机宽度内排成一行而不换行。
+ */
+@Composable
+private fun CompactPeriodChip(
+    selected: Boolean,
+    onClick: () -> Unit,
+    label: String
+) {
+    val containerColor = if (selected) MaterialTheme.colorScheme.primaryContainer
+    else MaterialTheme.colorScheme.surface
+    val contentColor = if (selected) MaterialTheme.colorScheme.onPrimaryContainer
+    else MaterialTheme.colorScheme.onSurfaceVariant
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(50),
+        color = containerColor,
+        contentColor = contentColor,
+        border = if (selected) null else BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+        modifier = Modifier.height(32.dp)
+    ) {
+        Box(
+            contentAlignment = Alignment.Center,
+            modifier = Modifier.padding(horizontal = 12.dp)
+        ) {
+            Text(text = label, style = MaterialTheme.typography.labelSmall)
+        }
     }
 }

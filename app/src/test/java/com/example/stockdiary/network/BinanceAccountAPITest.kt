@@ -239,8 +239,9 @@ class BinanceAccountAPITest {
         val client = OkHttpClient.Builder().addInterceptor(interceptor).build()
         BinanceAccountAPI.getEarnPositions("dummyKey", "dummySecret", client)
 
-        // 活期 + 定期两个接口各发一次
-        assertEquals("应发出 2 个理财接口请求（活期+定期）", 2, recorded.size)
+        // 活期 + 定期两个核心接口各发一次，外加一个 Staking 诊断探针（权限全开却 earn 拉不到
+        // 时，用来确认钱是否其实在 Staking 而非 Simple Earn）。探针只记日志、不并入合并链路。
+        assertEquals("应发出 3 个请求（活期+定期+Staking诊断探针）", 3, recorded.size)
         assertTrue(
             "活期接口应为 /sapi/v1/simple-earn/flexible/position",
             recorded.any { it == "/sapi/v1/simple-earn/flexible/position" }
@@ -248,6 +249,10 @@ class BinanceAccountAPITest {
         assertTrue(
             "定期接口应为 /sapi/v1/simple-earn/locked/position",
             recorded.any { it == "/sapi/v1/simple-earn/locked/position" }
+        )
+        assertTrue(
+            "Staking诊断探针应为 /sapi/v1/staking/position",
+            recorded.any { it == "/sapi/v1/staking/position" }
         )
         assertTrue(
             "SAPI 绝不能带 /api/v3 前缀（那是现货基址，拼上去路径不存在→404）",

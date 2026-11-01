@@ -473,8 +473,12 @@ object BinanceAccountAPI {
         val lockedPositions = async {
             fetchEarnOrFailure(EARN_LOCKED_URL, apiKey, apiSecret, httpClient, locked = true)
         }
+        // 诊断探针（非集成）：权限全开却 simple-earn 拉不到 USDT 时，顺手探一下 Staking，
+        // 排除「这笔钱其实在锁仓质押而非 Simple Earn」。只记日志、绝不并入合并链路。
+        val stakingProbe = async { probeStakingPositions(apiKey, apiSecret, httpClient) }
         val flexibleResult = flexible.await()
         val lockedResult = lockedPositions.await()
+        stakingProbe.await()
 
         BinanceEarnFetch(
             positions = flexibleResult.positions + lockedResult.positions,
@@ -709,6 +713,29 @@ object BinanceAccountAPI {
                     } else ""),
                 "BinanceAccountAPI"
             )
+            // 形状异常（非 JSON / 无 rows / 行内缺字段 / JSON 解析抛异常）**或接口回了 200 但 0 条
+            // 有效持仓**时，把响应体原文截前 600 字落盘：响应体是币安回包，不含签名/密钥，安全。
+            // 下一轮真机导入即可一眼看到币安到底回了什么：
+            //   - 错误码 JSON（权限/签名/地区）→ 直接定位；
+            //   - 干净的 {"rows":[],"total":0} → 说明这笔钱不在 Simple Earn 活期/定期（可能在
+            //     Staking / 其他理财，或确实没持仓），指向「换个接口拉」而非「权限没开」；
+            //   - HTML 墙 → 地区/网关拦截。
+            // 用户已确认读取权限全开却 earn 进不来，最可能是后两类，必须靠这行原文判定，不能靠猜。
+            if (parsed.positions.isEmpty() || parsed.hasShapeProblem || parsed.bodyNotJson != null) {
+                val snippet = body.take(600).replace("\r", " ").replace("\n", " ")
+                val reason = when {
+                    parsed.bodyNotJson != null ->
+                        "响应不是合法 JSON(${parsed.bodyNotJson})"
+                    parsed.hasShapeProblem ->
+                        "响应形状异常(缺 rows/字段)"
+                    else ->
+                        "返回 0 条有效持仓(钱可能不在 Simple Earn 活期/定期)"
+                }
+                AppLogger.w(
+                    "币安理财接口[$kind] $reason，响应体前600字=$snippet",
+                    "BinanceAccountAPI"
+                )
+            }
             return EarnPageOutcome(positions = parsed.positions, failures = parsed.failures(kind))
         }
     }
@@ -789,6 +816,54 @@ object BinanceAccountAPI {
             EarnParseResult(
                 positions = emptyList(),
                 bodyNotJson = e::class.simpleName ?: "解析失败"
+            )
+        }
+    }
+
+    /**
+     * 诊断探针（非集成）：顺手拉一下 Staking 持仓接口，把原始响应体前 600 字落盘。
+     *
+     * ## 为什么要有这个探针
+     *
+     * 用户已确认 API Key 读取权限全开，但 simple-earn 接口在真机上回 0 条（App 因此只用
+     * 被借币抵押压小的 LD 壳，少算 142.08−124.59≈17.49 USDT）。权限没问题的前提下，最可能是
+     * 这笔钱其实躺在 **Staking（锁仓质押）** 而不是 Simple Earn——而 Staking 是另一套接口、
+     * 另一套响应形状，App 当前根本不查。这个探针只记日志、绝不并入合并链路（并入需要单独处理
+     * Staking 的 `data[]` 形状且要补单测，不能顺手乱加），目的只是「一次真机拉取就看清钱在哪」。
+     * 4xx / 异常都静默吞掉，绝不影响导入主流程。
+     */
+    private suspend fun probeStakingPositions(
+        apiKey: String,
+        apiSecret: String,
+        httpClient: OkHttpClient
+    ) {
+        val timestamp = System.currentTimeMillis()
+        val query =
+            "product=STAKING&current=1&size=$EARN_PAGE_SIZE&timestamp=$timestamp&recvWindow=$RECV_WINDOW"
+        val signature = sign(apiSecret, query)
+        val request = Request.Builder()
+            // 只记端点路径，signature 由 secret 派生，绝不落盘
+            .url("${EARN_SAPI_BASE}/staking/position?$query&signature=$signature")
+            .addHeader("X-MBX-APIKEY", apiKey)
+            .addHeader("User-Agent", "Mozilla/5.0")
+            .build()
+        try {
+            val response = httpClient.newCall(request).execute()
+            response.use { resp ->
+                val body = resp.body?.string().orEmpty()
+                val snippet = body.take(600).replace("\r", " ").replace("\n", " ")
+                AppLogger.w(
+                    "币安诊断探针[Staking] HTTP ${resp.code}，响应体前600字=$snippet",
+                    "BinanceAccountAPI"
+                )
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // 探针失败绝不影响导入：可能没开 Staking 权限 / 接口调整 / 网络抖动，都只是少一条日志
+            AppLogger.w(
+                "币安诊断探针[Staking] 请求异常: ${e::class.simpleName} ${e.message ?: ""}",
+                "BinanceAccountAPI"
             )
         }
     }

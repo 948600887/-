@@ -495,11 +495,26 @@ object BinanceAccountAPI {
      * 用户侧没有任何可改的设置；451（地区限制）与 401/403/-2015（权限）才是用户可修的，
      * 所以 451 归 [BinanceFailureKind.PERMISSION_OR_OTHER]，保住原有的「换代理节点」提示。
      */
-    internal fun classifyFailure(e: Throwable): BinanceFailureKind = when {
-        isNetworkFailure(e) -> BinanceFailureKind.NETWORK
-        e is BinanceApiException && (e.httpCode == 418 || e.httpCode == 429 || e.httpCode >= 500) ->
-            BinanceFailureKind.SERVER_OR_RATE_LIMIT
-        else -> BinanceFailureKind.PERMISSION_OR_OTHER
+    internal fun classifyFailure(e: Throwable): BinanceFailureKind {
+        // BinanceApiException 带真实 HTTP/业务码，必须先按码分类，绝不能让 message 里的
+        // "timeout"/"interrupted" 关键词把它误判成网络失败（例如 -1007 业务码响应体常带 timeout 字样）。
+        if (e is BinanceApiException) return classifyApiException(e)
+        if (isNetworkFailure(e)) return BinanceFailureKind.NETWORK
+        // 其余非 API 异常（普通 Exception、业务层错误）按「权限/地区/参数」兜底
+        return BinanceFailureKind.PERMISSION_OR_OTHER
+    }
+
+    /**
+     * 只按 HTTP 状态码与币安业务码归类，不读 message——message 里可能出现 "timeout" 等词造成误判。
+     * - 401/403/451（及 -2015 权限业务码）：用户侧可修（授权 / 换地区节点）→ PERMISSION_OR_OTHER；
+     * - 其余（404 路由错、400 参数错、418/429/5xx、-1007 业务码等）：币安侧临时或可重试状态
+     *   → SERVER_OR_RATE_LIMIT。
+     */
+    private fun classifyApiException(e: BinanceApiException): BinanceFailureKind {
+        if (e.httpCode == 401 || e.httpCode == 403 || e.httpCode == 451 || e.binanceCode == -2015) {
+            return BinanceFailureKind.PERMISSION_OR_OTHER
+        }
+        return BinanceFailureKind.SERVER_OR_RATE_LIMIT
     }
 
     /**

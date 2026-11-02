@@ -228,17 +228,19 @@ class CalendarViewModel(
                 "${asset.interestRate}|${asset.millionCopiesIncome}"
         }
 
-    private fun loadDividendIncome(assets: List<Asset>) {
+    private fun loadDividendIncome(assets: List<Asset>, forceRefresh: Boolean = false) {
         if (assets.isEmpty()) return
         viewModelScope.launch {
             try {
-                // cacheOnly：冷启动只读缓存，不为了「预计收入」去敲几十个接口。
-                // 连过期数据都没有（首次安装）时内部会自己走抓取流程
+                // 非强制刷新（进页/切月/切 Tab）走 cacheOnly=true：只读缓存、不为了「预计收入」
+                // 去敲几十个接口；连过期数据都没有（首次安装）时内部会自己走抓取流程。
+                // 手动刷新（forceRefresh=true）则 cacheOnly=false，按刚抓回的最新分红重算年度收入，
+                // 否则网格更新了、喂给 FIRE 的年度收入却停在旧缓存值（优化①）。
                 val result = dividendIncomeUseCase.load(
                     assets,
-                    forceRefresh = false,
+                    forceRefresh = forceRefresh,
                     tag = "CalendarVM",
-                    cacheOnly = true
+                    cacheOnly = !forceRefresh
                 )
                 _uiState.update { state -> state.copy(realAnnualIncome = result.totalAnnualIncome) }
             } catch (e: CancellationException) {
@@ -301,6 +303,9 @@ class CalendarViewModel(
         viewModelScope.launch {
             try {
                 generateCalendarData(_uiState.value.assets, forceRefresh = true)
+                // 优化①：强制重抓分红后，年度收入（喂给 FIRE 计算器）必须按最新数据重算，
+                // 否则日历分红网格刷新了、FIRE 的年度收入却停在旧缓存值
+                loadDividendIncome(_uiState.value.assets, forceRefresh = true)
                 // 手动刷新撞过天天基金限流（514/429）→ 提示「部分场外基金分红没抓全」（非阻塞）
                 if (dividendRepository.consumeOtcRateLimitWarning()) {
                     _dividendWarning.value = "今日部分场外基金分红因天天基金限流未能抓取完整，可稍后手动重试"

@@ -71,11 +71,14 @@ class CalendarViewModelTest {
     // 刻意**不加**延后：这样 loadDividendIncome 会先于 generateCalendarData 完成写入，
     // 正好是原先会把 realAnnualIncome 覆盖掉的顺序 —— 用例仍通过即证明 uiState 的
     // 原子更新（update{}）确实修好了那处竞态。
+    // cacheOnly=true（进页/切月冷路径）返回旧缓存值；cacheOnly=false（手动刷新强制重算）返回最新值，
+    // 用来回归「手动刷新后年度收入必须更新」这一修复（优化①）。
     private val useCase = DividendIncomeUseCase { _assets, _forceRefresh, _tag, _cacheOnly ->
+        val income = if (_cacheOnly) 1234.5 else 9999.0
         DividendIncomeLoader.IncomeResult(
             dividendsBySymbol = emptyMap(),
             recordsBySymbol = emptyMap(),
-            totalAnnualIncome = 1234.5,
+            totalAnnualIncome = income,
             hasDividendData = true
         )
     }
@@ -125,6 +128,26 @@ class CalendarViewModelTest {
         waitUntil(timeoutMs = 6000) { vm.uiState.value.realAnnualIncome == 1234.5 }
         assertEquals(1234.5, vm.uiState.value.realAnnualIncome, 0.001)
         assertEquals(listOf(stockAsset), vm.uiState.value.assets)
+    }
+
+    /**
+     * 优化①回归：手动刷新必须让「年度收入（喂给 FIRE）」按最新分红重算。
+     *
+     * 进页冷路径走 cacheOnly=true（桩返回旧缓存 1234.5）；手动刷新走 forceRefresh=true
+     * → cacheOnly=false（桩返回最新 9999.0）。若 refresh() 漏掉 loadDividendIncome(forceRefresh=true)，
+     * realAnnualIncome 会停在旧缓存 1234.5，FIRE 计算器看到的年度收入就过期了。
+     */
+    @Test
+    fun `手动刷新后年度收入按最新分红重算`() = runBlocking {
+        val vm = buildVm()
+        // 进页冷路径：cacheOnly=true，拿到旧缓存值
+        waitUntil(timeoutMs = 6000) { vm.uiState.value.realAnnualIncome == 1234.5 }
+        assertEquals(1234.5, vm.uiState.value.realAnnualIncome, 0.001)
+
+        // 手动刷新：必须按刚抓回的最新分红重算 → cacheOnly=false 返回 9999.0
+        vm.refresh()
+        waitUntil(timeoutMs = 6000) { vm.uiState.value.realAnnualIncome == 9999.0 }
+        assertEquals(9999.0, vm.uiState.value.realAnnualIncome, 0.001)
     }
 
     @Test

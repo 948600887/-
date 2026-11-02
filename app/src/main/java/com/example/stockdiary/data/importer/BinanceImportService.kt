@@ -492,7 +492,7 @@ class BinanceImportService(
         // 已清零的折叠壳行（balance≈0）不再重复写：它们上一轮导入就已置 0，再 UPDATE 0→0 只是
         // 日志/计数噪音与一次无谓的 DB 写。真实仍持有余额的壳行（需要清 0）照常处理。
         internal fun buildZeroRows(assets: List<Asset>): List<SnapshotAlignment.CommitRow> =
-            assets.filter { abs(it.balance) > DUST_THRESHOLD }.map { it.toZeroRow() }
+            assets.filter { abs(it.balance) >= DUST_THRESHOLD }.map { it.toZeroRow() }
     }
 }
 

@@ -392,7 +392,7 @@ class BinanceImportService(
             // 已排除 items 的 symbol），让「本次从币安拉到的新鲜数量」最后落库才是唯一正确的
             // 结果。反过来（items 在前）就是真机 P0：先把数量写对、再被清零行写 0，
             // 每次导入都清空资产，下次预览满屏「覆盖 0 → X」。
-            rows = preview.supersededAssets.map { it.toZeroRow() } +
+            rows = buildZeroRows(preview.supersededAssets) +
                 preview.items.map { it.toCommitRow(prices) },
             writer = writer,
             account = account,
@@ -439,24 +439,6 @@ class BinanceImportService(
             isEarnLocked = isEarnLocked
         )
 
-    /**
-     * 被 [mergeEarnIntoBalances] 折叠掉的旧行 → 清零行。
-     *
-     * 只改数量、不碰价格与 [Asset.isEarnLocked]：这一行的钱已经并入同底层的主行，
-     * 刷价/改标记都是无谓写；清零才是让它不再被重复计入总资产。
-     */
-    private fun Asset.toZeroRow(): SnapshotAlignment.CommitRow =
-        SnapshotAlignment.CommitRow(
-            symbol = symbol.orEmpty(),
-            name = name,
-            quantity = 0.0,
-            status = SnapshotAlignment.ItemStatus.UPDATE,
-            existing = this,
-            nav = null,
-            currency = null,
-            isEarnLocked = isEarnLocked
-        )
-
     /** 内核状态 → 本链路 UI 状态（两边枚举常量一一对应） */
     private fun SnapshotAlignment.ItemStatus.toUiStatus(): ItemStatus = when (this) {
         SnapshotAlignment.ItemStatus.NEW -> ItemStatus.NEW
@@ -488,6 +470,29 @@ class BinanceImportService(
 
         /** 币安现货计价币种（USDT 稳定币 ≈ 美元） */
         private const val CURRENCY = "USD"
+
+        /**
+         * 被 [mergeEarnIntoBalances] 折叠掉的旧行 → 清零行。
+         *
+         * 只改数量、不碰价格与 [Asset.isEarnLocked]：这一行的钱已经并入同底层的主行，
+         * 刷价/改标记都是无谓写；清零才是让它不再被重复计入总资产。
+         */
+        private fun Asset.toZeroRow(): SnapshotAlignment.CommitRow =
+            SnapshotAlignment.CommitRow(
+                symbol = symbol.orEmpty(),
+                name = name,
+                quantity = 0.0,
+                status = SnapshotAlignment.ItemStatus.UPDATE,
+                existing = this,
+                nav = null,
+                currency = null,
+                isEarnLocked = isEarnLocked
+            )
+
+        // 已清零的折叠壳行（balance≈0）不再重复写：它们上一轮导入就已置 0，再 UPDATE 0→0 只是
+        // 日志/计数噪音与一次无谓的 DB 写。真实仍持有余额的壳行（需要清 0）照常处理。
+        internal fun buildZeroRows(assets: List<Asset>): List<SnapshotAlignment.CommitRow> =
+            assets.filter { abs(it.balance) > DUST_THRESHOLD }.map { it.toZeroRow() }
     }
 }
 

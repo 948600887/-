@@ -984,7 +984,9 @@ class BinanceImportServiceTest {
      */
     @Test
     fun 同一行既在清零名单又是主行时_主行数量最后落库() = runBlocking {
-        val row = cryptoAsset(id = 99L, symbol = "BNBUSDT", balance = 0.0)
+        // 旧壳余额给成非 0（这里 1.0）：buildZeroRows 只跳过 balance≈0 的「已被上一轮清零」壳，
+        // 这条刻意造的、仍持有余额的壳必须照常进清零行，才能继续钉住「清空行先写、主行后写」的顺序契约。
+        val row = cryptoAsset(id = 99L, symbol = "BNBUSDT", balance = 1.0)
         // 按调用顺序记下每次写入的数量，用来断言「谁覆盖了谁」
         val writes = mutableListOf<Double>()
         coEvery { repo.updateBalance(99L, any()) } coAnswers {

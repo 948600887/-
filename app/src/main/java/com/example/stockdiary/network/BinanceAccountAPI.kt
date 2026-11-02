@@ -825,10 +825,17 @@ object BinanceAccountAPI {
             // 降级：不阻断导入，只把原因带回预览页。
             // 失败类别决定文案：限流/服务端异常与网络问题都不该让用户去查 Loan 权限
             warnLoanFailure(e)
+            // 借币接口 404 绝大多数是「未开通 Loan 读取权限 / 该地区不支持」（见 warnLoanFailure 注释），
+            // 该给「去开 Loan 读取权限」提示。classifyFailure 现在把通用 404 归到限流/服务端异常——
+            // 那对 earn 等端点是对的，但会让借币 404 误导用户去「等几分钟」。这里对借币端点单独把
+            // 404 拉回权限类，保留原有提示，不动其它端点的通用 404 归类。
+            val loanKind = (e as? BinanceApiException)?.takeIf { it.httpCode == 404 }
+                ?.let { BinanceFailureKind.PERMISSION_OR_OTHER }
+                ?: classifyFailure(e)
             BinanceLoanFetch(
                 debts = emptyList(),
                 failures = listOf(e.message ?: "拉取失败"),
-                failureKind = classifyFailure(e),
+                failureKind = loanKind,
                 httpCode = (e as? BinanceApiException)?.httpCode
             )
         }

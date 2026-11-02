@@ -1387,4 +1387,45 @@ class BinanceAccountAPITest {
         assertTrue("失败原因应带回预览页提示", result.warning != null)
         assertTrue(result.warning!!.contains("借币负债没拉到"))
     }
+
+    /**
+     * 借币接口 404（非 -2015 业务码）仍归权限类，提示去开 Loan 读取权限。
+     *
+     * 回归点：FIX 1 把通用 404 在 [BinanceAccountAPI.classifyFailure] 里改归
+     * [BinanceFailureKind.SERVER_OR_RATE_LIMIT]（对 earn 等端点正确），但借币 404 绝大多数是
+     * 「未开通 Loan 读取权限 / 该地区不支持」，若沿用通用归类会给错成「请过几分钟再试」的误导文案。
+     * [BinanceAccountAPI.getLoans] 在 catch 里对借币 404 单独拉回 [BinanceFailureKind.PERMISSION_OR_OTHER]。
+     * 这里用 `{"code":0,...}`（非 -2015）的 404 验证该特殊分支生效；同时确认 earn 端点的通用
+     * 404 归类不受此改动影响（那部分不在此测试范围内、由 classifyFailure 测试钉住）。
+     */
+    @Test
+    fun 借币接口404非2015业务码_仍归权限类且提示开Loan权限() = runBlocking {
+        val interceptor = object : Interceptor {
+            override fun intercept(chain: Interceptor.Chain): Response {
+                return Response.Builder()
+                    .request(chain.request())
+                    .protocol(Protocol.HTTP_1_1)
+                    .code(404)
+                    .message("Not Found")
+                    .body(
+                        """{"code":0,"msg":"Service unavailable from a restricted location."}"""
+                            .toResponseBody("application/json".toMediaType())
+                    )
+                    .build()
+            }
+        }
+        val client = OkHttpClient.Builder().addInterceptor(interceptor).build()
+        val result = BinanceAccountAPI.getLoans("dummyKey", "dummySecret", client)
+
+        // 关键：非 -2015 的 404 被借币端点拉回权限类，而非限流/服务端异常
+        assertEquals(
+            "借币 404 应归权限类（提示去开 Loan 读取权限），而非限流/服务端异常",
+            BinanceFailureKind.PERMISSION_OR_OTHER,
+            result.failureKind
+        )
+        assertTrue(
+            "权限类文案应点名去开 Loan 读取权限",
+            result.warning?.contains("Loan 读取权限") == true
+        )
+    }
 }

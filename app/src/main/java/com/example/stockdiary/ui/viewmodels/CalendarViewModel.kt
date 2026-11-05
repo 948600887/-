@@ -132,6 +132,9 @@ class CalendarViewModel(
                 if (generatedOnDate == LocalDate.now()) continue
                 rollMonthIfFollowingToday()
                 generateCalendarData(_uiState.value.assets)
+                // C2：跨零点后一并重算「年度收入 / FIRE」。DividendIncomeCache 以 date 跨日为重算门控，
+                // 这里走 forceRefresh=false：底层 records 未变就零网络复用，跨日则重算，避免 FIRE 停在旧值。
+                loadDividendIncome(_uiState.value.assets, forceRefresh = false)
             }
         }
     }
@@ -148,6 +151,8 @@ class CalendarViewModel(
         if (generatedOnDate != null && generatedOnDate != LocalDate.now()) {
             rollMonthIfFollowingToday()
             viewModelScope.launch { generateCalendarData(_uiState.value.assets) }
+            // C2：回前台且跨日时，同样重算「年度收入 / FIRE」（与午夜逻辑一致）
+            loadDividendIncome(_uiState.value.assets, forceRefresh = false)
         }
     }
 
@@ -386,6 +391,32 @@ class CalendarViewModel(
         val dividends: List<Pair<String, List<DividendRecord>>>
     )
 
+    /**
+     * 合并同代码多账户资产，并预热/补抓分红缓存。被 [generateAssetCalendarData] 与
+     * [generateIncomeCalendarData] 共用——两者前段「合并资产 + primeDividendCache + prefetchDividends」
+     * 完全一致，抽出避免逐字重复（B③）。
+     *
+     * @return 合并后的资产列表（按 symbol 聚合 balance），供后续逐标的取分红。
+     */
+    private suspend fun prepareMergedAssets(assets: List<Asset>, forceRefresh: Boolean): List<Asset> {
+        // 同代码多账户：按 symbol 合并 balance 后再遍历，避免详情卡分红金额 N 倍放大
+        // （见 [aggregateAssetsBySymbol] 的 KDoc）。
+        val mergedAssets = aggregateAssetsBySymbol(assets).values.toList()
+        val symbols = mergedAssets.mapNotNull { it.symbol }
+        // 冷启动不强制重抓：先宽口径批量读把库里有记录的标的预热进内存缓存（零网络、2 次 IO），
+        // 只让「连过期数据都没有」的标的去联网。forceRefresh=true（用户主动刷新）时
+        // primeDividendCache 直接放行全部，走原来的全量重抓路径。
+        val needFetch = dividendRepository.primeDividendCache(symbols, forceRefresh)
+        if (needFetch.isNotEmpty()) {
+            dividendRepository.prefetchDividends(
+                symbols = needFetch,
+                forceRefresh = forceRefresh,
+                timeBudgetMs = SyncBudget.MANUAL_SYNC_TIME_LIMIT_MS
+            )
+        }
+        return mergedAssets
+    }
+
     private suspend fun generateAssetCalendarData(
         month: YearMonth,
         assets: List<Asset>,
@@ -448,29 +479,8 @@ class CalendarViewModel(
                 today = today
             )
 
-            // 同代码多账户：按 symbol 合并 balance 后再遍历，否则下方 dividends.add(symbol, …)
-            // 会把同一 symbol 塞进列表 N 次，而详情卡 DividendDayDetail 用合并 balance 逐条重算，
-            // 会把当天分红放大 N 倍（格子/月汇总因逐条未合并累加反而数值正确）。
-            val mergedAssets = aggregateAssetsBySymbol(assets).values.toList()
-            val symbols = mergedAssets.mapNotNull { it.symbol }
-            // 冷启动不强制重抓：先用宽口径批量读把库里有记录的标的预热进内存缓存
-            //（零网络、2 次 IO），只让「连过期数据都没有」的标的去联网。
-            //
-            // 从前是无条件 prefetchDividends(全部标的)。而 DividendRepository.cache
-            // 是进程内内存 Map、一重启就全丢，预取判据 forceRefresh || ttlExpired
-            // 于是对每个标的都成立；更要命的是 getDividendsBySymbol 里
-            // 「DB 有记录但 lastFetchedAt 超过 24h」会 return null 转去联网 ——
-            // 超过一天没同步，200 个标的全部重抓，本页在 isLoading 里转圈到预算耗尽
-            // （70s），而 generateCalendarData 是 suspend 且被 collect 直接调用，
-            // 转圈期间整条收集链都阻塞着。详见 primeDividendCache 的 KDoc。
-            val needFetch = dividendRepository.primeDividendCache(symbols, forceRefresh)
-            if (needFetch.isNotEmpty()) {
-                dividendRepository.prefetchDividends(
-                    symbols = needFetch,
-                    forceRefresh = forceRefresh,
-                    timeBudgetMs = SyncBudget.MANUAL_SYNC_TIME_LIMIT_MS
-                )
-            }
+            // 合并同代码多账户 + 预热/补抓分红缓存（与收支日历共用，见 prepareMergedAssets，B③）
+            val mergedAssets = prepareMergedAssets(assets, forceRefresh)
 
             val dividendDates = mutableSetOf<LocalDate>()
             val dividends = mutableListOf<Pair<String, List<DividendRecord>>>()
@@ -532,22 +542,8 @@ class CalendarViewModel(
             }
 
             val today = LocalDate.now()
-            // 同 generateAssetCalendarData：按 symbol 合并 balance 后再遍历，避免同代码多账户时
-            // 详情卡分红金额翻倍（见 aggregateAssetsBySymbol）。
-            val mergedAssets = aggregateAssetsBySymbol(assets).values.toList()
-            val symbols = mergedAssets.mapNotNull { it.symbol }
-            // 同 generateAssetCalendarData：冷启动先宽口径预热、只补抓缺失的标的，
-            // 不再无条件全量预取（那正是本页冷启动转圈几十秒的根因）。
-            // forceRefresh=true（用户主动刷新）时 primeDividendCache 直接放行全部，
-            // 走的仍是原来的全量重抓路径
-            val needFetch = dividendRepository.primeDividendCache(symbols, forceRefresh)
-            if (needFetch.isNotEmpty()) {
-                dividendRepository.prefetchDividends(
-                    symbols = needFetch,
-                    forceRefresh = forceRefresh,
-                    timeBudgetMs = SyncBudget.MANUAL_SYNC_TIME_LIMIT_MS
-                )
-            }
+            // 合并同代码多账户 + 预热/补抓分红缓存（与资产日历共用，见 prepareMergedAssets，B③）
+            val mergedAssets = prepareMergedAssets(assets, forceRefresh)
 
             val dividendDates = mutableSetOf<LocalDate>()
             val dividends = mutableListOf<Pair<String, List<DividendRecord>>>()

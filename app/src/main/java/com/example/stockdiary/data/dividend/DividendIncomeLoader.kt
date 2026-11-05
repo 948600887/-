@@ -256,9 +256,13 @@ class DividendIncomeLoader(
      * 只取 symbol 集合（去重 + 排序保证确定性）：预计收入的计算范围由「有哪些标的」
      * 决定，持仓数量的变化由 [computeDataHash] 负责判重，这里不重复计入。
      */
-    private fun scopeKey(assets: List<Asset>): String =
-        assets.mapNotNull { it.symbol }.distinct().sorted()
-            .joinToString(",").hashCode().toString(36)
+    private fun scopeKey(assets: List<Asset>): String {
+        val symbols = assets.mapNotNull { it.symbol }.distinct().sorted()
+        // 不再对符号串取 hashCode：不同标的集合理论上可能撞出同一 hash，导致分片错复用（坑④）。
+        // 直接用排序后的符号串本身做分片键，彻底消除碰撞。
+        // 纯存款组合无 symbol（被 mapNotNull 丢弃），用稳定常量避免与空集合或其它组合撞键。
+        return if (symbols.isEmpty()) "deposits-only" else symbols.joinToString(",")
+    }
 
     private fun computeDataHash(
         recordsBySymbol: Map<String, List<DividendRecord>>,

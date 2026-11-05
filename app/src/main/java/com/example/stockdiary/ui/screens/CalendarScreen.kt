@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.padding
@@ -216,14 +217,38 @@ fun CalendarScreen(
     }
 
     if (showFireDialog) {
-        FireCalculationDialog(
-            // FIRE 必须用全量资产（含负债与加密货币）；刚进页尚未加载完时先退回日历资产
-            assets = uiState.fireAssets.ifEmpty { assets },
-            realAnnualIncome = realAnnualIncome,
-            monthlyExpense = monthlyExpense,
-            onDismiss = { showFireDialog = false },
-            onExpenseChange = { viewModel.updateMonthlyExpense(it) }
-        )
+        val fireAssets = uiState.fireAssets
+        if (fireAssets.isNotEmpty()) {
+            FireCalculationDialog(
+                // FIRE 必须用全量资产（含负债与加密货币）
+                assets = fireAssets,
+                realAnnualIncome = realAnnualIncome,
+                monthlyExpense = monthlyExpense,
+                onDismiss = { showFireDialog = false },
+                onExpenseChange = { viewModel.updateMonthlyExpense(it) }
+            )
+        } else {
+            // 全量资产（含负债/加密）尚未加载完：宁显示加载占位，也不回退到不完整的日历资产
+            // （日历 assets 缺负债/加密会让净资产口径变大、FIRE 目标被低估，C③）。
+            Box(
+                modifier = Modifier.fillMaxSize(),
+                contentAlignment = Alignment.Center
+            ) {
+                Card(
+                    shape = RoundedCornerShape(12.dp),
+                    colors = CardDefaults.cardColors(containerColor = AppTheme.colors.surfaceContainer)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(20.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        CircularProgressIndicator(modifier = Modifier.size(20.dp))
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Text("正在加载资产…", color = AppTheme.colors.onSurface)
+                    }
+                }
+            }
+        }
     }
 }
 

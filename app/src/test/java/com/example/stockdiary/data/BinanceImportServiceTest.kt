@@ -1084,4 +1084,48 @@ class BinanceImportServiceTest {
         // 旧行被更新成 0：既少一行，也不重复计钱
         coVerify { repo.updateBalance(7L, 0.0) }
     }
+
+    // ---------- 多页结果在导入侧汇总（network 层分页用例的导入侧对位） ----------
+
+    /**
+     * network 层 `BinanceAccountAPITest` 已钉住「活期理财持仓 > 单页上限时翻页拉全」，
+     * 但那 6 个分页用例都停在解析层，导入侧从未验证「多页拼起来的全量 earn 列表」会被
+     * 完整汇总。这里模拟第 1 页满 100 行 + 第 2 页 2 行，断言导入侧既不漏第 2 页、
+     * 也不把页数当成重复数据吞掉；第 2 页的定期锁仓金额与标记还要能透传到合并结果。
+     */
+    @Test
+    fun 多页理财持仓在导入侧汇总_不漏第2页() = runBlocking {
+        val pageSize = 100 // 与 BinanceAccountAPITest 分页用例同口径（币安单页上限）
+        val page1 = (0 until pageSize).map { earn("EARN$it", 1.0) }
+        val page2 = listOf(
+            earn("PAXG", 0.002474),
+            earn("USDT", 144.99343452, locked = true)
+        )
+        val allPages = page1 + page2
+
+        val merged = mergeEarnIntoBalances(
+            balances = listOf(balance("USDT", free = 57.0)),
+            earn = allPages
+        )
+
+        // 第 1 页最后一行与第 2 页两行都必须在合并结果里（只取第一页就会缺）
+        assertEquals(1.0, merged.first { it.asset == "EARN99" }.total, 1e-9)
+        assertEquals(0.002474, merged.first { it.asset == "PAXG" }.total, 1e-12)
+        val usdt = merged.first { it.asset == "USDT" }
+        assertEquals(
+            "第 2 页的定期锁仓必须独立相加，不能被第 1 页覆盖或漏算",
+            57.0 + 144.99343452,
+            usdt.total,
+            1e-9
+        )
+        assertTrue("第 2 页含定期持仓，承载行应标记 isEarnLocked", usdt.isEarnLocked)
+
+        // 导入预览侧同样要看到全部页：100 个 EARN + PAXG + USDT = 102 行
+        val preview = service.buildPreview(merged, existingAssets = emptyList())
+        assertEquals(pageSize + 2, preview.items.size)
+        val bySymbol = preview.items.associateBy { it.symbol }
+        assertEquals(1.0, bySymbol["EARN99USDT"]!!.quantity, 1e-9)
+        assertEquals(0.002474, bySymbol["PAXGUSDT"]!!.quantity, 1e-12)
+        assertEquals(57.0 + 144.99343452, bySymbol["USDT"]!!.quantity, 1e-9)
+    }
 }

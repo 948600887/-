@@ -88,6 +88,22 @@ class CalendarViewModel(
     private var generatedOnDate: LocalDate? = null
 
     /**
+     * 已生成的日历结果缓存，按 (Tab, 月份, 资产签名) 分片，避免切月/切 Tab 时重复重算（B④）。
+     *
+     * 必须声明在 init 之前：init 里启动的协程在单元测试用的 UnconfinedTestDispatcher 下会
+     * **同步跑到构造期内**，若放在 init 之后，属性初始化顺序还没轮到它就被访问 → 拿到 null →
+     * 首调 generateCalendarData 直接 NPE，init 协程被炸死（连锁：loadDividendIncome 永远不执行、
+     * calendarData 恒为空）。生产环境用真实 Main 调度器会延后到构造完成后才跑，所以不暴露，但仍是
+     * 一颗雷。这里把声明前移彻底排掉。
+     *
+     * 失效时机：forceRefresh / invalidateCache 时整体清空；资产签名变化（init 流）、回前台、午夜都会
+     * 触发失效，保证数据新鲜。今天实时净值等动态字段的保鲜仍由既有重算触发（refresh/资产变更/午夜/回前台）保证。
+     */
+    private val calendarCache = mutableMapOf<String, CalendarResult>()
+
+    private fun calendarCacheKey(tab: String, month: YearMonth, signature: String): String = "$tab|$month|$signature"
+
+    /**
      * 天天基金限流提示（非阻塞）：本轮手动刷新撞过 514/429 时置位，
      * 由界面对应的 LaunchedEffect 弹 Snackbar 后调 [clearDividendWarning] 清空。
      * 与 uiState.errorMessage 分开，避免和「同步失败」混淆——限流只是「部分分红没抓全」。
@@ -113,7 +129,7 @@ class CalendarViewModel(
                 .distinctUntilChanged { old, new -> calendarSignature(old) == calendarSignature(new) }
                 .collect { assets ->
                     _uiState.update { state -> state.copy(assets = assets) }
-                    generateCalendarData(assets)
+                    generateCalendarData(assets, invalidateCache = true)
                     loadDividendIncome(assets)
                 }
         }
@@ -131,7 +147,7 @@ class CalendarViewModel(
                 delay(Duration.between(now, nextMidnight).toMillis() + 1000)
                 if (generatedOnDate == LocalDate.now()) continue
                 rollMonthIfFollowingToday()
-                generateCalendarData(_uiState.value.assets)
+                generateCalendarData(_uiState.value.assets, invalidateCache = true)
                 // C2：跨零点后一并重算「年度收入 / FIRE」。DividendIncomeCache 以 date 跨日为重算门控，
                 // 这里走 forceRefresh=false：底层 records 未变就零网络复用，跨日则重算，避免 FIRE 停在旧值。
                 loadDividendIncome(_uiState.value.assets, forceRefresh = false)
@@ -325,7 +341,8 @@ class CalendarViewModel(
         _uiState.update { state -> state.copy(errorMessage = null) }
     }
 
-    private suspend fun generateCalendarData(assets: List<Asset>, forceRefresh: Boolean = false) {
+    private suspend fun generateCalendarData(assets: List<Asset>, forceRefresh: Boolean = false, invalidateCache: Boolean = false) {
+        if (forceRefresh || invalidateCache) calendarCache.clear()
         if (assets.isEmpty()) {
             _uiState.update { state -> state.copy(
                 isLoading = false,
@@ -336,8 +353,22 @@ class CalendarViewModel(
             ) }
             return
         }
-        _uiState.update { state -> state.copy(isLoading = true, errorMessage = null) }
         val requestState = _uiState.value
+        val cacheKey = calendarCacheKey(requestState.selectedTab, requestState.currentMonth, calendarSignature(assets))
+        // 缓存命中（非强制刷新、未要求失效、且同 (Tab, 月) 已算过）：直接复用，避免切月/切 Tab 反复重算
+        if (!forceRefresh && !invalidateCache && calendarCache.containsKey(cacheKey)) {
+            val cached = calendarCache[cacheKey]!!
+            generatedOnDate = LocalDate.now()
+            _uiState.update { state -> state.copy(
+                isLoading = false,
+                calendarData = cached.calendarData,
+                dividendDates = cached.dividendDates,
+                dividends = cached.dividends,
+                errorMessage = null
+            ) }
+            return
+        }
+        _uiState.update { state -> state.copy(isLoading = true, errorMessage = null) }
         // 顶层兜底：内部虽返回 Result，但 withContext 链路上的意外异常不能让 viewModelScope 崩溃
         val result = try {
             withContext(Dispatchers.IO) {
@@ -367,6 +398,8 @@ class CalendarViewModel(
         result.onSuccess { calendarResult ->
             // 生成成功才更新「保鲜日期」：失败的生成不算数，下次回前台还要重试
             generatedOnDate = LocalDate.now()
+            // 缓存本次结果，供后续切回同 (Tab, 月) 时直接复用（B④）
+            calendarCache[cacheKey] = calendarResult
             // 用 update{} 原子读-改-写：不能直接拿上面读到的 currentState 去 copy，
             // 期间 loadDividendIncome 等协程可能已经写过 uiState，那会把它们的更新整体冲掉
             _uiState.update { state -> state.copy(

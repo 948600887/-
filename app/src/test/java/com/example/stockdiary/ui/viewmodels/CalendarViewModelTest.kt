@@ -479,11 +479,11 @@ class CalendarViewModelTest {
         // 修复后两生成函数都按 aggregateAssetsBySymbol 合并遍历，同一 symbol 只计一次。
         val a1 = stockAsset.copy(account = "华泰", balance = 1000.0)
         val a2 = stockAsset.copy(account = "中信", balance = 2000.0) // 同 symbol 600900，合并后 3000
-        val vm = buildVm(assets = listOf(a1, a2))
-        waitUntil { vm.uiState.value.assets.size == 2 }
-
-        // 必须用本月内 <= today 的日期：生产只聚合"已到账"分红（date !isAfter(today)），钉 15 号在每月 1–14 号运行会被过滤成 0.0
-        val recDate = vm.uiState.value.currentMonth.atDay(1)
+        // 分红 mock 必须在构造 VM 之前就位：进页 init 流会立刻生成「资产日历」并把结果按
+        // (Tab, 月, 资产签名) 缓存，若构造后才打桩，init 那轮抓到的是空分红，切回资产日历时
+        // 命中该过期缓存 → dividends.size 错判为 0（生产环境 init 自己会把分红抓全，缓存恒为正确值；
+        // 这里是测试构造时序差异）。recDate 按 YearMonth.now() 提前算好（等于 VM 构造时的 currentMonth）。
+        val recDate = YearMonth.now().atDay(1)
         coEvery { divRepo.getDividendsBySymbol(any(), any()) } returns listOf(
             DividendRecord(
                 exDividendDate = recDate.toString(),
@@ -493,6 +493,10 @@ class CalendarViewModelTest {
                 paymentDate = null
             )
         )
+        val vm = buildVm(assets = listOf(a1, a2))
+        waitUntil { vm.uiState.value.assets.size == 2 }
+
+        // 必须用本月内 <= today 的日期：生产只聚合"已到账"分红（date !isAfter(today)），钉 15 号在每月 1–14 号运行会被过滤成 0.0
         vm.selectTab("收支日历")
         // 每十股 10 元 × 合并 3000 股 ÷ 10 = 3000（修复前逐条未合并累加也恰好是 3000，
         // 所以格子数值无法区分；真正区分点在 dividends 列表是否重复）

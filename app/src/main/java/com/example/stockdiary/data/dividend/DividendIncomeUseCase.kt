@@ -61,22 +61,30 @@ class DividendIncomeUseCase(
         cacheOnly: Boolean = false
     ): DividendIncomeLoader.IncomeResult {
         val key = requestKey(assets, cacheOnly)
-        // 非强制刷新时，先看有没有进行中**且签名一致**的抓取可复用（锁外读，不在持锁时 await）
-        val existing = mutex.withLock {
+        // 阶段1（锁外快速路径）：先看有没有进行中**且签名一致**的抓取可复用。
+        // 复用方直接等别人的结果，但**不**清理 inFlight（清理由原发起方负责），避免误清在飞任务。
+        val reusable = mutex.withLock {
             if (!forceRefresh) inFlight?.takeIf { it.isActive && inFlightKey == key } else null
         }
-        if (existing != null) return existing.await()
+        if (reusable != null) return reusable.await()
 
-        // 没在飞的（或签名不同、不能复用）就新起一个抓取，并登记为进行中
-        val deferred = scope.async { loader(assets, forceRefresh, tag, cacheOnly) }
-        mutex.withLock {
-            inFlight = deferred
-            inFlightKey = key
+        // 阶段2（持锁登记）：新起抓取，且登记必须在锁内完成。
+        // 关键修复（单飞并发缝隙）：阶段1 读到的 reusable 可能为 null（两并发都还没登记），
+        // 若不二次校验就各自 async，会出现「同一 key 两次真实抓取」。
+        // 这里在锁内再查一次 —— 若此刻已有人发起了同 key 任务，就复用它而非重复发起。
+        val deferred = mutex.withLock {
+            val race = if (!forceRefresh) inFlight?.takeIf { it.isActive && inFlightKey == key } else null
+            race ?: scope.async { loader(assets, forceRefresh, tag, cacheOnly) }.also {
+                inFlight = it
+                inFlightKey = key
+            }
         }
         return try {
             deferred.await()
         } finally {
-            // 抓取结束后清掉引用，下次非强制调用可重新走缓存路径
+            // 抓取结束后清掉引用，下次非强制调用可重新走缓存路径。
+            // 用 === 身份比较：只有「当前 inFlight 仍指向本次 deferred」时才清，
+            // 并发复用方（拿到的是同一个 deferred）不会重复清，也不误清之后的新任务。
             mutex.withLock {
                 if (inFlight === deferred) {
                     inFlight = null
@@ -97,13 +105,18 @@ class DividendIncomeUseCase(
      * cacheOnly 同理：冷启动时 cacheOnly=true 的在飞请求会被手动刷新（cacheOnly=false）复用，
      * 于是刷新完分红数字纹丝不动——与 Dashboard 那句「这条不能 cacheOnly」的注释直接矛盾。
      *
-     * 只取影响结果的字段：symbol（取哪些分红）、balance（利息按余额算）、currency（外币折算）。
-     * 刻意不含 currentPrice/lastSyncTime：分红与利息跟实时价无关，价格抖动不该让签名失效
-     * （与 CalendarViewModel.calendarSignature 同一口径）。排序后再拼，避免调用方传入顺序不同
+     * 只取影响结果的字段，且必须与 [DividendIncomeLoader.computeDataHash] /
+     * CalendarViewModel.calendarSignature 同一口径：symbol（取哪些分红）、type（存款/股票分支）、
+     * balance（利息按余额算）、currency（外币折算）、interestRate（存款利率）、millionCopiesIncome（货基万份收益）。
+     * 刻意不含 currentPrice/lastSyncTime：分红与利息跟实时价无关，价格抖动不该让签名失效。
+     * 旧实现漏掉 type/interestRate/millionCopiesIncome，会让存款/货基的利率或万份收益变动、
+     * 且恰在并发瞬间时复用到过期年度收入（坑②）。interestRate / millionCopiesIncome 可空，
+     * 缺失用 -1.0 占位，与 computeDataHash 一致。排序后再拼，避免调用方传入顺序不同
      * 导致本可复用的两次抓取被判成不一样。
      */
     private fun requestKey(assets: List<Asset>, cacheOnly: Boolean): String =
-        assets.map { "${it.symbol}:${it.balance}:${it.currency}" }
-            .sorted()
-            .joinToString(separator = ",", prefix = "$cacheOnly|")
+        assets.map { a ->
+            "${a.symbol}:${a.type}:${a.balance}:${a.currency}:" +
+                "${a.interestRate ?: -1.0}:${a.millionCopiesIncome ?: -1.0}"
+        }.sorted().joinToString(separator = ",", prefix = "$cacheOnly|")
 }

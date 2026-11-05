@@ -21,6 +21,21 @@ class DividendIncomeUseCaseTest {
         balance = 100.0
     )
 
+    private fun assetWith(
+        symbol: String,
+        interestRate: Double? = null,
+        millionCopiesIncome: Double? = null,
+        type: AssetType = AssetType.STOCK
+    ) = Asset(
+        name = symbol,
+        type = type,
+        symbol = symbol,
+        account = "默认",
+        balance = 100.0,
+        interestRate = interestRate,
+        millionCopiesIncome = millionCopiesIncome
+    )
+
     /**
      * 用计数 lambda 模拟一次真实抓取（带延迟让并发重叠），验证单飞：
      * 同一时刻多个调用者应当只真正触发一次底层抓取。
@@ -53,6 +68,44 @@ class DividendIncomeUseCaseTest {
 
         assertEquals("并发调用应只真正抓取一次", 1, counter.get())
         results.forEach { assertEquals(2.0, it.totalAnnualIncome, 0.0) }
+    }
+
+    @Test
+    fun `并发同key绝不会重复抓取_即使阶段1复用检查都返回null`() = runBlocking {
+        // 回归单飞并发缝隙：旧实现「读 existing(锁外) → async → 登记(锁内)」非原子，
+        // 两个并发同 key 调用可能都在阶段1看到 null，于是各自 async 造成重复抓取。
+        // 修复后阶段2 在锁内二次校验，无论调度如何交错，同一 key 只真正抓取一次。
+        val counter = AtomicInteger(0)
+        val useCase = DividendIncomeUseCase(countingLoader(counter))
+        val assets = listOf(asset("600900"), asset("000001"))
+
+        // 拉高并发数，放大「阶段1 都返回 null 再各自登记」的竞态窗口
+        val results = (1..20).map {
+            async { useCase.load(assets, forceRefresh = false, tag = "test") }
+        }.map { it.await() }
+
+        assertEquals("并发同 key 必须只真正抓取一次（单飞缝隙已堵）", 1, counter.get())
+        results.forEach { assertEquals(2.0, it.totalAnnualIncome, 0.0) }
+    }
+
+    @Test
+    fun `利率不同的同标的并发各自抓取_不共享单飞`() = runBlocking {
+        // 回归坑②：requestKey 必须含 interestRate / millionCopiesIncome，否则存款/货基利率变动、
+        // 且恰在并发瞬间时，单飞会复用「利率未更新」前的过期年度收入。
+        // 这里两只同 symbol/balance/currency、仅 interestRate 不同的资产应被视为不同 key，
+        // 各自触发一次抓取（counter==2），而非共享同一次。
+        val counter = AtomicInteger(0)
+        val useCase = DividendIncomeUseCase(countingLoader(counter))
+        val lowRate = listOf(assetWith("600900", interestRate = 1.0))
+        val highRate = listOf(assetWith("600900", interestRate = 2.0))
+
+        val results = listOf(
+            async { useCase.load(lowRate, forceRefresh = false, tag = "test") },
+            async { useCase.load(highRate, forceRefresh = false, tag = "test") }
+        ).map { it.await() }
+
+        assertEquals("利率不同的同标的必须各自抓取（口径已对齐 computeDataHash）", 2, counter.get())
+        results.forEach { assertEquals(1.0, it.totalAnnualIncome, 0.0) }
     }
 
     @Test

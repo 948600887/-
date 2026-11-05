@@ -11,10 +11,12 @@
 #   连 MigrationTest.kt 都被拖得根本跑不起来。
 #   只要这条命令在闸门里，下次再腐化会在提交前就暴露。
 #
-# 为什么 `testDebugUnitTest` 必须带 `--rerun`（Gradle 8.13）：
-#   任务 UP-TO-DATE（或 CI 开 build cache 后 FROM-CACHE）时 Gradle 会**直接跳过**并退出 0，
-#   表现为「GATE PASSED 但一条测试都没跑」——一个会假绿的闸门比没有闸门更危险，
-#   它给人虚假的安全感。所以除了 --rerun，本脚本还会解析测试结果 XML 断言「真的跑到了测试」。
+# 为什么**三条 gradle 任务**都必须带 `--rerun`（Gradle 8.13）：
+#   任务 UP-TO-DATE（或 CI 开 build cache 后 FROM-CACHE）时 Gradle 会**直接跳过**并退出 0。
+#   compileDebugKotlin / compileDebugAndroidTestKotlin 被跳过 = 源码改坏了照样绿；
+#   testDebugUnitTest 被跳过 = 「GATE PASSED 但一条测试都没跑」。一个会假绿的闸门比没有
+#   闸门更危险，它给人虚假的安全感。所以三条一律 --rerun；单测额外解析结果 XML
+#   断言「真的跑到了测试」。
 #
 # 用法（Windows / Git Bash）：
 #   bash tools/check_gate.sh
@@ -45,6 +47,11 @@ for arg in "$@"; do
 done
 
 # 中文项目路径下 gradle 直接输出会乱码，统一重定向到文件后再 grep。
+#
+# ⚠️ Git Bash 下别用 Windows cmd 的 `>nul` / `2>nul`：`nul` 在 POSIX 里只是普通文件名，
+#    会在仓库根留下一个 `nul` 幽灵文件（历史遗留已清理）。一律用 `>/dev/null` / `2>/dev/null`。
+#    gradlew.bat 里的 `>NUL` 由 cmd.exe 解释（Windows 空设备名），语义正确、不在此列。
+#
 # 每个步骤用**独立**的日志文件：否则某步失败后，下一步 PASS 会把日志覆盖并删除，
 # 失败原因永久丢失（常见非编译类失败：gradle 锁超时 / OOM / daemon 崩溃 / python 不在 PATH）。
 run_step() {
@@ -113,12 +120,17 @@ PY
 
 FAILED=0
 
-run_step "compileDebugKotlin" "$GRADLEW" compileDebugKotlin || FAILED=1
+run_step "compileDebugKotlin" "$GRADLEW" compileDebugKotlin --rerun || FAILED=1
 
-run_step "compileDebugAndroidTestKotlin" "$GRADLEW" compileDebugAndroidTestKotlin || FAILED=1
+run_step "compileDebugAndroidTestKotlin" "$GRADLEW" compileDebugAndroidTestKotlin --rerun || FAILED=1
 
-# 离线迁移校验：不需要设备，按 1.json 建库 → 应用全部迁移 SQL → PRAGMA 对照当前 schema JSON
+# 离线迁移校验：不需要设备，按 1.json 建库 → 应用全部迁移 SQL → PRAGMA 双向对照最新 schema JSON，
+# 并单独断言「17.json 建库只跑 MIGRATION_17_18」加出的 assets.isEarnLocked 列
 run_step "validate_migration.py" "$PY_CMD" tools/validate_migration.py || FAILED=1
+
+# 校验器自测：用故意缺列 / 列类型写错 / 多余表列 / 17→18 DDL 写坏的库，
+# 证明 validate() 与 17→18 列断言真的会 FAIL（而不是像旧版那样只打印「v17 假绿」）
+run_step "validate_migration_selftest.py" "$PY_CMD" tools/validate_migration_selftest.py || FAILED=1
 
 # 迁移数据保留校验：同样不需要设备，逐位比对搬表迁移有没有把数据搬丢
 run_step "validate_migration_data.py" "$PY_CMD" tools/validate_migration_data.py || FAILED=1

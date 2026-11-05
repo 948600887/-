@@ -13,6 +13,7 @@ import android.content.res.Configuration
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.data.price.ApiManager
+import com.example.stockdiary.data.price.RoundSourceFailureScope
 import com.example.stockdiary.data.price.SourceStats
 import com.example.stockdiary.data.price.StockDataManager
 import com.example.stockdiary.network.FundAPI
@@ -462,6 +463,13 @@ object AssetSyncManager {
 
         // 轮次 ID：进程内自增。几轮同步混在同一份日志里时，靠它把散落各处的行归属到同一轮
         val roundId = syncRoundSeq.incrementAndGet()
+
+        // 本轮「源级失败记账」上下文：显式轮次 ID + 每轮独立的「已记账源」集合。
+        // 在批量预取之前开启；批量 0 命中确实记过账的源写入 reportedSources（扇出前写完，
+        // 扇出期间只读）；逐标的扇出用 withContext 把它沿回落路径传给门面 / StockDataManager。
+        // 作用域结束即自动失效：没有进程级全局状态，也没有 ThreadLocal 的清理路径。
+        val roundFailureScope = RoundSourceFailureScope(roundId, ConcurrentHashMap.newKeySet())
+
         // 各数据源的成败统计只反映**本轮**：开头清零，末尾打快照
         val stockManagerForStats = StockDataManager.getInstance(context)
         stockManagerForStats.resetSourceStats()
@@ -576,9 +584,18 @@ object AssetSyncManager {
             // 整体 0 命中且批里有普通股票：不是「这些代码此源不支持」，而是源在返回空报价。
             // 真机日志坐实过：新浪 44 次请求全 41 字节、0 成功，却因为逐只被判成符号级
             // （代码不在此源支持范围）而熔断器永不开，导致每轮每个标的白打一次新浪。
-            // 喂一次源级失败，让熔断器看见（阈值 5 次才禁，半开探测自动恢复）。
+            // 喂一次源级失败，让熔断器看见（阈值 8 次才禁，半开探测自动恢复）。
+            // 若这次确实记了账，就把该源登记进本轮上下文：随后逐标的回落对同一源不再
+            // 重复喂熔断（币安侧同款「整轮只记一次成败」），避免「1 次批量 + N 个标的」
+            // 凑成 1+N 次、把单波并发抖动放大成误熔。返回 false（批内没有普通股票）时
+            // 不登记，逐标的真实 IO 失败照常记账。
             if (batchPriceMap.isEmpty()) {
-                stockManager.reportBatchTotalMiss(ApiManager.API_SINA, batchStockCodes)
+                val reported = stockManager.reportBatchTotalMiss(
+                    ApiManager.API_SINA, batchStockCodes, roundId
+                )
+                if (reported) {
+                    roundFailureScope.reportedSources.add(ApiManager.API_SINA)
+                }
             }
 
             // 加密货币批量预取：与上面的 STOCK 批量同构——逐标的扇出**之前**只发
@@ -632,19 +649,25 @@ object AssetSyncManager {
                         AppLogger.d("开始同步 $label", TAG)
                         inFlightAssets.add(label)
                         try {
-                        syncSingleAsset(
-                            asset,
-                            repository,
-                            priceWriter,
-                            successCount,
-                            failedCount,
-                            errorTypes,
-                            forceRefresh,
-                            correctNames,
-                            batchResult = batchPriceMap[asset.symbol] ?: cryptoPriceMap[asset.symbol],
-                            networkAvailable = networkAvailable,
-                            onSkip = ::countSkip
-                        )
+                            // 把本轮「已记账源」上下文注入回落链路：门面 / StockDataManager
+                            // 从 currentCoroutineContext 读取，同一源不再重复喂熔断。
+                            // 子任务结束即失效，一轮一个 scope，不残留跨轮状态。
+                            withContext(roundFailureScope) {
+                                syncSingleAsset(
+                                    asset,
+                                    repository,
+                                    priceWriter,
+                                    successCount,
+                                    failedCount,
+                                    errorTypes,
+                                    forceRefresh,
+                                    correctNames,
+                                    batchResult = batchPriceMap[asset.symbol] ?: cryptoPriceMap[asset.symbol],
+                                    networkAvailable = networkAvailable,
+                                    roundId = roundId,
+                                    onSkip = ::countSkip
+                                )
+                            }
                         } finally {
                             inFlightAssets.remove(label)
                         }

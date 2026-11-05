@@ -143,7 +143,7 @@ class UnifiedPriceServiceTest {
             1,
             BinanceHostGate.consecutiveFailuresForTesting()
         )
-        assertEquals(Phase.CLOSED, BinanceHostGate.phaseForTesting()) // 仅 1 次，未达阈值 5，不熔断
+        assertEquals(Phase.CLOSED, BinanceHostGate.phaseForTesting()) // 仅 1 次，未达 FAIL_THRESHOLD，不熔断
         assertFalse("单发 451 未达阈值，UI 不应显示暂不可达", BinanceHostGate.isUnavailable())
     }
 
@@ -163,7 +163,7 @@ class UnifiedPriceServiceTest {
 
     @Test
     fun `getCryptoPrice 连续451达阈值触发熔断短路`() = runBlocking {
-        // 模拟地区封锁用户：连续 5 次 451 必须触发熔断（OPEN），之后 tryAcquireProbe 短路、
+        // 模拟地区封锁用户：连续 FAIL_THRESHOLD 次 451 必须触发熔断（OPEN），之后 tryAcquireProbe 短路、
         // UI 显示「币安暂不可达」，而不是每轮每个币都白打一次 451、还各计一次同步失败。
         repeat(BinanceHostGate.FAIL_THRESHOLD) {
             UnifiedPriceService.getCryptoPrice("BTC", client = fakeClient(Ticker451Interceptor()))

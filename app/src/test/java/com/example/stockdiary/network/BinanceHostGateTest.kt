@@ -15,7 +15,7 @@ import org.junit.Test
  *
  * 钉的契约：
  * - 单波抖动（3 连失败，=旧阈值=同步并发度）不再误熔；
- * - 累计 5 次才熔断、blockCount +1；
+ * - 累计 [BinanceHostGate.FAIL_THRESHOLD] 次才熔断、blockCount +1；
  * - 冷却期内 tryAcquireProbe 恒拒绝；
  * - 冷却结束只放行 1 个半开探测、并发第 2 个仍拒；
  * - 探测成功闭路、后续全放行、计数清零、blockCount 不涨；
@@ -69,7 +69,7 @@ class BinanceHostGateTest {
     @Test
     fun `单波 3 连失败不熔断_钉死误伤修复`() {
         // 3 = 旧阈值 = 同步并发度：单波抖动（3 个在途同时挂满 20s）旧实现会误熔半个组合。
-        // 新阈值 5，3 连失败必须仍在 CLOSED、后续请求照常放行、不熔断。
+        // 新阈值 8 > 并发度 6，3 连失败必须仍在 CLOSED、后续请求照常放行、不熔断。
         repeat(3) { BinanceHostGate.onNetworkFailure(base) }
         assertEquals(Phase.CLOSED, BinanceHostGate.phaseForTesting())
         assertTrue(BinanceHostGate.tryAcquireProbe(base))

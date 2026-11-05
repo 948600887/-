@@ -43,7 +43,7 @@ import org.junit.Test
  *  3+4. **新浪 sink 消息碰撞**（原为缺陷见证，修复后已反转为回归）：
  *     旧 SinaStockAPI.getRealtimeData 把批内任何异常吞成「未获取到股票数据」符号级文案，
  *     饿死源级熔断器。修复（透出原始异常）后，这两条改走**真实** SinaStockAPI 路径
- *     （mock OkHttp 层抛源级异常、不 mock getRealtimeData），断言透出源级异常 + 累计 5 次熔禁。
+ *     （mock OkHttp 层抛源级异常、不 mock getRealtimeData），断言透出源级异常 + 累计到阈值熔禁。
  */
 class SourceCircuitBreakerVerifyTest {
 
@@ -190,7 +190,7 @@ class SourceCircuitBreakerVerifyTest {
     /**
      * （原缺陷见证 2，修复后反转）新浪无缓存 + 网络故障，熔断器不再被饿死。
      * 走真实 SinaStockAPI 路径（mock OkHttp 抛源级异常）经 StockDataManager 分类，
-     * 累计 5 次后必须熔禁（OPEN）——修复前会永远 CLOSED。
+     * 累计到阈值后必须熔禁（OPEN）——修复前会永远 CLOSED。
      */
     @Test
     fun `回归_新浪无缓存网络故障_熔断器不再饿死_达阈值熔禁`() = runBlocking {

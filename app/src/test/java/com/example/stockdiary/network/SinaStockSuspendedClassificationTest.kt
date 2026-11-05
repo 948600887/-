@@ -23,7 +23,7 @@ import kotlinx.coroutines.runBlocking
  * - 批量响应里混着停牌票时，该代码要进 `suspendedOut`，由 `getStockData` 判成
  *   [QuoteSuspendedException]——那是「不计失败」分支；
  * - 只有它一只、整批无命中时，失败文案必须是 `isSymbolLevelFailure` 认得出的那条，
- *   **不能**被当成源级失败喂给 `SourceCircuitBreaker`（累积 5 次会误禁整个新浪源）。
+ *   **不能**被当成源级失败喂给 `SourceCircuitBreaker`（累积到阈值会误禁整个新浪源）。
  *
  * ## 2026-10-23 相关修复
  * 停牌代码集合原是**进程级共享字段**：价格同步 3 并发扇出时，后进来的调用一上来就

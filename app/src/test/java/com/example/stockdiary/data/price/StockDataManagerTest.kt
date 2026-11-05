@@ -169,7 +169,7 @@ class StockDataManagerTest {
         coEvery { TencentStockAPI.getStockData(any()) } returns
             Result.failure(IOException("未获取到股票数据，请检查股票代码"))
 
-        // 6 次远超阈值 5：若符号级被计入，早该熔禁了
+        // 每次会遍历两个源：若符号级被误计入源级，累计早该达到阈值而熔禁
         repeat(6) {
             manager.getStockData("sh600000", forceRefresh = true, networkAvailable = true)
         }
@@ -202,7 +202,7 @@ class StockDataManagerTest {
     /**
      * 回归（QA 缺陷见证的工程师侧对应）：新浪无缓存 + **网络超时**，走**真实** SinaStockAPI 路径
      * （mock OkHttp 层抛 SocketTimeoutException，不 mock getStockData/getRealtimeData——内部 sink
-     * 转换必须真实执行）→ 透出源级异常 → 累计 5 次熔禁。
+     * 转换必须真实执行）→ 透出源级异常 → 累计到阈值熔禁。
      *
      * 这是 ③ 主体测试（mock 在 getStockData 接缝）覆盖不到的点：那绕过了吞异常的批处理代码。
      * 用 NetworkRetryHelper 旁路跳过重试延迟，聚焦「sink 透出 → 分类 → 熔禁」链路本身。

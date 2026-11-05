@@ -242,8 +242,8 @@ class BinanceAccountAPIGateTest {
     // ---------- 契约 1/2 在批量取价路径上同样成立 ----------
 
     @Test
-    fun `getPrices 连不上时逐次喂 gate 并在第5次熔断`() = runBlocking {
-        // 4 次 = 4 次记账：fetchBatch 与 getPrices 不得重复记一笔（否则这里是 8）
+    fun `getPrices 连不上时逐次喂 gate 并在达阈值时熔断`() = runBlocking {
+        // N 次 = N 次记账：fetchBatch 与 getPrices 不得重复记一笔（否则计数会翻倍）
         failPricesTimes(BinanceHostGate.FAIL_THRESHOLD - 1)
         assertEquals(Phase.CLOSED, BinanceHostGate.phaseForTesting())
         assertEquals(
@@ -296,7 +296,7 @@ class BinanceAccountAPIGateTest {
 
     @Test
     fun `公开行情gate打开时账户成功不提前解封`() = runBlocking {
-        // 用取价把 gate 顶开（取价 5 次失败），模拟「镜像行情真连不上」
+        // 用取价把 gate 顶开（取价 FAIL_THRESHOLD 次失败），模拟「镜像行情真连不上」
         failPricesTimes(BinanceHostGate.FAIL_THRESHOLD)
         assertEquals(Phase.OPEN, BinanceHostGate.phaseForTesting())
 

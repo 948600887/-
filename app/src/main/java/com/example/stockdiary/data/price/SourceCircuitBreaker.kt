@@ -39,8 +39,11 @@ private data class SourceGateState(
  * 旧实现 `maxFailures=3` 恰等于同步并发度，且**符号级业务失败也计数**：Sina 返回
  * 「未获取到股票数据，请检查股票代码」（代码不在此源支持范围）3 次就整源禁用 30 分钟；
  * Part B 把挂死变成 20s 失败后，单波 3 个并发同时超时 = 恰好 3 次 = 误禁，禁用期间全部
- * A 股/场内基金只能走腾讯单源，腾讯再抖就整批失败。三态改造：
- * - 阈值 3→5（≈两波，与 [com.example.stockdiary.network.BinanceHostGate.FAIL_THRESHOLD] 对齐）；
+ * A 股/场内基金只能走腾讯单源，腾讯再抖就整批失败。三态改造（阈值演进史 3→5→8）：
+ * - 阈值 3→5→8；当前取 8，与 [com.example.stockdiary.network.BinanceHostGate.FAIL_THRESHOLD]
+ *   对齐，且 **8 > MAX_CONCURRENT_SYNC = 6**：一波最多 6 个同源标的并发抖动、外加一次
+ *   批量整体 0 命中，也凑不满 8，保证单波并发抖动不会误熔整源；真实持续不健康仍会在
+ *   连续多波后禁用（演进理由详见 [FAIL_THRESHOLD] 的 KDoc）；
  * - 冷却 30min→5min，配合半开探测把「恢复成本」从「干等 30min」降到「1 个探测请求」；
  * - 冷却结束进 [SourcePhase.HALF_OPEN]，只放行一个探测：成功→闭路，失败→立即重开冷却。
  *

@@ -113,7 +113,7 @@ object SinaStockAPI : StockAPI {
         // 停牌代码集合必须是**每次调用一份**，不能用进程级共享字段：
         // 价格同步是 3 并发扇出的（手动刷新与后台 Worker 还可能撞车），共享字段会被
         // 别的协程 clear()/addAll() 抹掉或串味——后果是「停牌」被误判成「源级失败」
-        // 喂给熔断器，累积 5 次可能把整个新浪源误禁；并发 add/clear 在非线程安全的
+        // 喂给熔断器，累积到阈值可能把整个新浪源误禁；并发 add/clear 在非线程安全的
         // LinkedHashSet 上还可能抛 ConcurrentModificationException。
         val suspendedCodes = ConcurrentHashMap.newKeySet<String>()
         val result = getRealtimeData(listOf(stockCode), suspendedOut = suspendedCodes)

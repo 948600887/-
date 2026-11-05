@@ -15,6 +15,7 @@ import com.example.stockdiary.utils.StockCodeManager
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import java.io.IOException
@@ -325,10 +326,26 @@ class StockDataManager(
                 continue
             }
 
-            // 源级失败（超时 / 连接失败 / 空返回 / 格式坏 / 无效价格）：喂给熔断器
-            breakerFor(apiName).onFailure(System.currentTimeMillis())
-            countersFor(apiName).sourceFailure.incrementAndGet()
-            AppLogger.w("${apiName}获取数据失败: ${failure.message}", TAG)
+            // 源级失败（超时 / 连接失败 / 空返回 / 格式坏 / 无效价格）：喂给熔断器。
+            //
+            // 同一同步轮次内，若该源已由「批量预取整体 0 命中」记过账（见
+            // [reportBatchTotalMiss]），逐标的回落就不再重复喂熔断，也不重复累计统计——
+            // 对齐币安侧「整轮只记一次成败」。否则「1 次批量 + N 个回落标的」= 1+N 次，
+            // 单波并发抖动就能凑满阈值误熔整源（正是 8 > MAX_CONCURRENT_SYNC=6 想防的场景）。
+            // 上下文只在同步扇出时由 AssetSyncManager 注入；前台单标的查价等路径没有它，
+            // 真实 IO 失败照常记账。停牌 / 符号级失败在上面的 continue 分支已分流，不走到这里。
+            val roundScope = currentCoroutineContext()[RoundSourceFailureScope.Key]
+            if (roundScope?.isAlreadyReported(apiName) == true) {
+                AppLogger.w(
+                    "$apiName 本轮已由批量0命中记账（轮次#${roundScope.roundId}），" +
+                        "逐标的回落不重复喂熔断: ${failure.message}",
+                    TAG
+                )
+            } else {
+                breakerFor(apiName).onFailure(System.currentTimeMillis())
+                countersFor(apiName).sourceFailure.incrementAndGet()
+                AppLogger.w("${apiName}获取数据失败: ${failure.message}", TAG)
+            }
         }
         
         // 6. 所有数据源都失败
@@ -436,13 +453,25 @@ class StockDataManager(
      * 但一批十几个代码一个都没回来、且批里存在新浪理应支持的普通 A 股时，就只能是源级问题。
      *
      * ## 为什么不在这里直接熔断
-     * 这里只负责「让证据被看见」：喂一次失败，由熔断器按阈值（5 次）与半开探测自行决定
-     * 禁用与恢复。误伤有上限——即使连着喂，5 分钟后半开探测用真实请求试水，源恢复即自动闭路。
+     * 这里只负责「让证据被看见」：喂一次失败，由熔断器按阈值
+     * （[SourceCircuitBreaker.FAIL_THRESHOLD] = 8 次）与半开探测自行决定禁用与恢复。
+     * 误伤有上限——即使连着喂，5 分钟后半开探测用真实请求试水，源恢复即自动闭路。
+     *
+     * ## 返回值为什么重要
+     * 调用方（AssetSyncManager）据此把该源登记进本轮的 [RoundSourceFailureScope]，
+     * 逐标的回落便不会重复喂熔断（整轮只记一次成败）。返回 false 表示这次没记账
+     * （批内没有普通股票代码），此时不要登记，否则会白白抑制真实的逐标的 IO 失败。
      *
      * @param sourceName 数据源名（[ApiManager.API_SINA] 等）
      * @param probedCodes 本轮批量预取的代码（带市场前缀，如 sh600519）
+     * @param roundId 本轮同步轮次 ID，只用于日志归属
+     * @return 是否真的记了一次源级失败
      */
-    fun reportBatchTotalMiss(sourceName: String, probedCodes: List<String>) {
+    fun reportBatchTotalMiss(
+        sourceName: String,
+        probedCodes: List<String>,
+        roundId: Int = 0
+    ): Boolean {
         val hasPlainStock = probedCodes.any { code ->
             StockCodeManager.classifyCode(code) == StockCodeManager.CodeCategory.STOCK
         }
@@ -451,14 +480,16 @@ class StockDataManager(
                 "$sourceName 批量 0 命中，但批内没有普通股票代码（可能整批都是场内基金/REIT），不计源级失败",
                 TAG
             )
-            return
+            return false
         }
         AppLogger.w(
-            "$sourceName 批量预取整体 0 命中（批内含普通股票代码），按源级故障计入一次失败",
+            "$sourceName 批量预取整体 0 命中（批内含普通股票代码），" +
+                "按源级故障计入一次失败 [轮次#$roundId]",
             TAG
         )
         breakerFor(sourceName).onFailure(System.currentTimeMillis())
         countersFor(sourceName).sourceFailure.incrementAndGet()
+        return true
     }
 
     /** 测试专用复位：清空各数据源熔断器状态，保证用例间隔离 */

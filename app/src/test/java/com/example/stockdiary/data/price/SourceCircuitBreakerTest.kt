@@ -15,7 +15,7 @@ import org.junit.Test
  *
  * 钉的契约（与 BinanceHostGate 同构，阈值/冷却按数据源侧取值）：
  * - 单波 3 连失败（=旧阈值=同步并发度）不再误禁；
- * - 累计 5 次源级失败才禁用、进入 OPEN；
+ * - 累计 [SourceCircuitBreaker.FAIL_THRESHOLD] 次源级失败才禁用、进入 OPEN；
  * - 冷却期内 tryAcquireProbe 恒拒绝；
  * - 冷却结束只放行 1 个半开探测、第 2 个仍拒；
  * - 探测成功闭路、失败立即重开冷却；
@@ -43,7 +43,7 @@ class SourceCircuitBreakerTest {
     }
 
     @Test
-    fun `连续 4 次失败未达阈值5，不熔禁`() {
+    fun `连续未达阈值次失败_不熔禁`() {
         repeat(SourceCircuitBreaker.FAIL_THRESHOLD - 1) { breaker.onFailure(base) }
         assertEquals(SourcePhase.CLOSED, breaker.phaseForTesting())
         assertTrue(breaker.tryAcquireProbe(base))
@@ -60,7 +60,7 @@ class SourceCircuitBreakerTest {
     }
 
     @Test
-    fun `第 5 次失败达到阈值，熔禁进入 OPEN`() {
+    fun `达到阈值那次失败_熔禁进入OPEN`() {
         tripOpen()
         assertEquals(SourcePhase.OPEN, breaker.phaseForTesting())
         assertTrue(breaker.isUnavailable())

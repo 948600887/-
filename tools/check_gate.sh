@@ -18,6 +18,15 @@
 #   闸门更危险，它给人虚假的安全感。所以三条一律 --rerun；单测额外解析结果 XML
 #   断言「真的跑到了测试」。
 #
+# 为什么最前面新增 2 步毫秒级静态检查（check_invariants.py + 其 selftest）：
+#   「8>6 阈值/并发」、「@Database 版本链」、「savePreferences 收口」、「Compose 版本组合」、
+#   「禁手动 Accept-Encoding」、「CALL_MS 下限」这 6 组隐性不变量此前全靠人记。两步纯读源码、
+#   不依赖 gradle、毫秒级，刻意放在所有 gradle 任务之前做 fast-fail：改坏一处立刻红，
+#   不必先等几分钟编译。第二步用故意写坏的源码副本反证校验器自己不会假绿
+#   （旧版 validate_migration.py 写死目标版本导致假绿的教训）。
+#   两步**必须放在 `if [[ "$SKIP_UNIT_TEST" ... ]]` 之外**：改文档 / 改脚本走
+#   `--skip-unit-test` 快速通道时也要跑，否则这些不变量被突破无人察觉。
+#
 # 用法（Windows / Git Bash）：
 #   bash tools/check_gate.sh
 # 也可以跳过单测（改文档/改脚本时的快速通道）：
@@ -86,11 +95,16 @@ run_step() {
 # 断言「单测真的执行了」，而不只是 gradle 退出 0。
 # Gradle 8.13 下任务 UP-TO-DATE / FROM-CACHE 会静默跳过，
 # 只靠退出码会把「0 条测试」判成绿 —— 这是本闸门最需要防的失败模式。
+# 另外两处收紧：`skipped > 0` 也要判红（有人给一批用例加 @Ignore 不该悄悄过），
+# 以及结果 XML 的 mtime 必须不早于本轮开始（否则是沿用上一轮旧 XML 的假绿）。
 verify_test_count() {
     local out
     out=$("$PY_CMD" - <<'PY'
-import glob, xml.etree.ElementTree as ET
+import glob, os, sys, xml.etree.ElementTree as ET
+# 未传环境变量时回退 0（任何 mtime 都 >= 0），保证单独调用本函数不会误判红。
+start = int(os.environ.get('GATE_START_EPOCH', '0'))
 files = tot = fail = err = skip = 0
+stale = []
 for p in glob.glob('app/build/test-results/testDebugUnitTest/*.xml'):
     r = ET.parse(p).getroot()
     files += 1
@@ -98,12 +112,18 @@ for p in glob.glob('app/build/test-results/testDebugUnitTest/*.xml'):
     fail += int(r.get('failures', 0))
     err += int(r.get('errors', 0))
     skip += int(r.get('skipped', 0))
-print(files, tot, fail, err, skip)
+    # 结果文件必须在本轮开始后才被写入；旧文件 = 测试被跳过、沿用了上一轮结果。
+    if os.path.getmtime(p) < start:
+        stale.append(p)
+# 第 6 个字段是过期文件数；具体清单走 stderr，不污染 shell 的 `set -- $out` 解析。
+print(files, tot, fail, err, skip, len(stale))
+for p in stale:
+    print('    STALE: ' + p, file=sys.stderr)
 PY
 )
     # shellcheck disable=SC2086
     set -- $out
-    local files="${1:-0}" total="${2:-0}" fails="${3:-0}" errs="${4:-0}" skips="${5:-0}"
+    local files="${1:-0}" total="${2:-0}" fails="${3:-0}" errs="${4:-0}" skips="${5:-0}" stales="${6:-0}"
 
     if [[ "$total" -le 0 ]]; then
         echo "    FAIL: 解析到 0 条测试 —— 测试任务被 UP-TO-DATE/FROM-CACHE 跳过，"
@@ -111,14 +131,35 @@ PY
         return 1
     fi
     echo "    单测结果: ${total} 例 / 失败 ${fails} / 错误 ${errs} / 跳过 ${skips}（${files} 个结果文件）"
+    if [[ "$stales" -ne 0 ]]; then
+        echo "    FAIL: ${stales} 个结果 XML 的 mtime 早于本轮开始（GATE_START_EPOCH=${GATE_START_EPOCH:-0}）——"
+        echo "          结果文件早于本轮开始，测试可能被 UP-TO-DATE/FROM-CACHE 跳过，这是**假绿灯**。"
+        return 1
+    fi
     if [[ "$fails" -ne 0 || "$errs" -ne 0 ]]; then
         echo "    FAIL: 存在失败/错误的用例"
+        return 1
+    fi
+    if [[ "$skips" -ne 0 ]]; then
+        echo "    FAIL: 存在被 @Ignore 跳过的用例（${skips} 例），需说明原因"
         return 1
     fi
     return 0
 }
 
 FAILED=0
+
+# 本轮开始的 epoch 秒：verify_test_count 用它判断结果 XML 是不是本轮真跑出来的。
+# 若结果文件早于本轮开始，说明 testDebugUnitTest 被 UP-TO-DATE/FROM-CACHE 跳过、
+# 只是沿用了上一轮旧 XML —— 那是最隐蔽的假绿灯。`date +%s` 在 Git Bash 与
+# Ubuntu runner 都可用；--skip-unit-test 快速通道不调用 verify_test_count，不受影响。
+GATE_START_EPOCH=$(date +%s)
+export GATE_START_EPOCH
+
+# 毫秒级静态不变量检查：放最前 fast-fail；**不受 --skip-unit-test 影响**（见文件头说明）。
+# selftest 用故意写坏的源码副本反证校验器本身不会假绿。
+run_step "check_invariants.py" "$PY_CMD" tools/check_invariants.py || FAILED=1
+run_step "check_invariants_selftest.py" "$PY_CMD" tools/check_invariants_selftest.py || FAILED=1
 
 run_step "compileDebugKotlin" "$GRADLEW" compileDebugKotlin --rerun || FAILED=1
 
@@ -150,4 +191,5 @@ if [[ "$FAILED" -ne 0 ]]; then
 fi
 
 echo ""
+echo "==> 发版提醒：本闸门不含真机/模拟器验证，请按 docs/RELEASE_CHECKLIST.md 手动完成 connectedDebugAndroidTest 与 release 签名冒烟（只提示，不自动执行）"
 echo "GATE PASSED"

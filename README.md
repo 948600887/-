@@ -4,19 +4,19 @@
 
 - 应用名：金库（`android:label="金库"`）
 - 包名：`com.example.stockdiary`（早期项目名「新股日记」，部分文档仍沿用旧称）
-- 当前版本：`1.0.0`（versionCode 6）
+- 当前版本：`1.0.0`（versionCode 11）
 
 ## 技术栈
 
 | 领域 | 选型 |
 |---|---|
 | UI | Kotlin + Jetpack Compose（Material 3），Compose BOM `2024.02.00` |
-| 本地库 | Room `2.6.1`（kapt，schema 导出到 `app/schemas`） |
-| 网络 | OkHttp `4.12.0`、Retrofit `2.9.0` |
+| 本地库 | Room `2.6.1`（KSP，schema 导出到 `app/schemas`） |
+| 网络 | OkHttp `4.12.0`（全裸 OkHttp，未用 Retrofit） |
 | 后台任务 | WorkManager `2.9.0`（资产快照） |
 | OCR | ML Kit 中文文字识别 `16.0.1`（模型内置，无需联网） |
 | HTML 解析 | Jsoup `1.17.2`（天天基金分红页） |
-| 环境 | `compileSdk`/`targetSdk` 34，`minSdk` 26，Java 17 |
+| 环境 | `compileSdk`/`targetSdk` 35，`minSdk` 26，Java 17 |
 
 ## 快速开始
 
@@ -30,7 +30,7 @@
 ./gradlew assembleDebug          # macOS / Linux
 gradlew.bat assembleDebug        # Windows
 
-# 跑 JVM 单元测试（当前 1036 个，全绿）
+# 跑 JVM 单元测试（当前用例数以 tools/check_gate.sh 的 verify_test_count 输出为准）
 ./gradlew testDebugUnitTest
 gradlew.bat testDebugUnitTest
 ```
@@ -76,13 +76,12 @@ app/src/main/java/com/example/stockdiary/
 
 ## 已知约束（避免重复踩坑）
 
-1. **币安在中国大陆网络被地区封锁**——行情接口返回 **HTTP 451**，账户接口常 `UnknownHostException`（DNS 解析不出）。这是**网络/合规限制，不是代码 Bug**，换币安自家域名同样 451。已用 `network/BinanceHostGate.kt`（三态断路器：CLOSED / OPEN / HALF_OPEN + 半开探测自愈）做主机级短路；行情路径与账户/资产路径**共用同一闸门**，UI 统一显示「币安暂不可达」。
+1. **币安公开行情与签名账户已解耦，不再共用闸门**：公开行情（ticker/24hr、ticker/price、klines）一律走 `data-api.binance.vision` 镜像——它与 `api.binance.com` 同套 `/api/v3` 路径、同返回结构，但**不做地区封锁**（实测 200 + lastPrice），无需代理即可取价；`api.binance.com` 在部分地区回 **HTTP 451**（合规层拒绝，换 IP 无效，**不是代码 Bug**）。签名 `/account` 导入仍只能走 `api.binance.com`，封锁地区会 451 / `UnknownHostException`。`network/BinanceHostGate.kt`（三态断路器：CLOSED / OPEN / HALF_OPEN + 半开探测自愈）**只保护公开行情镜像**；账户 / 资产路径刻意**不喂**它——否则封锁地区账户必失败，会把能用的镜像行情一并熔断短路。
 2. **场内基金 / REIT（508xxx、500/501xxx、16xxxx）的分红不在东财股票分红报告**（`RPT_SHAREBONUS_DET` 返回 9201 空），必须走天天基金分红源——见 `DividendRepository.fetchDividendData` 的 `isExchangeFund` 分支。
-3. `DataManager` 是旧版全局状态容器，新代码优先走 `Repository`；两者并存，改动时注意别混用。
 
 ## 给协作者（含 AI）的建议
 
 1. **先读 `AI_GUIDE.md`**（最新、路径均已核实），再看 `docs/PROJECT_MEMORY.md`（别推翻既有决策）。
 2. 然后看 `app/src`，从 `MainActivity` → `GoldVaultNavHost` → 各 `Screen` / `ViewModel` / `Repository` 顺下来。
-3. 改完请跑 `gradlew.bat testDebugUnitTest`，保证 **1036 个**测试不回归；新增逻辑请配套单测（网络路径可用注入假 `OkHttpClient` 的方式测试，仓库已有先例）。
+3. 改完请跑 `bash tools/check_gate.sh`，保证全量单测不回归（当前用例数以 `tools/check_gate.sh` 的 `verify_test_count` 输出为准）；新增逻辑请配套单测（网络路径可用注入假 `OkHttpClient` 的方式测试，仓库已有先例）。
 4. 改动做完默认直接 commit + push，但**按主题分批**，且 push 前必须编译 + 全量测试通过。

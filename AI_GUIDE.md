@@ -4,7 +4,7 @@
 
 > ⚠️ **重要：`CODE_ARCHITECTURE.md` 部分内容已过时**，不要全信。已核实的过时点：
 > - 导航类实际是 `ui/navigation/GoldVaultNavHost.kt`，不是文档里写的 `StockDiaryNavHost.kt`；
-> - `common/` 目录现在只有 `APIConfig.kt`（内含 `APIEndpoints` 对象）和 `Result.kt`，文档里列的 `Constants.kt` / `ErrorMessages.kt` / `components/` 等已不存在。
+> - `common/` 目录现有 `APIConfig.kt`（内含 `APIEndpoints` 对象）、`Result.kt` 和 `SyncLimits.kt`（同步并发度与熔断阈值的单一来源），文档里列的 `Constants.kt` / `ErrorMessages.kt` / `components/` 等已不存在。
 >
 > 有冲突时**以实际代码为准**（本手册的路径均已逐条核实过）。
 
@@ -29,7 +29,7 @@
 | 项 | 要求 |
 |---|---|
 | JDK | **17**（`compileOptions` 与 `kotlinOptions.jvmTarget` 都是 17） |
-| Android SDK | **compileSdk / targetSdk = 34**，需装 Android 14（API 34）平台 + 对应 build-tools |
+| Android SDK | **compileSdk / targetSdk = 35**，需装 Android 15（API 35）平台 + 对应 build-tools |
 | 网络 | 首次构建要下载 Gradle 8.13 和全部依赖（Compose / Room / OkHttp 等），几分钟 |
 
 ### ⚠️ 必须做的一步：告诉 Gradle SDK 在哪
@@ -63,7 +63,7 @@
 ### ✅ 仓库完整性自检（拿到仓库先跑一遍）
 
 ```bash
-git ls-files | wc -l                 # 应为 323（全部源码 + 资源，无 APK）
+git ls-files | wc -l                 # 以命令实际输出为准（应为「全部源码 + 资源、无 APK」；不写死文件数）
 git status                           # 工作树应干净
 git log --oneline -1                 # 最新应为 e79c758（或更新）
 ```
@@ -81,7 +81,7 @@ git archive --format=zip --prefix=NewStockDiary/ -o NewStockDiary.zip HEAD   # �
 ```
 
 > 别整仓打包：仓库含 350 个 jar、`gradle-8.13` 146 MB、build 目录，整仓 **767 MB**；
-> 而 `app/src` 只有 **4.1 MB / 261 个 .kt**。
+> 而 `app/src` 的 .kt 数量以 `find app/src -name '*.kt' | wc -l` 实际输出为准，体积同理不写死数值。
 
 ---
 
@@ -97,7 +97,7 @@ git archive --format=zip --prefix=NewStockDiary/ -o NewStockDiary.zip HEAD   # �
 | 分红怎么抓的 | `data/repository/DividendRepository.kt` |
 | 收息进度怎么算的 | `data/dividend/DividendProgressCalculator.kt` |
 | 仪表盘显示开关 | `data/prefs/DashboardPreferencesManager.kt` |
-| 后台同步按类型分频 | `data/sync/SyncStrategy.kt` + `data/sync/PriceSyncWorker.kt` |
+| 后台同步按类型分频 | `data/contract/SyncStrategy.kt` + `data/sync/PriceSyncWorker.kt` |
 | 资产币种/到期日 | `database/Asset.kt`（`currency`/`dueDate`）+ `utils/ExchangeRateManager.kt` |
 | 币安持仓导入 | `data/importer/BinanceImportService.kt` + `ui/viewmodels/BinanceImportViewModel.kt` |
 | 依赖注入 | `di/AppContainer.kt`（手写单例容器，**没有 Hilt**） |
@@ -123,7 +123,7 @@ bash tools/check_gate.sh
 # 离线迁移校验（不需要设备，纯 python + sqlite）
 python tools/validate_migration.py
 
-# 全量 JVM 单元测试（当前 1036 个，约 2~4 分钟）
+# 全量 JVM 单元测试（当前用例数以 tools/check_gate.sh 的 verify_test_count 输出为准，约 2~4 分钟）
 ./gradlew.bat testDebugUnitTest
 
 # 只跑某一个测试类
@@ -147,8 +147,10 @@ app/src/main/java/com/example/stockdiary/
 ├── database/                    Room：实体 + DAO（Asset / Dividend / Transaction / AssetSnapshot / Portfolio / StockBasic）
 ├── data/
 │   ├── repository/              AssetRepository、DividendRepository
+│   ├── contract/                SyncStrategy 等共享内核（按资产类型分频判定）
+│   ├── export/                  数据导出
 │   ├── sync/                    AssetSyncManager（价格同步编排 + 看门狗）、PriceSyncWorker（后台周期任务）、
-│   │                            SyncStrategy（按资产类型分频判定）、PriceSyncPreferencesManager（同步偏好）
+│   │                            PriceSyncPreferencesManager（同步偏好）
 │   ├── price/                   StockDataManager（股票行情多源 + 数据源级熔断）、SourceCircuitBreaker
 │   ├── dividend/                DividendProgressCalculator（收息进度）、DividendIncomeLoader、
 │   │                            DividendYieldCalculator、DividendIncomeCalculator、DividendService
@@ -159,14 +161,21 @@ app/src/main/java/com/example/stockdiary/
 │                                BinanceAPI / BinanceAccountAPI / BinanceHostGate（币安 + 熔断）、
 │                                SinaStockAPI / TencentStockAPI / FundAPI（行情源）、
 │                                EastmoneyDividendApiService / FundDividendApiService（分红源）
+│   ├── base/                    请求基类与共享配置
+│   ├── cache/                   行情缓存
+│   └── model/                   响应数据模型
 ├── ui/
 │   ├── navigation/              GoldVaultNavHost
 │   ├── screens/                 各页面（Dashboard / Portfolio / History / Calendar / Settings …）
+│   │   ├── settings/            设置页子组件
+│   │   ├── history/             历史页子组件
+│   │   └── calendar/            日历页子组件
 │   ├── viewmodels/              各页面 ViewModel
 │   ├── components/              可复用 Compose 组件（DashboardComponents、DividendProgressComponents …）
+│   │   └── import/              导入向导子组件
 │   └── theme/                   Theme / Color / Typography
 ├── utils/                       StockCodeManager（代码分类）、ExchangeRateManager（汇率）、AppLogger
-├── common/                      APIConfig.kt（APIEndpoints 端点/超时/缓存）、Result.kt
+├── common/                      APIConfig.kt（APIEndpoints 端点/超时/缓存）、Result.kt、SyncLimits.kt
 └── di/                          AppContainer（手写依赖容器）
 ```
 
@@ -224,7 +233,7 @@ app/src/main/java/com/example/stockdiary/
 8. **货币基金**不发现金分红，走"每万份收益"估算，与现金分红口径不同（见 `moneyFundIncome`）。
 9. 代码里**没有** `DataManager.kt`：早期架构文档曾称其为「旧版全局状态容器」，实际不存在。活跃的行情抓取层是 `StockDataManager`（多源聚合 + `SourceCircuitBreaker` 数据源级熔断），本身被 Repository 调用，是现行代码不是遗留物。**不要**为了「消灭 DataManager」做大重构。
 10. **`addOrUpdateStockAsset` 的参数契约（2026-10-22 新增，最易踩）**：签名现为 **12 参**（原 symbol/name/balance/price/account/assetType/fee + `currency`/`dueDate`/`notes`/`interestRate`/`currentPrice`）。**新建持仓分支**把这些字段落库；**合并（加仓）分支刻意只更新 `balance`/`purchasePrice`/`lastUpdateTime`**，currency/dueDate 等靠 `existingAsset.copy` 默认保留。原因是 `AssetDetailViewModel.adjustPosition` 走合并分支且不传币种——若把合并分支写成"用传入值覆盖"，加仓会把既有 USD 仓重置成 CNY。**新增调用方必须传 `currency`**，否则外币资产被静默按 CNY 折算（`2e1f208`）。
-11. **后台同步按资产类型分频，不再一刀切**（`5c7410b`）：判定集中在一个纯函数 `data/sync/SyncStrategy.kt` 的 `shouldAutoSyncType(type, inTradingHours, stockIntradaySync, cryptoAutoSync)`——股票/基金 = `stockIntradaySync || !inTradingHours`（**仅盘后/非交易时段刷**）、加密 = `cryptoAutoSync`（**默认关，只手动刷**）。两偏好在 `data/sync/PriceSyncPreferencesManager.kt`，默认均为 **false**；`PriceSyncWorker` 每轮据此过滤资产，全被过滤掉时跳过本轮但仍重排下次。要改同步时机先看这个函数，别直接改 `AssetSyncManager` 的时钟。
+11. **后台同步按资产类型分频，不再一刀切**（`5c7410b`）：判定集中在一个纯函数 `data/contract/SyncStrategy.kt` 的 `shouldAutoSyncType(type, inTradingHours, stockIntradaySync, cryptoAutoSync)`——股票/基金 = `stockIntradaySync || !inTradingHours`（**仅盘后/非交易时段刷**）、加密 = `cryptoAutoSync`（**默认关，只手动刷**）。两偏好在 `data/sync/PriceSyncPreferencesManager.kt`，默认均为 **false**；`PriceSyncWorker` 每轮据此过滤资产，全被过滤掉时跳过本轮但仍重排下次。要改同步时机先看这个函数，别直接改 `AssetSyncManager` 的时钟。
 12. **日历有两处专门修过的坑，别改回去**：① `CalendarViewModel` 对 assets 流按 `(symbol, balance, currency)` 签名做 `distinctUntilChanged`（`ee6054e`）——日历不依赖实时价，去掉它一次同步会重算日历 20+ 次；② 日期格子是**固定高度 + 三段固定槽位**（`41e71a9` / `b17fe07` / `cee874b`），贴底的「分」槽位收太紧会被 Surface 的 `clip` 切掉半截。动日历布局前先读这三笔注释。
 13. **以下死代码已删除，旧资料别再引用**（`f5b44f5`、`b47cee8`）：`AssetDao` 的 `getAssetsByAccount(Flow)` / `getTotalValueByCurrency` / `getAccountsByType` / `getAssetsPaged` / `deleteAssetsByType` 及其 Repository 转发、`Extensions.DividendData.isNewest()`、`DashboardComponent` 枚举及三处方法。若某份审查报告让你用它们，说明那份报告基于旧版本。
 14. **行情数据源没有手动切换入口了**（2026-10-23 应用户要求去除）：顺序**全自动** = 妙想Skill(仅配置了 API Key 时参与) > 新浪 > 腾讯，某个源连续失败由 `SourceCircuitBreaker` 自动短期禁用并降级。`ApiManager` 现在只保留三个源名字符串常量，**不再有 SharedPreferences 偏好读写**；`ApiSelectionDialog.kt` 已删除。设置页保留「**数据源状态**」入口（`DataSourceStatusDialog`）用来看每个源通不通、熔断状态。批量预取 `StockDataManager.getBatchStockDataThroughSina` 仍写死走新浪（只有新浪有批量接口，N 个代码 ≈ ⌈N/20⌉ 次请求），某个代码没被预取到时才走上面的自动链。**别再去加"让用户选数据源"的 UI**——那是被明确去掉的。

@@ -110,7 +110,7 @@
 | 本次 | **去掉「我的 → 行情数据源」，数据源全自动** | 用户发现该设置形同虚设：批量预取写死走新浪（只有新浪有批量接口），偏好只在兜底路径生效，新浪正常时选腾讯/妙想毫无效果。**已去除**：设置页入口改为「数据源状态」（保留体检）、删 `ApiSelectionDialog.kt`、`ApiManager` 去掉 SharedPreferences 读写只留常量。顺序**全自动** = 妙想Skill(仅配置了 API Key 时参与) > 新浪 > 腾讯，某源连续失败由 `SourceCircuitBreaker` 自动短期禁用并降级。 |
 | 本次 | **币安公开行情绕开地区封锁（data-api.binance.vision 镜像）** | 根因：用户换多个出口 IP 币安仍取不到价——`api.binance.com` 在部分地区回 451/DNS 屏蔽，这是**合规层**拒绝、**换 IP 无效**（与连通层失败不同）。币安**公开行情镜像** `data-api.binance.vision` 同套 `/api/v3` 路径、**不做地区封锁**，实测 200 + lastPrice。改动：公开行情（UnifiedPriceService.ticker/24hr、BinanceAccountAPI 批量 ticker/price、旧 BinanceAPI 对象、DataSourceHealthChecker ping）全部改走镜像；**签名 `/account` 导入仍走 api.binance.com**（镜像不服务）。**关键解耦**：账户路径不再喂 `BinanceHostGate`——否则封锁地区账户必失败会把「能用的镜像行情」一并熔断短路，等于白修；仅镜像行情路径保留熔断保护。重写 `BinanceAccountAPIGateTest` 钉死「账户不碰 gate、只有取价喂 gate」。测试仍 981 全绿。 |
 
-测试规模演进：925 → 931 → 933 → 943 → 945 → 956 → 969 → 971 → 973 → 975 → 976 → **981**（0 failures / 0 errors / 0 skipped）。
+测试规模：当前用例数以 `tools/check_gate.sh` 的 `verify_test_count` 输出为准（不在文档里写死例数——数字一变文档就过期；历史演进数字仅为当时快照，不代表现状）。
 
 ---
 

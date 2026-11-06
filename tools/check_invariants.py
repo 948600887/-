@@ -18,6 +18,9 @@
   A5 禁手动 Accept-Encoding：先剔除 // 行注释、/* */ 块注释与 KDoc，再匹配真实 header 构造；
      SinaStockAPI.kt / DividendService.kt 注释里出现该词**不得误报**。
   A6 超时下限：Timeouts.CALL_MS 不得 < 20000。
+  A7 锁Room版本v18：不得出现 MIGRATION_18_19（本机无 adb，v19 迁移无法真机端到端验证，写错即老用户开库崩溃且不可自愈）。
+  A8 同步入口收口：AssetSyncManager.syncAllAssets 的全部调用点必须位于 PriceSyncCoordinator.kt（统一同步入口），禁止其它文件直调绕过。
+  A9 血缘零持久化 + 源标识唯一：PriceLineageRecorder 不得接任何持久化；价/源交汇文件（PriceCacheManager / UnifiedPriceService）的 source 字段不得硬编码源ID字面量，必须走 SourceIds。
 
 ## 为什么行号必须精确、为什么注释要「抹成空格」而不是删掉
 每条规则都要输出 `PASS/FAIL: 规则名 — 文件:行号 — 期望 X，实际 Y`，人排障时直接跳到那一行。
@@ -63,6 +66,18 @@ DASHBOARD_PREFS = (
 DIVIDEND_SERVICE = (
     "app/src/main/java/com/example/stockdiary/data/dividend/DividendService.kt"
 )
+PRICE_LINEAGE = (
+    "app/src/main/java/com/example/stockdiary/data/price/PriceLineage.kt"
+)
+PRICE_CACHE_MANAGER = (
+    "app/src/main/java/com/example/stockdiary/data/price/PriceCacheManager.kt"
+)
+UNIFIED_PRICE_SERVICE = (
+    "app/src/main/java/com/example/stockdiary/network/UnifiedPriceService.kt"
+)
+PRICE_SYNC_COORDINATOR = (
+    "app/src/main/java/com/example/stockdiary/data/sync/PriceSyncCoordinator.kt"
+)
 
 # A1：三个老文件里只允许「引用」，不允许把定义复制回来。
 # 只盯这两个名字：文件里还有一堆别的 const val 数字常量（批大小 8、回退闸 2、
@@ -104,6 +119,24 @@ HEADER_PATTERNS = (
     ("HEADERS-map 键", re.compile(r"\"Accept-Encoding\"\s*to\s*", re.I)),
 )
 BARE_HEADER_LITERAL = re.compile(r"[\"']Accept-Encoding[\"']", re.I)
+
+# A8：syncAllAssets( 调用点收口到统一入口 PriceSyncCoordinator.kt。
+SYNC_ALL_CALL = re.compile(r"\bsyncAllAssets\s*\(")
+SYNC_ALL_DECL = re.compile(r"\bfun\s+syncAllAssets\s*\(")
+
+# A9a：PriceLineageRecorder 不得接任何持久化原语（deny-list）。
+PERSISTENCE_TOKENS = (
+    "RoomDatabase", "SharedPreferences", "DataStore", "Migration",
+    "StockDatabase", "@Entity", "@Dao", "@Insert", "@Query",
+    "assetRepository", "getDatabase", ".insert(", "AppDatabase",
+)
+# A9b：价与源交汇文件里，source/源字段不得硬编码源ID字面量，必须走 SourceIds。
+SOURCE_LITERAL_PATTERNS = (
+    re.compile(r'optString\(\s*"source"\s*,\s*"[^"]+"'),
+    re.compile(r'"source"\s+to\s*"[^"]+"'),
+    re.compile(r'\bsourceId\s*=\s*"[^"]+"'),
+    re.compile(r'\bsource\s*=\s*"[^"]+"'),
+)
 
 CALL_MS_MIN = 20000
 
@@ -533,6 +566,117 @@ def check_a6(root: str, result: RuleResult) -> None:
         )
 
 
+def check_a7(root: str, result: RuleResult) -> None:
+    """A7 锁定 Room 版本在 v18：不得出现 MIGRATION_18_19。
+
+    本机无 adb，写错 v19 迁移无法真机端到端验证，老用户升级开库即崩且不可自愈。
+    A2 已保证「version == 最新 schema json == N-1 条迁移」一致；但有人若把 v19 写得
+    **完全一致**（补 19.json + MIGRATION_18_19 + version=19），A2 会放行——这正是
+    本机无法验证、却最危险的情形。A7 直接钉死「不得出现 MIGRATION_18_19」。
+    """
+    clean = strip_comments(read_source(root, STOCK_DATABASE))
+    match = re.search(r"\bMIGRATION_18_19\b", clean)
+    if match:
+        result.bad(
+            STOCK_DATABASE, line_no(clean, match.start()),
+            "不得出现 MIGRATION_18_19（Room 版本锁定 v18；v19 迁移必须先有真机端到端验证再写）",
+            "源码含 MIGRATION_18_19",
+        )
+    else:
+        result.ok(
+            STOCK_DATABASE, 22,
+            "Room 版本锁定 v18：无 MIGRATION_18_19",
+            "未出现该迁移常量",
+        )
+
+
+def check_a8(root: str, result: RuleResult) -> None:
+    """A8 所有 syncAllAssets( 调用点必须位于 PriceSyncCoordinator.kt（统一同步入口）。
+
+    其余文件里不得出现对 AssetSyncManager.syncAllAssets 的直调，防止绕过 Coordinator
+    的「场景归一化」层、让同步入口重新散落（阶段1 G5 已把 7 处调用点收口到 Coordinator）。
+    `fun syncAllAssets` 定义本身不算调用点；注释里的提及经 strip_comments 已失效。
+    """
+    decl_line = 31
+    for number, line in enumerate(
+        strip_comments(read_source(root, PRICE_SYNC_COORDINATOR)).splitlines(), start=1
+    ):
+        if SYNC_ALL_CALL.search(line) and not SYNC_ALL_DECL.search(line):
+            decl_line = number
+            break
+    main_root = os.path.join(root, MAIN_SRC)
+    violations: list[tuple[str, int, str]] = []
+    for path in sorted(Path(main_root).rglob("*.kt")):
+        rel = os.path.relpath(str(path), root).replace(os.sep, "/")
+        clean = strip_comments(path.read_text(encoding="utf-8"))
+        for number, line in enumerate(clean.splitlines(), start=1):
+            if SYNC_ALL_DECL.search(line):
+                continue  # 定义本身不算调用点
+            if SYNC_ALL_CALL.search(line) and rel != PRICE_SYNC_COORDINATOR:
+                violations.append((rel, number, line.strip()[:90]))
+    if violations:
+        for rel, number, snippet in violations:
+            result.bad(
+                rel, number,
+                "syncAllAssets( 调用点只允许在 PriceSyncCoordinator.kt（统一同步入口）",
+                f"越界直调：{snippet}",
+            )
+    else:
+        result.ok(
+            PRICE_SYNC_COORDINATOR, decl_line,
+            "syncAllAssets( 调用点全部收口到 PriceSyncCoordinator.kt",
+            "0 处越界（扫描 main .kt）",
+        )
+
+
+def check_a9(root: str, result: RuleResult) -> None:
+    """A9 血缘零持久化（PriceLineageRecorder 不接持久化）+ 源标识唯一（价/源交汇文件不硬编码源ID）。
+
+    9a 零持久化：PriceLineageRecorder 是进程内内存方案（G3），重启即空、零 DB 迁移；
+        一旦有人把 Room/SP/DataStore/Repository 接进去，血缘就脱离「重启不展示」的刻意设计，
+        且会引入本机无法真机验证的迁移风险。故对这些持久化原语做 deny-list。
+    9b 源标识唯一：价与源交汇的 PriceCacheManager / UnifiedPriceService 里，source 字段的
+        默认值/赋值必须引用 SourceIds 常量，不得出现游离的源ID字面量（如 `optString("source", "sina")`）；
+        否则会重演「腾讯源的价被记成新浪」的数据质量债（G3 已修，这里钉死不再回归）。
+    """
+    # 9a 零持久化
+    lineage_clean = strip_comments(read_source(root, PRICE_LINEAGE))
+    hits_persist = [token for token in PERSISTENCE_TOKENS if token in lineage_clean]
+    if hits_persist:
+        for token in hits_persist:
+            result.bad(
+                PRICE_LINEAGE, 89,
+                "PriceLineageRecorder 不得接任何持久化（血缘是进程内内存方案，重启即空）",
+                f"出现持久化原语 {token!r}",
+            )
+    else:
+        result.ok(
+            PRICE_LINEAGE, 89,
+            "PriceLineageRecorder 零持久化：无 Room/SP/DataStore/Repository 依赖",
+            "未出现持久化原语",
+        )
+    # 9b 源标识唯一
+    bad_src: list[tuple[str, int, str]] = []
+    for rel in (PRICE_CACHE_MANAGER, UNIFIED_PRICE_SERVICE):
+        clean = strip_comments(read_source(root, rel))
+        for number, line in enumerate(clean.splitlines(), start=1):
+            if any(pat.search(line) for pat in SOURCE_LITERAL_PATTERNS):
+                bad_src.append((rel, number, line.strip()[:90]))
+    if bad_src:
+        for rel, number, snippet in bad_src:
+            result.bad(
+                rel, number,
+                "源标识必须走 SourceIds 常量；价/源交汇文件不得硬编码源ID字面量（防「腾讯源价谎称新浪」回归）",
+                f"游离源ID字面量：{snippet}",
+            )
+    else:
+        result.ok(
+            PRICE_CACHE_MANAGER, 347,
+            "价与源交汇文件 source 字段全部走 SourceIds（无游离字面量）",
+            "0 处硬编码",
+        )
+
+
 CHECKS = (
     ("A1 阈值>并发", check_a1),
     ("A2 DB版本链", check_a2),
@@ -540,6 +684,9 @@ CHECKS = (
     ("A4 Compose版本组合白名单", check_a4),
     ("A5 禁手动Accept-Encoding", check_a5),
     ("A6 超时下限", check_a6),
+    ("A7 锁Room版本v18", check_a7),
+    ("A8 同步入口收口Coordinator", check_a8),
+    ("A9 血缘零持久化+源标识唯一", check_a9),
 )
 
 

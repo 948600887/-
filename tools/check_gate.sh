@@ -20,7 +20,8 @@
 #
 # 为什么最前面新增 2 步毫秒级静态检查（check_invariants.py + 其 selftest）：
 #   「8>6 阈值/并发」、「@Database 版本链」、「savePreferences 收口」、「Compose 版本组合」、
-#   「禁手动 Accept-Encoding」、「CALL_MS 下限」这 6 组隐性不变量此前全靠人记。两步纯读源码、
+#   「禁手动 Accept-Encoding」、「CALL_MS 下限」、「锁Room版本v18」、「同步入口收口Coordinator」、
+#   「血缘零持久化+源标识唯一」这 9 组隐性不变量此前全靠人记。两步纯读源码、
 #   不依赖 gradle、毫秒级，刻意放在所有 gradle 任务之前做 fast-fail：改坏一处立刻红，
 #   不必先等几分钟编译。第二步用故意写坏的源码副本反证校验器自己不会假绿
 #   （旧版 validate_migration.py 写死目标版本导致假绿的教训）。

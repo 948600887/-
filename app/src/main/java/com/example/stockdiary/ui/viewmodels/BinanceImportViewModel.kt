@@ -9,7 +9,9 @@ import androidx.lifecycle.viewModelScope
 import com.example.stockdiary.data.repository.AssetRepository
 import com.example.stockdiary.data.importer.BinanceCredentialsManager
 import com.example.stockdiary.data.importer.BinanceImportService
-import com.example.stockdiary.data.sync.AssetSyncManager
+import com.example.stockdiary.data.sync.PriceSyncCoordinator
+import com.example.stockdiary.data.sync.PriceSyncRequest
+import com.example.stockdiary.data.sync.SyncScenario
 import com.example.stockdiary.data.sync.refreshTodaySnapshotAfterImport
 import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.di.AppContainer
@@ -247,13 +249,15 @@ open class BinanceImportViewModel(
                     .filter { it.type == AssetType.CRYPTO }
             }
             if (imported.isEmpty()) return
-            val result = AssetSyncManager.syncAllAssets(
+            // 统一入口：BINANCE_IMPORT_BACKFILL → 由场景推导出 forceRefresh=false（对已落库持仓回填补价）。
+            val result = PriceSyncCoordinator.sync(
                 context = context,
                 repository = repository,
-                assets = imported,
-                onProgress = { /* 结果页不展示进度：这轮是后台补价，用户看到的是「导入成功」 */ },
-                forceRefresh = false,
-                syncTrigger = "币安导入保存"
+                request = PriceSyncRequest(
+                    scenario = SyncScenario.BINANCE_IMPORT_BACKFILL,
+                    assets = imported,
+                    onProgress = { /* 结果页不展示进度：这轮是后台补价，用户看到的是「导入成功」 */ }
+                )
             )
             AppLogger.i(
                 "币安导入后行情同步：成功 ${result.successCount}，失败 ${result.failedCount}",

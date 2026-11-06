@@ -316,8 +316,22 @@ class StockDataManager(
                         low = stockData.low ?: 0.0,
                         volume = stockData.volume ?: 0L
                     )
+                    val fetchedAtStock = System.currentTimeMillis()
                     PriceCacheManager.cachePrice(symbol, sinaData, SourceIds.normalizeLegacySource(apiName))
-                    
+                    // G5 血缘：股价落 PriceCacheManager 时上报来源（归一化 sourceId + 落库时间戳）。
+                    // roundId 本组恒为 0；STOCK 不在此之外的 getPrice 分支重复上报。
+                    PriceLineageRecorder.report(
+                        symbol,
+                        PriceLineage(
+                            code = symbol,
+                            sourceId = SourceIds.normalizeLegacySource(apiName),
+                            origin = LineageOrigin.FILE_CACHE,
+                            asOf = fetchedAtStock,
+                            fetchedAt = fetchedAtStock,
+                            roundId = 0
+                        )
+                    )
+
                     breakerFor(apiName).onSuccess()
                     countersFor(apiName).success.incrementAndGet()
                     AppLogger.d("使用${apiName}获取数据成功: ${stockData.name}", TAG)
@@ -430,10 +444,23 @@ class StockDataManager(
         if (symbols.isEmpty()) return Result.success(emptyMap())
         val sinaResult = SinaStockAPI.getRealtimeData(symbols, context = context, forceRefresh = forceRefresh)
         return sinaResult.map { sinaMap ->
+            val now = System.currentTimeMillis()
             sinaMap.mapValues { (code, sina) ->
                 val unified = sina.toUnifiedStockData()
                 cache[code] = CacheItem(unified, System.currentTimeMillis())
                 PriceCacheManager.cachePrice(code, sina, SourceIds.SINA)
+                // G5 血缘：批量回填的股价落 PriceCacheManager 时上报来源。roundId 本组恒为 0。
+                PriceLineageRecorder.report(
+                    code,
+                    PriceLineage(
+                        code = code,
+                        sourceId = SourceIds.SINA,
+                        origin = LineageOrigin.FILE_CACHE,
+                        asOf = now,
+                        fetchedAt = now,
+                        roundId = 0
+                    )
+                )
                 unified
             }
         }

@@ -94,18 +94,18 @@ class PriceSyncWorker(
 
             AppLogger.i("开始自动价格同步，资产数: ${assets.size}", "PriceSyncWorker")
 
-            val result = AssetSyncManager.syncAllAssets(
+            // 统一入口：BACKGROUND_PERIODIC 由 PriceSyncCoordinator 推导出 forceRefresh=false
+            // （分红走「24h TTL + 空结果 7 天」分层，股票仍按自身 TTL 自然刷新，不强制重抓）。
+            val result = PriceSyncCoordinator.sync(
                 context = applicationContext,
                 repository = repository,
-                assets = assets,
-                onProgress = { },
-                // 后台定时同步：分红走「24h TTL + 空结果 7 天」分层（DividendRepository），
-                // 不该每次都强制重抓全部分红——那会把请求量放大数倍且毫无收益。
-                // 股票价格仍按自身 5min/60s TTL 自然刷新（见 UnifiedPriceService / PriceCacheManager）。
-                forceRefresh = false,
-                startTime = startTime,
-                timeLimitMs = WORKER_TIME_LIMIT_MS,
-                syncTrigger = "后台周期同步"
+                request = PriceSyncRequest(
+                    scenario = SyncScenario.BACKGROUND_PERIODIC,
+                    assets = assets,
+                    onProgress = { },
+                    startTime = startTime,
+                    timeLimitMs = WORKER_TIME_LIMIT_MS
+                )
             )
 
             // 收尾先分类再按计划执行副作用（纯判定见 [PriceSyncRoundPolicy]）。
@@ -142,7 +142,8 @@ class PriceSyncWorker(
             // 日志带 skipped 总数；文案与通知共用同一个纯函数，口径不会漂移。
             // 前缀不再写「完成」：全跳过轮次拼成「完成：本轮无有效更新」自相矛盾；
             // 如实性统一由 plan.message 承担，这里只标明「一轮后台同步」。
-            AppLogger.i("自动价格同步：${plan.message}", "PriceSyncWorker")
+            // 截断（时间预算跑满）时，在日志如实标注「部分未更新」，避免用户以为整轮都同步完了
+            AppLogger.i(buildRoundSyncLog(result, plan.message), "PriceSyncWorker")
 
             if (plan.refreshLastSyncTime) prefs.setLastSyncTimeMillis(System.currentTimeMillis())
             if (plan.clearConsecutiveFailures) prefs.setConsecutiveFailureCount(0)

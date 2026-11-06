@@ -5,7 +5,9 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import androidx.lifecycle.viewModelScope
-import com.example.stockdiary.data.sync.AssetSyncManager
+import com.example.stockdiary.data.sync.PriceSyncCoordinator
+import com.example.stockdiary.data.sync.PriceSyncRequest
+import com.example.stockdiary.data.sync.SyncScenario
 import com.example.stockdiary.data.dividend.DividendRecord
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
@@ -112,15 +114,17 @@ class AssetDetailViewModel(private val container: AppContainer, private val asse
                 // 银行存款无实时行情，不同步
                 if (currentAsset != null && (currentAsset.type == AssetType.STOCK || currentAsset.type == AssetType.FUND || currentAsset.type == AssetType.CRYPTO)) {
                     try {
-                        AssetSyncManager.syncAllAssets(
+                        // 统一入口：ASSET_DETAIL_REFRESH → 场景推导出 forceRefresh=true（手动刷新必须强制）。
+                        PriceSyncCoordinator.sync(
                             context = container.applicationContext,
                             repository = repository,
-                            assets = listOf(currentAsset),
-                            // 手动刷新必须强制：门面在非强制时直接返回 60 秒内的缓存，
-                            // 于是 60 秒内连点刷新 = 转圈结束、价格没变，用户以为「刷新了但没变化」。
-                            forceRefresh = true,
-                            onProgress = { },
-                        syncTrigger = "资产详情页刷新"
+                            request = PriceSyncRequest(
+                                scenario = SyncScenario.ASSET_DETAIL_REFRESH,
+                                assets = listOf(currentAsset),
+                                // 手动刷新必须强制：门面在非强制时直接返回 60 秒内的缓存，
+                                // 于是 60 秒内连点刷新 = 转圈结束、价格没变，用户以为「刷新了但没变化」。
+                                onProgress = { }
+                            )
                         )
                     } catch (e: CancellationException) {
                         throw e

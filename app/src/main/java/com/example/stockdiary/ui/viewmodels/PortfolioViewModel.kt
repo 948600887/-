@@ -5,7 +5,9 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import androidx.lifecycle.viewModelScope
-import com.example.stockdiary.data.sync.AssetSyncManager
+import com.example.stockdiary.data.sync.PriceSyncCoordinator
+import com.example.stockdiary.data.sync.PriceSyncRequest
+import com.example.stockdiary.data.sync.SyncScenario
 import com.example.stockdiary.data.sync.saveTodaySnapshotIfEligible
 import com.example.stockdiary.data.prefs.DashboardPreferences
 import com.example.stockdiary.data.dividend.DividendIncomeUseCase
@@ -328,13 +330,15 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
             var syncResult: SyncResult? = null
             var syncError: String? = null
             try {
-                syncResult = AssetSyncManager.syncAllAssets(
+                // 统一入口：PORTFOLIO_FULL_REFRESH → 场景推导出 forceRefresh=true。
+                syncResult = PriceSyncCoordinator.sync(
                     context = container.applicationContext,
                     repository = repository,
-                    assets = priceAssets,
-                    onProgress = { progress -> _uiState.update { it.copy(syncProgress = progress) } },
-                    forceRefresh = true,
-                syncTrigger = "持仓页刷新"
+                    request = PriceSyncRequest(
+                        scenario = SyncScenario.PORTFOLIO_FULL_REFRESH,
+                        assets = priceAssets,
+                        onProgress = { progress -> _uiState.update { it.copy(syncProgress = progress) } }
+                    )
                 )
                 AppLogger.i(
                     "价格同步完成（成功 ${syncResult.successCount}，失败 ${syncResult.failedCount}），开始计算分红",
@@ -530,13 +534,15 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
             _uiState.update { it.copy(isRefreshing = true) }
             AppLogger.i("批量同步开始：${assets.size} 项", "PortfolioVM")
             try {
-                val result = AssetSyncManager.syncAllAssets(
+                // 统一入口：PORTFOLIO_BATCH_REFRESH → 场景推导出 forceRefresh=true。
+                val result = PriceSyncCoordinator.sync(
                     context = container.applicationContext,
                     repository = repository,
-                    assets = assets,
-                    onProgress = { },
-                    forceRefresh = true,
-                syncTrigger = "持仓页批量刷新"
+                    request = PriceSyncRequest(
+                        scenario = SyncScenario.PORTFOLIO_BATCH_REFRESH,
+                        assets = assets,
+                        onProgress = { }
+                    )
                 )
                 // 批量同步同样可能被时间预算截断：勾选的标的只同步了一部分，
                 // 不提示的话用户会以为整批都更新了

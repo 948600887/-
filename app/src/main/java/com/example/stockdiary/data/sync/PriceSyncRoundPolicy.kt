@@ -89,19 +89,27 @@ fun planPriceSyncRound(
         elapsedSinceLastSuccessNotifyMillis >= successNotifyIntervalMillis
 
     return when (outcome) {
-        PriceSyncRoundOutcome.EFFECTIVE_UPDATE -> PriceSyncRoundPlan(
-            outcome = outcome,
-            message = message,
-            notifyResult = notifyResult,
-            // 纯成功通知才推进降频窗口；窗口内被降频（没发通知）时不写时间戳
-            updateSuccessNotifyTimestamp = notifyResult,
-            refreshLastSyncTime = true,
-            clearConsecutiveFailures = true,
-            clearLastErrorType = true,
-            saveTodaySnapshot = true,
-            notifyTodayDividends = true,
-            reschedule = true
-        )
+        PriceSyncRoundOutcome.EFFECTIVE_UPDATE -> {
+            // 截断（时间预算跑满）：本轮只更新了部分标的。已写库的部分不该被当成
+            // 「本轮全部成功」——清零连续失败 / 清错误类型 / 写全量当日快照都会把
+            // 「部分新价 + 部分旧价」固化成当日净值、掩盖真实失败，故截断时一律关掉。
+            // 但仍刷新全局 last_sync_time：本轮确实抓到了新价，时间戳只标记「最近一次有同步发生」，
+            // 不等于「全部成功」；照常通知、照常检查分红到账、照常续期（Worker 仍 Result.success()）。
+            val truncated = result.truncatedByTimeLimit
+            PriceSyncRoundPlan(
+                outcome = outcome,
+                message = message,
+                notifyResult = notifyResult,
+                // 纯成功通知才推进降频窗口；截断（部分更新）不占「成功通知」降频窗口
+                updateSuccessNotifyTimestamp = notifyResult && !truncated,
+                refreshLastSyncTime = true,
+                clearConsecutiveFailures = !truncated,
+                clearLastErrorType = !truncated,
+                saveTodaySnapshot = !truncated,
+                notifyTodayDividends = true,
+                reschedule = true
+            )
+        }
 
         PriceSyncRoundOutcome.NO_EFFECTIVE_UPDATE -> PriceSyncRoundPlan(
             outcome = outcome,
@@ -133,4 +141,15 @@ fun planPriceSyncRound(
             reschedule = false
         )
     }
+}
+
+/**
+ * 一轮同步的日志文案（含截断标注）。Worker 与单测共用同一份拼接逻辑，口径不会漂移。
+ *
+ * 截断（时间预算跑满）时如实追加「（已到时间上限，部分未更新）」，让用户知道本轮只同步了部分标的，
+ * 而不是误以为整轮都同步完成。
+ */
+fun buildRoundSyncLog(result: SyncResult, baseMessage: String): String {
+    val suffix = if (result.truncatedByTimeLimit) "（已到时间上限，部分未更新）" else ""
+    return "自动价格同步：$baseMessage$suffix"
 }

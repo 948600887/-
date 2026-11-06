@@ -6,7 +6,9 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import androidx.lifecycle.viewModelScope
-import com.example.stockdiary.data.sync.AssetSyncManager
+import com.example.stockdiary.data.sync.PriceSyncCoordinator
+import com.example.stockdiary.data.sync.PriceSyncRequest
+import com.example.stockdiary.data.sync.SyncScenario
 import com.example.stockdiary.data.sync.saveTodaySnapshotIfEligible
 import com.example.stockdiary.data.dividend.DividendIncomeUseCase
 import com.example.stockdiary.data.dividend.DividendProgressCalculator
@@ -363,14 +365,16 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
             var syncResult: SyncResult? = null
             var syncError: String? = null
             try {
-                syncResult = AssetSyncManager.syncAllAssets(
+                // 统一入口：DASHBOARD_FULL_REFRESH → 场景推导出 forceRefresh=true。
+                syncResult = PriceSyncCoordinator.sync(
                     context = container.applicationContext,
                     repository = repository,
-                    assets = priceAssets,
-                    // 实时进度：刷新要跑完上百个标的，只转圈用户无从判断是在干活还是卡死
-                    onProgress = { progress -> _uiState.update { it.copy(syncProgress = progress) } },
-                    forceRefresh = true,
-                syncTrigger = "仪表盘刷新"
+                    request = PriceSyncRequest(
+                        scenario = SyncScenario.DASHBOARD_FULL_REFRESH,
+                        assets = priceAssets,
+                        // 实时进度：刷新要跑完上百个标的，只转圈用户无从判断是在干活还是卡死
+                        onProgress = { progress -> _uiState.update { it.copy(syncProgress = progress) } }
+                    )
                 )
                 AppLogger.i(
                     "价格同步完成（成功 ${syncResult.successCount}，失败 ${syncResult.failedCount}）",

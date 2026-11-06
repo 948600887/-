@@ -39,7 +39,7 @@ class PriceSyncRoundPolicyTest {
     @Test
     fun `全跳过_不刷新全局时间戳_不清零连续失败_不写快照_不发误导通知`() {
         val result = allSkipped()
-        val plan = planPriceSyncRound(result, elapsedSinceLastSuccessNotifyMillis = 0L, interval)
+        val plan = planPriceSyncRound(result, elapsedSinceLastSuccessNotifyMillis = interval, interval)
 
         assertEquals(PriceSyncRoundOutcome.NO_EFFECTIVE_UPDATE, plan.outcome)
         assertFalse("全跳过不得刷新 last_price_sync_time", plan.refreshLastSyncTime)
@@ -152,5 +152,61 @@ class PriceSyncRoundPolicyTest {
             planPriceSyncRound(SyncResult(successCount = 0, failedCount = 2), 0L, interval)
                 .updateSuccessNotifyTimestamp
         )
+    }
+
+    @Test
+    fun `截断轮_部分更新_收尾计划4个标志关_时间戳仍刷新_仍续期`() {
+        // 时间预算跑满：本轮只更新了 3 个标的，其余还没轮到就被截断。
+        val result = SyncResult(successCount = 3, failedCount = 0, truncatedByTimeLimit = true)
+        val plan = planPriceSyncRound(result, elapsedSinceLastSuccessNotifyMillis = interval, interval)
+
+        // 仍归有效更新：Worker 照旧 Result.success()，不走 handleFailure
+        assertEquals(PriceSyncRoundOutcome.EFFECTIVE_UPDATE, plan.outcome)
+        // 截断时关掉的 4 个副作用（避免把「部分新价+部分旧价」固化成当日快照/掩盖真实失败）
+        assertFalse("截断轮不得清零连续失败", plan.clearConsecutiveFailures)
+        assertFalse("截断轮不得清掉上次错误类型", plan.clearLastErrorType)
+        assertFalse("截断轮不得写当日快照", plan.saveTodaySnapshot)
+        assertFalse("截断轮不占『成功通知』降频窗口", plan.updateSuccessNotifyTimestamp)
+        // 仍要发生的：本轮确实抓到了新价，时间戳标记「最近一次有同步」；照常通知/查分红/续期
+        assertTrue("截断轮仍刷新 last_price_sync_time", plan.refreshLastSyncTime)
+        assertTrue("截断轮照常通知", plan.notifyResult)
+        assertTrue("分红是独立提醒，照常判", plan.notifyTodayDividends)
+        assertTrue("周期任务仍要续期", plan.reschedule)
+        // 截断轮同样被快照策略函数拦下（避免固化「部分新价+部分旧价」），与 plan.saveTodaySnapshot 一致
+        assertFalse(shouldSaveSnapshotAfterSync(result))
+    }
+
+    @Test
+    fun `非截断有效更新_收尾计划4个标志仍开_对照防误判`() {
+        // 对照：同样的 3 成功 0 失败，但没被截断，所有成功态副作用照旧全开
+        val result = SyncResult(successCount = 3, failedCount = 0, truncatedByTimeLimit = false)
+        val plan = planPriceSyncRound(result, elapsedSinceLastSuccessNotifyMillis = interval, interval)
+
+        assertEquals(PriceSyncRoundOutcome.EFFECTIVE_UPDATE, plan.outcome)
+        assertTrue(plan.clearConsecutiveFailures)
+        assertTrue(plan.clearLastErrorType)
+        assertTrue(plan.saveTodaySnapshot)
+        assertTrue(plan.updateSuccessNotifyTimestamp)
+        assertTrue(plan.refreshLastSyncTime)
+        assertTrue(plan.notifyResult)
+        assertTrue(plan.notifyTodayDividends)
+        assertTrue(plan.reschedule)
+    }
+
+    @Test
+    fun `截断轮_日志标注已到时间上限_部分未更新`() {
+        val truncated = SyncResult(successCount = 3, failedCount = 0, truncatedByTimeLimit = true)
+        val log = buildRoundSyncLog(truncated, "成功 3 个，失败 0 个")
+        assertTrue("截断轮日志要标注已到时间上限", log.contains("已到时间上限"))
+        assertTrue("截断轮日志要标注部分未更新", log.contains("部分未更新"))
+        assertTrue(log.contains("自动价格同步：成功 3 个，失败 0 个"))
+
+        // 非截断：日志不应带截断标注
+        val normal = buildRoundSyncLog(
+            SyncResult(successCount = 3, failedCount = 0, truncatedByTimeLimit = false),
+            "成功 3 个，失败 0 个"
+        )
+        assertFalse(normal.contains("已到时间上限"))
+        assertFalse(normal.contains("部分未更新"))
     }
 }

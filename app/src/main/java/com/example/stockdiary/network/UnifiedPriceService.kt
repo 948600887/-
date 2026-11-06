@@ -3,6 +3,7 @@ package com.example.stockdiary.network
 import android.content.Context
 import com.example.stockdiary.common.APIEndpoints
 import com.example.stockdiary.database.AssetType
+import com.example.stockdiary.data.price.PriceLineageRecorder
 import com.example.stockdiary.data.price.SourceIds
 import com.example.stockdiary.data.price.StockDataManager
 import com.example.stockdiary.network.cache.CacheManager
@@ -995,6 +996,9 @@ object UnifiedPriceService {
         // 基金净值走的是 FundAPI 自己的 5 分钟缓存（本类的 getFundPrice 委托给它）。
         // 只清这里的 60 秒缓存而不清 FundAPI 那份，「清完缓存还是拿到旧净值」。
         FundAPI.clearCache()
+        // G4：清掉行情缓存的同时清血缘。清缓存后展示旧血缘是预期（非 bug）：
+        // 进程内血缘本就「重启即空」，缓存被清意味着旧价不可信，旧血缘没有继续展示的意义。
+        PriceLineageRecorder.clear()
         AppLogger.i("价格缓存已清空 (${sizeBefore} 条)", TAG)
     }
 }

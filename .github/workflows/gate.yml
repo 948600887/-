@@ -1,0 +1,40 @@
+# 最小 CI：Ubuntu、无设备，只跑 tools/check_gate.sh。
+#
+# 边界（刻意不做，别指望它替代 docs/RELEASE_CHECKLIST.md）：
+#   - 不跑 connectedDebugAndroidTest：需要真机 / 模拟器，Room v18 迁移的 IdentityHash
+#     端到端校验只能靠发版清单第 ② 步人工补跑；
+#   - 不构建 / 不验证 release 包，不做 apksigner 签名与安装冒烟；
+#   - 不配 emulator：成本与维护量对单人项目过高（架构评审 §9.5 明确不建议）。
+#
+# 首次运行注意：actions/setup-java@v4 走 foojay toolchain 下载 temurin JDK 17，
+# 若下载源被拦或超时，需先调通 toolchain 下载（或换镜像），否则 job 会在 setup-java 阶段失败。
+# 门禁命令刻意**不带 --skip-unit-test**：CI 上必须跑全量单测，快速通道只留给本地改文档/脚本。
+
+name: 质量门禁
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出源码
+        uses: actions/checkout@v4
+
+      - name: 准备 JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: 配置 Gradle 缓存
+        uses: gradle/actions/setup-gradle@v3
+
+      - name: 确保 gradlew 可执行（仓库里可能没带 +x 位）
+        run: chmod +x gradlew
+
+      - name: 跑全量质量门禁
+        run: bash tools/check_gate.sh

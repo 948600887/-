@@ -63,6 +63,10 @@
 6. **不写"假负缓存"**：数据源未应答（网络失败）时**不得**缓存"无分红"，否则一次断网把数据锁死 7 天。
 7. **密钥不落盘**：日志一律走 `AppLogger`（对 OkHttp 日志脱敏），禁止把 API Key/Secret 写进日志或异常 message。
 
+### 技术/架构级不变量已机器化
+
+上述 7 条是**业务语义**不变量。还有一类**技术/架构**不变量（阈值>并发、`@Database` 版本↔schema↔迁移链、`savePreferences` 收口、Compose BOM 版本组合、禁手动 `Accept-Encoding`、`CALL_MS` 下限、锁 Room v18、同步入口收口、血缘零持久化+源标识唯一）已由 `tools/check_invariants.py` 钉成 **A1–A9** 静态断言，并在门禁 `tools/check_gate.sh` 首跑（含 `check_invariants_selftest.py` 的负向反证）。改相关代码前先跑 `bash tools/check_gate.sh`，别突破 A1–A9。
+
 ---
 
 ## 3. 开发流水（按主题，含提交号）

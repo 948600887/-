@@ -114,7 +114,7 @@ class StockDataManagerTest {
         manager.resetSourceStats()
         assertTrue("reset 后快照应为空", manager.sourceStatsSnapshot().isEmpty())
 
-        manager.reportBatchTotalMiss(ApiManager.API_SINA, listOf("sh600519"))
+        manager.reportBatchTotalMiss(ApiManager.API_SINA, listOf("sh600519"), roundId = 0)
 
         val stats = manager.sourceStatsSnapshot()
         assertEquals(1, stats.size)
@@ -132,7 +132,8 @@ class StockDataManagerTest {
         // 贵州茅台（普通 A 股，新浪理应支持）+ REIT + LOF：整批 0 命中只能是源级问题
         manager.reportBatchTotalMiss(
             ApiManager.API_SINA,
-            listOf("sh600519", "sh508085", "sz160719")
+            listOf("sh600519", "sh508085", "sz160719"),
+            roundId = 0
         )
         assertEquals(
             "批里有普通股票却整批 0 命中，必须喂一次源级失败让熔断器看见",
@@ -148,7 +149,8 @@ class StockDataManagerTest {
         // 若这也计入源级，几轮后会把整源误禁，把流量全甩给腾讯（雪崩）。
         manager.reportBatchTotalMiss(
             ApiManager.API_SINA,
-            listOf("sh508085", "sz160719", "sh501225")
+            listOf("sh508085", "sz160719", "sh501225"),
+            roundId = 0
         )
         assertEquals(
             "整批都是场内基金时 0 命中不能计入源级失败",

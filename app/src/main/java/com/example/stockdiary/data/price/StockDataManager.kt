@@ -498,7 +498,7 @@ class StockDataManager(
     fun reportBatchTotalMiss(
         sourceName: String,
         probedCodes: List<String>,
-        roundId: Int = 0
+        roundId: Int
     ): Boolean {
         val hasPlainStock = probedCodes.any { code ->
             StockCodeManager.classifyCode(code) == StockCodeManager.CodeCategory.STOCK

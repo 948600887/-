@@ -783,7 +783,7 @@ object AssetSyncManager {
             skippedByReason = skipReasons.mapValues { it.value.get() }
         ).also {
             AppLogger.i(
-                "价格同步结束 [轮次#$roundId]：成功 ${it.successCount}，失败 ${it.failedCount}，" +
+                "价格同步结束 [轮次#$roundId][$syncTrigger]：成功 ${it.successCount}，失败 ${it.failedCount}，" +
                     "跳过 ${it.skippedCount}，超时截断=${it.truncatedByTimeLimit}",
                 TAG
             )
@@ -910,8 +910,8 @@ object AssetSyncManager {
         batchResult: AssetPrice? = null,
         /** 同步起点一次性算好的网络可用性（P4）：非 null 时不再逐标的读 ConnectivityManager */
         networkAvailable: Boolean? = null,
-        /** 本轮轮次 ID，只用于日志归属 */
-        roundId: Int = 0,
+        /** 本轮轮次 ID，只用于日志归属（由 runSync 显式传入，无默认值） */
+        roundId: Int,
         /** 跳过原因回调（退市/停牌/币安熔断…），供轮次末汇总分类计数 */
         onSkip: (String) -> Unit = {}
     ) {

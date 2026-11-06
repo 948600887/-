@@ -74,6 +74,12 @@ class PriceSyncWorker(
             if (assets.isEmpty()) {
                 // 本轮被偏好/时段全部过滤掉（典型：盘中 + 两个开关都关）：正常跳过，
                 // 但仍重排下一轮，保证 15min↔4h 的自适应切换不失效。
+                // ⚠️ 此处刻意**不构造** [planPriceSyncRound]（即 PriceSyncRoundPlan）：
+                // 这是「全 0 极端分支」——资产列表为空，[AssetSyncManager.syncAllAssets]
+                // 的 `assets.isEmpty() → return SyncResult(0,0)`（:328-330）与手动刷新路径
+                // 早已覆盖，后台链路在此根本不可达（assets 为空走不到下面的 syncAllAssets）。
+                // 没必要为一条不可达分支造一个全 0 的 plan 再消费，否则反而要为空结果
+                // 特判「是否该通知 / 是否更新时间戳」，徒增噪声。
                 AppLogger.i(
                     "按同步偏好与交易时段无可同步资产，跳过本轮" +
                         "（交易时段=$inTradingHours, 盘中同步股票=$stockIntradaySync, 自动同步加密=$cryptoAutoSync）",

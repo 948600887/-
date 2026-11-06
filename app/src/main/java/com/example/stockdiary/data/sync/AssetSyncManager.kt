@@ -16,6 +16,7 @@ import com.example.stockdiary.data.price.ApiManager
 import com.example.stockdiary.data.price.RoundSourceFailureScope
 import com.example.stockdiary.data.price.SourceStats
 import com.example.stockdiary.data.price.StockDataManager
+import com.example.stockdiary.common.SyncLimits
 import com.example.stockdiary.network.FundAPI
 import com.example.stockdiary.network.UnifiedPriceService
 import com.example.stockdiary.network.model.AssetPrice
@@ -75,7 +76,9 @@ object AssetSyncManager {
      * 峰值内存不变；多出来的名额只会被股票 / 加密行情这类**几十字节**的轻量请求占用。
      * 网络侧由 [com.example.stockdiary.network.NetworkClient] 的 per-host 上限兜底。
      */
-    private const val MAX_CONCURRENT_SYNC = 6
+    // 值收口到 common/SyncLimits.kt：改并发度只需改一处，且 A1 静态校验会
+    // 同时检查「熔断阈值仍严格大于并发度」。保留同名 const 引用，下游引用点一行都不用动。
+    private const val MAX_CONCURRENT_SYNC = SyncLimits.MAX_CONCURRENT_SYNC
 
     /**
      * 手动刷新之间的进程内互斥。

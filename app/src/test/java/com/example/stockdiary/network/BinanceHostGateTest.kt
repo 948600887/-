@@ -1,5 +1,6 @@
 package com.example.stockdiary.network
 
+import com.example.stockdiary.common.SyncLimits
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -145,7 +146,8 @@ class BinanceHostGateTest {
      */
     @Test
     fun `单波6连失败不熔断_阈值必须高于同步并发度`() {
-        val concurrency = 6 // AssetSyncManager.MAX_CONCURRENT_SYNC
+        // 不再写死 6：改并发度时本用例必须跟着变，否则「假钉」会让阈值铁律失去回归保护
+        val concurrency = SyncLimits.MAX_CONCURRENT_SYNC
         assertTrue(
             "阈值(${BinanceHostGate.FAIL_THRESHOLD}) 必须严格大于同步并发度($concurrency)，否则单波抖动必然误熔",
             BinanceHostGate.FAIL_THRESHOLD > concurrency

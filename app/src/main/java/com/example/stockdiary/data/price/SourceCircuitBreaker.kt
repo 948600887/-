@@ -1,5 +1,6 @@
 package com.example.stockdiary.data.price
 
+import com.example.stockdiary.common.SyncLimits
 import com.example.stockdiary.utils.AppLogger
 import java.time.Instant
 import java.util.concurrent.atomic.AtomicReference
@@ -180,7 +181,8 @@ internal class SourceCircuitBreaker {
          * [com.example.stockdiary.network.BinanceHostGate.FAIL_THRESHOLD] 对齐，
          * 单波并发抖动不再误禁；真实不健康仍会在连续多波后禁用。
          */
-        const val FAIL_THRESHOLD = 8
+        // 值收口到 common/SyncLimits.kt；公开属性名保留（单测引用 SourceCircuitBreaker.FAIL_THRESHOLD）。
+        const val FAIL_THRESHOLD = SyncLimits.FAIL_THRESHOLD
 
         /**
          * 禁用冷却时长（毫秒）。取 5 分钟（原为 30 分钟）：配合半开探测，恢复成本从

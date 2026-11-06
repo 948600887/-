@@ -1,5 +1,6 @@
 package com.example.stockdiary.network
 
+import com.example.stockdiary.common.SyncLimits
 import com.example.stockdiary.utils.AppLogger
 import java.time.Instant
 import java.util.concurrent.atomic.AtomicInteger
@@ -92,7 +93,8 @@ internal object BinanceHostGate {
      * 8 > 6 ⇒ 单波抖动不再误熔；真实不可达仍会在约两波（≈40s）内熔断——
      * 且同步总预算看门狗已兜底，多烧一波也不怕。
      */
-    const val FAIL_THRESHOLD = 8
+    // 值收口到 common/SyncLimits.kt；公开属性名保留（大量单测引用 BinanceHostGate.FAIL_THRESHOLD）。
+    const val FAIL_THRESHOLD = SyncLimits.FAIL_THRESHOLD
 
     /**
      * 地区封锁（451/403）**专用**的熔断阈值，远小于瞬断的 [FAIL_THRESHOLD]。

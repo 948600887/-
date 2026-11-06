@@ -6,6 +6,7 @@ import com.example.stockdiary.common.Result
 import com.example.stockdiary.network.EastmoneySkillApi
 import com.example.stockdiary.network.NetworkRetryHelper
 import com.example.stockdiary.network.QuoteSuspendedException
+import com.example.stockdiary.network.StalePriceCacheException
 import com.example.stockdiary.network.SinaStockAPI
 import com.example.stockdiary.network.SinaStockData
 import com.example.stockdiary.network.TencentStockAPI
@@ -204,8 +205,20 @@ class StockDataManager(
                 return Result.success(cached.data)
             }
             
-            // 3. 检查PriceCacheManager持久化缓存
-            val persistedCache = PriceCacheManager.getCachedPrice(symbol)
+            // 3. 检查 PriceCacheManager 持久化缓存。
+            //
+            // 复用它自己的 TTL 判定（交易时段 5min；16 点后 / 周末 MAX_VALUE = 收盘价复用，
+            // 是刻意设计，本阶段不改它的口径）：只有仍在 TTL 内的缓存才能以 success
+            // 身份返回，已过期的一律往下走，由 [StalePriceCacheException] 明确告诉调用方
+            // 「只有旧价、不是新价，别重新落库」。
+            // 过期分支直接跳过 getCachedPrice（不再依赖它内部「判 TTL 并顺手移除条目」的
+            // 清理副作用，本路径也就不动缓存条目）：显式保证「不返回过期价」成为可读、
+            // 可测的契约。旧价仍留在缓存与库里，等网络 / 行情源恢复后自然更新。
+            val persistedCache = if (PriceCacheManager.isCacheValid(symbol)) {
+                PriceCacheManager.getCachedPrice(symbol)
+            } else {
+                null
+            }
             if (persistedCache != null) {
                 val stockData = StockData(
                     code = persistedCache.code,
@@ -233,7 +246,22 @@ class StockDataManager(
             AppLogger.w("网络连接不可用", TAG)
             val oldCache = cache[symbol]
             if (oldCache != null) {
-                return Result.success(oldCache.data)
+                if (PriceCacheManager.isCacheValid(symbol)) {
+                    // 仍在 TTL 内（盘后/周末复用收盘价是刻意设计）：保持原语义复用旧价，
+                    // 不清空旧价、不写 0，也不改 PriceCacheManager 的 TTL 口径。
+                    AppLogger.d("网络不可用，复用仍在 TTL 内的缓存价: $symbol", TAG)
+                    return Result.success(oldCache.data)
+                }
+                // 缓存真的过期了：不能再以 success 身份把旧价送回 syncSingleAsset。
+                // 那会走 priceWriter → AssetDao.updatePriceBySymbol，把该行 lastSyncTime
+                // 刷成「刚刚」，让三天前的收盘价在卡片上伪装成刚抓的新价。
+                // 旧价本身保留在内存缓存与库里不动（不清空、不写 0）；同步编排器把本异常
+                // 归到「跳过」（不算失败），等网络/行情源恢复后自然更新。
+                AppLogger.w(
+                    "网络不可用且缓存已过 TTL，不再以成功身份返回旧价（避免刷新 lastSyncTime）: $symbol",
+                    TAG
+                )
+                return Result.failure(StalePriceCacheException(symbol))
             }
             return Result.failure(IOException("网络连接不可用"))
         }
@@ -495,6 +523,21 @@ class StockDataManager(
     /** 测试专用复位：清空各数据源熔断器状态，保证用例间隔离 */
     internal fun resetForTesting() {
         breakers.clear()
+    }
+
+    /**
+     * 测试专用：往进程内内存缓存塞一条「旧价」。
+     *
+     * 无网络回落分支（getStockData 第 4 步）读的就是这张表，真实链路里它来自上一次
+     * 成功抓价 / 持久化缓存回填。单测要钉死「TTL 已过就不再以 success 身份返回」，
+     * 必须能确定性地造出这个前置状态，故开一个 internal 接缝（与 resetForTesting 同款）。
+     */
+    internal fun seedCacheForTesting(
+        symbol: String,
+        data: StockData,
+        timestamp: Long = System.currentTimeMillis()
+    ) {
+        cache[symbol] = CacheItem(data, timestamp)
     }
 
     /** 测试专用读数：指定数据源当前相位，供三态迁移断言 */

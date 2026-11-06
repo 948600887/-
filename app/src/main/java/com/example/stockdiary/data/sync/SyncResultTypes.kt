@@ -37,11 +37,36 @@ data class SyncResult(
         get() = networkErrorCount > 0 || serverErrorCount > 0 || unknownErrorCount > 0
 
     /**
+     * 本轮跳过的标的**总数**（[skippedByReason] 各原因计数之和）。
+     *
+     * 跳过从来没有标量字段，只在 map 里，日志里才 `skipReasons.values.sum()` 现算一次
+     * （见 AssetSyncManager.logRoundSummary）。现在后台 Worker 的成功判定、通知、日志、
+     * 快照策略都要用这个数，收成一个只读派生属性，避免五处各写一遍 sum、日后又漂移。
+     */
+    val skippedCount: Int
+        get() = skippedByReason.values.sum()
+
+    /**
+     * 「本轮无有效更新」：0 成功 / 0 失败 / 有跳过。
+     *
+     * 这是后台成功判定必须让出来的分支：这一轮一个价格都没更新，
+     * 不能刷新全局 `last_price_sync_time`、不能清零连续失败、不能写当日快照、
+     * 更不能报「成功同步 0 个资产」。
+     *
+     * 刻意**不**包含 `success == 0 && failed == 0 && skipped == 0`（全 0 极端：
+     * 资产为空 / 全被偏好过滤）——那仍按原有「无害覆盖」语义处理。
+     */
+    val hasNoEffectiveUpdate: Boolean
+        get() = successCount == 0 && failedCount == 0 && skippedCount > 0
+
+    /**
      * 把 [skippedByReason] 渲染成给用户看的一句补充（供刷新结果提示拼接）。
      *
-     * 只对「用户会困惑」的两类说话：
+     * 只对「用户会困惑」的三类说话：
      * - 行情源不可达（币安熔断）：这些标的价格**压根没更新**，不说明的话用户会以为
      *   刷新成功却没生效；
+     * - 缓存过期（断网且旧价已过 TTL）：手上有价但不是新价、且**没有重新落库**，
+     *   不说明会被当成「刚更新」；
      * - 退市/停牌/不可交易：这些本来就没有新价，说明一下免得被当成失败。
      *
      * 其余原因（如「非行情类型」）用户不关心，不占用提示篇幅。
@@ -50,9 +75,13 @@ data class SyncResult(
         get() {
             if (skippedByReason.isEmpty()) return ""
             val gated = skippedByReason["币安熔断"] ?: 0
-            val others = skippedByReason.filterKeys { it != "币安熔断" }.values.sum()
+            val stale = skippedByReason["缓存过期"] ?: 0
+            val others = skippedByReason
+                .filterKeys { it != "币安熔断" && it != "缓存过期" }
+                .values.sum()
             return buildString {
                 if (gated > 0) append("；$gated 个加密货币行情源不可达，本次未更新")
+                if (stale > 0) append("；$stale 个仅有过期的旧价，本次未更新（价格保持上次的值）")
                 if (others > 0) append("；$others 个无需更新（退市/停牌等）")
             }
         }

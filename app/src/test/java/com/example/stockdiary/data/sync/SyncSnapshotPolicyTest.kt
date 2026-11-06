@@ -20,6 +20,18 @@ class SyncSnapshotPolicyTest {
     private fun result(success: Int, failed: Int, truncated: Boolean = false) =
         SyncResult(successCount = success, failedCount = failed, truncatedByTimeLimit = truncated)
 
+    private fun resultWithSkips(
+        success: Int,
+        failed: Int,
+        skipped: Map<String, Int>,
+        truncated: Boolean = false
+    ) = SyncResult(
+        successCount = success,
+        failedCount = failed,
+        truncatedByTimeLimit = truncated,
+        skippedByReason = skipped
+    )
+
     @Test
     fun `截断不存_优先级最高`() {
         // 即便有成功、无失败，只要被时间预算截断就不存：那一轮只更新了一部分标的
@@ -52,8 +64,38 @@ class SyncSnapshotPolicyTest {
 
     @Test
     fun `全0极端也存_无害覆盖`() {
-        // successCount=0 且 failedCount=0：全退市组合一个都没同步、但也没失败，
-        // 覆盖一次同日快照无害（本来就是同一批价）——与后台 Worker 门槛一致
+        // successCount=0 且 failedCount=0（skipped 也为空）：全退市组合一个都没同步、
+        // 但也没失败，覆盖一次同日快照无害（本来就是同一批价）——与后台 Worker 门槛一致。
+        // 阶段 0 新增「全跳过不存」时特意只拦 skipped>0，本用例必须继续通过。
         assertTrue(shouldSaveSnapshotAfterSync(result(success = 0, failed = 0)))
+    }
+
+    // ---------- 阶段 0：全跳过（success=0 && skipped>0）不得固化当日快照 ----------
+
+    @Test
+    fun `全跳过不存快照_币安熔断130加退市1`() {
+        // 本轮一个价格都没更新，覆盖快照只是把旧价再固化一次、还会让人以为今天刷新过
+        assertFalse(shouldSaveSnapshotAfterSync(resultWithSkips(0, 0, mapOf("币安熔断" to 130, "退市" to 1))))
+    }
+
+    @Test
+    fun `全跳过的判定只看skipped总量_单一原因也拦`() {
+        assertFalse(shouldSaveSnapshotAfterSync(resultWithSkips(0, 0, mapOf("停牌" to 1))))
+    }
+
+    @Test
+    fun `截断且全跳过也不存_截断优先级最高`() {
+        assertFalse(shouldSaveSnapshotAfterSync(resultWithSkips(0, 0, mapOf("退市" to 2), truncated = true)))
+    }
+
+    @Test
+    fun `有成功且伴随跳过仍存_跳过不连坐成功标的`() {
+        assertTrue(shouldSaveSnapshotAfterSync(resultWithSkips(5, 0, mapOf("币安熔断" to 130))))
+        assertTrue(shouldSaveSnapshotAfterSync(resultWithSkips(5, 2, mapOf("退市" to 1))))
+    }
+
+    @Test
+    fun `全失败且带跳过不存`() {
+        assertFalse(shouldSaveSnapshotAfterSync(resultWithSkips(0, 3, mapOf("停牌" to 1))))
     }
 }

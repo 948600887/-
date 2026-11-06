@@ -35,9 +35,10 @@ import com.example.stockdiary.utils.formatMoney
 import com.example.stockdiary.utils.CRYPTO_DECIMALS
 import com.example.stockdiary.utils.formatCryptoQuantity
 import com.example.stockdiary.utils.formatTrim
+import com.example.stockdiary.utils.isPriceStale
+import com.example.stockdiary.utils.priceAgeStamp
 import com.example.stockdiary.utils.pricePrecisionFor
 import com.example.stockdiary.utils.shareUnitWord
-import com.example.stockdiary.utils.toRelativeTime
 import com.example.stockdiary.utils.totalValueCny
 import kotlinx.coroutines.launch
 
@@ -213,7 +214,11 @@ fun AssetDetailScreen(
                                         "¥" + ExchangeRateManager.toCny(price, a.currency).formatTrim(CRYPTO_DECIMALS)
                                     else
                                         ExchangeRateManager.toCny(price, a.currency)
-                                            .formatMoney(digits = pricePrecisionFor(a.type, a.symbol))) + syncStamp(a.lastSyncTime)
+                                            .formatMoney(digits = pricePrecisionFor(a.type, a.symbol))) +
+                                        syncStamp(a.lastSyncTime),
+                                    // 与首页/持仓卡片同一分级：>24h 用主题 error 色给可见警示
+                                    valueColor = if (isPriceStale(a.lastSyncTime))
+                                        MaterialTheme.colorScheme.error else AppTheme.colors.onSurface
                                 )
                             }
                             DetailRow("当前市值", a.totalValueCny.formatMoney())
@@ -392,16 +397,19 @@ fun AssetDetailScreen(
 }
 
 /**
- * 行情新鲜度后缀，形如 " · 12分钟前更新"。
+ * 行情新鲜度后缀，形如 " · 2小时前更新"。
  *
  * 用户看到「¥12.34」时无从判断这个价是刚抓的还是三天前的——尤其页面已经给出
  * 「价格待更新 / 币安暂不可达」这类状态时，一个"多久之前"比状态词更有用。
  *
- * `lastSyncTime == 0` 表示这条资产从没同步过（手工录入、或行情一直没抓到），
- * 此时必须返回空串：toRelativeTime(0) 会算成"几十年前"，比不显示更糟。
+ * 判定/格式/阈值全部委托给 [com.example.stockdiary.utils.priceAgeStamp]，与首页、
+ * 持仓卡片共用**同一套口径**（原来这里另写了一份私有 when，两页迟早漂移）：
+ * - `lastSyncTime == 0`（从未同步）→ 空串（toRelativeTime(0) 会算成"几十年前"）；
+ * - 1 小时内 → 空串（足够新鲜，不占篇幅）；
+ * - 超过 1 小时 → " · N小时前更新" / " · N天前更新"；
+ * - 超过 24 小时 → 同一文案 + 主题 error 色警示（见上面的 valueColor）。
  */
-private fun syncStamp(lastSyncTime: Long): String =
-    if (lastSyncTime > 0) " · ${lastSyncTime.toRelativeTime()}更新" else ""
+private fun syncStamp(lastSyncTime: Long): String = priceAgeStamp(lastSyncTime)
 
 @Composable
 private fun DetailRow(label: String, value: String, valueColor: androidx.compose.ui.graphics.Color = AppTheme.colors.onSurface) {

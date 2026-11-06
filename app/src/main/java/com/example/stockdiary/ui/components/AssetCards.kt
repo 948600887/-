@@ -28,6 +28,8 @@ import com.example.stockdiary.utils.formatMoney
 import com.example.stockdiary.utils.CRYPTO_DECIMALS
 import com.example.stockdiary.utils.formatCryptoQuantity
 import com.example.stockdiary.utils.formatTrim
+import com.example.stockdiary.utils.isPriceStale
+import com.example.stockdiary.utils.priceAgeStamp
 import com.example.stockdiary.utils.pricePrecisionFor
 import com.example.stockdiary.utils.quantityPrecisionFor
 import com.example.stockdiary.utils.totalValueCny
@@ -344,32 +346,51 @@ fun StockAssetItem(
                     }
                 }
             }
+            // 数据年龄：与资产详情页共用 utils/PriceAge 的同一判定与格式，杜绝两套口径。
+            // lastSyncTime == 0（从未成功同步）→ 空串，卡片保持原有的「价格待更新」；
+            // 超过 1 小时 → " · N小时前更新"；超过 24 小时 → 额外给可见警示。
+            val ageStamp = priceAgeStamp(asset.lastSyncTime)
+            val stale = currentPrice != null && isPriceStale(asset.lastSyncTime)
+            val priceText = when {
+                isLiability -> "待偿还"
+                // 价格是原币口径（与 totalValue 同币种），而同行市值是折算后人民币。
+                // 不过这道换算直接套 ¥，USD 加密货币会把 $67,000 显示成 ¥67,000
+                // （真实约 ¥48 万）——与详情页 AssetDetailScreen:180 同一口径
+                currentPrice != null ->
+                    if (asset.type == AssetType.CRYPTO)
+                        "¥" + ExchangeRateManager.toCny(currentPrice, asset.currency).formatTrim(CRYPTO_DECIMALS)
+                    else
+                        ExchangeRateManager.toCny(currentPrice, asset.currency).formatMoney(digits = pricePrecision)
+                StockCodeManager.isDelistedForSync(asset.symbol) -> "退市"
+                // 币安主机级熔断期间（连不上币安公开行情）要给一个
+                // 区别于「价格待更新」的提示：前者是网络/主机问题，后者可能是数据源缺数据。
+                // 注意 isUnavailable 是普通 volatile 读、不可观察；列表在每轮同步结束后会重组，
+                // 届时标签会刷新——这个局限写进注释，别做成轮询。它是纯读、无副作用，
+                // 不会驱动熔断状态机（请求闸门是 tryAcquireProbe 的职责）。
+                // 经 AssetQuoteRepository 收口，UI 不再直接 import network 层（审计 H1）。
+                asset.type == AssetType.CRYPTO &&
+                    LocalAppContainer.current.assetQuoteRepository.isBinanceUnavailable() -> "币安暂不可达"
+                else -> "价格待更新"
+            }
             Column(modifier = Modifier.weight(1f), horizontalAlignment = Alignment.End) {
                 Text(asset.totalValueCny.formatMoney(), style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold, color = AppTheme.colors.onSurface)
                 Text(
-                    when {
-                        isLiability -> "待偿还"
-                        // 价格是原币口径（与 totalValue 同币种），而同行市值是折算后人民币。
-                        // 不过这道换算直接套 ¥，USD 加密货币会把 $67,000 显示成 ¥67,000
-                        // （真实约 ¥48 万）——与详情页 AssetDetailScreen:180 同一口径
-                        currentPrice != null ->
-                            if (asset.type == AssetType.CRYPTO)
-                                "¥" + ExchangeRateManager.toCny(currentPrice, asset.currency).formatTrim(CRYPTO_DECIMALS)
-                            else
-                                ExchangeRateManager.toCny(currentPrice, asset.currency).formatMoney(digits = pricePrecision)
-                        StockCodeManager.isDelistedForSync(asset.symbol) -> "退市"
-                        // 币安主机级熔断期间（连不上币安公开行情）要给一个
-                        // 区别于「价格待更新」的提示：前者是网络/主机问题，后者可能是数据源缺数据。
-                        // 注意 isUnavailable 是普通 volatile 读、不可观察；列表在每轮同步结束后会重组，
-                        // 届时标签会刷新——这个局限写进注释，别做成轮询。它是纯读、无副作用，
-                        // 不会驱动熔断状态机（请求闸门是 tryAcquireProbe 的职责）。
-                        // 经 AssetQuoteRepository 收口，UI 不再直接 import network 层（审计 H1）。
-                        asset.type == AssetType.CRYPTO &&
-                            LocalAppContainer.current.assetQuoteRepository.isBinanceUnavailable() -> "币安暂不可达"
-                        else -> "价格待更新"
-                    },
-                    style = MaterialTheme.typography.bodySmall, color = AppTheme.colors.onSurfaceVariant, fontWeight = FontWeight.Medium
+                    // 年龄只跟在真实价格后面；「价格待更新」「退市」「币安暂不可达」等状态词保持原样。
+                    if (currentPrice != null) priceText + ageStamp else priceText,
+                    style = MaterialTheme.typography.bodySmall,
+                    // >24h 用主题 error 色（MaterialTheme.colorScheme 明暗主题各自适配），
+                    // 不硬编码深色/浅色。
+                    color = if (stale) MaterialTheme.colorScheme.error else AppTheme.colors.onSurfaceVariant,
+                    fontWeight = FontWeight.Medium
                 )
+                if (stale) {
+                    Text(
+                        "价格数据已超过 24 小时未更新",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
                 if (asset.millionCopiesIncome != null) {
                     Text("万份收益 ${asset.millionCopiesIncome.format(4)}",
                         style = MaterialTheme.typography.bodySmall, color = AppTheme.colors.onSurfaceVariant)

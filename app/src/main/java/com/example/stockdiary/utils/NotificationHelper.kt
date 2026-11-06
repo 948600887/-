@@ -160,17 +160,34 @@ object NotificationHelper {
         )
     }
 
-    fun showPriceSyncNotification(context: Context, successCount: Int, failedCount: Int) {
-        val title = "价格同步完成"
-        val message = when {
-            failedCount == 0 -> "成功同步 $successCount 个资产"
-            successCount == 0 -> "同步失败，请检查网络"
-            else -> "成功 $successCount 个，失败 $failedCount 个"
-        }
+    /**
+     * 一轮价格同步的结果通知。
+     *
+     * @param skippedCount 本轮跳过总数（[com.example.stockdiary.data.sync.SyncResult.skippedCount]）。
+     *   旧文案完全没有这一项：0 成功 / 0 失败 / N 跳过时会写成「成功同步 0 个资产」，
+     *   用户以为刷新生效、实际一个价格都没动。
+     * @param skippedByReason 跳过原因分布，拼进文案后缀，让用户能判断「该不该管」
+     *   （130 个行情源不可达 vs 1 个退市股，处置完全不同）。
+     */
+    fun showPriceSyncNotification(
+        context: Context,
+        successCount: Int,
+        failedCount: Int,
+        skippedCount: Int = 0,
+        skippedByReason: Map<String, Int> = emptyMap()
+    ) {
+        // 标题/正文统一由纯函数生成（见 PriceSyncMessages）：通知只负责投递，
+        // 如实性判定集中在可单测的一处，且与 Worker 日志共用同一份正文文案。
+        val text = buildPriceSyncNotificationText(
+            successCount,
+            failedCount,
+            skippedCount,
+            skippedByReason
+        )
         showNotification(
             context,
-            title,
-            message,
+            text.title,
+            text.message,
             notificationId = NOTIFICATION_ID_PRICE_SYNC,
             requestCode = NOTIFICATION_ID_PRICE_SYNC,
             channelId = CHANNEL_ID_SYNC

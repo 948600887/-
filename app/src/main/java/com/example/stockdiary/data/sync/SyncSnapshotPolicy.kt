@@ -26,15 +26,22 @@ private val SNAPSHOT_DATE_FORMATTER: DateTimeFormatter = DateFormats.ISO_DATE_FO
  * 一部分标的（被时间预算砍断），此时存快照会把「部分新价 + 部分旧价」固化成当日快照，
  * 污染历史净值曲线——宁可这轮不存，等下次完整刷新或后台 Worker 补。
  *
+ * 阶段 0 新增「**全跳过不存**」：`successCount == 0 && skippedCount > 0` 时这一轮
+ * 一个价格都没更新（全被熔断/退市/停牌/过期缓存跳过），覆盖当日快照只是把上一轮
+ * 的旧价再固化一次、还会让人以为今天刷新过，没有任何收益。
+ *
  * 边界（逐条有单测钉死）：
  * - `truncatedByTimeLimit = true` → false（截断不存，优先级最高，即便全 0 也不存）；
+ * - `successCount == 0 && skippedCount > 0` → false（全跳过：本轮无有效更新）；
  * - `successCount == 0 && failedCount > 0` → false（整轮全失败，没什么可存）；
- * - `successCount > 0` → true（有标的更新成功，值得固化）；
- * - `failedCount == 0` → true（含全 0 的极端：全退市组合一个都没同步、但也没失败，
- *   覆盖一次同日快照无害——本来就是同一批价）。
+ * - `successCount > 0` → true（有标的更新成功，值得固化，伴随跳过也照存）；
+ * - `failedCount == 0` → true（含全 0 的极端：全退市组合一个都没同步、但也没失败、
+ *   **skipped 也为空**，覆盖一次同日快照无害——本来就是同一批价）。
  */
 fun shouldSaveSnapshotAfterSync(result: SyncResult): Boolean {
     if (result.truncatedByTimeLimit) return false
+    // 仅当「有跳过且零成功」时返回 false；skipped 为空的全 0 极端保持原语义（返回 true）。
+    if (result.successCount == 0 && result.skippedCount > 0) return false
     return result.successCount > 0 || result.failedCount == 0
 }
 

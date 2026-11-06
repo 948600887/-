@@ -102,45 +102,70 @@ class PriceSyncWorker(
                 syncTrigger = "后台周期同步"
             )
 
+            // 收尾先分类再按计划执行副作用（纯判定见 [PriceSyncRoundPolicy]）。
+            // 旧判定 `successCount > 0 || failedCount == 0` 对「0 成功 / 0 失败 / N 跳过」
+            // 恒为真，全跳过的一轮也会刷新全局时间戳 + 清零失败 + 写快照 + 报「成功同步 0 个资产」。
+            val plan = planPriceSyncRound(
+                result = result,
+                elapsedSinceLastSuccessNotifyMillis =
+                    System.currentTimeMillis() - prefs.getLastSuccessNotifyTimeMillis(),
+                successNotifyIntervalMillis = SUCCESS_NOTIFY_INTERVAL
+            )
+
             // 通知只是附加反馈：失败不能把"成功的同步"判成失败，更不能让它穿透到 doWork
             // 的 catch 里导致走到 handleFailure 后无法自我续期。所以这里一律兜住。
-            // 成功通知降频：交易时段每 15 分钟一轮，每轮都发一条「同步完成 N 个资产」
-            // 只会持续刷新通知栏时间戳，把真正需要看的失败告警挤下去。
-            // 有失败就一定发（用户需要知道）；纯成功则最多几小时一条
-            val shouldNotifySuccess =
-                result.failedCount > 0 ||
-                    System.currentTimeMillis() - prefs.getLastSuccessNotifyTimeMillis() >= SUCCESS_NOTIFY_INTERVAL
-            if (shouldNotifySuccess) {
+            // 纯成功降频；有失败、或全跳过（本轮一个价格都没更新）都一定如实通知。
+            if (plan.notifyResult) {
                 notifySafely {
                     NotificationHelper.showPriceSyncNotification(
                         applicationContext,
                         result.successCount,
-                        result.failedCount
+                        result.failedCount,
+                        result.skippedCount,
+                        result.skippedByReason
                     )
                 }
+            }
+            // 「上次成功通知时间」只由纯策略决定、Worker 只消费：全跳过 / 失败轮次虽然
+            // 照常发通知，但不是成功通知，绝不占用纯成功降频窗口（否则会重置窗口、
+            // 推迟网络恢复后那次真实成功通知）。
+            if (plan.updateSuccessNotifyTimestamp) {
                 prefs.setLastSuccessNotifyTimeMillis(System.currentTimeMillis())
             }
 
-            AppLogger.i(
-                "自动价格同步完成，成功: ${result.successCount}, 失败: ${result.failedCount}",
-                "PriceSyncWorker"
-            )
+            // 日志带 skipped 总数；文案与通知共用同一个纯函数，口径不会漂移。
+            // 前缀不再写「完成」：全跳过轮次拼成「完成：本轮无有效更新」自相矛盾；
+            // 如实性统一由 plan.message 承担，这里只标明「一轮后台同步」。
+            AppLogger.i("自动价格同步：${plan.message}", "PriceSyncWorker")
 
-            if (result.successCount > 0 || result.failedCount == 0) {
-                prefs.setLastSyncTimeMillis(System.currentTimeMillis())
-                prefs.setConsecutiveFailureCount(0)
-                prefs.setLastErrorType(null)
-                // 走统一策略：截断（时间预算跑满）的轮次不写快照——那会把「部分新价 + 部分旧价」
-                // 固化成当日净值。与手动刷新共用 [SyncSnapshotPolicy]，避免两处判定再次漂移。
-                saveTodaySnapshotIfEligible(repository, result, "PriceSyncWorker")
-                // 用全量资产判分红：assets 已被价格同步开关过滤，拿它判会漏掉当天的派息提醒
-                notifyTodayDividends(applicationContext, allAssets)
-                // 跑完一轮后按「此时是否交易时段」重排下一次间隔（15分钟 ↔ 4小时自适应），
-                // 否则间隔永远是上次 App 启动那一刻算出的值，智能间隔形同虚设
-                rescheduleIfEnabled()
-                Result.success()
-            } else {
-                handleFailure(result.dominantErrorType)
+            if (plan.refreshLastSyncTime) prefs.setLastSyncTimeMillis(System.currentTimeMillis())
+            if (plan.clearConsecutiveFailures) prefs.setConsecutiveFailureCount(0)
+            if (plan.clearLastErrorType) prefs.setLastErrorType(null)
+            // 走统一策略：截断（时间预算跑满）/ 全跳过的轮次不写快照——前者会把
+            // 「部分新价 + 部分旧价」固化成当日净值，后者只是把旧价再固化一次。
+            // 与手动刷新共用 [SyncSnapshotPolicy]，避免两处判定再次漂移。
+            if (plan.saveTodaySnapshot) saveTodaySnapshotIfEligible(repository, result, "PriceSyncWorker")
+            if (plan.outcome == PriceSyncRoundOutcome.NO_EFFECTIVE_UPDATE) {
+                AppLogger.i(
+                    "本轮无有效更新（${result.skippedCount} 个资产被跳过），" +
+                        "不刷新全局时间戳 / 不清零连续失败 / 不写当日快照；跳过不算失败，照常续期",
+                    "PriceSyncWorker"
+                )
+            }
+            // 用全量资产判分红：assets 已被价格同步开关过滤，拿它判会漏掉当天的派息提醒；
+            // 分红是独立提醒，全跳过的轮次也要照常判。
+            if (plan.notifyTodayDividends) notifyTodayDividends(applicationContext, allAssets)
+            // 跑完一轮后按「此时是否交易时段」重排下一次间隔（15分钟 ↔ 4小时自适应），
+            // 否则间隔永远是上次 App 启动那一刻算出的值，智能间隔形同虚设。
+            // 失败轮次由 handleFailure 内部自行续期，这里不重复排。
+            if (plan.reschedule) rescheduleIfEnabled()
+
+            return when (plan.outcome) {
+                // 「跳过不算失败」：全跳过照旧 success，绝不改成 Result.failure，
+                // 也不触发 handleFailure / 指数退避。
+                PriceSyncRoundOutcome.EFFECTIVE_UPDATE,
+                PriceSyncRoundOutcome.NO_EFFECTIVE_UPDATE -> Result.success()
+                PriceSyncRoundOutcome.FAILURE -> handleFailure(result.dominantErrorType)
             }
         } catch (e: CancellationException) {
             throw e

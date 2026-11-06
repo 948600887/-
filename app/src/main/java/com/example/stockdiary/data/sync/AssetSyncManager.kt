@@ -784,7 +784,7 @@ object AssetSyncManager {
         ).also {
             AppLogger.i(
                 "价格同步结束 [轮次#$roundId]：成功 ${it.successCount}，失败 ${it.failedCount}，" +
-                    "超时截断=${it.truncatedByTimeLimit}",
+                    "跳过 ${it.skippedCount}，超时截断=${it.truncatedByTimeLimit}",
                 TAG
             )
         }
@@ -1117,6 +1117,13 @@ object AssetSyncManager {
                 // 无关的提示骚扰。价格保持上次的值，冷却过去后自然恢复。
                 AppLogger.i("币安接口临时熔断，跳过: ${asset.name}（${lastError?.message}）", TAG)
                 skipReason = "币安熔断"; onSkip("币安熔断")
+            } else if (com.example.stockdiary.network.StalePriceCacheException.isStaleCache(lastError)) {
+                // 断网 / 行情源全挂且 PriceCacheManager 判定旧价已过 TTL：
+                // 旧价**不能**重新落库——AssetDao.updatePriceBySymbol 会把 lastSyncTime
+                // 刷成「刚刚」，三天前的收盘价就伪装成刚抓的新价。归到「跳过」（不算失败），
+                // 库里的旧价原样保留（不清空、不写 0），等网络恢复后自然更新。
+                AppLogger.i("过期缓存回落，跳过且不刷新 lastSyncTime: ${asset.name}（${lastError?.message}）", TAG)
+                skipReason = "缓存过期"; onSkip("缓存过期")
             } else {
                 // 仅当协程仍活跃时才把这次记为同步失败。协程已被取消（切后台 / VM 销毁 /
                 // 看门狗超预算）时，lastError 多半是「我们自己放弃」的产物（如币安抓取层把

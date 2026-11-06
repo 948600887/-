@@ -191,13 +191,13 @@ object PriceCacheManager {
         }
     }
 
-    fun cachePrice(code: String, data: SinaStockData, source: String = "sina") {
+    fun cachePrice(code: String, data: SinaStockData, source: String) {
         memoryCache[code] = CachedPriceData(data, System.currentTimeMillis(), source)
         trimMemoryCacheIfNeeded()
         maybeSaveToDisk()
     }
 
-    fun cachePrices(prices: Map<String, SinaStockData>, source: String = "sina") {
+    fun cachePrices(prices: Map<String, SinaStockData>, source: String) {
         val now = System.currentTimeMillis()
         prices.forEach { (code, data) ->
             memoryCache[code] = CachedPriceData(data, now, source)
@@ -344,7 +344,7 @@ object PriceCacheManager {
                     val code = jsonObject.optString("code")
                     if (code.isEmpty()) { skipped++; continue }
                     val timestamp = jsonObject.optLong("timestamp", 0L)
-                    val source = jsonObject.optString("source", "sina")
+                    val source = jsonObject.optString("source", SourceIds.SINA)
 
                     // 价格非正 = 坏数据：进了缓存会让市值按 0 显示
                     val price = jsonObject.optDouble("price", 0.0)

@@ -64,17 +64,42 @@ fun priceAgeLevel(
 }
 
 /**
- * 价格旁的统一后缀，复用现有 [Long.toRelativeTime] 的文案（分钟/小时/天/日期）。
+ * 数据年龄文案（纯函数，无 Android 依赖，JVM 单测可直调）。
+ *
+ * 与 [priceAgeStamp] 共用同一套「分钟/小时/天」分级，但**不退回日期串**：
+ * 哪怕超过 7 天，仍然返回 `"N天前"`，而不是 [Long.toRelativeTime] 那种具体日期。
+ * 卡片上「N天前」比一个绝对日期更易读、也更不容易让人误以为「刚更新」。
+ *
+ * `nowMillis` 与阈值判定用**同一个**传入值，保证分级与文案严格同源、不漂移。
+ * `lastSyncTime <= 0`（从未同步）返回空串——调用方据此保持「价格待更新」。
+ */
+fun priceAgeLabel(
+    lastSyncTime: Long,
+    nowMillis: Long = System.currentTimeMillis()
+): String {
+    if (lastSyncTime <= 0L) return ""
+    val diff = nowMillis - lastSyncTime
+    if (diff <= 0L) return "刚刚" // 时钟回拨：绝不显示负年龄
+    return when {
+        diff < 60_000L -> "刚刚"
+        diff < 3_600_000L -> "${diff / 60_000}分钟前"
+        diff < 86_400_000L -> "${diff / 3_600_000}小时前"
+        else -> "${diff / 86_400_000}天前" // 超过 7 天仍返回「N天前」，不退回日期串
+    }
+}
+
+/**
+ * 价格旁的统一后缀，复用 [priceAgeLabel] 的文案（分钟/小时/天前）。
  *
  * 详情页的 syncStamp 与首页/持仓卡片都调它，格式永远一致：
- * `""` 或 `" · 2小时前更新"` / `" · 3天前更新"`。
+ * `""` 或 `" · 2小时前更新"` / `" · 3天前更新"`（超过 7 天也是「N天前更新」，无日期串）。
  */
 fun priceAgeStamp(
     lastSyncTime: Long,
     nowMillis: Long = System.currentTimeMillis()
 ): String = when (priceAgeLevel(lastSyncTime, nowMillis)) {
     PriceAgeLevel.NEVER_SYNCED, PriceAgeLevel.FRESH -> ""
-    PriceAgeLevel.AGED, PriceAgeLevel.STALE -> " · ${lastSyncTime.toRelativeTime()}更新"
+    PriceAgeLevel.AGED, PriceAgeLevel.STALE -> " · ${priceAgeLabel(lastSyncTime, nowMillis)}更新"
 }
 
 /** 是否需要在 UI 上给出「数据过期」可见警示（主题 error 色）。 */

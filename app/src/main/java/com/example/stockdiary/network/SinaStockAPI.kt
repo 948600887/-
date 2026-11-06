@@ -2,6 +2,7 @@ package com.example.stockdiary.network
 
 import android.content.Context
 import com.example.stockdiary.utils.AppLogger
+import com.example.stockdiary.data.price.SourceIds
 import com.example.stockdiary.common.Result
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -318,7 +319,7 @@ object SinaStockAPI : StockAPI {
                     batchResult.forEach { (code, data) ->
                         cacheData(code, data)
                         if (context != null) {
-                            PriceCacheManager.cachePrice(code, data, "sina")
+                            PriceCacheManager.cachePrice(code, data, SourceIds.SINA)
                         }
                     }
 

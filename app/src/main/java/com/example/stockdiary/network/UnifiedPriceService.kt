@@ -3,6 +3,7 @@ package com.example.stockdiary.network
 import android.content.Context
 import com.example.stockdiary.common.APIEndpoints
 import com.example.stockdiary.database.AssetType
+import com.example.stockdiary.data.price.SourceIds
 import com.example.stockdiary.data.price.StockDataManager
 import com.example.stockdiary.network.cache.CacheManager
 import com.example.stockdiary.network.model.AssetPrice
@@ -59,8 +60,19 @@ object UnifiedPriceService {
     /** 进程内价格缓存上限：与 [com.example.stockdiary.data.price.PriceCacheManager] / [SinaStockAPI] 同量级（~200），避免长会话里无限增长 */
     private const val PRICE_CACHE_MAX_ENTRIES = 200
 
-    /** 缓存条目：价格 + 写入时间，用于判断过期 */
-    private data class CacheEntry(val price: AssetPrice, val timestamp: Long)
+    /**
+     * 缓存条目：价格 + 写入时间，用于判断过期。
+     *
+     * [sourceId] / [asOf] 为 G3 血缘预留的稳定源 ID 与数据 as-of 时间，
+     * 域默认值：STOCK→[SourceIds.SINA]、FUND→[SourceIds.EASTMONEY_FUND]、
+     * CRYPTO→[SourceIds.BINANCE]，[asOf] 取写入时间戳。
+     */
+    private data class CacheEntry(
+        val price: AssetPrice,
+        val timestamp: Long,
+        val sourceId: String,
+        val asOf: Long
+    )
 
     private val priceCache = ConcurrentHashMap<String, CacheEntry>()
     private val pendingRequests = ConcurrentHashMap<String, CompletableDeferred<Result<AssetPrice>>>()
@@ -150,7 +162,20 @@ object UnifiedPriceService {
             }
 
             result.onSuccess { price ->
-                priceCache[cacheKey] = CacheEntry(price, System.currentTimeMillis())
+                val entryTimestamp = System.currentTimeMillis()
+                // 域默认值：STOCK→新浪、FUND→东方财富、CRYPTO→币安（见 CacheEntry）
+                val sourceId = when (type) {
+                    AssetType.STOCK -> SourceIds.SINA
+                    AssetType.FUND -> SourceIds.EASTMONEY_FUND
+                    AssetType.CRYPTO -> SourceIds.BINANCE
+                    else -> SourceIds.SINA
+                }
+                priceCache[cacheKey] = CacheEntry(
+                    price = price,
+                    timestamp = entryTimestamp,
+                    sourceId = sourceId,
+                    asOf = entryTimestamp
+                )
                 trimPriceCacheIfNeeded()
             }
 
@@ -224,7 +249,13 @@ object UnifiedPriceService {
                 val priceMap = result.data.mapValues { (_, stockData) -> AssetPrice.Stock(stockData) }
                 // 写门面 60s 缓存：即便 batchResult 短路没兜住，逐标的 getPrice 也能命中这里
                 priceMap.forEach { (code, price) ->
-                    priceCache["${AssetType.STOCK.name}_$code"] = CacheEntry(price, System.currentTimeMillis())
+                    val entryTimestamp = System.currentTimeMillis()
+                    priceCache["${AssetType.STOCK.name}_$code"] = CacheEntry(
+                        price = price,
+                        timestamp = entryTimestamp,
+                        sourceId = SourceIds.SINA,
+                        asOf = entryTimestamp
+                    )
                 }
                 Result.success(priceMap)
             }
@@ -501,7 +532,13 @@ object UnifiedPriceService {
     private fun writeCryptoPricesToCache(priceMap: Map<String, AssetPrice>) {
         if (priceMap.isEmpty()) return
         priceMap.forEach { (code, price) ->
-            priceCache["${AssetType.CRYPTO.name}_$code"] = CacheEntry(price, System.currentTimeMillis())
+            val entryTimestamp = System.currentTimeMillis()
+            priceCache["${AssetType.CRYPTO.name}_$code"] = CacheEntry(
+                price = price,
+                timestamp = entryTimestamp,
+                sourceId = SourceIds.BINANCE,
+                asOf = entryTimestamp
+            )
         }
         trimPriceCacheIfNeeded()
     }

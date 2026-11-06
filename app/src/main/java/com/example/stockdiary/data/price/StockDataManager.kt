@@ -316,7 +316,7 @@ class StockDataManager(
                         low = stockData.low ?: 0.0,
                         volume = stockData.volume ?: 0L
                     )
-                    PriceCacheManager.cachePrice(symbol, sinaData, apiName)
+                    PriceCacheManager.cachePrice(symbol, sinaData, SourceIds.normalizeLegacySource(apiName))
                     
                     breakerFor(apiName).onSuccess()
                     countersFor(apiName).success.incrementAndGet()
@@ -433,7 +433,7 @@ class StockDataManager(
             sinaMap.mapValues { (code, sina) ->
                 val unified = sina.toUnifiedStockData()
                 cache[code] = CacheItem(unified, System.currentTimeMillis())
-                PriceCacheManager.cachePrice(code, sina, ApiManager.API_SINA)
+                PriceCacheManager.cachePrice(code, sina, SourceIds.SINA)
                 unified
             }
         }

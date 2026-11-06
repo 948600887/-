@@ -55,7 +55,7 @@ class AssetDetailViewModelTest {
     private fun buildVm(assetId: Long = 1L, current: Asset? = null): AssetDetailViewModel {
         every { container.assetRepository } returns assetRepo
         every { container.dividendRepository } returns divRepo
-        every { container.context } returns mockk(relaxed = true)
+        every { container.applicationContext } returns mockk(relaxed = true)
         if (current != null) {
             // getAssetById 是 suspend，录桩要用 coEvery（every 的录制 lambda 不在 coroutine 中）
             coEvery { assetRepo.getAssetById(assetId) } returns current

@@ -90,7 +90,7 @@ class DashboardViewModelTest {
         every { container.assetRepository } returns assetRepo
         every { container.dividendIncomeUseCase } returns useCase
         every { container.dashboardPreferencesManager } returns prefsMgr
-        every { container.context } returns mockk(relaxed = true)
+        every { container.applicationContext } returns mockk(relaxed = true)
         // 非挂起函数用 every / 挂起函数用 coEvery
         every { prefsMgr.loadPreferences() } returns DashboardPreferences()
         // 模拟 Manager 的真实契约：拉磁盘最新值 → 套用 mutate → 存盘 → 返回合并结果。

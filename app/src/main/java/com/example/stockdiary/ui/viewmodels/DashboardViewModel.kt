@@ -15,7 +15,6 @@ import com.example.stockdiary.data.dividend.dividendInputFingerprint
 import com.example.stockdiary.data.prefs.SortOrder
 import com.example.stockdiary.data.sync.SyncProgress
 import com.example.stockdiary.data.sync.SyncResult
-import com.example.stockdiary.data.repository.DividendRepository
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetSnapshot
 import com.example.stockdiary.database.AssetType
@@ -70,7 +69,7 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
     private val repository = container.assetRepository
     private val preferencesManager = container.dashboardPreferencesManager
     private val incomeUseCase = container.dividendIncomeUseCase
-    private val dividendRepository = DividendRepository.getInstance(container.context)
+    private val dividendRepository = container.dividendRepository
 
     /**
      * 仪表盘状态机：一次「刷新 / 收入计算」先后推进哪些字段，全在这里。
@@ -365,7 +364,7 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
             var syncError: String? = null
             try {
                 syncResult = AssetSyncManager.syncAllAssets(
-                    context = container.context,
+                    context = container.applicationContext,
                     repository = repository,
                     assets = priceAssets,
                     // 实时进度：刷新要跑完上百个标的，只转圈用户无从判断是在干活还是卡死

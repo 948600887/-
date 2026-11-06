@@ -92,7 +92,7 @@ class PortfolioViewModelTest {
         every { container.assetRepository } returns assetRepo
         every { container.dividendIncomeUseCase } returns useCase
         every { container.dashboardPreferencesManager } returns prefsMgr
-        every { container.context } returns mockk(relaxed = true)
+        every { container.applicationContext } returns mockk(relaxed = true)
         every { prefsMgr.loadPreferences() } returns initialPrefs
         // 模拟 Manager 的真实契约：拉磁盘最新值 → 套用 mutate → 存盘 → 返回合并结果。
         // 必须这么打桩：prefsMgr 是 mock，其 updatePreferences 是桩、真实方法体不会执行，

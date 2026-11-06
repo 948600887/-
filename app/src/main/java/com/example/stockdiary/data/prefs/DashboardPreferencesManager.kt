@@ -2,6 +2,7 @@ package com.example.stockdiary.data.prefs
 
 import android.content.Context
 import android.content.SharedPreferences
+import androidx.annotation.VisibleForTesting
 import com.example.stockdiary.utils.AppLogger
 
 /**
@@ -186,6 +187,15 @@ class DashboardPreferencesManager(context: Context) {
         )
     }
     
+    /**
+     * 直接把一份完整偏好副本整块落盘。
+     *
+     * **业务代码一律走 [updatePreferences]**：它会先 `loadPreferences()` 拉磁盘最新值、
+     * 再只套用 mutate 改动的字段，避免用构造期的过期副本把别的页面刚写的值覆盖掉。
+     * 本方法刻意保持 public：约 8 处单测直接调用它构造初始状态，故不改 private、
+     * 也不加 @Deprecated；[VisibleForTesting] 只标明它的定位，**仅供单测构造初始状态**。
+     */
+    @VisibleForTesting
     fun savePreferences(preferences: DashboardPreferences) {
         prefs.edit().apply {
             putBoolean(KEY_SHOW_TOTAL_ASSETS, preferences.showTotalAssets)

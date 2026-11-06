@@ -13,7 +13,6 @@ import com.example.stockdiary.data.dividend.dividendInputFingerprint
 import com.example.stockdiary.data.prefs.SortOrder
 import com.example.stockdiary.data.sync.SyncProgress
 import com.example.stockdiary.data.sync.SyncResult
-import com.example.stockdiary.data.repository.DividendRepository
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.di.AppContainer
@@ -62,7 +61,7 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
 
     private val repository = container.assetRepository
     private val incomeUseCase = container.dividendIncomeUseCase
-    private val dividendRepository = DividendRepository.getInstance(container.context)
+    private val dividendRepository = container.dividendRepository
 
     /**
      * 持仓页状态机：一次「刷新 / 分红加载」会先后推进哪些字段，全在这里。
@@ -330,7 +329,7 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
             var syncError: String? = null
             try {
                 syncResult = AssetSyncManager.syncAllAssets(
-                    context = container.context,
+                    context = container.applicationContext,
                     repository = repository,
                     assets = priceAssets,
                     onProgress = { progress -> _uiState.update { it.copy(syncProgress = progress) } },
@@ -532,7 +531,7 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
             AppLogger.i("批量同步开始：${assets.size} 项", "PortfolioVM")
             try {
                 val result = AssetSyncManager.syncAllAssets(
-                    context = container.context,
+                    context = container.applicationContext,
                     repository = repository,
                     assets = assets,
                     onProgress = { },

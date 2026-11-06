@@ -113,7 +113,7 @@ class AssetDetailViewModel(private val container: AppContainer, private val asse
                 if (currentAsset != null && (currentAsset.type == AssetType.STOCK || currentAsset.type == AssetType.FUND || currentAsset.type == AssetType.CRYPTO)) {
                     try {
                         AssetSyncManager.syncAllAssets(
-                            context = container.context,
+                            context = container.applicationContext,
                             repository = repository,
                             assets = listOf(currentAsset),
                             // 手动刷新必须强制：门面在非强制时直接返回 60 秒内的缓存，

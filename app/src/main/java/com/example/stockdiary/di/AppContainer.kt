@@ -25,7 +25,18 @@ import com.example.stockdiary.utils.CrashRecoveryManager
  * 简易 DI 容器，替代 Service Locator 反模式
  * 在 Application.onCreate() 中初始化，通过 CompositionLocal 提供给 Composable 树
  */
-class AppContainer(val context: Context) {
+class AppContainer(private val context: Context) {
+    /**
+     * 对外暴露的 Application Context。
+     *
+     * 为什么把构造参数 context 收成 private：容器只由 Application 创建一次，外部
+     * （ViewModel / Factory）不该再从容器里掏原始 Context 去各自 `getInstance(...)`
+     * ——那是绕过 DI 的 Service Locator 用法。需要 Context 的地方统一取本属性；
+     * 它与构造时传入的 Application 是同一个对象，容器内部各 `by lazy` 仍用原 context，
+     * **单例来源完全不变**。
+     */
+    val applicationContext: Context = context.applicationContext
+
     val assetRepository: AssetRepository by lazy { AssetRepository.getInstance(context) }
     val dividendRepository: DividendRepository by lazy { DividendRepository.getInstance(context) }
     /** 交易流水的唯一访问入口，收口对 TransactionDao 的直接访问（与 AssetRepository/DividendRepository 同一架构边界） */

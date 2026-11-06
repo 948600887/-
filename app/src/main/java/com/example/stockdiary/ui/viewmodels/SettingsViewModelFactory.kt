@@ -16,7 +16,7 @@ import com.example.stockdiary.utils.DataSourceHealthChecker
 fun createSettingsViewModelFactory(container: AppContainer): ViewModelProvider.Factory = viewModelFactory {
     initializer {
         SettingsViewModel(
-            appContext = container.context.applicationContext,
+            appContext = container.applicationContext,
             assetRepository = container.assetRepository,
             dividendRepository = container.dividendRepository,
             transactionRepository = container.transactionRepository,

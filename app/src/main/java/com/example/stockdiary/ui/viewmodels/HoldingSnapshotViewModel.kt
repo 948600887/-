@@ -392,7 +392,7 @@ open class HoldingSnapshotViewModel(
         fun factory(container: AppContainer, source: Source): ViewModelProvider.Factory = viewModelFactory {
             initializer {
                 HoldingSnapshotViewModel(
-                    context = container.context,
+                    context = container.applicationContext,
                     repository = container.assetRepository,
                     service = container.holdingSnapshotService,
                     recognizer = container.imageTextRecognizer,

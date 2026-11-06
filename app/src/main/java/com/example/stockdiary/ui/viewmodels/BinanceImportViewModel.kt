@@ -300,7 +300,7 @@ open class BinanceImportViewModel(
         fun factory(container: AppContainer): ViewModelProvider.Factory = viewModelFactory {
             initializer {
                 BinanceImportViewModel(
-                    context = container.context,
+                    context = container.applicationContext,
                     repository = container.assetRepository,
                     service = container.binanceImportService,
                     credentialsManager = container.binanceCredentialsManager

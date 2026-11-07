@@ -29,9 +29,6 @@ import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.CurrencyBitcoin
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SnackbarHost
-import androidx.compose.material3.SnackbarHostState
-import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.Text
 import androidx.compose.material3.TimePicker
@@ -44,8 +41,8 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
@@ -57,6 +54,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 
 import com.example.stockdiary.di.AppContainer
+import com.example.stockdiary.ui.components.LocalAppSnackbar
 import com.example.stockdiary.ui.screens.settings.components.AboutDialog
 import com.example.stockdiary.ui.screens.settings.components.BinanceImportDialog
 import com.example.stockdiary.ui.screens.settings.components.ClearDataDialog
@@ -79,7 +77,7 @@ import com.example.stockdiary.ui.viewmodels.SettingsViewModel
 import com.example.stockdiary.ui.viewmodels.createSettingsViewModelFactory
 
 import com.example.stockdiary.utils.format
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.filterNotNull
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -88,8 +86,9 @@ fun SettingsScreen(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    val snackbarHostState = remember { SnackbarHostState() }
+    // 提示宿主在导航层（见 GoldVaultNavHost）：本页只发消息，不持有 SnackbarHostState，
+    // 否则切 Tab 时页面移出组合，刚弹出的提示会被取消、回来又重弹。
+    val appSnackbar = LocalAppSnackbar.current
     // 版本号从包信息动态读取，避免发版后忘记改硬编码的 "1.0.0"
     val versionName = remember {
         runCatching {
@@ -110,7 +109,6 @@ fun SettingsScreen(
     val reminderEnabled = uiState.reminderEnabled
     val reminderHour = uiState.reminderHour
     val reminderMinute = uiState.reminderMinute
-    val reminderError = uiState.reminderError
     val currentTheme = rememberThemeMode()
 
     // 当前生效的美元汇率与上次刷新时间：从 UiState 读（刷新后要能重组），
@@ -157,7 +155,7 @@ fun SettingsScreen(
                 "每日查看提醒" -> "已开启每日查看提醒，但通知权限被拒绝，到点不会弹出通知"
                 else -> "已开启自动同步，但通知权限被拒绝，同步结果将不会显示通知"
             }
-            scope.launch { snackbarHostState.showSnackbar(message) }
+            appSnackbar.show(message)
         }
         pendingPermissionReason = null
     }
@@ -191,44 +189,48 @@ fun SettingsScreen(
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
+    // 先清状态再展示（理由同 DashboardScreen）：切页时状态已清，回来不会重弹；
+    // show 跑在应用级作用域上，不会随本效应取消。
     LaunchedEffect(uiState.errorMessage) {
         uiState.errorMessage?.let { message ->
-            snackbarHostState.showSnackbar(message)
             viewModel.clearErrorMessage()
+            appSnackbar.show(message)
         }
     }
 
-    LaunchedEffect(reminderError) {
-        reminderError?.let { message ->
-            // 精确闹钟权限缺失的提示：SCHEDULE_EXACT_ALARM 无法用弹窗申请，
-            // 必须让用户手动去系统设置开启。给一个「去设置」动作直接跳转，
-            // 否则这行错误只是干巴巴的一句话，用户不知道下一步该做什么。
-            val isAlarmPermission = message.contains("精确闹钟权限")
-            val result = if (isAlarmPermission) {
-                snackbarHostState.showSnackbar(
-                    message = message,
-                    actionLabel = "去设置",
-                    duration = SnackbarDuration.Long
-                )
-            } else {
-                snackbarHostState.showSnackbar(message)
-                SnackbarResult.Dismissed
+    // 精确闹钟权限缺失的提示：SCHEDULE_EXACT_ALARM 无法用弹窗申请，
+    // 必须让用户手动去系统设置开启。给一个「去设置」动作直接跳转，
+    // 否则这行错误只是干巴巴的一句话，用户不知道下一步该做什么。
+    //
+    // 用 snapshotFlow + Unit key：先清状态再展示，清空不会取消本效应；
+    // 等按钮点击的协程在 controller 的应用级作用域里，切走「我的」页提示仍在。
+    LaunchedEffect(Unit) {
+        snapshotFlow { uiState.reminderError }
+            .filterNotNull()
+            .collect { message ->
+                viewModel.clearReminderError()
+                if (message.contains("精确闹钟权限")) {
+                    appSnackbar.showWithAction(
+                        message = message,
+                        actionLabel = "去设置",
+                        duration = SnackbarDuration.Long
+                    ) {
+                        viewModel.openAlarmSettings()
+                    }
+                } else {
+                    appSnackbar.show(message)
+                }
             }
-            if (result == SnackbarResult.ActionPerformed) {
-                viewModel.openAlarmSettings()
-            }
-            viewModel.clearReminderError()
-        }
     }
 
     LaunchedEffect(uiState.deleteResult) {
         uiState.deleteResult?.let { result ->
+            viewModel.clearDeleteResult()
             if (result.isSuccess) {
                 showClearDataDialog = false
             } else {
-                snackbarHostState.showSnackbar(result.exceptionOrNull()?.message ?: "清除失败")
+                appSnackbar.show(result.exceptionOrNull()?.message ?: "清除失败")
             }
-            viewModel.clearDeleteResult()
         }
     }
 
@@ -236,8 +238,8 @@ fun SettingsScreen(
         uiState.exportResult?.let { result ->
             // 成功也提示：文件名是用户取消分享面板后唯一能追踪导出结果的信息
             val message = result.getOrNull() ?: result.exceptionOrNull()?.message ?: "导出失败"
-            snackbarHostState.showSnackbar(message)
             viewModel.clearExportResult()
+            appSnackbar.show(message)
         }
     }
 
@@ -464,7 +466,6 @@ fun SettingsScreen(
     Scaffold(
         contentWindowInsets = WindowInsets.statusBars,
         modifier = modifier,
-        snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             TopAppBar(
                 // 与底部导航标签保持一致

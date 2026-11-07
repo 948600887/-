@@ -21,6 +21,7 @@ import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.data.dividend.DividendYieldCalculator
 import com.example.stockdiary.data.dividend.DividendIncomeCalculator
+import com.example.stockdiary.ui.components.LocalAppSnackbar
 import com.example.stockdiary.ui.components.SingleLineText
 import com.example.stockdiary.data.importer.stripLoanSuffix
 import com.example.stockdiary.ui.dialogs.AdjustPositionDialog
@@ -66,7 +67,8 @@ fun AssetDetailScreen(
     var showDeleteDialog by remember { mutableStateOf(false) }
     var isDeleting by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
-    val snackbarHostState = remember { SnackbarHostState() }
+    // 提示宿主在导航层（见 GoldVaultNavHost）：本页只发消息，不持有 SnackbarHostState
+    val appSnackbar = LocalAppSnackbar.current
 
     val shareBonus = remember(asset, dividends) {
         val assetVal = asset ?: return@remember null
@@ -78,7 +80,6 @@ fun AssetDetailScreen(
 
     Scaffold(
         contentWindowInsets = WindowInsets.statusBars,
-        snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             TopAppBar(
                 title = {
@@ -322,7 +323,7 @@ fun AssetDetailScreen(
                     runCatching { viewModel.updateAsset(updatedAsset) }
                         .onFailure {
                             AppLogger.e("更新资产失败: ${it.message}", it, "AssetDetailScreen")
-                            snackbarHostState.showSnackbar("保存失败：${it.message ?: "未知错误"}")
+                            appSnackbar.show("保存失败：${it.message ?: "未知错误"}")
                         }
                     showEditDialog = false
                 }
@@ -341,10 +342,10 @@ fun AssetDetailScreen(
                         viewModel.adjustPosition(updatedAsset)
                     }.exceptionOrNull()
                     if (failure == null) {
-                        snackbarHostState.showSnackbar("已记录")
+                        appSnackbar.show("已记录")
                     } else {
                         AppLogger.e("调整持仓失败: ${failure.message}", failure, "AssetDetailScreen")
-                        snackbarHostState.showSnackbar("调整失败：${failure.message ?: "未知错误"}")
+                        appSnackbar.show("调整失败：${failure.message ?: "未知错误"}")
                     }
                     // 成败都要关：否则按钮永久转圈且没有出口
                     showAdjustDialog = false
@@ -373,7 +374,7 @@ fun AssetDetailScreen(
                                 onNavigateBack()
                             } else {
                                 AppLogger.e("删除资产失败: ${failure.message}", failure, "AssetDetailScreen")
-                                snackbarHostState.showSnackbar("删除失败：${failure.message ?: "未知错误"}")
+                                appSnackbar.show("删除失败：${failure.message ?: "未知错误"}")
                             }
                         }
                     },

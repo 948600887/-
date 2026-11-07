@@ -209,7 +209,9 @@ fun PortfolioScreen(
     var showMoveAccountDialog by rememberSaveable { mutableStateOf(false) }
     var showDeleteConfirmDialog by rememberSaveable { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
-    val snackbarHostState = remember { SnackbarHostState() }
+    // 提示宿主在导航层（见 GoldVaultNavHost）：本页只发消息，不持有 SnackbarHostState，
+    // 否则切 Tab 时页面移出组合，刚弹出的提示会立刻被取消。
+    val appSnackbar = LocalAppSnackbar.current
 
     // 与首页（DashboardScreen）同一处修复：本页 VM 挂在 Activity 作用域、跨标签页长期存活，
     // 偏好只在构造期加载一次。从「设置 → 自定义仪表盘」改完开关回本页时，内存副本仍是旧值，
@@ -462,10 +464,13 @@ fun PortfolioScreen(
         viewModel.syncGroups(groupKeys, marketKeys)
     }
 
+    // 先清状态再展示（理由同 DashboardScreen）：show 在应用级作用域上，不随效应取消，
+    // 而状态已清，回到本页不会整段重弹。
     if (errorMessage != null) {
         LaunchedEffect(errorMessage) {
-            snackbarHostState.showSnackbar(errorMessage ?: "")
+            val message = errorMessage ?: return@LaunchedEffect
             viewModel.clearError()
+            appSnackbar.show(message)
         }
     }
 
@@ -473,8 +478,8 @@ fun PortfolioScreen(
     // 与上面的 errorMessage 分开（那是「同步失败」），避免混淆。
     dividendWarning?.let { warning ->
         LaunchedEffect(warning) {
-            snackbarHostState.showSnackbar(warning)
             viewModel.clearDividendWarning()
+            appSnackbar.show(warning)
         }
     }
 
@@ -493,30 +498,33 @@ fun PortfolioScreen(
                 } else {
                     "刷新完成：成功 ${result.successCount}"
                 } + result.skippedHint + result.sourceHealthHint
-                snackbarHostState.showSnackbar(msg)
+                appSnackbar.show(msg)
             }
     }
 
     // 批量删除结果：成功才退出多选并清空选择；失败保留选择态并给可重试的提示（#12）。
-    // 用 uiState.deleteResult 这个持久字段 + clearDeleteResult 配对即可
-    // （失败重试时会被反复 set，需要可重入）。
-    LaunchedEffect(uiState.deleteResult) {
-        uiState.deleteResult?.let { result ->
-            if (result.isSuccess) {
-                selectionMode = false
-                selectedIds = emptySet()
-            } else {
-                val action = snackbarHostState.showSnackbar(
-                    message = "批量删除失败，请重试",
-                    actionLabel = "重试"
-                )
-                if (action == SnackbarResult.ActionPerformed) {
-                    // 选择态仍保留着（删除失败没清），直接再发一次
-                    viewModel.batchDelete(selectedIds)
+    //
+    // 改用 snapshotFlow + 应用级作用域（原来 LaunchedEffect(deleteResult) + 页面协程 await）：
+    // ① 结果先清再处理，切页时不会因为 clear 执行不到而残留、回来重弹；
+    // ② await 也从页面协程挪到 controller 里，切走后提示与「重试」按钮都还在。
+    LaunchedEffect(Unit) {
+        snapshotFlow { uiState.deleteResult }
+            .filterNotNull()
+            .collect { result ->
+                viewModel.clearDeleteResult()
+                if (result.isSuccess) {
+                    selectionMode = false
+                    selectedIds = emptySet()
+                } else {
+                    appSnackbar.showWithAction(
+                        message = "批量删除失败，请重试",
+                        actionLabel = "重试"
+                    ) {
+                        // 选择态仍保留着（删除失败没清），直接再发一次
+                        viewModel.batchDelete(selectedIds)
+                    }
                 }
             }
-            viewModel.clearDeleteResult()
-        }
     }
 
     // 选择态修剪：资产被删/被其它路径移除后，selectedIds 里残留的失效 id 要清掉，
@@ -566,7 +574,6 @@ fun PortfolioScreen(
 
     Scaffold(
         contentWindowInsets = WindowInsets.statusBars,
-        snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             TopAppBar(
                 title = {
@@ -818,7 +825,7 @@ fun PortfolioScreen(
                     runCatching { viewModel.addAsset(asset) }
                         .onFailure {
                             AppLogger.e("新增资产失败: ${it.message}", it, "PortfolioScreen")
-                            snackbarHostState.showSnackbar("保存失败：${it.message ?: "未知错误"}")
+                            appSnackbar.show("保存失败：${it.message ?: "未知错误"}")
                         }
                     showAddDialog = false
                 }

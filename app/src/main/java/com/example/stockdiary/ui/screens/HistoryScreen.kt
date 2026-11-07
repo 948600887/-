@@ -22,8 +22,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SnackbarHost
-import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
@@ -39,6 +37,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.stockdiary.di.LocalAppContainer
+import com.example.stockdiary.ui.components.LocalAppSnackbar
 import com.example.stockdiary.ui.screens.history.components.HistorySaveSnapshotDialog
 import com.example.stockdiary.ui.screens.history.components.HistoryPeriodSelector
 import com.example.stockdiary.ui.screens.history.components.historyAssetDistribution
@@ -62,25 +61,28 @@ fun HistoryScreen(
     // 进入本页时重读偏好，让「设置 → 自定义仪表盘」里改的开关立即生效
     LaunchedEffect(Unit) { viewModel.reloadPreferences() }
 
-    val snackbarHostState = remember { SnackbarHostState() }
+    // 提示宿主在导航层（见 GoldVaultNavHost）：本页只发消息，不持有 SnackbarHostState
+    val appSnackbar = LocalAppSnackbar.current
     var showSaveDialog by remember { mutableStateOf(false) }
 
     // 每次进入历史页重读「默认历史周期」：VM 常驻、默认周期只在构造时读一次，
     // 设置页改完不重进应用的话本页永远用旧周期。
     LaunchedEffect(Unit) { viewModel.reloadDefaultPeriod() }
 
+    // 先清状态再展示（理由同 DashboardScreen）：切页时状态已清，回来不会重弹。
     LaunchedEffect(uiState.errorMessage) {
         uiState.errorMessage?.let { message ->
-            snackbarHostState.showSnackbar(message)
             viewModel.clearError()
+            appSnackbar.show(message)
         }
     }
 
     val saveResult = uiState.saveResult
     LaunchedEffect(saveResult) {
         saveResult?.let { result ->
+            viewModel.clearSaveResult()
             if (result.isSuccess) {
-                snackbarHostState.showSnackbar("保存成功")
+                appSnackbar.show("保存成功")
                 showSaveDialog = false
             } else {
                 // 失败时也要关闭对话框：失败原因写在 uiState.errorMessage 里、由上面的
@@ -89,14 +91,12 @@ fun HistoryScreen(
                 // 真实原因（如「当天没有持仓，未保存快照」）才能正常显示。
                 showSaveDialog = false
             }
-            viewModel.clearSaveResult()
         }
     }
 
     Scaffold(
         contentWindowInsets = WindowInsets.statusBars,
         modifier = modifier,
-        snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             TopAppBar(
                 title = { Text("资产分析", fontWeight = FontWeight.Bold) },

@@ -15,12 +15,14 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
-import kotlinx.coroutines.launch
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.stockdiary.di.LocalAppContainer
+import com.example.stockdiary.ui.components.AppSnackbarController
+import com.example.stockdiary.ui.components.LocalAppSnackbar
 import com.example.stockdiary.ui.screens.*
 import com.example.stockdiary.ui.viewmodels.DashboardViewModel
 import com.example.stockdiary.ui.viewmodels.PortfolioViewModel
@@ -79,10 +81,18 @@ fun GoldVaultNavHost() {
 
     val isDetailScreen = currentDetailId != null
 
-    // 全局唯一的 Snackbar 宿主：把「再按一次退出」这种反馈统一收口到这里，
-    // 而不是用 Toast（应用里其它 16 处反馈都走 SnackbarHostState，Toast 是唯一例外）。
+    // 全应用唯一的 Snackbar 宿主：页面只负责「说什么」，不持有宿主。
+    // 原先每个页面各自 remember { SnackbarHostState() } + Scaffold(snackbarHost=...)，
+    // 切 Tab 时页面整个移出组合，宿主与 showSnackbar 的协程一起被取消，
+    // 提示刚弹出就消失；回到该页又因为状态没清而全时长重弹一遍（看起来像停留时间被刷新）。
+    //
+    // 现在 HostState 与协程作用域都挂在导航层（Activity 级），切页不受影响，
+    // Material3 的自动关闭计时也只在创建时启动一次，不会被页面重组重置。
     val snackbarHostState = remember { SnackbarHostState() }
     val navScope = rememberCoroutineScope()
+    val appSnackbar = remember(snackbarHostState, navScope) {
+        AppSnackbarController(snackbarHostState, navScope)
+    }
 
     BackHandler(enabled = isDetailScreen) {
         currentDetailId = null
@@ -107,63 +117,69 @@ fun GoldVaultNavHost() {
                 // 用 Snackbar 代替 Toast，与全应用的反馈方式保持一致；
                 // 已在显示时不再重复触发，避免「Snackbar host 正在显示」异常。
                 if (snackbarHostState.currentSnackbarData == null) {
-                    navScope.launch { snackbarHostState.showSnackbar("再按一次退出") }
+                    appSnackbar.show("再按一次退出")
                 }
             }
         }
     }
 
-    Scaffold(
-        contentWindowInsets = WindowInsets.navigationBars,
-        snackbarHost = { SnackbarHost(snackbarHostState) },
-        bottomBar = {
-            if (!isDetailScreen) {
-                NavigationBar {
-                    bottomNavigationItems.forEach { screen ->
-                        NavigationBarItem(
-                            icon = { Icon(screen.icon, contentDescription = screen.title) },
-                            label = { Text(screen.title) },
-                            selected = selectedScreenRoute == screen.route,
-                            onClick = { selectedScreenRoute = screen.route }
-                        )
+    CompositionLocalProvider(LocalAppSnackbar provides appSnackbar) {
+        Scaffold(
+            contentWindowInsets = WindowInsets.navigationBars,
+            // 宿主只有这一处。底部多留 88dp：首页/持仓页的 FAB 就贴在内容区右下角，
+            // 不留空隙的话提示条会正好压在按钮上（提示期间用户还得能点到「+」）。
+            snackbarHost = {
+                SnackbarHost(snackbarHostState, modifier = Modifier.padding(bottom = 88.dp))
+            },
+            bottomBar = {
+                if (!isDetailScreen) {
+                    NavigationBar {
+                        bottomNavigationItems.forEach { screen ->
+                            NavigationBarItem(
+                                icon = { Icon(screen.icon, contentDescription = screen.title) },
+                                label = { Text(screen.title) },
+                                selected = selectedScreenRoute == screen.route,
+                                onClick = { selectedScreenRoute = screen.route }
+                            )
+                        }
                     }
                 }
             }
-        }
-    ) { padding ->
-        val detailId = currentDetailId
-        val detailVm = detailViewModel
-        if (detailId != null && detailVm != null) {
-            AssetDetailScreen(
-                assetId = detailId,
-                viewModel = detailVm,
-                onNavigateBack = { currentDetailId = null },
-                modifier = Modifier.padding(padding)
-            )
-        } else {
-            when (selectedScreen) {
-                Screen.Dashboard -> DashboardScreen(
-                    viewModel = dashboardViewModel,
-                    onNavigateToPortfolio = { selectedScreenRoute = Screen.Portfolio.route },
+        ) { padding ->
+            val detailId = currentDetailId
+            val detailVm = detailViewModel
+            if (detailId != null && detailVm != null) {
+                AssetDetailScreen(
+                    assetId = detailId,
+                    viewModel = detailVm,
+                    onNavigateBack = { currentDetailId = null },
                     modifier = Modifier.padding(padding)
                 )
-                Screen.Portfolio -> PortfolioScreen(
-                    viewModel = portfolioViewModel,
-                    onNavigateToAssetDetail = { currentDetailId = it },
-                    modifier = Modifier.padding(padding)
-                )
-                Screen.Calendar -> CalendarScreen(
-                    // 日历空状态的「去添加资产」：跳到仪表盘（添加资产入口所在页）
-                    onNavigateToAssets = { selectedScreenRoute = Screen.Dashboard.route },
-                    modifier = Modifier.padding(padding)
-                )
-                Screen.History -> HistoryScreen(
-                    modifier = Modifier.padding(padding)
-                )
-                Screen.Settings -> SettingsScreen(
-                    container = container,
-                    modifier = Modifier.padding(padding)
-                )
+            } else {
+                when (selectedScreen) {
+                    Screen.Dashboard -> DashboardScreen(
+                        viewModel = dashboardViewModel,
+                        onNavigateToPortfolio = { selectedScreenRoute = Screen.Portfolio.route },
+                        modifier = Modifier.padding(padding)
+                    )
+                    Screen.Portfolio -> PortfolioScreen(
+                        viewModel = portfolioViewModel,
+                        onNavigateToAssetDetail = { currentDetailId = it },
+                        modifier = Modifier.padding(padding)
+                    )
+                    Screen.Calendar -> CalendarScreen(
+                        // 日历空状态的「去添加资产」：跳到仪表盘（添加资产入口所在页）
+                        onNavigateToAssets = { selectedScreenRoute = Screen.Dashboard.route },
+                        modifier = Modifier.padding(padding)
+                    )
+                    Screen.History -> HistoryScreen(
+                        modifier = Modifier.padding(padding)
+                    )
+                    Screen.Settings -> SettingsScreen(
+                        container = container,
+                        modifier = Modifier.padding(padding)
+                    )
+                }
             }
         }
     }

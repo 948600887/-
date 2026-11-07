@@ -60,7 +60,9 @@ fun DashboardScreen(
     // rememberSaveable：旋屏/配置变更后对话框不会凭空消失
     var showAddDialog by rememberSaveable { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
-    val snackbarHostState = remember { SnackbarHostState() }
+    // 提示宿主在导航层（见 GoldVaultNavHost）：本页只发消息，不持有 SnackbarHostState，
+    // 否则切 Tab 时页面移出组合，刚弹出的提示会立刻被取消。
+    val appSnackbar = LocalAppSnackbar.current
 
     // 首页列表只列「真正的持仓」：币安借币（负余额 crypto）不在这里出现，
     // 否则列表逐项加总对不上顶部「总资产」（借款已挪到负债端，见 [Asset.isDebt]）。
@@ -167,16 +169,20 @@ fun DashboardScreen(
                     // 会掩盖某个源整轮都在失败，用户只会觉得价格没更新却不知为何
                     append(result.sourceHealthHint)
                 }
-                snackbarHostState.showSnackbar(msg)
+                appSnackbar.show(msg)
             }
     }
 
     // 刷新兜底：ViewModel 的 CoroutineExceptionHandler 把逃逸异常变成这条提示，
-    // 进程不再被杀掉；用户至少知道「刷新没成功」，而不是界面莫名停止转动
+    // 进程不再被杀掉；用户至少知道「刷新没成功」，而不是界面莫名停止转动。
+    //
+    // 先清状态再展示：清空让 key 变成 null、本效应被取消，但 show 跑在应用级作用域上，
+    // 提示不受影响；若反过来「等提示结束再清」，切页时 clear 永远执行不到，
+    // 状态残留在 VM 里，回到首页会重新弹一遍（表现为停留时间被刷新）。
     errorMessage?.let { message ->
         LaunchedEffect(message) {
-            snackbarHostState.showSnackbar(message)
             viewModel.clearError()
+            appSnackbar.show(message)
         }
     }
 
@@ -184,14 +190,13 @@ fun DashboardScreen(
     // 与上面的 errorMessage 分开（那是「同步失败」），避免混淆。
     dividendWarning?.let { warning ->
         LaunchedEffect(warning) {
-            snackbarHostState.showSnackbar(warning)
             viewModel.clearDividendWarning()
+            appSnackbar.show(warning)
         }
     }
 
     Scaffold(
         contentWindowInsets = WindowInsets.statusBars,
-        snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             TopAppBar(
                 title = {
@@ -362,7 +367,7 @@ fun DashboardScreen(
                     runCatching { viewModel.addAsset(asset) }
                         .onFailure {
                             AppLogger.e("新增资产失败: ${it.message}", it, "DashboardScreen")
-                            snackbarHostState.showSnackbar("保存失败：${it.message ?: "未知错误"}")
+                            appSnackbar.show("保存失败：${it.message ?: "未知错误"}")
                         }
                     showAddDialog = false
                 }

@@ -54,11 +54,10 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.material3.SnackbarHost
-import androidx.compose.material3.SnackbarHostState
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.di.LocalAppContainer
+import com.example.stockdiary.ui.components.LocalAppSnackbar
 import com.example.stockdiary.ui.screens.calendar.components.CalendarCard
 import com.example.stockdiary.ui.components.FireCalculationDialog
 import com.example.stockdiary.ui.screens.calendar.components.DividendDayDetail
@@ -105,7 +104,8 @@ fun CalendarScreen(
     val realAnnualIncome = uiState.realAnnualIncome
 
     val dividendWarning by viewModel.dividendWarning.collectAsStateWithLifecycle()
-    val snackbarHostState = remember { SnackbarHostState() }
+    // 提示宿主在导航层（见 GoldVaultNavHost）：本页只发消息，不持有 SnackbarHostState
+    val appSnackbar = LocalAppSnackbar.current
 
     // 进页补一次全量实时资产：FIRE 需要负债/加密货币（日历那份资产被裁过），
     // 「今天」格需要最新价（日历签名去重不含价格）。只查一次 Room，不触发分红抓取。
@@ -113,10 +113,11 @@ fun CalendarScreen(
 
     // 天天基金限流提示：手动刷新撞 514 时，部分场外基金分红没抓全，给个非阻塞 Snackbar + 可稍后重试。
     // 与下面的 errorMessage（ErrorMessagCard，代表「同步失败」）分开，避免混淆。
+    // 先清状态再展示：show 在应用级作用域上，不随本效应取消，回到日历不会重弹。
     LaunchedEffect(dividendWarning) {
         dividendWarning?.let {
-            snackbarHostState.showSnackbar(it)
             viewModel.clearDividendWarning()
+            appSnackbar.show(it)
         }
     }
 
@@ -140,11 +141,10 @@ fun CalendarScreen(
         return
     }
 
-    // Snackbar 必须由 Scaffold 固定托管；放进 verticalScroll 会滚到页面底部且撑高内容。
+    // Snackbar 由导航层统一托管（见 GoldVaultNavHost），这里只负责页面内容。
     Scaffold(
         contentWindowInsets = WindowInsets.statusBars,
         modifier = modifier.fillMaxSize(),
-        snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
         containerColor = AppTheme.colors.background,
         contentColor = AppTheme.colors.onBackground
     ) { contentPadding ->

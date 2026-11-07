@@ -6,6 +6,7 @@ import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.data.price.LineageOrigin
 import com.example.stockdiary.data.price.PriceLineage
 import com.example.stockdiary.data.price.PriceLineageRecorder
+import com.example.stockdiary.data.price.RoundSourceFailureScope
 import com.example.stockdiary.data.price.SourceIds
 import com.example.stockdiary.data.price.StockDataManager
 import com.example.stockdiary.network.cache.CacheManager
@@ -164,6 +165,7 @@ object UnifiedPriceService {
                 else -> Result.failure(Exception("不支持的资产类型: $type"))
             }
 
+            val lineageRoundId = currentCoroutineContext()[RoundSourceFailureScope.Key]?.roundId ?: 0
             result.onSuccess { price ->
                 val entryTimestamp = System.currentTimeMillis()
                 // 域默认值：STOCK→新浪、FUND→东方财富、CRYPTO→币安（见 CacheEntry）
@@ -181,17 +183,25 @@ object UnifiedPriceService {
                 )
                 trimPriceCacheIfNeeded()
                 // G5 血缘：仅 FUND/CRYPTO 在此上报（STOCK 已在 StockDataManager 落 PriceCacheManager
-                // 处上报，避免同一笔股价被重复记录）。roundId 本组恒为 0。
+                // 处上报，避免同一笔股价被重复记录）。
+                // 基金命中 Room/持久化缓存才算 ROOM_FUND_NAV；实时抓取或内存缓存都是 IN_MEMORY。
                 if (type == AssetType.FUND || type == AssetType.CRYPTO) {
+                    val origin = if (type == AssetType.FUND &&
+                        (price as? AssetPrice.Fund)?.data?.isFromCache == true
+                    ) {
+                        LineageOrigin.ROOM_FUND_NAV
+                    } else {
+                        LineageOrigin.IN_MEMORY
+                    }
                     PriceLineageRecorder.report(
                         code,
                         PriceLineage(
                             code = code,
                             sourceId = sourceId,
-                            origin = if (type == AssetType.FUND) LineageOrigin.ROOM_FUND_NAV else LineageOrigin.IN_MEMORY,
+                            origin = origin,
                             asOf = entryTimestamp,
                             fetchedAt = entryTimestamp,
-                            roundId = 0
+                            roundId = lineageRoundId
                         )
                     )
                 }
@@ -700,7 +710,9 @@ object UnifiedPriceService {
                     changePercent = fundInfo.changePercent,
                     netWorth = fundInfo.netWorth,
                     netWorthDate = fundInfo.date,
-                    millionCopiesIncome = fundInfo.millionCopiesIncome
+                    millionCopiesIncome = fundInfo.millionCopiesIncome,
+                    isStale = fundInfo.isStale,
+                    isFromCache = fundInfo.isFromCache
                 )
                 Result.success(fundData)
             } else {

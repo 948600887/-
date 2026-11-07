@@ -33,6 +33,7 @@ import kotlinx.coroutines.test.setMain
 import org.junit.AfterClass
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.BeforeClass
 import org.junit.Test
 
@@ -86,7 +87,7 @@ class DashboardViewModelTest {
         return cond()
     }
 
-    private fun buildVm(): DashboardViewModel {
+    private fun buildVm(initialAssets: List<Asset> = emptyList()): DashboardViewModel {
         every { container.assetRepository } returns assetRepo
         every { container.dividendIncomeUseCase } returns useCase
         every { container.dashboardPreferencesManager } returns prefsMgr
@@ -102,7 +103,7 @@ class DashboardViewModelTest {
             prefsMgr.savePreferences(updated)
             updated
         }
-        every { assetRepo.getAllAssets() } returns flowOf(emptyList())
+        every { assetRepo.getAllAssets() } returns flowOf(initialAssets)
         every { assetRepo.getAllSnapshots() } returns flowOf(emptyList())
         coEvery { assetRepo.getAllAccounts() } returns emptyList()
         coEvery { useCase.load(any(), any(), any(), any()) } returns DividendIncomeLoader.IncomeResult(
@@ -148,6 +149,36 @@ class DashboardViewModelTest {
             assertFalse(latest().dividendLoading)
         } finally {
             trackJob.cancel()
+        }
+    }
+
+    @Test
+    fun `资产为空时刷新直接提示且不触发同步与收入计算`() = runBlocking {
+        // 冷启动首帧点刷新：空 priceAssets 会让 SyncResult(0,0) 被当成可写快照，
+        // 用库里的旧价覆盖当日快照，并把年度分红缓存写成 0。必须在入口短路。
+        mockkObject(AssetSyncManager)
+        try {
+            val vm = buildVm()
+            val (trackJob, latest) = vm.uiState.trackIn(this)
+            try {
+                waitUntil { latest().assetsFrameReady }
+                vm.refresh()
+                waitUntil { !latest().isRefreshing && latest().errorMessage != null }
+                assertTrue(
+                    latest().errorMessage == "暂无资产可同步" ||
+                        latest().errorMessage == "资产数据加载中，请稍后再试"
+                )
+                coVerify(exactly = 0) {
+                    AssetSyncManager.syncAllAssets(
+                        any(), any(), any(), any(), any(), any(), any(), any(), any()
+                    )
+                }
+                coVerify(exactly = 0) { useCase.load(any(), any(), any(), any()) }
+            } finally {
+                trackJob.cancel()
+            }
+        } finally {
+            unmockkAll()
         }
     }
 
@@ -209,7 +240,7 @@ class DashboardViewModelTest {
                 AssetSyncManager.syncAllAssets(any(), any(), any(), any(), any(), any(), any(), any(), any())
             } returns SyncResult(successCount = 3, failedCount = 1, truncatedByTimeLimit = true)
 
-            val vm = buildVm()
+            val vm = buildVm(initialAssets = listOf(stockAsset))
             val (trackJob, latest) = vm.uiState.trackIn(this)
             try {
                 vm.refresh()
@@ -232,7 +263,7 @@ class DashboardViewModelTest {
                 AssetSyncManager.syncAllAssets(any(), any(), any(), any(), any(), any(), any(), any(), any())
             } returns SyncResult(successCount = 5, failedCount = 0, truncatedByTimeLimit = false)
 
-            val vm = buildVm()
+            val vm = buildVm(initialAssets = listOf(stockAsset))
             val (trackJob, latest) = vm.uiState.trackIn(this)
             try {
                 vm.refresh()
@@ -258,16 +289,23 @@ class DashboardViewModelTest {
                 AssetSyncManager.syncAllAssets(any(), any(), any(), any(), any(), any(), any(), any(), any())
             } returns expected
 
-            val vm = buildVm()
-            vm.refresh()
-            // refresh 走真实 Dispatchers.IO：直接等状态里出现结果，runTest 自身超时兜底
-            val state = vm.uiState.first { it.pendingSyncResult != null }
-            assertEquals(expected, state.pendingSyncResult)
-            assertEquals(null, state.errorMessage)
+            val vm = buildVm(initialAssets = listOf(stockAsset))
+            // uiState 是 WhileSubscribed 派生流：不订阅时 .value 恒为空初值，
+            // refresh 会命中“资产加载中”守卫而不是真正的同步路径。
+            val (trackJob, _) = vm.uiState.trackIn(this)
+            try {
+                vm.refresh()
+                // refresh 走真实 Dispatchers.IO：直接等状态里出现结果，runTest 自身超时兜底
+                val state = vm.uiState.first { it.pendingSyncResult != null }
+                assertEquals(expected, state.pendingSyncResult)
+                assertEquals(null, state.errorMessage)
 
-            // 消费后必须清掉，否则回到首页会再弹一次旧结果
-            vm.clearPendingSyncResult()
-            assertEquals(null, vm.uiState.value.pendingSyncResult)
+                // 消费后必须清掉，否则回到首页会再弹一次旧结果
+                vm.clearPendingSyncResult()
+                assertEquals(null, vm.uiState.value.pendingSyncResult)
+            } finally {
+                trackJob.cancel()
+            }
         } finally {
             unmockkAll()
         }
@@ -282,11 +320,16 @@ class DashboardViewModelTest {
                 AssetSyncManager.syncAllAssets(any(), any(), any(), any(), any(), any(), any(), any(), any())
             } throws RuntimeException("网络挂了")
 
-            val vm = buildVm()
-            vm.refresh()
-            val state = vm.uiState.first { it.errorMessage != null }
-            assertEquals("刷新失败：网络挂了", state.errorMessage)
-            assertEquals(null, state.pendingSyncResult)
+            val vm = buildVm(initialAssets = listOf(stockAsset))
+            val (trackJob, _) = vm.uiState.trackIn(this)
+            try {
+                vm.refresh()
+                val state = vm.uiState.first { it.errorMessage != null }
+                assertEquals("刷新失败：网络挂了", state.errorMessage)
+                assertEquals(null, state.pendingSyncResult)
+            } finally {
+                trackJob.cancel()
+            }
         } finally {
             unmockkAll()
         }

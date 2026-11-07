@@ -112,7 +112,8 @@ class PortfolioViewModelTest {
             totalAnnualIncome = 888.0,
             hasDividendData = true
         )
-        coEvery { assetRepo.addOrUpdateStockAsset(any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any()) } returns stockAsset
+        coEvery { assetRepo.addOrUpdateStockAsset(any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any()) } returns stockAsset
+        coEvery { assetRepo.upsertCryptoAsset(any()) } returns 1L
         coEvery { assetRepo.insertAsset(any()) } returns 1L
         return PortfolioViewModel(container)
     }
@@ -157,11 +158,36 @@ class PortfolioViewModelTest {
     }
 
     @Test
-    fun `addAsset 股票走 addOrUpdateStockAsset`() = runBlocking {
+    fun `addAsset 股票走 addOrUpdateStockAsset 且不记交易流水`() = runBlocking {
         val vm = buildVm()
         vm.addAsset(stockAsset)
-        coVerify { assetRepo.addOrUpdateStockAsset(any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any()) }
+        coVerify {
+            assetRepo.addOrUpdateStockAsset(
+                any(), any(), any(), any(), any(), any(), any(),
+                any(), any(), any(), any(), any(),
+                // 与首页一致：手动添加是补录持仓，不能凭空写一笔今日买入
+                recordTransaction = false
+            )
+        }
         coVerify(exactly = 0) { assetRepo.insertAsset(any()) }
+    }
+
+    @Test
+    fun `addAsset 加密货币走 upsertCryptoAsset 去重`() = runBlocking {
+        val cm = buildVm()
+        val crypto = Asset(
+            name = "Bitcoin", type = AssetType.CRYPTO, symbol = "BTCUSDT",
+            account = "币安", balance = 0.1, currency = "USD"
+        )
+        cm.addAsset(crypto)
+        coVerify { assetRepo.upsertCryptoAsset(crypto) }
+        coVerify(exactly = 0) { assetRepo.insertAsset(any()) }
+        coVerify(exactly = 0) {
+            assetRepo.addOrUpdateStockAsset(
+                any(), any(), any(), any(), any(), any(), any(),
+                any(), any(), any(), any(), any(), any()
+            )
+        }
     }
 
     @Test
@@ -169,7 +195,12 @@ class PortfolioViewModelTest {
         val vm = buildVm()
         vm.addAsset(depositAsset)
         coVerify { assetRepo.insertAsset(depositAsset) }
-        coVerify(exactly = 0) { assetRepo.addOrUpdateStockAsset(any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any()) }
+        coVerify(exactly = 0) {
+            assetRepo.addOrUpdateStockAsset(
+                any(), any(), any(), any(), any(), any(), any(),
+                any(), any(), any(), any(), any(), any()
+            )
+        }
     }
 
     @Test

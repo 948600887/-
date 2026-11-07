@@ -319,16 +319,17 @@ class StockDataManager(
                     val fetchedAtStock = System.currentTimeMillis()
                     PriceCacheManager.cachePrice(symbol, sinaData, SourceIds.normalizeLegacySource(apiName))
                     // G5 血缘：股价落 PriceCacheManager 时上报来源（归一化 sourceId + 落库时间戳）。
-                    // roundId 本组恒为 0；STOCK 不在此之外的 getPrice 分支重复上报。
+                    // 这里是**实时抓取成功**，origin 必须是 IN_MEMORY；FILE_CACHE 只用于
+                    // “命中磁盘旧价”的分支。轮次 ID 从本轮上下文取，避免 UI 展示错轮次。
                     PriceLineageRecorder.report(
                         symbol,
                         PriceLineage(
                             code = symbol,
                             sourceId = SourceIds.normalizeLegacySource(apiName),
-                            origin = LineageOrigin.FILE_CACHE,
+                            origin = LineageOrigin.IN_MEMORY,
                             asOf = fetchedAtStock,
                             fetchedAt = fetchedAtStock,
-                            roundId = 0
+                            roundId = currentCoroutineContext()[RoundSourceFailureScope.Key]?.roundId ?: 0
                         )
                     )
 
@@ -442,6 +443,7 @@ class StockDataManager(
         forceRefresh: Boolean = false
     ): Result<Map<String, StockData>> {
         if (symbols.isEmpty()) return Result.success(emptyMap())
+        val lineageRoundId = currentCoroutineContext()[RoundSourceFailureScope.Key]?.roundId ?: 0
         val sinaResult = SinaStockAPI.getRealtimeData(symbols, context = context, forceRefresh = forceRefresh)
         return sinaResult.map { sinaMap ->
             val now = System.currentTimeMillis()
@@ -449,16 +451,17 @@ class StockDataManager(
                 val unified = sina.toUnifiedStockData()
                 cache[code] = CacheItem(unified, System.currentTimeMillis())
                 PriceCacheManager.cachePrice(code, sina, SourceIds.SINA)
-                // G5 血缘：批量回填的股价落 PriceCacheManager 时上报来源。roundId 本组恒为 0。
+                // G5 血缘：批量回填是**本次实时**新浪请求的结果，origin=IN_MEMORY；
+                // 轮次 ID 取本轮上下文，不能固定 0。
                 PriceLineageRecorder.report(
                     code,
                     PriceLineage(
                         code = code,
                         sourceId = SourceIds.SINA,
-                        origin = LineageOrigin.FILE_CACHE,
+                        origin = LineageOrigin.IN_MEMORY,
                         asOf = now,
                         fetchedAt = now,
-                        roundId = 0
+                        roundId = lineageRoundId
                     )
                 )
                 unified

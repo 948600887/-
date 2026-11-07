@@ -12,6 +12,7 @@ import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.database.Dividend
 import com.example.stockdiary.database.Transaction
 import com.example.stockdiary.database.TransactionType
+import com.example.stockdiary.database.perTenSharesToAmount
 import com.example.stockdiary.utils.AppLogger
 import com.example.stockdiary.utils.CRYPTO_DECIMALS
 import com.example.stockdiary.utils.ExchangeRateManager
@@ -83,8 +84,8 @@ class DataExporter(private val context: Context) {
     fun exportSnapshotsToCSV(snapshots: List<AssetSnapshot>): Result<Uri> =
         exportFile("snapshots", "csv") { it.append(CsvContent.snapshots(snapshots)) }
 
-    fun exportDividendsToCSV(dividends: List<Dividend>): Result<Uri> =
-        exportFile("dividends", "csv") { it.append(CsvContent.dividends(dividends)) }
+    fun exportDividendsToCSV(dividends: List<Dividend>, assets: List<Asset>): Result<Uri> =
+        exportFile("dividends", "csv") { it.append(CsvContent.dividends(dividends, assets)) }
 
     fun exportTransactionsToCSV(assets: List<Asset>, transactions: List<Transaction>): Result<Uri> =
         exportFile("statement", "csv") { it.append(CsvContent.transactions(assets, transactions)) }
@@ -209,12 +210,30 @@ internal class AssetLookup(assets: List<Asset>) {
         if (list.none { it === asset }) list.add(asset)
     }
 
-    fun candidates(tx: Transaction): List<Asset> {
-        val raw = tx.symbol.trim()
+    private fun candidates(symbol: String): List<Asset> {
+        val raw = symbol.trim()
         return byKey[raw]
             ?: byKey[StockCodeManager.normalizeSymbol(raw)]
             ?: byKey[cryptoKey(raw)]
             ?: emptyList()
+    }
+
+    fun candidates(tx: Transaction): List<Asset> = candidates(tx.symbol)
+
+    /**
+     * 分红导出需要“当前持仓合计”：同一代码可能在多个账户各有一笔，
+     * 只取一条会低估折算金额。币种无法取得共识时返回 null，由调用方留空而不是猜。
+     */
+    fun holdingFor(symbol: String): ResolvedHolding? {
+        val list = candidates(symbol)
+        if (list.isEmpty()) return null
+        val currencies = list.map { it.currency.uppercase() }.distinct()
+        return ResolvedHolding(
+            asset = list.first(),
+            balance = list.sumOf { it.balance },
+            currency = currencies.singleOrNull(),
+            accounts = list.map { it.account }.distinct()
+        )
     }
 
     fun resolve(tx: Transaction): ResolvedTxAsset {
@@ -244,6 +263,14 @@ internal class AssetLookup(assets: List<Asset>) {
 /** 交易行解析结果；[currency] 为 null 表示无法确定币种（资产已删 / 多账户不同币种）。 */
 internal data class ResolvedTxAsset(val asset: Asset?, val account: String, val currency: String?)
 
+/** 代码对应的当前持仓合计；[currency] 为 null 表示多账户币种不一致，不能静默折算。 */
+internal data class ResolvedHolding(
+    val asset: Asset?,
+    val balance: Double,
+    val currency: String?,
+    val accounts: List<String>
+)
+
 /**
  * 各导出文件的**内容构建**。纯函数，不碰文件系统，单测直接调。
  */
@@ -258,7 +285,13 @@ internal object CsvContent {
         "日期", "总资产", "总负债", "净资产", "股票", "基金", "虚拟货币", "银行存款"
     )
 
-    private val DIVIDEND_HEADER = listOf("代码", "名称", "分红金额(元)", "除息日", "到账日", "是否手动添加")
+    /** 每10份派息率的导出精度：基金分红常见 4 位小数，不能按金额 2 位截断。 */
+    private const val DIVIDEND_RATE_DIGITS = 4
+
+    private val DIVIDEND_HEADER = listOf(
+        "代码", "名称", "每10份派息(元)", "当前持仓", "折算金额(原币)",
+        "币种", "折算金额(人民币)", "除息日", "到账日", "是否手动添加"
+    )
 
     private val TRANSACTION_HEADER = listOf(
         "日期", "代码", "名称", "交易类型", "数量", "价格", "手续费", "成交金额(原币)",
@@ -354,19 +387,51 @@ internal object CsvContent {
 
     // ---------------------------------------------------------------- 分红
 
-    fun dividends(dividends: List<Dividend>): String {
+    fun dividends(dividends: List<Dividend>, assets: List<Asset> = emptyList()): String {
         val sb = StringBuilder()
         sb.appendLine(csvRow(*DIVIDEND_HEADER.toTypedArray()))
         if (dividends.isEmpty()) {
             sb.appendLine("(暂无分红记录)")
             return sb.toString()
         }
+
+        val lookup = AssetLookup(assets)
+        var perTenTotal = 0.0
+        var cnyTotal = 0.0
+        var unconvertible = 0
         dividends.forEach { d ->
+            val holding = lookup.holdingFor(d.symbol)
+            val amountOriginal = holding?.let { h ->
+                if (h.currency != null && h.balance > 0.0) {
+                    perTenSharesToAmount(d.amount, h.balance)
+                } else {
+                    null
+                }
+            }
+            val amountCny = amountOriginal?.let { amount ->
+                holding?.currency?.let { currency -> ExchangeRateManager.toCny(amount, currency) }
+            }
+            perTenTotal += d.amount
+            if (amountCny != null) {
+                cnyTotal += amountCny
+            } else {
+                unconvertible++
+            }
             sb.appendLine(
                 csvRow(
                     d.symbol,
                     d.name,
-                    csvNumber(d.amount, MONEY_DIGITS),
+                    // 这是每 10 份的派息率，不是实际到账金额，列名必须说清楚
+                    csvNumber(d.amount, DIVIDEND_RATE_DIGITS),
+                    holding?.let { h ->
+                        csvNumber(
+                            h.balance,
+                            h.asset?.let { quantityPrecisionFor(it.type, it.symbol) } ?: MONEY_DIGITS
+                        )
+                    } ?: "",
+                    amountOriginal?.let { csvNumber(it, amountDigitsOf(holding?.asset)) } ?: "",
+                    holding?.currency ?: "",
+                    amountCny?.let { csvNumber(it, MONEY_DIGITS) } ?: "",
                     d.date,
                     d.payDate ?: "",
                     if (d.isManual) "是" else "否"
@@ -375,7 +440,9 @@ internal object CsvContent {
         }
         sb.appendLine()
         sb.appendLine("汇总信息")
-        sb.appendLine("分红合计(元),${csvNumber(dividends.sumOf { it.amount }, MONEY_DIGITS)}")
+        sb.appendLine("每10份派息合计(元),${csvNumber(perTenTotal, DIVIDEND_RATE_DIGITS)}")
+        sb.appendLine("折算金额合计(人民币),${csvNumber(cnyTotal, MONEY_DIGITS)}")
+        sb.appendLine("无法折算的分红记录数,$unconvertible")
         sb.appendLine("记录数,${dividends.size}")
         return sb.toString()
     }
@@ -533,7 +600,32 @@ internal object CsvContent {
             }
         }
 
+        var dividendCnyTotal = 0.0
+        var unconvertibleDividends = 0
         dividends.forEach { d ->
+            val holding = lookup.holdingFor(d.symbol)
+            val amountOriginal = holding?.let { h ->
+                if (h.currency != null && h.balance > 0.0) {
+                    perTenSharesToAmount(d.amount, h.balance)
+                } else {
+                    null
+                }
+            }
+            val amountCny = amountOriginal?.let { amount ->
+                holding?.currency?.let { currency -> ExchangeRateManager.toCny(amount, currency) }
+            }
+            if (amountCny != null) {
+                dividendCnyTotal += amountCny
+            } else {
+                unconvertibleDividends++
+            }
+            val note = buildString {
+                append("每10份派息 ${csvNumber(d.amount, DIVIDEND_RATE_DIGITS)}；")
+                append("到账日: ${d.payDate ?: "—"}")
+                if (amountCny == null) {
+                    append("；无对应持仓或币种不明，未折算")
+                }
+            }
             sb.appendLine(
                 csvRow(
                     "分红",
@@ -541,12 +633,20 @@ internal object CsvContent {
                     d.name,
                     d.symbol,
                     if (d.isManual) "手动" else "自动",
-                    "", "", "",
-                    csvNumber(d.amount, MONEY_DIGITS),
-                    "CNY",
-                    "1",
-                    csvNumber(d.amount, MONEY_DIGITS),
-                    "到账日: ${d.payDate ?: "—"}"
+                    holding?.accounts?.joinToString("/") ?: "",
+                    holding?.let { h ->
+                        csvNumber(
+                            h.balance,
+                            h.asset?.let { quantityPrecisionFor(it.type, it.symbol) } ?: MONEY_DIGITS
+                        )
+                    } ?: "",
+                    // 单价列按“每10份派息率”展示，与金额（实际折算）区分
+                    csvNumber(d.amount, DIVIDEND_RATE_DIGITS),
+                    amountOriginal?.let { csvNumber(it, amountDigitsOf(holding?.asset)) } ?: "",
+                    holding?.currency ?: "",
+                    holding?.currency?.let { csvNumber(ExchangeRateManager.getRate(it), 4) } ?: "",
+                    amountCny?.let { csvNumber(it, MONEY_DIGITS) } ?: "",
+                    note
                 )
             )
         }
@@ -561,7 +661,8 @@ internal object CsvContent {
         sb.appendLine(summaryRow("资产数量", assets.size.toDouble()))
         sb.appendLine(summaryRow("交易笔数", transactions.size.toDouble()))
         sb.appendLine(summaryRow("快照天数", snapshots.map { it.date }.distinct().size.toDouble()))
-        sb.appendLine(summaryRow("分红合计(元)", dividends.sumOf { it.amount }))
+        sb.appendLine(summaryRow("分红折算合计(人民币)", dividendCnyTotal))
+        sb.appendLine(summaryRow("无法折算的分红记录数", unconvertibleDividends.toDouble()))
         return sb.toString()
     }
 

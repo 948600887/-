@@ -444,8 +444,13 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
                 dueDate = asset.dueDate,
                 notes = asset.notes,
                 interestRate = asset.interestRate,
-                currentPrice = asset.currentPrice
+                currentPrice = asset.currentPrice,
+                // 与首页一致：手动「添加资产」是补录历史持仓，不能记成今日市价买入
+                recordTransaction = false
             )
+        } else if (asset.type == AssetType.CRYPTO && asset.symbol != null) {
+            // 与首页一致：加密货币按 (symbol, account) 去重，避免手动重复添加出现两条
+            repository.upsertCryptoAsset(asset)
         } else {
             repository.insertAsset(asset)
         }

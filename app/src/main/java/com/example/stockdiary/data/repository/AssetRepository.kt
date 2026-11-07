@@ -653,6 +653,9 @@ class AssetRepository private constructor(
                     notes = notes,
                     interestRate = interestRate,
                     currentPrice = currentPrice,
+                    // 表单里带入的 currentPrice 是实时抓到的行情/净值；有值即视为已同步一次，
+                    // 否则自动快照的新鲜度门槛会把刚添加的资产判成“从未同步”。
+                    lastSyncTime = if (currentPrice != null && currentPrice > 0.0) now else 0L,
                     lastUpdateTime = now
                 )
                 val newId = assetDao.insertAsset(newAsset)

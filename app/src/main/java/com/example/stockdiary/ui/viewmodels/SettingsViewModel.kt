@@ -11,6 +11,7 @@ import com.example.stockdiary.data.repository.AssetRepository
 import com.example.stockdiary.data.prefs.DashboardPreferences
 import com.example.stockdiary.data.prefs.DashboardPreferencesManager
 import com.example.stockdiary.data.export.DataExporter
+import com.example.stockdiary.data.price.StockDataManager
 import com.example.stockdiary.data.sync.PriceSyncPreferencesManager
 import com.example.stockdiary.data.sync.PriceSyncScheduler
 import com.example.stockdiary.data.sync.SnapshotScheduler
@@ -19,6 +20,9 @@ import com.example.stockdiary.database.AssetSnapshot
 import com.example.stockdiary.data.repository.DividendRepository
 import com.example.stockdiary.data.repository.TransactionRepository
 import com.example.stockdiary.database.Transaction
+import com.example.stockdiary.network.FundAPI
+import com.example.stockdiary.network.SinaStockAPI
+import com.example.stockdiary.network.UnifiedPriceService
 import com.example.stockdiary.utils.AppLogger
 import com.example.stockdiary.utils.DataSourceHealth
 import com.example.stockdiary.utils.DataSourceHealthChecker
@@ -228,7 +232,10 @@ class SettingsViewModel(
                         assetRepository.getAllSnapshotsSync(),
                         dividendRepository.getAllDividendsSync()
                     )
-                    ExportType.CSV_DIVIDENDS -> dataExporter.exportDividendsToCSV(dividendRepository.getAllDividendsSync())
+                    ExportType.CSV_DIVIDENDS -> dataExporter.exportDividendsToCSV(
+                        dividendRepository.getAllDividendsSync(),
+                        assetRepository.getAllAssets().first()
+                    )
                 }
                 result.fold(
                     onSuccess = { uri ->
@@ -315,6 +322,15 @@ class SettingsViewModel(
                 // externalFilesDir。不清的话「清除所有数据」之后，账目快照还躺在手机里。
                 runCatching { dataExporter.clearExportedFiles() }
                 runCatching { LogDiagnostics.clear(appContext) }
+                // 派生缓存也要清：Room/SharedPreferences 清掉不代表内存与磁盘缓存清掉。
+                // 否则用户清库后重新添加同一代码，旧行情、旧分红、旧基金净值会原样回来。
+                runCatching { StockDataManager.getInstance(appContext).clearCache() }
+                runCatching { SinaStockAPI.invalidateCache() }
+                runCatching { UnifiedPriceService.clearCache() }
+                runCatching { dividendRepository.clearCache() }
+                // FundAPI 的持久化净值表已被 assetRepository.deleteAllData() 清空，
+                // 这里再清一次内存/落盘入口，保证“清除所有数据”语义完整。
+                FundAPI.clearPersistentCache()
                 // 汇率单例还持有内存里的旧汇率与刷新时间（磁盘偏好已清），
                 // 不同步复位的话设置页会一直显示清除前的值，直到重启进程
                 ExchangeRateManager.resetToDefaultRates()
@@ -375,8 +391,10 @@ class SettingsViewModel(
         // 连点入口行 / 弹窗里重复点「刷新」时不要再起一轮：每次体检要并发跑 4~5 个 HTTP 探测，
         // 重叠执行既浪费流量，也让最终落到界面上的结果来自哪一轮变得不确定
         if (_uiState.value.isCheckingHealth) return
+        // 守卫必须在 launch 之前同步置位：写在 IO 协程里的话，快速连点两下时
+        // 第二个调用仍会看到 false，于是并发跑两轮体检、结果互相覆盖。
+        _uiState.update { state -> state.copy(isCheckingHealth = true) }
         viewModelScope.launch(Dispatchers.IO) {
-            _uiState.update { state -> state.copy(isCheckingHealth = true) }
             try {
                 val health = dataSourceHealthChecker.checkAllHealth()
                 // 结果摘要回流到列表行的 subtitle：不点开弹窗也能看到各域几个源可用
@@ -475,6 +493,10 @@ class SettingsViewModel(
                 throw e
             } catch (e: Exception) {
                 AppLogger.e("保存仪表盘偏好失败: ${e.message}", e, "SettingsVM")
+                // 开关按状态渲染，失败后会弹回旧值；必须告诉用户为什么没生效
+                _uiState.update {
+                    it.copy(errorMessage = "保存仪表盘设置失败：${e.message ?: "未知错误"}")
+                }
             }
         }
     }

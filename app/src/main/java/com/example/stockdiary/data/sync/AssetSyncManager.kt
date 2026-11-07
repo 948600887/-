@@ -13,6 +13,7 @@ import android.content.res.Configuration
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.data.price.ApiManager
+import com.example.stockdiary.data.price.PriceLineageRecorder
 import com.example.stockdiary.data.price.RoundSourceFailureScope
 import com.example.stockdiary.data.price.SourceStats
 import com.example.stockdiary.data.price.StockDataManager
@@ -466,6 +467,8 @@ object AssetSyncManager {
 
         // 轮次 ID：进程内自增。几轮同步混在同一份日志里时，靠它把散落各处的行归属到同一轮
         val roundId = syncRoundSeq.incrementAndGet()
+        // G5 血缘：开轮清掉上一轮残留，后续各取价层的 report 才会归属到本轮而非旧数据
+        PriceLineageRecorder.beginRound(roundId, syncTrigger)
 
         // 本轮「源级失败记账」上下文：显式轮次 ID + 每轮独立的「已记账源」集合。
         // 在批量预取之前开启；批量 0 命中确实记过账的源写入 reportedSources（扇出前写完，
@@ -1010,12 +1013,19 @@ object AssetSyncManager {
                             fundResult.onSuccess { price ->
                                 when (price) {
                                     is AssetPrice.Fund -> {
-                                        withContext(NonCancellable) {
-                                            priceWriter.write(
-                                                PendingPriceWrite(symbol, price.data.price, price.data.millionCopiesIncome)
-                                            )
+                                        // FundAPI 刷新失败/被节流时会回退旧净值并带 isStale：
+                                        // 不能把它当新价写回库（会刷新 lastSyncTime，旧净值伪装成刚更新），
+                                        // 交给下面统一的「缓存过期」分支按跳过记账。
+                                        if (price.data.isStale) {
+                                            lastError = com.example.stockdiary.network.StalePriceCacheException(symbol)
+                                        } else {
+                                            withContext(NonCancellable) {
+                                                priceWriter.write(
+                                                    PendingPriceWrite(symbol, price.data.price, price.data.millionCopiesIncome)
+                                                )
+                                            }
+                                            isSuccess = true
                                         }
-                                        isSuccess = true
                                     }
                                     else -> { lastError = IllegalStateException("返回类型不匹配") }
                                 }

@@ -321,24 +321,30 @@ object SnapshotAlignment {
 
             for (row in rows) {
                 when (row.status) {
-                    ItemStatus.NEW -> toInsert.add(
-                        Asset(
-                            name = row.name,
-                            type = policy.assetTypeOf(row.symbol),
-                            symbol = row.symbol,
-                            account = account.ifBlank { policy.defaultAccount },
-                            balance = row.quantity,
-                            // 参考单价留 0：它是「无行情时的市值兜底价」，
-                            // 给个假数字会让市值凭空多出来。有净值就走 currentPrice，没净值等行情同步
-                            purchasePrice = 0.0,
-                            currentPrice = row.nav?.takeIf { it > 0.0 },
-                            // 结算币种必须按导入数据写：默认 CNY 会让一只美元结算的 QDII
-                            // 被按人民币数值直接汇总。null（多来源币种不一致）时不猜，留默认
-                            currency = row.currency ?: policy.defaultCurrency,
-                            // 是否定期/锁仓理财（币安 LD 壳专用，基金E账户恒为 false）
-                            isEarnLocked = row.isEarnLocked
+                    ItemStatus.NEW -> {
+                        val nav = row.nav?.takeIf { it > 0.0 }
+                        toInsert.add(
+                            Asset(
+                                name = row.name,
+                                type = policy.assetTypeOf(row.symbol),
+                                symbol = row.symbol,
+                                account = account.ifBlank { policy.defaultAccount },
+                                balance = row.quantity,
+                                // 参考单价留 0：它是「无行情时的市值兜底价」，
+                                // 给个假数字会让市值凭空多出来。有净值就走 currentPrice，没净值等行情同步
+                                purchasePrice = 0.0,
+                                currentPrice = nav,
+                                // 导入文件里带的净值/行情价是权威数据：有值就把 lastSyncTime 记成
+                                // 导入时刻，否则自动快照的新鲜度门槛会把刚导入的基金判成“从未同步”。
+                                lastSyncTime = if (nav != null) System.currentTimeMillis() else 0L,
+                                // 结算币种必须按导入数据写：默认 CNY 会让一只美元结算的 QDII
+                                // 被按人民币数值直接汇总。null（多来源币种不一致）时不猜，留默认
+                                currency = row.currency ?: policy.defaultCurrency,
+                                // 是否定期/锁仓理财（币安 LD 壳专用，基金E账户恒为 false）
+                                isEarnLocked = row.isEarnLocked
+                            )
                         )
-                    )
+                    }
 
                     ItemStatus.UPDATE -> {
                         val existing = row.existing ?: continue

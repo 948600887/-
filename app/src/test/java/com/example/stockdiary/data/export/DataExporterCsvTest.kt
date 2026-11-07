@@ -184,14 +184,19 @@ class DataExporterCsvTest {
     }
 
     @Test
-    fun `分红导出带合计`() {
+    fun `分红导出区分每10份派息率与实际折算金额`() {
         val text = CsvContent.dividends(
             listOf(
                 Dividend(symbol = "600900", name = "长江电力", amount = 10.0, date = "2026-06-01"),
                 Dividend(symbol = "600900", name = "长江电力", amount = 2.5, date = "2026-07-01")
-            )
+            ),
+            // 持有 1000 股：10 元/10股 -> 1000 元，2.5 元/10股 -> 250 元
+            listOf(stock)
         )
-        assertTrue(text.contains("分红合计(元),12.50"))
+        assertTrue(text.contains("每10份派息(元)"))
+        assertTrue(text.contains("每10份派息合计(元),12.5000"))
+        assertTrue(text.contains("折算金额合计(人民币),1250.00"))
+        assertTrue(text.contains("无法折算的分红记录数,0"))
         assertTrue(text.contains("记录数,2"))
     }
 

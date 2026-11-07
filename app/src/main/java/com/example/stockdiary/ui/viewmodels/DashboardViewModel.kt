@@ -355,11 +355,28 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
         viewModelScope.launch(refreshExceptionHandler) {
             _uiState.update { it.copy(isRefreshing = true, errorMessage = null) }
 
+            // 首帧 Room 尚未发射、或确实没有任何资产时禁止继续：
+            // - 空 priceAssets 会让 syncAllAssets 返回 SyncResult(0,0)；
+            // - SyncSnapshotPolicy 把 0/0 判成可写快照，会用库里的旧价覆盖当日快照；
+            // - 紧接着的 incomeUseCase.load(空) 会把 annualDividendCache 写成 0。
+            // 持仓页已有同款守卫（PortfolioViewModel.refresh），首页曾经漏掉。
+            val currentAssets = uiState.value.assets
+            if (currentAssets.isEmpty()) {
+                val frameReady = uiState.value.assetsFrameReady || _assetsFrameReady.value
+                val message = if (frameReady) {
+                    "暂无资产可同步"
+                } else {
+                    "资产数据加载中，请稍后再试"
+                }
+                _uiState.update { it.copy(isRefreshing = false, errorMessage = message) }
+                return@launch
+            }
+
             // 两个范围，别混（详见方法 KDoc）：
             // - priceAssets 用于同步，只含有行情的类型；
             // - assetsOnly 用于收入计算，必须含银行存款，否则漏掉利息收入。
-            val priceAssets = uiState.value.assets.filter { it.type in AssetType.getPriceSyncedTypes() }
-            val assetsOnly = uiState.value.assets.filter { !it.type.isLiability }
+            val priceAssets = currentAssets.filter { it.type in AssetType.getPriceSyncedTypes() }
+            val assetsOnly = currentAssets.filter { !it.type.isLiability }
 
             // 两个阶段分开收尾，理由见下面两处 finally 的注释
             var syncResult: SyncResult? = null

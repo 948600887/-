@@ -138,13 +138,13 @@ class SettingsViewModelTest {
     @Test
     fun `导出分红明细走 exportDividendsToCSV 分支`() = runBlocking {
         val fakeUri = mockk<android.net.Uri>(relaxed = true)
-        every { dataExporter.exportDividendsToCSV(any()) } returns Result.success(fakeUri)
+        every { dataExporter.exportDividendsToCSV(any(), any()) } returns Result.success(fakeUri)
 
         vm.exportData(mockk(relaxed = true), SettingsViewModel.ExportType.CSV_DIVIDENDS)
         waitUntil { vm.uiState.value.exportResult != null }
 
         coVerify { dividendRepository.getAllDividendsSync() }
-        verify { dataExporter.exportDividendsToCSV(any()) }
+        verify { dataExporter.exportDividendsToCSV(any(), any()) }
         assertTrue(vm.uiState.value.exportResult?.isSuccess == true)
     }
 

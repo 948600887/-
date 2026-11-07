@@ -523,13 +523,4 @@ open class ImportBrokerageViewModel(
         updateState { state -> state.copy(error = null) }
     }
 
-    class Factory(private val container: AppContainer) : ViewModelProvider.Factory {
-        @Suppress("UNCHECKED_CAST")
-        override fun <T : ViewModel> create(modelClass: Class<T>): T {
-            return ImportBrokerageViewModel(
-                container.brokerageImportService,
-                container.ocrStatementService
-            ) as T
-        }
-    }
 }

@@ -8,6 +8,7 @@ import com.example.stockdiary.data.repository.AssetRepository
 import android.content.Context
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
+import com.example.stockdiary.data.dividend.DividendDateValidator
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.database.StockDatabase
@@ -259,11 +260,24 @@ class PriceSyncWorker(
             val db = StockDatabase.getInstance(context)
             // 到账日优先：除息日只是「有没有资格」的界点，钱真正到账是 payDate。
             // 数据源没给 payDate 时才退回除息日。
+            // 与日历/进度条同一套日期校验：脏的 payDate/date 直接不参与通知，
+            // 不要用原始字符串比较（可能带时间或日历上不存在的日期）。
             val todayDividends = db.dividendDao().getBySymbols(symbols)
-                .filter { (it.payDate ?: it.date) == today }
+                .filter { d ->
+                    (DividendDateValidator.normalizeOrNull(d.payDate)
+                        ?: DividendDateValidator.normalizeOrNull(d.date)) == today
+                }
             if (todayDividends.isEmpty()) return
 
-            val assetMap = stockFundAssets.associateBy { it.symbol }
+            // 多账户持有同一代码时，通知里的“今日到账总额”必须用合计持仓；
+            // 原先 associateBy 只留最后一个账户，金额会被低估。
+            val assetMap = stockFundAssets.groupBy { it.symbol }.mapValues { (_, group) ->
+                if (group.size == 1) {
+                    group.first()
+                } else {
+                    group.first().copy(balance = group.sumOf { it.balance })
+                }
+            }
             val prefs = context.getSharedPreferences("dividend_notifications", Context.MODE_PRIVATE)
             val editor = prefs.edit()
 

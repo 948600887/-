@@ -132,6 +132,9 @@ object FundAPI {
         legacyNavSource = { code -> fetchFundInfoLegacy(code) }
         lightweightFailures.set(0)
         lightweightSourceDisabled = false
+        // 内存缓存也是进程级单例：测试之间必须清掉，否则上一个用例写入的
+        // 基金净值会让下一个用例命中缓存、绕过它刚注入的假源。
+        cache.clear()
     }
 
     /**
@@ -160,7 +163,13 @@ object FundAPI {
         val changePercent: Double?,
         val date: String?,
         val millionCopiesIncome: Double? = null,
-        val isFromCache: Boolean = false
+        val isFromCache: Boolean = false,
+        /**
+         * true = 本次刷新失败/被节流，返回的是**旧净值**而不是刚抓到的值。
+         * 同步编排器据此走「缓存过期」跳过路径，不写库、不刷新 lastSyncTime。
+         * 普通缓存命中（内存/持久化）不算 stale：它们本来就是当日的有效净值。
+         */
+        val isStale: Boolean = false
     )
 
     private data class CacheEntry(
@@ -261,7 +270,7 @@ object FundAPI {
                     nowMillis = now
                 )
             ) {
-                val throttled = persisted.toFundInfo()
+                val throttled = persisted.toFundInfo().copy(isStale = true)
                 cache[fundCode] = CacheEntry(throttled, System.currentTimeMillis())
                 AppLogger.d(
                     "下载节流生效，先给库内最近一次净值: $fundCode navDate=${persisted.navDate}",
@@ -285,7 +294,11 @@ object FundAPI {
                 val stale = cachedEntry?.data ?: persisted?.toFundInfo()
                 if (stale != null) {
                     AppLogger.w("基金数据刷新失败，回退旧缓存: $fundCode", TAG)
-                    return@withContext Result.success(stale.copy(isFromCache = true))
+                    // 关键：标记 isStale，让同步编排器按「缓存过期」跳过，
+                    // 不把昨天的净值写回库并刷新 lastSyncTime（否则界面显示“刚刚更新”）。
+                    return@withContext Result.success(
+                        stale.copy(isFromCache = true, isStale = true)
+                    )
                 }
                 Result.failure(Exception("基金数据获取失败"))
             }

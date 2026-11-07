@@ -92,6 +92,27 @@ class DividendIncomeCacheVerifyTest {
      * 于是冷启动同一份数据被算 2~3 遍。这里坐实「按口径各存一片、各自读回自己的」。
      */
     @Test
+    fun `含逗号的分片键也能被正确淘汰`() {
+        // scopeKey 是逗号连接的 symbol 集合；分片索引若也用逗号分隔，
+        // 淘汰会删不到真实键、缓存无限堆积。这里连续写 7 片，必须只留 6 片。
+        val prefs = FakePrefs()
+        val cache = cacheWith(prefs)
+        for (i in 1..7) {
+            cache.save(
+                result(total = i.toDouble(), perSymbol = emptyMap()),
+                "hash-$i",
+                "2026-10-20",
+                "sh60000$i,sz00000$i"
+            )
+        }
+        assertEquals(6, cacheKeys(prefs).size)
+        assertTrue(
+            "最旧的分片应被真正删除",
+            !prefs.values.containsKey("income_cache_v1_sh600001,sz000001")
+        )
+    }
+
+    @Test
     fun `不同口径各存一片_互不覆盖`() {
         val prefs = FakePrefs()
         val cache = cacheWith(prefs)

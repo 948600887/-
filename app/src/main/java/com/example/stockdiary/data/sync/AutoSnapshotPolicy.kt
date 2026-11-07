@@ -1,6 +1,7 @@
 package com.example.stockdiary.data.sync
 
 import com.example.stockdiary.database.Asset
+import com.example.stockdiary.database.AssetType
 
 /**
  * 自动快照的准入判定与快照表去重计划。纯函数、无 IO 无时钟（[now] 由调用方注入）。
@@ -20,12 +21,14 @@ const val AUTO_SNAPSHOT_STALE_THRESHOLD_MS: Long = 24 * 60 * 60_000L
 /**
  * 这次自动快照该不该建。
  *
- * 规则：**过半（严格多于一半）非负债资产的 `lastSyncTime` 落在 [staleThresholdMs] 内**。
- * - 没有任何资产 → false（空组合建出来的净资产 0 快照会腐蚀统计，见 dropLeadingEmptySnapshots 的 KDoc）；
- * - 从没同步过（lastSyncTime 全 0）→ false，宁可没有自动快照，也不要旧价假数据；
- * - 负债不参与判定——它们没有行情价，lastSyncTime 恒 0，算进去会把分子稀释。
+ * 规则：**过半（严格多于一半）有行情资产的 `lastSyncTime` 落在 [staleThresholdMs] 内**。
+ * - 没有任何非负债资产 → false（空组合建出来的净资产 0 快照会腐蚀统计，见 dropLeadingEmptySnapshots 的 KDoc）；
+ * - **只有银行存款等无行情资产 → true**：它们的金额是静态的，不存在“旧价”，
+ *   若按 `lastSyncTime` 判会被永远判成陈旧，导致存款较多的组合长期没有自动快照；
+ * - 有行情资产从没同步过（lastSyncTime 全 0）→ false，宁可没有自动快照，也不要旧价假数据；
+ * - 负债不参与判定——它们没有行情价，lastSyncTime 恒 0，算进去会把分母稀释。
  *
- * 这不是「价格必须最新」的硬门槛，而是「多数标的价格是近期刷过的」的软门槛：
+ * 这不是「价格必须最新」的硬门槛，而是「多数有行情标的价格是近期刷过的」的软门槛：
  * 用户早上手动全量刷新过，晚上自动快照就能存；一整天没刷，就跳过。
  */
 fun shouldCreateAutoSnapshot(
@@ -35,6 +38,10 @@ fun shouldCreateAutoSnapshot(
 ): Boolean {
     val holdings = assets.filter { !it.type.isLiability }
     if (holdings.isEmpty()) return false
-    val freshCount = holdings.count { it.lastSyncTime > 0 && now - it.lastSyncTime <= staleThresholdMs }
-    return freshCount * 2 > holdings.size
+    // 只统计真正有行情的类型。存款/其它静态资产没有 lastSyncTime，
+    // 把它们放进分母会让“达标线”永远够不到（典型：1 笔存款 + 1 只股票，股票刷新了仍判 false）。
+    val priceSynced = holdings.filter { it.type in AssetType.getPriceSyncedTypes() }
+    if (priceSynced.isEmpty()) return true
+    val freshCount = priceSynced.count { it.lastSyncTime > 0 && now - it.lastSyncTime <= staleThresholdMs }
+    return freshCount * 2 > priceSynced.size
 }

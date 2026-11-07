@@ -36,7 +36,11 @@ data class FundData(
     val netWorthDate: String? = null,
     val fundType: String? = null,
     val estimatedValue: Double? = null,
-    val millionCopiesIncome: Double? = null
+    val millionCopiesIncome: Double? = null,
+    /** true = 本次刷新失败/被节流，返回的是旧净值，调用方不得把它当新价落库 */
+    val isStale: Boolean = false,
+    /** true = 来自 FundAPI 的内存/持久化缓存（用于展示，不代表本次重新抓取） */
+    val isFromCache: Boolean = false
 ) : PriceData {
     
     val isUp: Boolean get() = (changePercent ?: 0.0) > 0

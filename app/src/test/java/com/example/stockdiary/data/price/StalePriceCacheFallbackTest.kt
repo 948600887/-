@@ -237,6 +237,30 @@ class StalePriceCacheFallbackTest {
     }
 
     @Test
+    fun `场外基金旧净值回退按缓存过期跳过_不写库`() = runBlocking {
+        prepareSyncStubs()
+        val staleFund = AssetPrice.Fund(fundPrice().data.copy(isStale = true, isFromCache = true))
+        coEvery { UnifiedPriceService.getPrice(any(), AssetType.FUND, any()) } returns
+            kotlin.Result.success(staleFund)
+        val asset = fundAsset()
+
+        val result = AssetSyncManager.syncAllAssets(
+            context = context,
+            repository = repository,
+            assets = listOf(asset),
+            onProgress = {},
+            forceRefresh = true
+        )
+
+        assertEquals(0, result.successCount)
+        assertEquals(0, result.failedCount)
+        assertEquals("基金旧净值不能伪装成刚更新", 1, result.skippedByReason["缓存过期"])
+        coVerify(exactly = 0) { repository.updatePricesInTransaction(any()) }
+        coVerify(exactly = 0) { repository.updatePriceBySymbol(any(), any(), any()) }
+        assertEquals(1_700_000_000_000L, asset.lastSyncTime)
+    }
+
+    @Test
     fun `skippedHint如实区分过期缓存_不会被说成无需更新`() {
         val result = com.example.stockdiary.data.sync.SyncResult(
             successCount = 0,

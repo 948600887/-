@@ -333,6 +333,28 @@ class FundNavParserTest {
         assertEquals(2, FundAPI.lightweightFailureCount())
     }
 
+    @Test
+    fun `刷新失败回退旧缓存时标记 isStale`() = runBlocking {
+        val code = "STALEFUND"
+        FundAPI.lightweightNavSource = {
+            FundAPI.FundInfo(
+                name = "旧净值基金", code = code, price = 1.0, netWorth = 1.0,
+                changePercent = 0.0, date = "2026-01-01"
+            )
+        }
+        FundAPI.legacyNavSource = { null }
+        val first = FundAPI.getFundInfoWithCache(code, forceRefresh = true).getOrNull()
+        assertNotNull(first)
+
+        // 两个源都拿不到新数据：应当回退内存旧值，但必须带 isStale，
+        // 让 AssetSyncManager 走「缓存过期」跳过、不刷新 lastSyncTime。
+        FundAPI.lightweightNavSource = { null }
+        val second = FundAPI.getFundInfoWithCache(code, forceRefresh = true).getOrNull()
+        assertNotNull(second)
+        assertTrue(second!!.isStale)
+        assertTrue(second.isFromCache)
+    }
+
     // ==================== 辅助 ====================
 
     /** 只替换 DWJZ 的报文，用来测各种「净值字段不正常」的情况。 */

@@ -37,9 +37,11 @@ object SourceRegistry {
     private fun defaultPlaceholderSourceId(domain: SourceDomain): String = when (domain) {
         SourceDomain.STOCK_A -> SourceIds.SINA
         SourceDomain.FUND_OTC -> SourceIds.EASTMONEY_FUND
+        // 场内基金当前实际走股票行情门面（新浪/腾讯），占位仍标新浪；
+        // REIT 的分红/收益分配实际只在天天基金，不能沿用股票源。
         SourceDomain.FUND_EXCHANGE -> SourceIds.SINA
         SourceDomain.CRYPTO -> SourceIds.BINANCE
-        SourceDomain.REIT -> SourceIds.SINA
+        SourceDomain.REIT -> SourceIds.EASTMONEY_FUND
         SourceDomain.FX -> "fx"
         SourceDomain.DIVIDEND -> "dividend"
     }

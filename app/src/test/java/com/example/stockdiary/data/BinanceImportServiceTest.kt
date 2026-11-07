@@ -797,6 +797,22 @@ class BinanceImportServiceTest {
     }
 
     @Test
+    fun 现货余额为空时仍导入理财持仓() {
+        // /account 的 balances 为空、Simple Earn 只有定期/锁仓时，旧实现直接
+        // return balances，整块真实资产被静默丢掉。合并必须把 earn 独有资产补进来。
+        val merged = mergeEarnIntoBalances(
+            balances = emptyList(),
+            earn = listOf(
+                earn("USDC", 43.56),
+                earn("USDC", 10.0, locked = true)
+            )
+        )
+        assertEquals(1, merged.size)
+        assertEquals(53.56, merged.single().total, 1e-9)
+        assertTrue("有定期持仓时应带锁仓标记", merged.single().isEarnLocked)
+    }
+
+    @Test
     fun 借币负债不再被现货抵消_净值仍然正确() = runBlocking {
         // 用户实测：官方 USDT 142.0590224，其中 17.4775654 是借来的。
         // 旧实现落成 124.58（把欠币抵消掉了，用户核对时对不上官方）。现在两者分列：

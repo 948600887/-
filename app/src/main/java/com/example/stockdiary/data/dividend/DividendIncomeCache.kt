@@ -153,10 +153,16 @@ class DividendIncomeCache(context: Context) {
      */
     private fun touchScope(scopeKey: String) {
         runCatching {
-            val scopes = (prefs.getString(KEY_SCOPES, null) ?: "")
-                .split(",")
-                .filter { it.isNotBlank() }
-                .toMutableList()
+            val raw = prefs.getString(KEY_SCOPES, null) ?: ""
+            // 旧版本用逗号存索引，JSON 解析失败时丢弃旧索引；不影响本次写入的分片。
+            val scopes = runCatching {
+                val array = org.json.JSONArray(raw)
+                mutableListOf<String>().also { list ->
+                    for (i in 0 until array.length()) {
+                        array.optString(i).takeIf { it.isNotBlank() }?.let(list::add)
+                    }
+                }
+            }.getOrDefault(mutableListOf())
             scopes.remove(scopeKey)
             scopes.add(0, scopeKey)
 
@@ -165,7 +171,8 @@ class DividendIncomeCache(context: Context) {
                 val evict = scopes.removeAt(scopes.size - 1)
                 editor.remove(cacheKey(evict))
             }
-            editor.putString(KEY_SCOPES, scopes.joinToString(",")).apply()
+            val index = org.json.JSONArray().apply { scopes.forEach { put(it) } }
+            editor.putString(KEY_SCOPES, index.toString()).apply()
         }.onFailure { e ->
             // 淘汰失败不影响缓存本身：最坏结果是分片多留几份，下次继续尝试
             AppLogger.w("更新预计收入缓存分片索引失败: ${e.message}", "DividendIncomeCache")

@@ -136,6 +136,40 @@ class AutoSnapshotPolicyTest {
         assertTrue(shouldCreateAutoSnapshot(assets, now))
     }
 
+    @Test
+    fun `只有存款也应建自动快照`() {
+        // 存款金额是静态的，没有 lastSyncTime 也不存在“旧价”；
+        // 按旧口径会把它算成陈旧，导致纯存款组合永远不建快照。
+        val assets = listOf(
+            asset(AssetType.BANK_DEPOSIT, lastSyncTime = 0L),
+            asset(AssetType.BANK_DEPOSIT, lastSyncTime = 0L)
+        )
+        assertTrue(shouldCreateAutoSnapshot(assets, now))
+    }
+
+    @Test
+    fun `存款不稀释股票新鲜度判定`() {
+        // 1 笔存款 + 1 只新鲜股票：旧口径 1*2 > 2 为 false；新口径只看股票，应建。
+        val assets = listOf(
+            asset(AssetType.BANK_DEPOSIT, lastSyncTime = 0L),
+            asset(AssetType.STOCK, lastSyncTime = now)
+        )
+        assertTrue(shouldCreateAutoSnapshot(assets, now))
+    }
+
+    @Test
+    fun `存款较多但股票全是陈旧价时仍不建`() {
+        // 存款不参与门槛，但也不能把“有旧价的股票”洗白。
+        val assets = listOf(
+            asset(AssetType.BANK_DEPOSIT, lastSyncTime = 0L),
+            asset(AssetType.BANK_DEPOSIT, lastSyncTime = 0L),
+            asset(AssetType.BANK_DEPOSIT, lastSyncTime = 0L),
+            asset(AssetType.STOCK, lastSyncTime = now - 25 * 60 * 60_000),
+            asset(AssetType.FUND, lastSyncTime = 0L)
+        )
+        assertFalse(shouldCreateAutoSnapshot(assets, now))
+    }
+
     // ---------- planSnapshotDedup ----------
 
     private fun snapshot(id: Long, date: String, timestamp: Long, net: Double = 100.0) =

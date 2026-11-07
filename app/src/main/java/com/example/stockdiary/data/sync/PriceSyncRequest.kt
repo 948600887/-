@@ -3,11 +3,11 @@ package com.example.stockdiary.data.sync
 import com.example.stockdiary.database.Asset
 
 /**
- * 统一同步入口的「请求契约」（G1 仅建数据结构，[PriceSyncCoordinator] 在 G4 接入）。
+ * 统一同步入口的「请求契约」。
  *
- * [PriceSyncRequest] 此刻不被任何调用方使用：它只是数据结构 + 单测存在，
- * 后续把分散的 `AssetSyncManager.syncAllAssets` 调用点收敛到统一入口时再消费。
- * Kotlin 不会因「公共类未使用」报错，故此处安全预留，不接入任何同步流。
+ * G4/G5 起由 [PriceSyncCoordinator] 消费：7 个 UI/Worker 调用点统一构造本对象，
+ * 由 [PriceSyncRequest.scenario] 推导 forceRefresh 与日志文案，再委托给
+ * [AssetSyncManager.syncAllAssets]。不要再在调用方直接传 9 个散参数。
  */
 enum class SyncScenario(val triggerLabel: String) {
     /** 后台 WorkManager 周期同步 */

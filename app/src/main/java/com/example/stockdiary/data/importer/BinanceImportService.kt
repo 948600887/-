@@ -677,7 +677,10 @@ internal fun mergeEarnIntoBalances(
     balances: List<BinanceBalance>,
     earn: List<BinanceEarnPosition>
 ): List<BinanceBalance> {
-    if (balances.isEmpty()) return balances
+    // 不能因为现货余额为空就直接返回：账户只有 Simple Earn 定期/锁仓持仓时，
+    // /account 的 balances 可能为空，但 earn 接口仍有真实资产；直接返回会把整块资产丢掉。
+    // 下面 accountKeys 为空的分支会把只存在于 earn 的资产补进 merged。
+    if (balances.isEmpty() && earn.isEmpty()) return balances
 
     // 把理财持仓拆成活期(flex)与定期/锁仓(lock)两桶，分别处理。
     // 账户里的活期已以 LD 壳形式出现，与 simple-earn 接口的活期是同一笔的两个视图；

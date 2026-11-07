@@ -20,6 +20,8 @@ import java.time.ZoneId
 import java.time.temporal.ChronoUnit
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CancellationException
 
 /**
@@ -50,6 +52,9 @@ object FundAPI {
 
     /** 轻量源连续失败多少次后**整源熔断**（本进程内不再尝试）。 */
     private const val LIGHTWEIGHT_FAILURE_THRESHOLD = 3
+
+    /** 主机级短退避时长：与分红链路同口径（60s），覆盖限流窗口与一次网络切换恢复。 */
+    private const val HOST_BACKOFF_MS = 60_000L
 
     /** 源统计里的稳定名字：三条链路共用同一个 SourceStats 模型 */
     private const val SOURCE_LIGHTWEIGHT = "基金-轻量源"
@@ -120,6 +125,19 @@ object FundAPI {
     private val lightweightStats = SourceStatsCounter(SOURCE_LIGHTWEIGHT, host = HOST_LIGHTWEIGHT)
     private val legacyStats = SourceStatsCounter(SOURCE_LEGACY, host = HOST_LEGACY)
 
+    /**
+     * 主机级 60s 短退避（按主机隔离：轻量源与 legacy 互不影响）。
+     *
+     * 只在两种**确定性**故障后进入冷却：514/429 限流、DNS 主机不可达。
+     * 冷却期内的请求直接跳过、不发网络请求；原因写进本轮源统计的 degradedReason，
+     * 不额外增加失败计数（跳过的请求并没有真的失败）。
+     *
+     * 与分红链路的 rateLimitedUntil / hostUnreachableUntil 同口径（60s），
+     * 但这里是**净值链路**自己的窗口，两者互不共享状态。
+     */
+    internal val lightweightHostCooldown = HostCooldown(HOST_BACKOFF_MS)
+    internal val legacyHostCooldown = HostCooldown(HOST_BACKOFF_MS)
+
     /** 每轮同步开始时清零，与股票链路同节奏 */
     internal fun resetSourceStats() {
         lightweightStats.reset()
@@ -172,6 +190,9 @@ object FundAPI {
         legacyNavSource = { code -> fetchFundInfoLegacy(code) }
         lightweightFailures.set(0)
         lightweightSourceDisabled = false
+        // 主机退避窗口也是进程级单例，测试之间必须清零
+        lightweightHostCooldown.reset()
+        legacyHostCooldown.reset()
         // 统计计数器同样是进程级单例，测试之间必须清零
         resetSourceStats()
         // 内存缓存也是进程级单例：测试之间必须清掉，否则上一个用例写入的
@@ -486,31 +507,51 @@ object FundAPI {
      * （每条回退都打 [AppLogger.w]，带上基金码与原因，便于线上定位）。
      */
     internal suspend fun fetchFundInfo(fundCode: String): FundInfo? {
-        if (!lightweightSourceDisabled) {
-            // 只测耗时，不改回退/熔断：源函数内部已按 HTTP 状态/解析结果分类计数
-            val lightweightStartedAt = System.currentTimeMillis()
-            val lightweight = try {
-                lightweightNavSource(fundCode)
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                lightweightStats.recordSourceFailure(
-                    "网络异常：${e.message?.take(40) ?: e.javaClass.simpleName}"
-                )
-                AppLogger.w("轻量净值源异常，回退旧数据源: $fundCode ${e.message}", TAG)
-                null
-            } finally {
-                lightweightStats.addDuration(System.currentTimeMillis() - lightweightStartedAt)
+        val now = System.currentTimeMillis()
+        when {
+            lightweightSourceDisabled -> {
+                // 没有真实请求，只记录「本轮为什么没走轻量源」；失败计数保持 0
+                lightweightStats.markDegraded("连续失败已熔断，本轮直接走 legacy")
             }
-            if (lightweight != null) {
-                lightweightStats.recordSuccess()
-                lightweightFailures.set(0)
-                return lightweight
+            lightweightHostCooldown.isCooling(now) -> {
+                // 60s 主机退避：冷却期内直接跳过，不发请求，也不算一次失败
+                lightweightStats.markDegraded(lightweightHostCooldown.degradedReason())
+                AppLogger.w("轻量净值源退避中，跳过本次请求: $fundCode", TAG)
             }
-            noteLightweightFailure(fundCode)
-        } else {
-            // 没有真实请求，只记录「本轮为什么没走轻量源」；失败计数保持 0
-            lightweightStats.markDegraded("连续失败已熔断，本轮直接走 legacy")
+            else -> {
+                // 只测耗时，不改回退/熔断：源函数内部已按 HTTP 状态/解析结果分类计数
+                val lightweightStartedAt = System.currentTimeMillis()
+                val lightweight = try {
+                    lightweightNavSource(fundCode)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    if (isHostUnreachable(e)) {
+                        lightweightHostCooldown.start("主机不可达（DNS 解析失败）")
+                    }
+                    lightweightStats.recordSourceFailure(
+                        "网络异常：${e.message?.take(40) ?: e.javaClass.simpleName}"
+                    )
+                    AppLogger.w("轻量净值源异常，回退旧数据源: $fundCode ${e.message}", TAG)
+                    null
+                } finally {
+                    lightweightStats.addDuration(System.currentTimeMillis() - lightweightStartedAt)
+                }
+                if (lightweight != null) {
+                    lightweightStats.recordSuccess()
+                    lightweightFailures.set(0)
+                    return lightweight
+                }
+                noteLightweightFailure(fundCode)
+            }
+        }
+
+        val legacyNow = System.currentTimeMillis()
+        if (legacyHostCooldown.isCooling(legacyNow)) {
+            // legacy 主机与轻量源主机互不影响；这里跳过后由上层按「取价失败」处理
+            legacyStats.markDegraded(legacyHostCooldown.degradedReason())
+            AppLogger.w("legacy 净值源退避中，跳过本次请求: $fundCode", TAG)
+            return null
         }
 
         val legacyStartedAt = System.currentTimeMillis()
@@ -519,6 +560,9 @@ object FundAPI {
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
+            if (isHostUnreachable(e)) {
+                legacyHostCooldown.start("主机不可达（DNS 解析失败）")
+            }
             legacyStats.recordSourceFailure(
                 "网络异常：${e.message?.take(40) ?: e.javaClass.simpleName}"
             )
@@ -529,6 +573,16 @@ object FundAPI {
         }
         if (legacy != null) legacyStats.recordSuccess()
         return legacy
+    }
+
+    /**
+     * 514/429 命中后让该主机进入 60s 冷却（只做冷却，不改变失败计数——计数由调用点负责）。
+     * 其他状态码（5xx 等）不进冷却：那些是服务端瞬时故障，立即重试或回退更划算。
+     */
+    internal fun noteRateLimit(cooldown: HostCooldown, code: Int) {
+        if (code == 514 || code == 429) {
+            cooldown.start(httpFailureReason(code))
+        }
     }
 
     /** 514/429 是限流口径，原因里标出来，便于和普通 5xx 区分（internal 供单测钉死口径） */
@@ -581,6 +635,8 @@ object FundAPI {
                 response.use {
                     if (!it.isSuccessful) {
                         lightweightStats.recordSourceFailure(httpFailureReason(it.code))
+                        // 514/429 对该主机做 60s 短退避，冷却期内直接跳过请求
+                        noteRateLimit(lightweightHostCooldown, it.code)
                         AppLogger.w(
                             "轻量净值源 HTTP ${it.code}，回退旧数据源: $fundCode",
                             TAG
@@ -603,6 +659,9 @@ object FundAPI {
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
+                if (isHostUnreachable(e)) {
+                    lightweightHostCooldown.start("主机不可达（DNS 解析失败）")
+                }
                 lightweightStats.recordSourceFailure(
                     "网络异常：${e.message?.take(40) ?: e.javaClass.simpleName}"
                 )
@@ -633,6 +692,8 @@ object FundAPI {
                 response.use {
                     if (!it.isSuccessful) {
                         legacyStats.recordSourceFailure(httpFailureReason(it.code))
+                        // legacy 主机独立退避：不影响轻量源主机
+                        noteRateLimit(legacyHostCooldown, it.code)
                         AppLogger.e("基金请求失败: HTTP ${it.code}", tag = TAG)
                         return@withContext null
                     }
@@ -679,6 +740,9 @@ object FundAPI {
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
+                if (isHostUnreachable(e)) {
+                    legacyHostCooldown.start("主机不可达（DNS 解析失败）")
+                }
                 legacyStats.recordSourceFailure(
                     "网络异常：${e.message?.take(40) ?: e.javaClass.simpleName}"
                 )
@@ -786,6 +850,41 @@ internal fun shouldReusePersistentNav(
 
     // T4：工作日、已过公布时点、且不是今天的净值 → 可能有新净值，该下就下
     return false
+}
+
+/**
+ * 主机级 60s 短退避窗口（线程安全、按实例隔离）。
+ *
+ * 生产上两个实例各管一个主机：[FundAPI.lightweightHostCooldown] 对应轻量源主机、
+ * [FundAPI.legacyHostCooldown] 对应 legacy 主机——一个被限流/不可达不会影响另一个。
+ *
+ * 只做「冷却期内跳过」这一件事：不缓存、不改变回退顺序、不改变净值校验。
+ * 窗口自然过期后自动恢复，不需要成功探测；`reason` 只用于统计展示，
+ * 不参与是否冷却的判断。
+ */
+internal class HostCooldown(private val windowMs: Long) {
+    private val until = AtomicLong(0L)
+    private val reason = AtomicReference<String?>(null)
+
+    /** 当前是否仍在冷却窗口内（`now` 显式传入，便于单测钉住到期边界）。 */
+    fun isCooling(now: Long = System.currentTimeMillis()): Boolean = now < until.get()
+
+    /** 进入冷却：重置窗口起点；并发下以后到的原因为准（只用于展示）。 */
+    fun start(reason: String, now: Long = System.currentTimeMillis()) {
+        this.reason.set(reason)
+        until.set(now + windowMs)
+    }
+
+    /** 冷却期跳过请求时写进源统计的降级原因；没有记录原因时用通用口径兜底。 */
+    fun degradedReason(): String {
+        val why = reason.get()?.takeIf { it.isNotBlank() } ?: "主机退避中"
+        return "$why（${windowMs / 1000}s 退避中），本轮跳过"
+    }
+
+    fun reset() {
+        until.set(0L)
+        reason.set(null)
+    }
 }
 
 /**

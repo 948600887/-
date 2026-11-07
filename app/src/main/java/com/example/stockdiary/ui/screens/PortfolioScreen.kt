@@ -47,37 +47,70 @@ import kotlinx.coroutines.launch
 private const val LIABILITY_GROUP_KEY = "负债"
 
 /**
- * 持仓的一级分组：场外 / 场内 / 加密货币 / 其他。
+ * 持仓的一级分组：场外 / 场内 / 加密货币 / 银行存款 / 其他。
  *
  * 一级分组优先按**资产类型与 symbol 形态**判定，不是账户名——账户名是用户自己填的，
  * 两次导入填同一个名字就会混在一起，那是不可靠的。
  *
  * - `AssetType.CRYPTO`：加密货币（币安导入的 BTC/ETH…，代码形如 BTCUSDT）
+ * - `AssetType.BANK_DEPOSIT`：银行存款（没有代码，但**不能**因此落进「其他」）
  * - `fund_` 前缀：基金E账户导入的**场外**份额（按净值成交）
  * - `sh`/`sz`/`bj` 前缀：一码通导入的**场内**持仓（股票、ETF、LOF、REITs）
- * - 没有代码：存款等
+ * - 其余没有代码的资产：其他
  */
-private enum class HoldingsMarket(val label: String) {
+internal enum class HoldingsMarket(val label: String) {
     EXCHANGE("场内"),
     OTC("场外"),
     CRYPTO("加密货币"),
+    DEPOSIT("银行存款"),
     OTHER("其他");
 
     companion object {
         /** 展示顺序：场外（新导入的那批）放前面，其余按原顺序 */
-        val displayOrder = listOf(OTC, EXCHANGE, CRYPTO, OTHER)
+        val displayOrder = listOf(OTC, EXCHANGE, CRYPTO, DEPOSIT, OTHER)
     }
 }
 
-private fun marketOf(asset: Asset): HoldingsMarket {
+internal fun marketOf(asset: Asset): HoldingsMarket {
     // 加密货币必须优先按**类型**判：币安导入的代码形如 BTCUSDT，只按 symbol 形态会落进
     // 「场内」的 else 分支——加密不是场内证券，得单列一组。
     if (asset.type == AssetType.CRYPTO) return HoldingsMarket.CRYPTO
+    // 存款同样必须按类型判：它没有 symbol，若只看 symbol 形态会被静默归进「其他」。
+    if (asset.type == AssetType.BANK_DEPOSIT) return HoldingsMarket.DEPOSIT
     val symbol = asset.symbol
     return when {
         symbol.isNullOrBlank() -> HoldingsMarket.OTHER
         symbol.startsWith("fund_", ignoreCase = true) -> HoldingsMarket.OTC
         else -> HoldingsMarket.EXCHANGE
+    }
+}
+
+/** 一级分组 + 该组资产 + 该组本币总额（组头展示与组间排序同源） */
+internal data class MarketGroup(
+    val market: HoldingsMarket,
+    val assets: List<Asset>,
+    val totalValue: Double
+)
+
+/**
+ * 把资产按一级分组聚合，并按当前排序偏好决定**组间顺序**。
+ *
+ * 金额排序必须作用于分组本身：只排组内资产、组头仍按固定顺序输出的话，
+ * 「其他」会永远留在最后——真机复现：其他 ¥71616.93 排在加密货币 ¥1106.30 之后。
+ * 组总额与资产行同一个口径 [totalValueCny]（已按汇率换算成人民币），
+ * 避免「显示值看着更大、排序却更小」这种原值/显示值不一致的问题。
+ */
+internal fun groupAssets(assets: List<Asset>, sortOrder: SortOrder): List<MarketGroup> {
+    val groups = HoldingsMarket.displayOrder.mapNotNull { market ->
+        val list = assets.filter { marketOf(it) == market }
+        if (list.isEmpty()) null
+        else MarketGroup(market, list, list.sumOf { it.totalValueCny })
+    }
+    return when (sortOrder) {
+        SortOrder.BY_VALUE_DESC -> groups.sortedByDescending { it.totalValue }
+        SortOrder.BY_VALUE_ASC -> groups.sortedBy { it.totalValue }
+        // 按类型 / 按名称时保持既有展示顺序；组内资产已按各自规则排序
+        SortOrder.BY_TYPE, SortOrder.BY_NAME -> groups
     }
 }
 
@@ -109,7 +142,7 @@ private sealed interface PortfolioRow {
         val expandKey: String = "market:${market.name}",
         /**
          * 覆盖标题：负债区借用 [HoldingsMarket.OTHER] 的枚举值（排序/分组逻辑复用它），
-         * 但标题不能也叫「其他」——和无市场归属的资产（存款等）撞名，列表会出现两个「其他」。
+         * 但标题不能也叫「其他」——列表里会同时出现真实的「其他」资产分组。
          * 这里显式覆盖成「负债」。
          */
         val displayLabel: String? = null
@@ -258,23 +291,29 @@ fun PortfolioScreen(
     }
 
     /**
+     * 一级分组（含组间顺序）：金额排序时必须排**分组本身**，不能只排组内资产。
+     */
+    val marketGroups = remember(sortedAssets, preferences.sortOrder) {
+        groupAssets(sortedAssets, preferences.sortOrder)
+    }
+
+    /**
      * 拍扁后的渲染单元：市场大区 → 账户 → 资产。
      *
-     * 一级分组按 symbol 形态（场内/场外/其他），不按账户名——
+     * 一级分组按资产类型 / symbol 形态（场内/场外/存款/其他），不按账户名——
      * 账户名是用户填的，两次导入填同一个名字就会混在一起。
      * 展开/收起只影响要不要把资产行放进去，各级头始终在。
      */
-    val rows = remember(sortedAssets, liabilities, expandedAccounts) {
+    val rows = remember(marketGroups, liabilities, expandedAccounts) {
         buildList {
-            HoldingsMarket.displayOrder.forEach { market ->
-                val marketAssets = sortedAssets.filter { marketOf(it) == market }
-                if (marketAssets.isEmpty()) return@forEach
+            marketGroups.forEach { group ->
+                val market = group.market
 
                 add(
                     PortfolioRow.MarketHeader(
                         market = market,
-                        assetCount = marketAssets.size,
-                        totalValue = marketAssets.sumOf { it.totalValueCny }
+                        assetCount = group.assets.size,
+                        totalValue = group.totalValue
                     )
                 )
                 // 这个市场大区的展开 key
@@ -283,7 +322,7 @@ fun PortfolioScreen(
                 // 之前只藏资产行、账户头无条件 add，于是收起「场内」后底下一排账户头
                 // 还挂在那儿 —— 看着就像点了没反应、一级标题根本折叠不了。
                 if (marketKey in expandedAccounts) {
-                    marketAssets.groupBy { it.account }.forEach { (account, list) ->
+                    group.assets.groupBy { it.account }.forEach { (account, list) ->
                         val header = PortfolioRow.AccountHeader(
                             account = account,
                             assetCount = list.size,
@@ -371,14 +410,12 @@ fun PortfolioScreen(
      * 成员取自 [sortedAssets] / [liabilities]（即应用「隐藏低价值加密」等显示开关
      * 之后的集合）：被显示开关藏起来的资产本来也不在列表里，不该被整组勾选选中。
      */
-    val groupMembers = remember(sortedAssets, liabilities) {
+    val groupMembers = remember(marketGroups, liabilities) {
         val map = LinkedHashMap<String, List<Long>>()
-        HoldingsMarket.displayOrder.forEach { market ->
-            val marketAssets = sortedAssets.filter { marketOf(it) == market }
-            if (marketAssets.isEmpty()) return@forEach
-            map["market:${market.name}"] = marketAssets.map { it.id }
-            marketAssets.groupBy { it.account }.forEach { (account, list) ->
-                map["account:${market.name}:$account"] = list.map { it.id }
+        marketGroups.forEach { group ->
+            map["market:${group.market.name}"] = group.assets.map { it.id }
+            group.assets.groupBy { it.account }.forEach { (account, list) ->
+                map["account:${group.market.name}:$account"] = list.map { it.id }
             }
         }
         if (liabilities.isNotEmpty()) map[LIABILITY_GROUP_KEY] = liabilities.map { it.id }

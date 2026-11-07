@@ -22,6 +22,7 @@ import com.example.stockdiary.network.FundAPI
 import com.example.stockdiary.network.UnifiedPriceService
 import com.example.stockdiary.network.model.AssetPrice
 import com.example.stockdiary.utils.AppLogger
+import com.example.stockdiary.utils.FailureLogFormat
 import com.example.stockdiary.utils.StockCodeManager
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -476,12 +477,13 @@ object AssetSyncManager {
         // 作用域结束即自动失效：没有进程级全局状态，也没有 ThreadLocal 的清理路径。
         val roundFailureScope = RoundSourceFailureScope(roundId, ConcurrentHashMap.newKeySet())
 
-        // 各数据源的成败统计只反映**本轮**：开头清零，末尾打快照
+        // 各数据源的成败统计只反映**本轮**：统计按 roundId 隔离（不再进程级清零），
+        // 手动轮与后台 Worker 并发时互不覆盖；这里只防御性地清掉同号残留（理论上不会存在）
         val stockManagerForStats = StockDataManager.getInstance(context)
-        stockManagerForStats.resetSourceStats()
+        stockManagerForStats.resetSourceStats(roundId)
         // 基金与加密链路共用同一套 SourceStats，轮次节奏也必须一致
-        FundAPI.resetSourceStats()
-        UnifiedPriceService.resetSourceStats()
+        FundAPI.resetSourceStats(roundId)
+        UnifiedPriceService.resetSourceStats(roundId)
         // 跳过原因分类计数：汇总里「跳过 127」必须能拆开，否则等于没统计
         val skipReasons = ConcurrentHashMap<String, AtomicInteger>()
         fun countSkip(reason: String) {
@@ -769,9 +771,10 @@ object AssetSyncManager {
         // 分两次调用会在并发收尾时产生「日志 8 次失败、提示 7 次」这种对不上。
         val elapsedMs = System.currentTimeMillis() - startTime
         // 三条链路（股票 / 基金 / 加密）的快照合成一份，顺序稳定：股票在前，基金次之，加密最后
-        val sourceStats = stockManagerForStats.sourceStatsSnapshot() +
-            FundAPI.sourceStatsSnapshot() +
-            UnifiedPriceService.cryptoSourceStatsSnapshot()
+        // 全部按 roundId 取：并发轮次各看各的，轮次汇总只含本轮
+        val sourceStats = stockManagerForStats.sourceStatsSnapshot(roundId) +
+            FundAPI.sourceStatsSnapshot(roundId) +
+            UnifiedPriceService.cryptoSourceStatsSnapshot(roundId)
 
         logRoundSummary(
             roundId = roundId,
@@ -785,7 +788,7 @@ object AssetSyncManager {
             sourceStats = sourceStats
         )
 
-        SyncResult(
+        val result = SyncResult(
             successCount = successCount.get(),
             failedCount = failedCount.get(),
             networkErrorCount = networkErrorCount,
@@ -797,13 +800,18 @@ object AssetSyncManager {
             skippedByReason = skipReasons.mapValues { it.value.get() },
             sourceStats = sourceStats,
             elapsedMs = elapsedMs
-        ).also {
-            AppLogger.i(
-                "价格同步结束 [轮次#$roundId][$syncTrigger]：成功 ${it.successCount}，失败 ${it.failedCount}，" +
-                    "跳过 ${it.skippedCount}，超时截断=${it.truncatedByTimeLimit}",
-                TAG
-            )
-        }
+        )
+        AppLogger.i(
+            "价格同步结束 [轮次#$roundId][$syncTrigger]：成功 ${result.successCount}，失败 ${result.failedCount}，" +
+                "跳过 ${result.skippedCount}，超时截断=${result.truncatedByTimeLimit}",
+            TAG
+        )
+        // 轮末回收：统计按 roundId 隔离，快照已取完，及时释放避免轮次字典无限增长。
+        // **必须在快照之后**：先删再取会让汇总变空
+        stockManagerForStats.discardSourceStats(roundId)
+        FundAPI.discardSourceStats(roundId)
+        UnifiedPriceService.discardSourceStats(roundId)
+        result
     }
 
     /**
@@ -862,6 +870,24 @@ object AssetSyncManager {
         // 存一份给诊断报告头部用，再照常打日志
         lastRoundSummary = summary
         AppLogger.i(summary, TAG)
+
+        // 每源一行：逐标的行给细节，这一行回答「这个源这轮到底怎样」（跳过/失败的数量与原因分布）
+        sourceStats.forEach { s ->
+            if (s.success + s.sourceLevelFailure + s.skipped <= 0) return@forEach
+            AppLogger.i(
+                FailureLogFormat.sourceSummaryLine(
+                    roundId = roundId,
+                    source = s.source,
+                    success = s.success,
+                    failed = s.sourceLevelFailure,
+                    skipped = s.skipped,
+                    failureReasons = s.failureReasons,
+                    skipReasons = s.skipReasons,
+                    durationMs = s.durationMs
+                ),
+                TAG
+            )
+        }
     }
 
     /**

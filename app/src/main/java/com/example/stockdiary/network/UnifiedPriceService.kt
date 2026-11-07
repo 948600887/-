@@ -112,14 +112,30 @@ object UnifiedPriceService {
      */
     private val cryptoStats = SourceStatsCounter(SOURCE_CRYPTO, host = CRYPTO_HOST)
 
-    /** 每轮同步开始时清零，与股票/基金链路同节奏 */
-    internal fun resetSourceStats() {
-        cryptoStats.reset()
+    /** 兼容签名：清掉 roundId=0 的加密统计（非同步路径 / 既有单测） */
+    internal fun resetSourceStats() = resetSourceStats(0)
+
+    /** 每轮同步开始时清零**本轮**的加密统计，不碰并发中的其它轮次 */
+    internal fun resetSourceStats(roundId: Int) {
+        cryptoStats.reset(roundId)
     }
 
-    /** 加密链路源统计快照；本轮没有任何批量动作时返回空，不制造噪音 */
-    internal fun cryptoSourceStatsSnapshot(): List<SourceStats> =
-        if (cryptoStats.hasActivity()) listOf(cryptoStats.snapshot()) else emptyList()
+    /** 轮末释放该轮的统计桶，避免轮次字典无限增长（快照之后调用） */
+    internal fun discardSourceStats(roundId: Int) {
+        cryptoStats.discard(roundId)
+    }
+
+    /** 兼容签名：roundId=0 的加密统计快照 */
+    internal fun cryptoSourceStatsSnapshot(): List<SourceStats> = cryptoSourceStatsSnapshot(0)
+
+    /**
+     * 指定轮次的加密链路源统计快照。
+     *
+     * 只读该轮（`roundId` 各一份计数）：手动轮与后台 Worker 并发时互不串数、互不清零。
+     * 本轮没有任何批量动作时返回空，不制造噪音。
+     */
+    internal fun cryptoSourceStatsSnapshot(roundId: Int): List<SourceStats> =
+        if (cryptoStats.hasActivity(roundId)) listOf(cryptoStats.snapshot(roundId)) else emptyList()
 
     private fun isFresh(entry: CacheEntry): Boolean =
         System.currentTimeMillis() - entry.timestamp < PRICE_CACHE_TTL_MS
@@ -404,6 +420,9 @@ object UnifiedPriceService {
     ): Result<Map<String, AssetPrice>> = withContext(Dispatchers.IO) {
         if (codes.isEmpty()) return@withContext Result.success(emptyMap())
 
+        // 一次预取只取一次轮次上下文：下面所有统计都记到同一轮，避免逐条查上下文
+        val roundId = RoundSourceFailureScope.currentRoundId()
+
         val resultMap = LinkedHashMap<String, AssetPrice>()
         /** 原 code -> 要查的交易对（多个 code 可能归一到同一交易对，如 BTC 与 BTCUSDT） */
         val codeToPair = LinkedHashMap<String, String>()
@@ -475,6 +494,7 @@ object UnifiedPriceService {
         if (!BinanceHostGate.tryAcquireProbe(System.currentTimeMillis())) {
             // 只记降级事实、不增加失败计数：本轮压根没发请求，不该假装「源败了 N 次」
             cryptoStats.markDegraded(
+                roundId,
                 if (BinanceHostGate.isRegionBlocked()) {
                     "HTTP 451/403 地区封锁，主机熔断粘死，本轮未请求"
                 } else {
@@ -556,7 +576,7 @@ object UnifiedPriceService {
                 if (fetched.quotes != null) {
                     sawQuotes = true
                     appliedFromShard = applyQuotes(fetched.quotes, shard.toHashSet())
-                    cryptoStats.recordSuccess(appliedFromShard)
+                    cryptoStats.recordSuccess(roundId = roundId, count = appliedFromShard)
                     continue
                 }
 
@@ -569,7 +589,7 @@ object UnifiedPriceService {
                         TAG
                     )
                     // 降级事实：整片 400 不是一个「源故障」，而是片内混了无效交易对
-                    cryptoStats.markDegraded("整片 400（无效交易对），已切小重试")
+                    cryptoStats.markDegraded(roundId, "整片 400（无效交易对），已切小重试")
                     for (subShard in shard.chunked(CRYPTO_BATCH_RETRY_SYMBOLS)) {
                         // 切小重试同样受取消与预算约束：一个超时片再切 6 个子片，
                         // 不拦的话单轮可再烧掉 6 × callTimeout
@@ -579,14 +599,15 @@ object UnifiedPriceService {
                             sawQuotes = true
                             val subApplied = applyQuotes(subFetched.quotes, subShard.toHashSet())
                             appliedFromShard += subApplied
-                            cryptoStats.recordSuccess(subApplied)
+                            cryptoStats.recordSuccess(roundId = roundId, count = subApplied)
                         } else {
                             // 子片仍失败：直接回落逐标的，**不再往下切**（只切一层，不递归）
                             if (subFetched.httpCode == 400) {
                                 // 子片整片非法：按子片大小近似记符号级失败
-                                cryptoStats.recordSymbolFailure(subShard.size)
+                                cryptoStats.recordSymbolFailure(roundId = roundId, count = subShard.size)
                             } else {
                                 cryptoStats.recordSourceFailure(
+                                    roundId,
                                     shardFailureReason(subFetched),
                                     subShard.size
                                 )
@@ -601,13 +622,13 @@ object UnifiedPriceService {
 
                 // 非 400 的整片失败：对应 code 不进 map，回落逐标的，不重试
                 failedShards++
-                cryptoStats.recordSourceFailure(shardFailureReason(fetched), shard.size)
+                cryptoStats.recordSourceFailure(roundId, shardFailureReason(fetched), shard.size)
                 noteFailure(fetched.failureType)
             }
         } finally {
             // 提前返回（预算 / 取消）也照常落到这里：耗时不因中途收手而丢失
-            cryptoStats.addDuration(System.currentTimeMillis() - batchStartedAt)
-            cryptoStats.setBatchShards(shardsAttempted, failedShards)
+            cryptoStats.addDuration(roundId, System.currentTimeMillis() - batchStartedAt)
+            cryptoStats.setBatchShards(roundId, shardsAttempted, failedShards)
         }
 
         // 协程已取消（切后台等）：这一轮记账不算数，不喂熔断器，直接返回已采集的部分
@@ -631,11 +652,11 @@ object UnifiedPriceService {
         // 让提示能直接说清「是地区封锁还是网络抖动」，而不是只给一句源级失败。
         when {
             sawRegionBlocked && BinanceHostGate.isRegionBlocked() ->
-                cryptoStats.markDegraded("HTTP 451/403 地区封锁，主机已熔断粘死")
+                cryptoStats.markDegraded(roundId, "HTTP 451/403 地区封锁，主机已熔断粘死")
             sawRegionBlocked ->
-                cryptoStats.markDegraded("HTTP 451/403 地区封锁，主机熔断中")
+                cryptoStats.markDegraded(roundId, "HTTP 451/403 地区封锁，主机熔断中")
             BinanceHostGate.isUnavailable() ->
-                cryptoStats.markDegraded("主机连续网络失败，已熔断")
+                cryptoStats.markDegraded(roundId, "主机连续网络失败，已熔断")
         }
 
         writeCryptoPricesToCache(resultMap)
@@ -812,7 +833,8 @@ object UnifiedPriceService {
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            AppLogger.e("获取基金价格失败: $code", e, TAG)
+            // 单只基金取不到是「本轮降级、下次自愈」，按 WARN 记（ERROR 只留给需人介入）
+            AppLogger.w("获取基金价格失败: $code | ${e.message}", e, TAG)
             Result.failure(e)
         }
     }
@@ -853,6 +875,8 @@ object UnifiedPriceService {
          */
         client: OkHttpClient = NetworkClient.binanceClient
     ): Result<CryptoData> = withContext(Dispatchers.IO) {
+        // 逐只补价与批量预取共用同一轮源统计：这里必须取当前轮次号
+        val roundId = RoundSourceFailureScope.currentRoundId()
         val codeNorm = code.uppercase().trim()
         // 是否币安理财/锁仓（LD 前缀）产品：这类持仓的底层交易对若在币安现货根本没有
         // 可交易对（如 1MBBDOGE / SHIB2 这类币安理财持仓但无 USDT 现货盘），应归为
@@ -1012,7 +1036,7 @@ object UnifiedPriceService {
                     return@withContext if (cryptoData != null) {
                         // 逐标的补价与批量预取共用同一套源统计：分片失败后回落到这里拿到行情，
                         // 也必须记一次成功，否则健康面板会显示「有价、0 成功」。
-                        cryptoStats.recordSuccess()
+                        cryptoStats.recordSuccess(roundId = roundId)
                         Result.success(cryptoData)
                     } else {
                         Result.failure(Exception("解析加密货币数据失败"))
@@ -1037,7 +1061,8 @@ object UnifiedPriceService {
                     // 按标准三态累计 / 冷却 / 半开探测自愈，不粘死（地区封锁才粘死，见 451 分支）。
                     BinanceHostGate.onNetworkFailure(System.currentTimeMillis(), FailureType.TRANSIENT)
                 }
-                AppLogger.e("获取加密货币价格失败: $code", e, TAG)
+                // 单只币取不到是「本轮降级、下次自愈」，按 WARN 记（ERROR 只留给需人介入）
+                AppLogger.w("获取加密货币价格失败: $code | ${e.message}", e, TAG)
                 // 连接类失败（连不上/超时/域名解析不了）换成一句人话：OkHttp 原始 message
                 // 形如 "failed to connect to data-api.binance.vision/2001:… after 10000ms"，
                 // 既看不懂又把设备 IP/端口抖给用户。币安国际站在部分网络/地区连不上是常态

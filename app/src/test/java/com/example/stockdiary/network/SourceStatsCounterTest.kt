@@ -37,9 +37,9 @@ class SourceStatsCounterTest {
     fun `成功与失败分别累计_失败带最近原因`() {
         val counter = SourceStatsCounter("测试源")
 
-        counter.recordSuccess(3)
+        counter.recordSuccess(0, 3)
         counter.recordSourceFailure("HTTP 514 限流", count = 2)
-        counter.recordSymbolFailure(count = 1)
+        counter.recordSymbolFailure(0, count = 1)
         counter.addDuration(120)
 
         val snapshot = counter.snapshot()
@@ -81,7 +81,7 @@ class SourceStatsCounterTest {
     @Test
     fun `reset后回到零观测`() {
         val counter = SourceStatsCounter("测试源")
-        counter.recordSuccess(1)
+        counter.recordSuccess(0, 1)
         counter.recordSourceFailure("HTTP 500")
         counter.markDegraded("降级")
         counter.addDuration(50)

@@ -63,7 +63,8 @@ class LogDiagnosticsTest {
 
     @Test
     fun 日志超长时保留尾部_崩溃前那几行不能丢() {
-        val text = LogDiagnostics.composeReport(report(appLog = longLog()))
+        // 界面默认展示最近 5000 行；这里显式用小上限，验证「截断永远保尾部」的规则本身
+        val text = LogDiagnostics.composeReport(report(appLog = longLog()), tailLines = 400)
         assertTrue("崩溃那一行必须还在: $text", text.contains("炸了"))
         assertTrue("开头那些行该被截掉", !text.contains("第 1 行"))
     }
@@ -218,5 +219,88 @@ class LogDiagnosticsTest {
         assertTrue("堆栈头部要完整: $text", text.contains("File.java:1)"))
         assertTrue("堆栈尾部要完整: $text", text.contains("File.java:500)"))
         assertTrue("分享路径不该截断标注: $text", !text.contains("分享出去的是完整堆栈"))
+    }
+
+    // ---- 多份轮转日志与 12MB 上限（Stage E）----
+
+    @Test
+    fun 报告含多份轮转日志且新的在前() {
+        val text = LogDiagnostics.composeReport(
+            LogDiagnostics.Report(
+                crashes = emptyList(),
+                appLog = "new",
+                appLogPath = "/x/app.log",
+                crashFileCount = 0,
+                logFiles = listOf(
+                    LogDiagnostics.LogFile("app.log", "new"),
+                    LogDiagnostics.LogFile("app.log.1", "old")
+                )
+            )
+        )
+        val newIdx = text.indexOf("########## app.log ##########")
+        val oldIdx = text.indexOf("########## app.log.1 ##########")
+        assertTrue("两份文件都要出现", newIdx > 0 && oldIdx > 0)
+        assertTrue("新的必须在前面", newIdx < oldIdx)
+    }
+
+    @Test
+    fun 超出导出上限时明确标注省略量() {
+        val text = LogDiagnostics.composeReport(
+            LogDiagnostics.Report(
+                crashes = emptyList(),
+                appLog = "tail",
+                appLogPath = null,
+                crashFileCount = 0,
+                logFiles = listOf(
+                    LogDiagnostics.LogFile("app.log.1", "tail", omittedBytes = 12345L)
+                ),
+                omittedLogBytes = 12345L
+            )
+        )
+        assertTrue("头部要说明省略字节数: $text", text.contains("已省略更旧内容 12345 字节"))
+        assertTrue("文件段也要标注: $text", text.contains("省略 12345 字节"))
+    }
+
+    @Test
+    fun 轮次索引按轮号统计失败与跳过() {
+        val log = """
+            [2026-11-07 10:00:00.000] [INFO/StockDataManager] [轮次#7][600519][新浪] 跳过: 停牌
+            [2026-11-07 10:00:01.000] [WARN/StockDataManager] [轮次#7][600519][腾讯] 失败: HTTP 500
+            [2026-11-07 10:00:02.000] [INFO/StockDataManager] 无轮次前缀的普通日志
+            [2026-11-07 10:00:03.000] [INFO/StockDataManager] [轮次#8][000001][新浪] 跳过: 停牌
+        """.trimIndent()
+        val index = LogDiagnostics.buildRoundIndex(log)
+        assertEquals(2, index.size)
+        val r7 = index.first { it.roundId == 7 }
+        assertEquals(2, r7.lines)
+        assertEquals(1, r7.failures)
+        assertEquals(1, r7.skips)
+        val r8 = index.first { it.roundId == 8 }
+        assertEquals(1, r8.lines)
+        assertEquals(0, r8.failures)
+    }
+
+    @Test
+    fun 过滤支持级别关键词与轮次() {
+        val log = listOf(
+            "[t] [DEBUG/X] [轮次#1][600519][新浪] 调试",
+            "[t] [WARN/X] [轮次#1][600519][腾讯] 失败: HTTP 500",
+            "[t] [INFO/X] [轮次#2][000001][新浪] 跳过: 停牌"
+        ).joinToString("\n")
+
+        assertEquals(1, LogDiagnostics.filterLog(log, levels = setOf("WARN")).size)
+        assertEquals(2, LogDiagnostics.filterLog(log, keyword = "600519").size)
+        assertEquals(1, LogDiagnostics.filterLog(log, roundId = 2).size)
+        // 组合过滤：轮次 1 + WARN → 只剩腾讯那条失败
+        val combined = LogDiagnostics.filterLog(log, levels = setOf("WARN"), roundId = 1)
+        assertEquals(listOf("[t] [WARN/X] [轮次#1][600519][腾讯] 失败: HTTP 500"), combined)
+    }
+
+    @Test
+    fun 过滤后超限只保留最新尾部() {
+        val log = (1..10).joinToString("\n") { "[t] [INFO/X] [轮次#$it] 行" }
+        val lines = LogDiagnostics.filterLog(log, roundId = null, maxLines = 3)
+        assertEquals(3, lines.size)
+        assertTrue(lines.last().contains("轮次#10"))
     }
 }

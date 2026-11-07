@@ -10,6 +10,9 @@ import com.example.stockdiary.network.FundNavParser
 import com.example.stockdiary.network.NetworkClient
 import com.example.stockdiary.network.TencentStockAPI
 import kotlinx.coroutines.CancellationException
+import java.util.concurrent.atomic.AtomicReference
+
+private const val HEALTH_TAG = "DataSourceHealth"
 
 data class DataSourceHealth(
     val name: String,
@@ -34,6 +37,17 @@ object DataSourceHealthChecker {
     private const val HEALTH_CHECK_FUND_CODE = "110022"
 
     private val client = NetworkClient.defaultClient
+
+    /**
+     * 最近一次体检的摘要（供诊断快照读取）。
+     *
+     * 体检结果从前只在界面上展示，用户分享日志时完全看不到——而「我这边某某源是好的」
+     * 正是排障最常需要对质的一件事。这里留一份内存副本，诊断导出时一并带走。
+     */
+    private val lastSummary = AtomicReference<String?>(null)
+
+    /** 最近一次体检摘要；从未体检过则为 null */
+    fun lastHealthSummaryForDiagnostics(): String? = lastSummary.get()
     
     /**
      * 并行体检**完整取价链路**：妙想Skill（配了 Key 才参与）→ 新浪 → 腾讯，外加持仓用到的
@@ -53,14 +67,51 @@ object DataSourceHealthChecker {
         val fund = async(Dispatchers.IO) { checkFundAPI() }
         val binance = async(Dispatchers.IO) { checkBinanceAPI() }
 
-        buildList {
+        val results = buildList {
             if (skill != null) add(skill.await())
             add(sina.await())
             add(tencent.await())
             add(fund.await())
             add(binance.await())
         }
+        logHealthResults(results)
+        results
     }
+
+    /**
+     * 体检结果落盘：逐源一行 + 一行汇总。
+     *
+     * 不可用按 WARN（多为地区封锁/限流，可自愈），不是 ERROR；同时把汇总留在内存，
+     * 供 [LogDiagnostics] 拼进设备快照——用户分享日志时能直接对上「他那边哪个源是坏的」。
+     */
+    private fun logHealthResults(results: List<DataSourceHealth>) {
+        results.forEach { h ->
+            if (h.isAvailable) {
+                AppLogger.i("[体检][${h.name}] 可用 | ${h.url} | 耗时 ${h.latency}ms", HEALTH_TAG)
+            } else {
+                AppLogger.w(
+                    "[体检][${h.name}] 不可用: ${h.errorMessage ?: "未知原因"} | ${h.url} | 耗时 ${h.latency}ms",
+                    HEALTH_TAG
+                )
+            }
+        }
+        val available = results.count { it.isAvailable }
+        val summary = healthSummary(results)
+        AppLogger.i(
+            "[体检] ${results.size} 个源：$available 可用、${results.size - available} 不可用 | $summary",
+            HEALTH_TAG
+        )
+        lastSummary.set(summary)
+    }
+
+    /**
+     * 体检摘要（**纯函数**）：`新浪财经=正常 · 天天基金=不可用`。
+     *
+     * 抽出来既是为了单测（不碰网络、不碰 AppLogger），也为了让日志行与设备快照
+     * 共用同一份措辞，避免两处各写一版。
+     */
+    internal fun healthSummary(results: List<DataSourceHealth>): String =
+        results.joinToString(" · ") { "${it.name}=${if (it.isAvailable) "正常" else "不可用"}" }
 
     /**
      * 妙想 Skill 体检：仅在配置了 API Key 时参与（没 Key 时它本来就不在链路里）。

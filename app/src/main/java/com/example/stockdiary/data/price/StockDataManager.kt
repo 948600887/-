@@ -12,6 +12,7 @@ import com.example.stockdiary.network.SinaStockData
 import com.example.stockdiary.network.TencentStockAPI
 import com.example.stockdiary.network.model.StockData
 import com.example.stockdiary.utils.AppLogger
+import com.example.stockdiary.utils.FailureLogFormat
 import com.example.stockdiary.utils.StockCodeManager
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -53,16 +54,25 @@ data class SourceStats(
      * 轻量基金源已熔断本轮全走 legacy、币安 451 粘死后未发请求、整片 400 切小重试。
      * null = 本轮无此类降级。
      */
-    val degradedReason: String? = null
+    val degradedReason: String? = null,
+    /** 本轮该源「跳过」的标的数（停牌、代码不在覆盖范围、熔断冷却等）；跳过≠失败 */
+    val skipped: Int = 0,
+    /** 源级失败的原因分布（归一后的桶 → 次数），供轮次汇总一行说清「为什么失败」 */
+    val failureReasons: Map<String, Int> = emptyMap(),
+    /** 跳过原因分布（归一后的桶 → 次数），供轮次汇总说明「跳过了哪些、为什么」 */
+    val skipReasons: Map<String, Int> = emptyMap()
 )
 
-/** 单个数据源的计数器（进程内，由 [StockDataManager.resetSourceStats] 清零） */
+/** 单个数据源的计数器（按轮次隔离，见 [StockDataManager.sourceCountersByRound]） */
 private class SourceCounters {
     val success = java.util.concurrent.atomic.AtomicInteger()
     val sourceFailure = java.util.concurrent.atomic.AtomicInteger()
     val symbolFailure = java.util.concurrent.atomic.AtomicInteger()
+    val skipped = java.util.concurrent.atomic.AtomicInteger()
     val durationMs = java.util.concurrent.atomic.AtomicLong()
     val lastFailureReason = java.util.concurrent.atomic.AtomicReference<String?>(null)
+    val failureReasons = java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicInteger>()
+    val skipReasons = java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicInteger>()
 }
 
 /**
@@ -90,25 +100,72 @@ class StockDataManager(
         breakers.computeIfAbsent(apiName) { SourceCircuitBreaker() }
 
     /**
-     * 每个数据源的成功 / 源级失败 / 符号级失败计数（进程内）。
+     * 每个数据源的成功 / 源级失败 / 符号级失败计数，**按 roundId 隔离**。
+     *
+     * 从前是进程级单份计数、每轮开头 clear()：手动轮与后台 Worker 并发时，
+     * 后开的一轮会把先开那轮的计数清空，于是先结束那轮的汇总只统计到「清零之后」。
+     * 现在每个 roundId 一份，互不影响；轮末快照后由 [discardSourceStats] 回收。
+     * 非同步路径（前台单标的查价）统一落在 roundId=0 桶里。
      *
      * 与熔断器的 [SourceCircuitBreaker.failuresForTesting] 不同：那边是「连续失败计数、
      * 成功即清零」的**状态机输入**；这边是「本轮一共问成/问败多少」的**统计快照**，
      * 只在同步轮次末打汇总用，不参与任何判定。故意分开，避免为了统计去污染状态机。
      */
-    private val sourceCounters = ConcurrentHashMap<String, SourceCounters>()
+    private val sourceCountersByRound = ConcurrentHashMap<Int, ConcurrentHashMap<String, SourceCounters>>()
 
-    private fun countersFor(apiName: String): SourceCounters =
-        sourceCounters.computeIfAbsent(apiName) { SourceCounters() }
+    private fun roundCounters(roundId: Int): ConcurrentHashMap<String, SourceCounters> =
+        sourceCountersByRound.computeIfAbsent(roundId) { ConcurrentHashMap() }
 
-    /** 清零各源统计。由同步编排器在每轮开始时调用，保证汇总反映的是**本轮** */
+    private fun countersFor(apiName: String, roundId: Int): SourceCounters =
+        roundCounters(roundId).computeIfAbsent(apiName) { SourceCounters() }
+
+    /** 记录一次成功取价（批量成功按标的数累加） */
+    internal fun recordSourceSuccess(apiName: String, roundId: Int, count: Int = 1) {
+        if (count > 0) countersFor(apiName, roundId).success.addAndGet(count)
+    }
+
+    /** 记录源级失败，同时累计归一化后的原因桶（供轮次汇总的原因分布） */
+    internal fun recordSourceFailure(apiName: String, roundId: Int, reason: String?) {
+        val c = countersFor(apiName, roundId)
+        c.sourceFailure.incrementAndGet()
+        c.lastFailureReason.set(reason?.take(60))
+        c.failureReasons.bump(FailureLogFormat.reasonBucket(reason))
+    }
+
+    /** 记录一次「跳过」（停牌/代码不在覆盖范围/熔断冷却），不计入失败 */
+    internal fun recordSourceSkip(apiName: String, roundId: Int, reason: String?) {
+        val c = countersFor(apiName, roundId)
+        c.skipped.incrementAndGet()
+        c.skipReasons.bump(FailureLogFormat.reasonBucket(reason))
+    }
+
+    /** 累计源耗时（含网络等待与重试） */
+    internal fun addSourceDuration(apiName: String, roundId: Int, ms: Long) {
+        if (ms > 0) countersFor(apiName, roundId).durationMs.addAndGet(ms)
+    }
+
+    /** 清零某一轮的各源统计（保留兼容签名：roundId=0 用于非同步路径与既有单测） */
     fun resetSourceStats() {
-        sourceCounters.clear()
+        resetSourceStats(0)
+    }
+
+    /** 只清指定轮次，不碰其它并发轮次 */
+    fun resetSourceStats(roundId: Int) {
+        sourceCountersByRound.remove(roundId)
+    }
+
+    /** 轮末释放：快照之后调用，避免轮次字典无限增长 */
+    fun discardSourceStats(roundId: Int) {
+        sourceCountersByRound.remove(roundId)
     }
 
     /** 各源统计快照（按源名排序，保证汇总行顺序稳定，方便逐轮对比） */
-    fun sourceStatsSnapshot(): List<SourceStats> =
-        sourceCounters.entries
+    fun sourceStatsSnapshot(): List<SourceStats> = sourceStatsSnapshot(0)
+
+    /** 指定轮次的各源统计快照：**只含本轮**，不受并发轮次影响 */
+    fun sourceStatsSnapshot(roundId: Int): List<SourceStats> {
+        val counters = sourceCountersByRound[roundId] ?: return emptyList()
+        return counters.entries
             .sortedBy { it.key }
             .map { (name, c) ->
                 SourceStats(
@@ -117,9 +174,21 @@ class StockDataManager(
                     sourceLevelFailure = c.sourceFailure.get(),
                     symbolLevelFailure = c.symbolFailure.get(),
                     durationMs = c.durationMs.get(),
-                    lastFailureReason = c.lastFailureReason.get()
+                    lastFailureReason = c.lastFailureReason.get(),
+                    skipped = c.skipped.get(),
+                    failureReasons = c.failureReasons.toSortedCounts(),
+                    skipReasons = c.skipReasons.toSortedCounts()
                 )
             }
+    }
+
+    private fun ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicInteger>.toSortedCounts(): Map<String, Int> =
+        entries.sortedBy { it.key }.associate { it.key to it.value.get() }
+
+    /** 原因分布的计数：并发写安全，桶名由 [FailureLogFormat.reasonBucket] 归一 */
+    private fun ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicInteger>.bump(bucket: String) {
+        computeIfAbsent(bucket) { java.util.concurrent.atomic.AtomicInteger() }.incrementAndGet()
+    }
 
     /**
      * 价格是否可用于"写缓存 + 认定成功"。
@@ -219,6 +288,8 @@ class StockDataManager(
         forceRefresh: Boolean = false,
         networkAvailable: Boolean? = null
     ): Result<StockData> {
+        // 本轮同步编号：没有 RoundSourceFailureScope 上下文时为 0（前台单标的查价等）
+        val roundId = RoundSourceFailureScope.currentRoundId()
         // 1. 检查是否需要强制刷新
         if (!forceRefresh) {
             // 2. 检查内存缓存
@@ -266,7 +337,8 @@ class StockDataManager(
         // 4. 检查网络连接（优先用同步开始时一次性算好的结果，避免每个标的重复 binder 调用）
         val netAvailable = networkAvailable ?: isNetworkAvailable()
         if (!netAvailable) {
-            AppLogger.w("网络连接不可用", TAG)
+            val noNetLine = FailureLogFormat.failureLine(roundId, symbol, "网络", "网络连接不可用")
+            AppLogger.w(noNetLine, TAG)
             val oldCache = cache[symbol]
             if (oldCache != null) {
                 if (PriceCacheManager.isCacheValid(symbol)) {
@@ -280,8 +352,10 @@ class StockDataManager(
                 // 刷成「刚刚」，让三天前的收盘价在卡片上伪装成刚抓的新价。
                 // 旧价本身保留在内存缓存与库里不动（不清空、不写 0）；同步编排器把本异常
                 // 归到「跳过」（不算失败），等网络/行情源恢复后自然更新。
-                AppLogger.w(
-                    "网络不可用且缓存已过 TTL，不再以成功身份返回旧价（避免刷新 lastSyncTime）: $symbol",
+                AppLogger.i(
+                    FailureLogFormat.skipLine(
+                        roundId, symbol, "网络", "网络不可用且缓存已过 TTL（不返回旧价，保留库里旧值）"
+                    ),
                     TAG
                 )
                 return Result.failure(StalePriceCacheException(symbol))
@@ -297,7 +371,13 @@ class StockDataManager(
             // 三态熔断闸门：CLOSED 放行；OPEN 冷却期跳过；冷却结束只放行一个探测（其余跳过）。
             // 取代旧的「失败计数 >= maxFailures 就跳过错过的全部请求」。
             if (!breakerFor(apiName).tryAcquireProbe(System.currentTimeMillis())) {
-                AppLogger.w("跳过数据源 $apiName（熔断冷却中 / 半开探测已在进行）", TAG)
+                AppLogger.i(
+                    FailureLogFormat.skipLine(
+                        roundId, symbol, apiName, "熔断冷却中 / 半开探测已在进行"
+                    ),
+                    TAG
+                )
+                recordSourceSkip(apiName, roundId, "熔断冷却中 / 半开探测已在进行")
                 continue
             }
 
@@ -311,9 +391,7 @@ class StockDataManager(
                     dataSource.getStockData(symbol)
                 }
             } finally {
-                countersFor(apiName).durationMs.addAndGet(
-                    System.currentTimeMillis() - sourceStartedAt
-                )
+                addSourceDuration(apiName, roundId, System.currentTimeMillis() - sourceStartedAt)
             }
             
             if (result.isSuccess) {
@@ -366,12 +444,18 @@ class StockDataManager(
                     )
 
                     breakerFor(apiName).onSuccess()
-                    countersFor(apiName).success.incrementAndGet()
+                    recordSourceSuccess(apiName, roundId)
                     AppLogger.d("使用${apiName}获取数据成功: ${stockData.name}", TAG)
                     return Result.success(stockData)                }
                 if (stockData != null) {
                     AppLogger.w(
-                        "${apiName}返回的价格无效（${stockData.price}），视为失败并尝试下一个数据源",
+                        FailureLogFormat.failureLine(
+                            roundId,
+                            symbol,
+                            apiName,
+                            "价格无效（${stockData.price}），视为失败并尝试下一个数据源",
+                            System.currentTimeMillis() - sourceStartedAt
+                        ),
                         TAG
                     )
                     // 别让下面那句 Exception("Unknown error") 盖掉真实原因：
@@ -388,7 +472,14 @@ class StockDataManager(
             // 停牌不是数据源的故障：换源去问同一只停牌股还是没有报价，
             // 但累计失败次数会在几次后把整个数据源禁用，表现为"全市场行情同步停摆"。
             if (QuoteSuspendedException.isSuspended(failure)) {
-                AppLogger.w("$symbol 无有效报价（停牌/退市整理期），不计入数据源失败", TAG)
+                AppLogger.i(
+                    FailureLogFormat.skipLine(
+                        roundId, symbol, apiName, "无有效报价（停牌/退市整理期），不计入数据源失败",
+                        System.currentTimeMillis() - sourceStartedAt
+                    ),
+                    TAG
+                )
+                recordSourceSkip(apiName, roundId, "停牌/退市整理期无有效报价")
                 continue
             }
 
@@ -396,8 +487,15 @@ class StockDataManager(
             // 但这不是「源不健康」——把它计入会在几次后误禁整源、把流量全甩给单一源引发雪崩，
             // 正是本轮要修的问题。分类标准见 [isSymbolLevelFailure]。
             if (isSymbolLevelFailure(failure)) {
-                countersFor(apiName).symbolFailure.incrementAndGet()
-                AppLogger.w("$symbol 在 $apiName 无数据（代码不在此源支持范围），不计入数据源失败", TAG)
+                countersFor(apiName, roundId).symbolFailure.incrementAndGet()
+                recordSourceSkip(apiName, roundId, "代码不在此源支持范围")
+                AppLogger.i(
+                    FailureLogFormat.skipLine(
+                        roundId, symbol, apiName, "代码不在此源支持范围，不计入数据源失败",
+                        System.currentTimeMillis() - sourceStartedAt
+                    ),
+                    TAG
+                )
                 continue
             }
 
@@ -411,23 +509,34 @@ class StockDataManager(
             // 真实 IO 失败照常记账。停牌 / 符号级失败在上面的 continue 分支已分流，不走到这里。
             val roundScope = currentCoroutineContext()[RoundSourceFailureScope.Key]
             if (roundScope?.isAlreadyReported(apiName) == true) {
-                AppLogger.w(
-                    "$apiName 本轮已由批量0命中记账（轮次#${roundScope.roundId}），" +
-                        "逐标的回落不重复喂熔断: ${failure.message}",
+                AppLogger.i(
+                    FailureLogFormat.skipLine(
+                        roundId, symbol, apiName,
+                        "本轮已由批量0命中记账，逐标的回落不重复喂熔断: ${failure.message}",
+                        System.currentTimeMillis() - sourceStartedAt
+                    ),
                     TAG
                 )
+                recordSourceSkip(apiName, roundId, "批量已记账，逐标的回落不重复计数")
             } else {
                 breakerFor(apiName).onFailure(System.currentTimeMillis())
-                countersFor(apiName).sourceFailure.incrementAndGet()
-                countersFor(apiName).lastFailureReason.set(
-                    failure.message?.take(60) ?: failure.javaClass.simpleName
+                recordSourceFailure(apiName, roundId, failure.message ?: failure.javaClass.simpleName)
+                AppLogger.w(
+                    FailureLogFormat.failureLine(
+                        roundId, symbol, apiName, failure.message,
+                        System.currentTimeMillis() - sourceStartedAt
+                    ),
+                    TAG
                 )
-                AppLogger.w("${apiName}获取数据失败: ${failure.message}", TAG)
             }
         }
         
         // 6. 所有数据源都失败
-        AppLogger.e("所有数据源都失败: ${lastError?.message}", tag = TAG)
+        AppLogger.e(
+            "${FailureLogFormat.failureLine(roundId, symbol, "全部数据源", lastError?.message, null)}" +
+                "（本轮此标的取价失败，需处理后才会自愈）",
+            tag = TAG
+        )
         return Result.failure(lastError ?: IOException("所有数据源都失败"))
     }
     
@@ -484,15 +593,13 @@ class StockDataManager(
         val sinaResult = try {
             SinaStockAPI.getRealtimeData(symbols, context = context, forceRefresh = forceRefresh)
         } finally {
-            countersFor(ApiManager.API_SINA).durationMs.addAndGet(
-                System.currentTimeMillis() - batchStartedAt
-            )
+            addSourceDuration(ApiManager.API_SINA, lineageRoundId, System.currentTimeMillis() - batchStartedAt)
         }
         return sinaResult.map { sinaMap ->
             // 批量成功的口径与逐标的路径一致：每个真正拿到行情的代码记一次成功。
             // 原来只加了 durationMs 不加 success，健康统计里新浪「耗时一大截、成功 0 次」，
             // 看起来像源在空转。
-            countersFor(ApiManager.API_SINA).success.addAndGet(sinaMap.size)
+            recordSourceSuccess(ApiManager.API_SINA, lineageRoundId, sinaMap.size)
             val now = System.currentTimeMillis()
             sinaMap.mapValues { (code, sina) ->
                 val unified = sina.toUnifiedStockData()
@@ -588,13 +695,16 @@ class StockDataManager(
             return false
         }
         AppLogger.w(
-            "$sourceName 批量预取整体 0 命中（批内含普通股票代码），" +
-                "按源级故障计入一次失败 [轮次#$roundId]",
+            FailureLogFormat.batchFailureLine(
+                roundId,
+                "批量${probedCodes.size}只",
+                sourceName,
+                "批量预取整体 0 命中（批内含普通股票代码），按源级故障计入一次失败"
+            ),
             TAG
         )
         breakerFor(sourceName).onFailure(System.currentTimeMillis())
-        countersFor(sourceName).sourceFailure.incrementAndGet()
-        countersFor(sourceName).lastFailureReason.set("批量预取整体 0 命中")
+        recordSourceFailure(sourceName, roundId, "批量预取整体 0 命中")
         return true
     }
 

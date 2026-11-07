@@ -73,6 +73,8 @@ class FundAPIHostBackoffTest {
         val stats = FundAPI.sourceStatsSnapshot()
         val light = stats.first { it.source == "基金-轻量源" }
         assertEquals("跳过不是失败，不虚增源级失败", 0, light.sourceLevelFailure)
+        assertEquals("退避跳过要计入 skipped（跳过≠失败）", 1, light.skipped)
+        assertTrue(light.skipReasons.values.sum() == 1)
         assertTrue(light.degradedReason!!.contains("HTTP 514 限流"))
         assertTrue(light.degradedReason!!.contains("60s 退避中"))
         assertEquals(1, stats.first { it.source == "基金-legacy源" }.success)

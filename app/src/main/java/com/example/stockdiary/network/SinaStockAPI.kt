@@ -2,6 +2,8 @@ package com.example.stockdiary.network
 
 import android.content.Context
 import com.example.stockdiary.utils.AppLogger
+import com.example.stockdiary.utils.FailureLogFormat
+import com.example.stockdiary.data.price.RoundSourceFailureScope
 import com.example.stockdiary.data.price.SourceIds
 import com.example.stockdiary.common.Result
 import kotlinx.coroutines.Dispatchers
@@ -211,11 +213,11 @@ object SinaStockAPI : StockAPI {
                         // 让上层源级熔断器与 NetworkRetryHelper 拿到真实原因，而不是被吞成
                         // 「未获取到股票数据」这种符号级文案——那会把真·源级故障误判成「代码不支持」，
                         // 导致新浪熔断器被饿死（每个标的仍先白烧一轮新浪才回落腾讯）。
-                        AppLogger.e("所有批次失败，透出原始异常: ${batchError.message}", batchError, TAG)
+                        AppLogger.w("所有批次失败，透出原始异常: ${batchError.message}", batchError, TAG)
                         return@withContext Result.failure(batchError)
                     }
                     // 所有批次都正常应答、但没有任何代码命中：这才是真·符号级失败
-                    AppLogger.e("未获取到股票数据（所有批次正常应答但无代码命中）", tag = TAG)
+                    AppLogger.w("未获取到股票数据（所有批次正常应答但无代码命中）", tag = TAG)
                     return@withContext Result.failure(IOException("未获取到股票数据，请检查股票代码"))
                 }
                 
@@ -226,7 +228,7 @@ object SinaStockAPI : StockAPI {
                 throw e
             } catch (e: Exception) {
                 PerformanceMonitor.end("network_request")
-                AppLogger.e("异常: ${e.message}", e, TAG)
+                AppLogger.w("异常: ${e.message}", e, TAG)
                 Result.failure(e)
             }
         }
@@ -253,6 +255,12 @@ object SinaStockAPI : StockAPI {
         // 放在最外层 try 之前：try 块内声明的局部变量对其自身 catch 不可见（兄弟作用域），
         // 而内/外两层 catch 的日志都要带出失败 URL，故声明在最外层 try 外面。
         var reqUrl: String = "(未构造URL)"
+        // 失败行统一带轮次/批次/源/原因/耗时，便于和源统计对上
+        val roundId = RoundSourceFailureScope.currentRoundId()
+        val startedAt = System.currentTimeMillis()
+        val batchLabel = batch.firstOrNull()?.let { first ->
+            if (batch.size > 1) "$first…(共${batch.size}只)" else first
+        } ?: "(空批次)"
         // 抽成独立函数后必须显式 return（块体函数不会像原内联 lambda 那样隐式返回末表达式）。
         return try {
             val batchKey = batch.sorted().joinToString(",")
@@ -294,7 +302,14 @@ object SinaStockAPI : StockAPI {
                         // 这里把 URL 和响应体前 200 字一起记下来，方便区分
                         // 「被墙/403 限流」与「真·源级故障」（上层源级熔断靠这个判断）。
                         val bodyPeek = runCatching { it.body?.string()?.take(200) }.getOrNull().orEmpty()
-                        AppLogger.e("新浪行情 HTTP ${it.code} 非成功 | url=$reqUrl | 响应体前200=$bodyPeek", tag = TAG)
+                        AppLogger.e(
+                            FailureLogFormat.batchFailureLine(
+                                roundId, batchLabel, "新浪",
+                                "HTTP ${it.code} 非成功 | url=$reqUrl | 响应体前200=$bodyPeek",
+                                System.currentTimeMillis() - startedAt
+                            ),
+                            tag = TAG
+                        )
                         if (it.code == 403) {
                             throw IOException("API请求频率过高，请稍后再试")
                         }
@@ -307,7 +322,13 @@ object SinaStockAPI : StockAPI {
                     }
                     val bytes = responseBody.use { body -> body.bytes() }
                     if (bytes.isEmpty()) {
-                        AppLogger.e("新浪行情返回空 body | url=$reqUrl", tag = TAG)
+                        AppLogger.e(
+                            FailureLogFormat.batchFailureLine(
+                                roundId, batchLabel, "新浪", "返回空 body | url=$reqUrl",
+                                System.currentTimeMillis() - startedAt
+                            ),
+                            tag = TAG
+                        )
                         throw IOException("API返回空数据")
                     }
                     val text = String(bytes, Charset.forName("GBK"))
@@ -329,7 +350,13 @@ object SinaStockAPI : StockAPI {
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                AppLogger.e("批次请求失败 url=$reqUrl: ${e.message}", e, TAG)
+                AppLogger.w(
+                    FailureLogFormat.batchFailureLine(
+                        roundId, batchLabel, "新浪", "批次请求失败: ${e.message} | url=$reqUrl",
+                        System.currentTimeMillis() - startedAt
+                    ),
+                    e, TAG
+                )
                 request.complete(Result.failure(e))
                 // 并发下多个批可能同时失败：只记第一个（CAS 保证），避免后面的异常覆盖先到的根因。
                 if (lastBatchException.get() == null) {
@@ -358,7 +385,13 @@ object SinaStockAPI : StockAPI {
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            AppLogger.e("批次请求异常 url=$reqUrl: ${e.message}", e, TAG)
+            AppLogger.w(
+                FailureLogFormat.batchFailureLine(
+                    roundId, batchLabel, "新浪", "批次请求异常: ${e.message} | url=$reqUrl",
+                    System.currentTimeMillis() - startedAt
+                ),
+                e, TAG
+            )
             if (lastBatchException.get() == null) {
                 lastBatchException.compareAndSet(null, e)
             }
@@ -585,7 +618,13 @@ object SinaStockAPI : StockAPI {
                             // 现价和昨收都是 0：这只标的当前根本没有报价。
                             // 记为「停牌」而不是普通失败，否则会被计入数据源失败次数。
                             suspended.add(code)
-                            AppLogger.w("无有效报价（疑似停牌）: $code（现价=$current, 昨收=$close）", TAG)
+                            AppLogger.i(
+                                FailureLogFormat.skipLine(
+                                    FailureLogFormat.NO_ROUND, code, "新浪",
+                                    "无有效报价（疑似停牌，现价=$current 昨收=$close）"
+                                ),
+                                TAG
+                            )
                         }
                     }
                 }

@@ -3,6 +3,8 @@ package com.example.stockdiary.network
 import java.io.IOException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
+import com.example.stockdiary.data.price.RoundSourceFailureScope
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -114,6 +116,40 @@ class FundAPISourceStatsTest {
         assertEquals("熔断后没有请求，不能虚增源级失败", 0, light.sourceLevelFailure)
         assertEquals("连续失败已熔断，本轮直接走 legacy", light.degradedReason)
         assertEquals(1, stats.first { it.source == "基金-legacy源" }.success)
+    }
+
+    @Test
+    fun `并发轮次隔离_各轮统计互不串且reset只清本轮`() = runBlocking {
+        // 回归：统计从前是进程级单份、每轮开头 reset()，手动轮与后台 Worker 并发时
+        // 后开的一轮会把先开那轮的计数清空。现在按 roundId 各一份，互不影响。
+        FundAPI.discardSourceStats(1)
+        FundAPI.discardSourceStats(2)
+        FundAPI.lightweightNavSource = { fundInfo(it, "轻量源基金") }
+        FundAPI.legacyNavSource = { error("轻量源成功时不应回退 legacy") }
+
+        withContext(RoundSourceFailureScope(1)) {
+            repeat(2) { FundAPI.fetchFundInfo("110022") }
+        }
+        withContext(RoundSourceFailureScope(2)) {
+            repeat(5) { FundAPI.fetchFundInfo("110023") }
+        }
+
+        val round1 = FundAPI.sourceStatsSnapshot(1).single()
+        val round2 = FundAPI.sourceStatsSnapshot(2).single()
+        assertEquals("round 1 只统计自己的 2 次成功", 2, round1.success)
+        assertEquals("round 2 只统计自己的 5 次成功", 5, round2.success)
+
+        // reset 只清目标轮次：并发中的另一轮必须完整保留
+        FundAPI.resetSourceStats(1)
+        assertTrue("reset(1) 后 round 1 应为空", FundAPI.sourceStatsSnapshot(1).isEmpty())
+        assertEquals(
+            "reset(1) 不能清空并发中的 round 2",
+            5,
+            FundAPI.sourceStatsSnapshot(2).single().success
+        )
+
+        FundAPI.discardSourceStats(1)
+        FundAPI.discardSourceStats(2)
     }
 
     @Test

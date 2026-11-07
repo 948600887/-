@@ -155,7 +155,8 @@ class AssetSyncManagerTest {
     fun `同步结果携带源统计与总耗时`() = runBlocking {
         coEvery { UnifiedPriceService.getPrice(any(), AssetType.FUND, any()) } returns
             Result.success(fundPrice("010001"))
-        every { stockDataManager.sourceStatsSnapshot() } returns listOf(
+        // 源统计按 roundId 隔离：编排器取的是「本轮快照」，任意轮号都返回这份桩数据
+        every { stockDataManager.sourceStatsSnapshot(any()) } returns listOf(
             SourceStats(
                 source = ApiManager.API_SINA,
                 success = 1,

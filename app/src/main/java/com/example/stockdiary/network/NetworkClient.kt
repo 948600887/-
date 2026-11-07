@@ -1,6 +1,5 @@
 package com.example.stockdiary.network
 
-import com.example.stockdiary.BuildConfig
 import com.example.stockdiary.common.APIEndpoints
 import com.example.stockdiary.common.Timeouts
 import com.example.stockdiary.utils.AppLogger
@@ -29,8 +28,6 @@ import kotlinx.coroutines.CancellationException
  * 注意：新增客户端时，除非 API 使用相对路径，否则不要加 BaseUrlInterceptor。
  */
 object NetworkClient {
-
-    private val isDebug: Boolean = BuildConfig.DEBUG
 
     /**
      * 所有业务客户端共享同一个底层 OkHttpClient 的 ConnectionPool 与 Dispatcher。
@@ -75,9 +72,9 @@ object NetworkClient {
                 }
             )
 
-        if (isDebug) {
-            builder.addInterceptor(networkLogInterceptor)
-        }
+        // 始终挂载：release 与 debug 一致全量落盘（logcat 输出仍只由 AppLogger 的 isDebug 控制）。
+        // 排障最需要的「哪次请求慢、哪个接口 403」在 release 包里同样必须可见。
+        builder.addInterceptor(networkLogInterceptor)
 
         builder.build()
     }

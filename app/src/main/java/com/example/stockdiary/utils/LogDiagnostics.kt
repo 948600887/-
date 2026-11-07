@@ -43,10 +43,26 @@ object LogDiagnostics {
     /**
      * 界面上一次最多显示多少行 app.log。
      *
-     * app.log 被 [AppLogger] 截到 5000 行，全塞进一个 `Text` 会明显卡顿；
-     * 而排障真正要看的就是崩溃前那几百行。分享出去的是**全文**，不截断。
+     * 日志按轮转保留 4 份、单份 8MB，全塞进一个 `Text` 会明显卡顿；默认展示最近 5000 行
+     * （约覆盖近几轮同步），再配合级别/关键词/轮次过滤定位。分享出去的是多份全文（上限 12MB）。
      */
-    const val DISPLAY_TAIL_LINES = 400
+    const val DISPLAY_TAIL_LINES = 5000
+
+    /**
+     * 诊断导出的内容上限 12MB。
+     *
+     * 轮转后磁盘上最多 32MB 日志，一次性读进内存再拼成字符串会在低端机上触发 OOM
+     * （读 + 拼接是两份）。超出时只导**最新的部分**，并在报告里明确写出省略了多少，
+     * 绝不静默丢历史：静默截断会让「崩溃前那几行」看起来像真的没有。
+     */
+    const val EXPORT_MAX_BYTES = 12L * 1024 * 1024
+
+    /** 一份日志文件的内容，[omittedBytes] 为该文件因 12MB 上限被截掉的字节数 */
+    data class LogFile(
+        val name: String,
+        val content: String,
+        val omittedBytes: Long = 0L
+    )
 
     /**
      * 单份崩溃报告在**界面**上保留的堆栈行数。
@@ -78,7 +94,14 @@ object LogDiagnostics {
          * 设备状态快照（数据源健康度 / 汇率 / 价格缓存 / 最近一轮同步汇总）。
          * 空串 = 没采集到，头部不显示该段。默认空串保既有调用方与单测不变。
          */
-        val deviceState: String = ""
+        val deviceState: String = "",
+        /**
+         * 轮转后的全部日志文件，**新的在前**；每份内容已按 12MB 总上限裁剪。
+         * 空 = 只有旧字段 [appLog]（兼容旧调用方与单测）。
+         */
+        val logFiles: List<LogFile> = emptyList(),
+        /** 因 12MB 上限被省略的总字节数；0 = 没有截断 */
+        val omittedLogBytes: Long = 0L
     )
 
     /**
@@ -118,18 +141,66 @@ object LogDiagnostics {
             runCatching { file.name to file.readText() }.getOrNull()
         }
 
-        val logFile = AppLogger.getLogFile()
-        val appLog = logFile?.let { file ->
-            if (!file.exists()) null else runCatching { file.readText() }.getOrNull()
-        }
+        val (logFiles, omittedBytes) = collectLogFiles()
 
         return Report(
             crashes = crashes,
-            appLog = appLog,
-            appLogPath = logFile?.absolutePath,
+            appLog = logFiles.firstOrNull()?.content,
+            appLogPath = AppLogger.getLogFiles().firstOrNull()?.absolutePath,
             crashFileCount = crashFiles.size,
-            deviceState = collectDeviceState(context)
+            deviceState = collectDeviceState(context),
+            logFiles = logFiles,
+            omittedLogBytes = omittedBytes
         )
+    }
+
+    /**
+     * 读轮转后的全部日志，**新的在前**，总字节数不超过 [EXPORT_MAX_BYTES]。
+     *
+     * 超限时对边界文件只读尾部，并把被截掉的字节数带回去（报告里必须写明省略量，
+     * 静默截断会让人误以为日志真的只有这些）。读文件有 IO，调用方在 IO 线程。
+     */
+    private fun collectLogFiles(): Pair<List<LogFile>, Long> {
+        val files = AppLogger.getLogFiles()
+        var budget = EXPORT_MAX_BYTES
+        var omitted = 0L
+        val result = ArrayList<LogFile>(files.size)
+        for (file in files) {
+            val length = runCatching { file.length() }.getOrDefault(0L)
+            if (length <= 0L) continue
+            if (budget <= 0L) {
+                omitted += length
+                continue
+            }
+            if (length <= budget) {
+                val text = runCatching { file.readText() }.getOrNull() ?: continue
+                result += LogFile(file.name, text)
+                budget -= length
+            } else {
+                // 只读尾部 budget 字节：低端机上避免把 32MB 全读进内存再拼字符串
+                val text = runCatching { readTailBytes(file, budget) }.getOrNull() ?: continue
+                result += LogFile(file.name, text, omittedBytes = length - budget)
+                omitted += length - budget
+                budget = 0L
+            }
+        }
+        return result to omitted
+    }
+
+    /** 读取文件尾部至多 [maxBytes] 字节（可能从半行开始，属刻意的「最新优先」） */
+    private fun readTailBytes(file: File, maxBytes: Long): String {
+        java.io.RandomAccessFile(file, "r").use { raf ->
+            val skip = (raf.length() - maxBytes).coerceAtLeast(0L)
+            raf.seek(skip)
+            return raf.readUTF8(maxBytes)
+        }
+    }
+
+    private fun java.io.RandomAccessFile.readUTF8(maxBytes: Long): String {
+        val size = minOf(maxBytes, length() - filePointer).toInt().coerceAtLeast(0)
+        val buffer = ByteArray(size)
+        readFully(buffer)
+        return String(buffer, Charsets.UTF_8)
     }
 
     /**
@@ -184,6 +255,13 @@ object LogDiagnostics {
             AssetSyncManager.lastRoundSummaryForDiagnostics()?.let { lines += it }
         }
 
+        // 最近一次体检的结论：用户说「数据源坏了」时，这一行能直接对上是他侧的封锁还是全局故障
+        runCatching {
+            DataSourceHealthChecker.lastHealthSummaryForDiagnostics()?.let {
+                lines += "健康检查(最近一次): $it"
+            }
+        }
+
         return lines.joinToString("\n")
     }
 
@@ -228,7 +306,16 @@ object LogDiagnostics {
         // 从前报告里没有，每次都要来回问，现在报告自己说
         if (envInfo.isNotBlank()) appendLine("环境: $envInfo")
         appendLine("崩溃报告: ${report.crashFileCount} 份" + if (report.crashFileCount > 0) "（下面列出最近 ${report.crashes.size} 份）" else "")
-        appendLine("运行日志: ${report.appLog?.let { "${it.lineCount} 行" } ?: "无"}")
+        val files = report.logFiles.ifEmpty { report.appLog?.let { listOf(LogFile("app.log", it)) } ?: emptyList() }
+        appendLine(
+            "运行日志: " + if (files.isEmpty()) "无"
+            else "${files.size} 份（新的在前），共 ${files.sumOf { it.content.lineCount }} 行"
+        )
+        if (report.omittedLogBytes > 0) {
+            appendLine(
+                "注意: 超过 ${EXPORT_MAX_BYTES / 1024 / 1024}MB 导出上限，已省略更旧内容 ${report.omittedLogBytes} 字节"
+            )
+        }
         report.appLogPath?.let { appendLine("日志路径: $it") }
         // 设备状态快照：排障第一秒就能看到「哪个源坏了、汇率多久没刷、最近一轮成了多少」，
         // 不必先去几百行日志里 grep（见 [collectDeviceState]）
@@ -276,34 +363,99 @@ object LogDiagnostics {
     }
 
     private fun appLogSectionOf(report: Report, tailLines: Int): String = buildString {
-        appendLine("--- 运行日志（app.log）---")
-        val log = report.appLog
-        when {
-            log == null -> {
-                appendLine("（app.log 不存在）")
-                appendLine()
-                appendLine("可能的原因：")
-                appendLine("1. 本次启动还没写够一批日志（AppLogger 每 2 秒 flush 一次，ERROR 级立即 flush）")
-                appendLine("2. 上次崩溃后进程被立刻杀死，守护线程没来得及落盘")
+        appendLine("--- 运行日志 ---")
+        val files = report.logFiles.ifEmpty {
+            report.appLog?.let { listOf(LogFile("app.log", it)) } ?: emptyList()
+        }
+        if (files.isEmpty()) {
+            appendLine("（app.log 不存在）")
+            appendLine()
+            appendLine("可能的原因：")
+            appendLine("1. 本次启动还没写够一批日志（AppLogger 每 2 秒 flush 一次，ERROR 级立即 flush）")
+            appendLine("2. 上次崩溃后进程被立刻杀死，守护线程没来得及落盘")
+            return@buildString
+        }
+        files.forEach { file ->
+            appendLine()
+            appendLine("########## ${file.name} ##########")
+            if (file.omittedBytes > 0) {
+                appendLine("（该文件超过导出上限，仅保留最新部分，省略 ${file.omittedBytes} 字节）")
             }
-
-            log.isBlank() -> appendLine("（app.log 是空的）")
-
-            else -> {
-                val total = log.lineCount
-                val (shown, dropped) = tail(log, tailLines)
-                if (dropped > 0) {
-                    appendLine("（全文 $total 行，这里只显示最后 $tailLines 行，前面 $dropped 行已省略；分享出去的是全文）")
-                    appendLine()
-                }
-                append(shown.trimEnd())
+            val total = file.content.lineCount
+            if (file.content.isBlank()) {
+                appendLine("（该文件是空的）")
+                return@forEach
             }
+            val (shown, dropped) = tail(file.content, tailLines)
+            if (dropped > 0) {
+                appendLine(
+                    "（全文 $total 行，这里只显示最后 $tailLines 行，前面 $dropped 行已省略；" +
+                        "分享出去的是未按行截断的内容，但仍受 12MB 上限）"
+                )
+            }
+            append(shown.trimEnd())
+            appendLine()
         }
     }
 
     /**
-     * 取文本尾部 [keep] 行，返回（保留的部分, 被丢掉的行数）。
+     * 一轮同步在日志里留下的痕迹。
      *
+     * [lines] 该轮相关行数；[failures]/[skips] 其中「失败/跳过」行数。
+     * 诊断界面先给出索引，用户点某一轮再过滤，比在几千行里翻找快得多。
+     */
+    data class RoundIndexEntry(
+        val roundId: Int,
+        val lines: Int,
+        val failures: Int,
+        val skips: Int
+    )
+
+    /**
+     * 从日志文本构建轮次索引（**纯函数**）。按轮次号升序。
+     *
+     * 只认统一前缀 `[轮次#N]`；非同步路径的 `#0` 同样列出，便于确认「前台查价也在刷日志」。
+     */
+    fun buildRoundIndex(logText: String): List<RoundIndexEntry> {
+        val counts = sortedMapOf<Int, IntArray>()
+        logText.lineSequence().forEach { line ->
+            val id = ROUND_ID_REGEX.find(line)?.groupValues?.get(1)?.toIntOrNull() ?: return@forEach
+            val c = counts.getOrPut(id) { intArrayOf(0, 0, 0) }
+            c[0]++
+            if (line.contains("] 失败:")) c[1]++
+            if (line.contains("] 跳过:")) c[2]++
+        }
+        return counts.map { (id, c) -> RoundIndexEntry(id, c[0], c[1], c[2]) }
+    }
+
+    /**
+     * 按级别 / 关键词 / 轮次过滤日志行（**纯函数**）。
+     *
+     * @param levels 级别集合（DEBUG/INFO/WARN/ERROR/API/DB）；空集合 = 不按级别过滤
+     * @param keyword 关键词（忽略大小写，子串匹配）；null/空白 = 不过滤
+     * @param roundId 只看某一轮；null = 全部
+     * @param maxLines 过滤后仍最多显示多少行（保留尾部，保最新）
+     */
+    fun filterLog(
+        text: String,
+        levels: Set<String> = emptySet(),
+        keyword: String? = null,
+        roundId: Int? = null,
+        maxLines: Int = DISPLAY_TAIL_LINES
+    ): List<String> {
+        val kw = keyword?.trim()?.takeIf { it.isNotEmpty() }
+        val filtered = text.lineSequence().filter { line ->
+            (levels.isEmpty() || levels.any { lv -> line.contains("[$lv/") }) &&
+                (kw == null || line.contains(kw, ignoreCase = true)) &&
+                (roundId == null ||
+                    ROUND_ID_REGEX.find(line)?.groupValues?.get(1)?.toIntOrNull() == roundId)
+        }.toList()
+        return if (maxLines <= 0 || filtered.size <= maxLines) filtered else filtered.takeLast(maxLines)
+    }
+
+    private val ROUND_ID_REGEX = Regex("\\[轮次#(\\d+)]")
+
+    /**
      * 用 [String.lineCount] 先数再切：直接 `lines().takeLast` 会先把整段切成
      * 几千个字符串对象，而这里经常要处理 5000 行的日志。
      */

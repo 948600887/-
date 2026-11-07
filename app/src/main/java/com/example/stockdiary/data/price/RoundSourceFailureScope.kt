@@ -35,7 +35,16 @@ class RoundSourceFailureScope(
     val reportedSources: MutableSet<String> = ConcurrentHashMap.newKeySet()
 ) : AbstractCoroutineContextElement(Key) {
 
-    companion object Key : CoroutineContext.Key<RoundSourceFailureScope>
+    companion object Key : CoroutineContext.Key<RoundSourceFailureScope> {
+        /**
+         * 当前协程所属的同步轮次号；非同步路径（没有该上下文）返回 0。
+         *
+         * 日志拼装用它统一 `[轮次#N]` 前缀，避免每个调用点各写一遍
+         * `currentCoroutineContext()[Key]?.roundId ?: 0`。
+         */
+        suspend fun currentRoundId(): Int =
+            kotlinx.coroutines.currentCoroutineContext()[Key]?.roundId ?: 0
+    }
 
     /** 该源本轮是否已由「批量预取整体 0 命中」记过一次源级失败。 */
     fun isAlreadyReported(sourceName: String): Boolean = sourceName in reportedSources

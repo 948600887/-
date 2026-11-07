@@ -5,8 +5,10 @@ import com.example.stockdiary.common.Result
 import com.example.stockdiary.database.FundNavCache
 import com.example.stockdiary.database.FundNavCacheDao
 import com.example.stockdiary.database.StockDatabase
+import com.example.stockdiary.data.price.RoundSourceFailureScope
 import com.example.stockdiary.data.price.SourceStats
 import com.example.stockdiary.utils.AppLogger
+import com.example.stockdiary.utils.FailureLogFormat
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -151,32 +153,47 @@ object FundAPI {
     internal val lightweightHostCooldown = HostCooldown(HOST_BACKOFF_MS)
     internal val legacyHostCooldown = HostCooldown(HOST_BACKOFF_MS)
 
-    /** 每轮同步开始时清零，与股票链路同节奏 */
-    internal fun resetSourceStats() {
-        lightweightStats.reset()
-        legacyStats.reset()
+    /** 兼容签名：清掉 roundId=0 的统计（非同步路径 / 既有单测） */
+    internal fun resetSourceStats() = resetSourceStats(0)
+
+    /** 每轮同步开始时清零**本轮**统计，与股票链路同节奏（不碰并发中的其它轮次） */
+    internal fun resetSourceStats(roundId: Int) {
+        lightweightStats.reset(roundId)
+        legacyStats.reset(roundId)
     }
 
+    /** 轮末释放该轮的统计桶，避免轮次字典无限增长（快照之后调用） */
+    internal fun discardSourceStats(roundId: Int) {
+        lightweightStats.discard(roundId)
+        legacyStats.discard(roundId)
+    }
+
+    /** 兼容签名：roundId=0 的统计快照 */
+    internal fun sourceStatsSnapshot(): List<SourceStats> = sourceStatsSnapshot(0)
+
     /**
-     * 基金两源的统计快照，顺序固定为「轻量 → legacy」，与回退链一致。
+     * 指定轮次的基金两源统计快照，顺序固定为「轻量 → legacy」，与回退链一致。
+     *
+     * 只读该轮（`roundId` 各一份计数）：手动轮与后台 Worker 并发时，不会把对方的
+     * 成功/失败数混进来，也不会因为对方 `reset` 而清空本轮。
      *
      * 轻量源已熔断且本轮确实走了 legacy 时，补一行 `degradedReason`；
      * 这时它没有真实请求，所以成功/失败计数保持 0（不用 0 假装「跑过」）。
      */
-    internal fun sourceStatsSnapshot(): List<SourceStats> {
-        val lightweight = lightweightStats.snapshot()
-        val legacy = legacyStats.snapshot()
+    internal fun sourceStatsSnapshot(roundId: Int): List<SourceStats> {
+        val lightweight = lightweightStats.snapshot(roundId)
+        val legacy = legacyStats.snapshot(roundId)
         return buildList {
-            if (lightweightStats.hasActivity()) {
+            if (lightweightStats.hasActivity(roundId)) {
                 add(lightweight)
-            } else if (lightweightSourceDisabled && legacyStats.hasActivity()) {
+            } else if (lightweightSourceDisabled && legacyStats.hasActivity(roundId)) {
                 add(
                     lightweight.copy(
                         degradedReason = "连续失败已熔断，本轮直接走 legacy"
                     )
                 )
             }
-            if (legacyStats.hasActivity()) add(legacy)
+            if (legacyStats.hasActivity(roundId)) add(legacy)
         }
     }
 
@@ -369,7 +386,13 @@ object FundAPI {
                 // 回退顺序：内存旧值 → 库里旧值 → 才认失败。
                 val stale = cachedEntry?.data ?: persisted?.toFundInfo()
                 if (stale != null) {
-                    AppLogger.w("基金数据刷新失败，回退旧缓存: $fundCode", TAG)
+                    AppLogger.w(
+                        FailureLogFormat.failureLine(
+                            FailureLogFormat.NO_ROUND, fundCode, "基金",
+                            "两源均失败，回退旧缓存（标记 isStale）"
+                        ),
+                        TAG
+                    )
                     // 关键：标记 isStale，让同步编排器按「缓存过期」跳过，
                     // 不把昨天的净值写回库并刷新 lastSyncTime（否则界面显示“刚刚更新”）。
                     return@withContext Result.success(
@@ -381,7 +404,12 @@ object FundAPI {
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            AppLogger.e("获取基金数据异常: ${e.message}", e, TAG)
+            AppLogger.w(
+                FailureLogFormat.failureLine(
+                    FailureLogFormat.NO_ROUND, fundCode, "基金", "获取基金数据异常: ${e.message}"
+                ),
+                TAG
+            )
             Result.failure(e)
         }
     }
@@ -520,16 +548,29 @@ object FundAPI {
      * （每条回退都打 [AppLogger.w]，带上基金码与原因，便于线上定位）。
      */
     internal suspend fun fetchFundInfo(fundCode: String): FundInfo? {
+        // 一轮只取一次轮次上下文：下面每条统计/日志都用同一个 roundId，
+        // 避免逐条记录各查一次上下文（也避免同一函数内出现两个不同的轮次号）
+        val roundId = RoundSourceFailureScope.currentRoundId()
         val now = System.currentTimeMillis()
         when {
             lightweightSourceDisabled -> {
                 // 没有真实请求，只记录「本轮为什么没走轻量源」；失败计数保持 0
-                lightweightStats.markDegraded("连续失败已熔断，本轮直接走 legacy")
+                lightweightStats.markDegraded(roundId, "连续失败已熔断，本轮直接走 legacy")
             }
             lightweightHostCooldown.isCooling(now) -> {
                 // 60s 主机退避：冷却期内直接跳过，不发请求，也不算一次失败
-                lightweightStats.markDegraded(lightweightHostCooldown.degradedReason())
-                AppLogger.w("轻量净值源退避中，跳过本次请求: $fundCode", TAG)
+                lightweightStats.markDegraded(roundId, lightweightHostCooldown.degradedReason())
+                lightweightStats.recordSkip(
+                    roundId,
+                    "主机退避中（${lightweightHostCooldown.degradedReason()}），跳过本次请求"
+                )
+                AppLogger.i(
+                    FailureLogFormat.skipLine(
+                        roundId, fundCode, SOURCE_LIGHTWEIGHT,
+                        "主机退避中（${lightweightHostCooldown.degradedReason()}），跳过本次请求"
+                    ),
+                    TAG
+                )
             }
             else -> {
                 // 只测耗时，不改回退/熔断：源函数内部已按 HTTP 状态/解析结果分类计数
@@ -549,15 +590,23 @@ object FundAPI {
                             lightweightHostCooldown.start("主机不可达（DNS 解析失败）")
                     }
                     lightweightStats.recordSourceFailure(
+                        roundId,
                         "网络异常：${e.message?.take(40) ?: e.javaClass.simpleName}"
                     )
-                    AppLogger.w("轻量净值源异常，回退旧数据源: $fundCode ${e.message}", TAG)
+                    AppLogger.w(
+                        FailureLogFormat.failureLine(
+                            roundId, fundCode, SOURCE_LIGHTWEIGHT,
+                            "网络异常（回退旧数据源）: ${e.message}",
+                            System.currentTimeMillis() - lightweightStartedAt
+                        ),
+                        TAG
+                    )
                     null
                 } finally {
-                    lightweightStats.addDuration(System.currentTimeMillis() - lightweightStartedAt)
+                    lightweightStats.addDuration(roundId, System.currentTimeMillis() - lightweightStartedAt)
                 }
                 if (lightweight != null) {
-                    lightweightStats.recordSuccess()
+                    lightweightStats.recordSuccess(roundId = roundId)
                     lightweightFailureWindow.recordSuccess()
                     return lightweight
                 }
@@ -571,8 +620,18 @@ object FundAPI {
         val legacyNow = System.currentTimeMillis()
         if (legacyHostCooldown.isCooling(legacyNow)) {
             // legacy 主机与轻量源主机互不影响；这里跳过后由上层按「取价失败」处理
-            legacyStats.markDegraded(legacyHostCooldown.degradedReason())
-            AppLogger.w("legacy 净值源退避中，跳过本次请求: $fundCode", TAG)
+            legacyStats.markDegraded(roundId, legacyHostCooldown.degradedReason())
+            legacyStats.recordSkip(
+                roundId,
+                "主机退避中（${legacyHostCooldown.degradedReason()}），跳过本次请求"
+            )
+            AppLogger.i(
+                FailureLogFormat.skipLine(
+                    roundId, fundCode, SOURCE_LEGACY,
+                    "主机退避中（${legacyHostCooldown.degradedReason()}），跳过本次请求"
+                ),
+                TAG
+            )
             return null
         }
 
@@ -586,14 +645,22 @@ object FundAPI {
                 legacyHostCooldown.start("主机不可达（DNS 解析失败）")
             }
             legacyStats.recordSourceFailure(
+                roundId,
                 "网络异常：${e.message?.take(40) ?: e.javaClass.simpleName}"
             )
-            AppLogger.w("legacy 净值源异常: $fundCode ${e.message}", TAG)
+            AppLogger.w(
+                FailureLogFormat.failureLine(
+                    roundId, fundCode, SOURCE_LEGACY,
+                    "网络异常: ${e.message}",
+                    System.currentTimeMillis() - legacyStartedAt
+                ),
+                TAG
+            )
             null
         } finally {
-            legacyStats.addDuration(System.currentTimeMillis() - legacyStartedAt)
+            legacyStats.addDuration(roundId, System.currentTimeMillis() - legacyStartedAt)
         }
-        if (legacy != null) legacyStats.recordSuccess()
+        if (legacy != null) legacyStats.recordSuccess(roundId = roundId)
         return legacy
     }
 
@@ -648,6 +715,8 @@ object FundAPI {
      */
     private suspend fun fetchFundInfoLightweight(fundCode: String): FundInfo? {
         return withContext(Dispatchers.IO) {
+            val startedAt = System.currentTimeMillis()
+            val roundId = RoundSourceFailureScope.currentRoundId()
             try {
                 val url = "$LIGHTWEIGHT_NAV_URL?FCODE=$fundCode" +
                     "&deviceid=Wap&plat=Wap&product=EFund&version=2.0.0"
@@ -661,7 +730,7 @@ object FundAPI {
                 val response = client.newCall(request).execute()
                 response.use {
                     if (!it.isSuccessful) {
-                        lightweightStats.recordSourceFailure(httpFailureReason(it.code))
+                        lightweightStats.recordSourceFailure(roundId, httpFailureReason(it.code))
                         val trace = currentCoroutineContext()[NavFetchTrace]
                         if (it.code == 514 || it.code == 429) {
                             trace?.failureKind = NavFailureKind.RATE_LIMITED
@@ -672,7 +741,11 @@ object FundAPI {
                             trace?.failureKind = NavFailureKind.SOURCE
                         }
                         AppLogger.w(
-                            "轻量净值源 HTTP ${it.code}，回退旧数据源: $fundCode",
+                            FailureLogFormat.failureLine(
+                                roundId, fundCode, SOURCE_LIGHTWEIGHT,
+                                httpFailureReason(it.code) + "，回退旧数据源",
+                                System.currentTimeMillis() - startedAt
+                            ),
                             TAG
                         )
                         return@withContext null
@@ -682,10 +755,15 @@ object FundAPI {
                     val info = FundNavParser.parseBasicInfo(body, fundCode)
                     if (info == null) {
                         // HTTP 成功但这条代码没有可解析数据：算符号级缺口，不是源故障
-                        lightweightStats.recordSymbolFailure()
+                        lightweightStats.recordSymbolFailure(roundId = roundId)
+                        lightweightStats.recordSkip(roundId, "返回无法解析的内容")
                         currentCoroutineContext()[NavFetchTrace]?.failureKind = NavFailureKind.SYMBOL
-                        AppLogger.w(
-                            "轻量净值源返回无法解析的内容，回退旧数据源: $fundCode",
+                        AppLogger.i(
+                            FailureLogFormat.skipLine(
+                                roundId, fundCode, SOURCE_LIGHTWEIGHT,
+                                "返回无法解析的内容，回退旧数据源",
+                                System.currentTimeMillis() - startedAt
+                            ),
                             TAG
                         )
                     }
@@ -701,9 +779,17 @@ object FundAPI {
                         lightweightHostCooldown.start("主机不可达（DNS 解析失败）")
                 }
                 lightweightStats.recordSourceFailure(
+                    roundId,
                     "网络异常：${e.message?.take(40) ?: e.javaClass.simpleName}"
                 )
-                AppLogger.w("轻量净值源请求失败，回退旧数据源: $fundCode ${e.message}", TAG)
+                AppLogger.w(
+                    FailureLogFormat.failureLine(
+                        roundId, fundCode, SOURCE_LIGHTWEIGHT,
+                        "网络异常（回退旧数据源）: ${e.message?.take(40) ?: e.javaClass.simpleName}",
+                        System.currentTimeMillis() - startedAt
+                    ),
+                    TAG
+                )
                 null
             }
         }
@@ -716,6 +802,8 @@ object FundAPI {
      */
     private suspend fun fetchFundInfoLegacy(fundCode: String): FundInfo? {
         return withContext(Dispatchers.IO) {
+            val startedAt = System.currentTimeMillis()
+            val roundId = RoundSourceFailureScope.currentRoundId()
             try {
                 val url = "$LEGACY_BASE_URL/${fundCode}.js?v=${System.currentTimeMillis()}"
                 AppLogger.apiUrl("GET", url, TAG)
@@ -729,18 +817,33 @@ object FundAPI {
                 val response = client.newCall(request).execute()
                 response.use {
                     if (!it.isSuccessful) {
-                        legacyStats.recordSourceFailure(httpFailureReason(it.code))
+                        legacyStats.recordSourceFailure(roundId, httpFailureReason(it.code))
                         // legacy 主机独立退避：不影响轻量源主机
                         noteRateLimit(legacyHostCooldown, it.code)
-                        AppLogger.e("基金请求失败: HTTP ${it.code}", tag = TAG)
+                        // legacy 与轻量源同级：单只基金取不到是「本轮降级、下次可自愈」，
+                        // 不是需要人介入的 ERROR（旧实现这里用 E，与轻量源的 W 口径不一致）
+                        AppLogger.w(
+                            FailureLogFormat.failureLine(
+                                roundId, fundCode, SOURCE_LEGACY,
+                                httpFailureReason(it.code),
+                                System.currentTimeMillis() - startedAt
+                            ),
+                            TAG
+                        )
                         return@withContext null
                     }
 
                     val body = it.body?.string()
                     if (body == null || body.length < 100) {
                         // 200 但响应过短：通常是反爬/网关拦截，归为源级响应异常
-                        legacyStats.recordSourceFailure("响应过短")
-                        AppLogger.e("基金响应数据过短", tag = TAG)
+                        legacyStats.recordSourceFailure(roundId, "响应过短")
+                        AppLogger.w(
+                            FailureLogFormat.failureLine(
+                                roundId, fundCode, SOURCE_LEGACY, "响应过短（疑似反爬/网关拦截）",
+                                System.currentTimeMillis() - startedAt
+                            ),
+                            TAG
+                        )
                         return@withContext null
                     }
 
@@ -748,9 +851,16 @@ object FundAPI {
                     val code = FundDataParser.extractJsVar(body, "fS_code") ?: fundCode
 
                     if (name.isEmpty()) {
-                        // 文件正常但没这个代码：符号级缺口
-                        legacyStats.recordSymbolFailure()
-                        AppLogger.e("未找到基金名称", tag = TAG)
+                        // 文件正常但没这个代码：符号级缺口，属「跳过」而非降级
+                        legacyStats.recordSymbolFailure(roundId = roundId)
+                        legacyStats.recordSkip(roundId, "响应里没有该基金代码")
+                        AppLogger.i(
+                            FailureLogFormat.skipLine(
+                                roundId, fundCode, SOURCE_LEGACY, "响应里没有该基金代码，换下一源",
+                                System.currentTimeMillis() - startedAt
+                            ),
+                            TAG
+                        )
                         return@withContext null
                     }
 
@@ -760,8 +870,15 @@ object FundAPI {
                     // 且因为没有明显报错用户很难察觉，所以这里宁可不返回这条数据（触发下一数据源）。
                     if (nawData.naw <= 0.0) {
                         // 解析出 0 是数据质量问题，不是「没有这个代码」
-                        legacyStats.recordSourceFailure("净值无效")
-                        AppLogger.w("基金净值无效，丢弃该条: $code naw=${nawData.naw}", tag = TAG)
+                        legacyStats.recordSourceFailure(roundId, "净值无效")
+                        AppLogger.w(
+                            FailureLogFormat.failureLine(
+                                roundId, fundCode, SOURCE_LEGACY,
+                                "净值无效（naw=${nawData.naw}），丢弃该条",
+                                System.currentTimeMillis() - startedAt
+                            ),
+                            TAG
+                        )
                         return@withContext null
                     }
 
@@ -782,9 +899,16 @@ object FundAPI {
                     legacyHostCooldown.start("主机不可达（DNS 解析失败）")
                 }
                 legacyStats.recordSourceFailure(
+                    roundId,
                     "网络异常：${e.message?.take(40) ?: e.javaClass.simpleName}"
                 )
-                AppLogger.e("获取基金信息失败: ${e.message}", e, TAG)
+                AppLogger.w(
+                    FailureLogFormat.failureLine(
+                        roundId, fundCode, SOURCE_LEGACY, "网络异常: ${e.message}",
+                        System.currentTimeMillis() - startedAt
+                    ),
+                    TAG
+                )
                 null
             }
         }

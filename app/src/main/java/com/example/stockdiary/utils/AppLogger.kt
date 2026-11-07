@@ -95,6 +95,22 @@ object AppLogger {
         if (isDebug) Log.w(tag, message)
         queueLog("WARN", tag, message)
     }
+
+    /**
+     * 带异常栈的 WARN。
+     *
+     * 单次请求失败按语义是「已降级、可自愈」（W），但排查时仍然需要栈；
+     * 从前只能降级成 e 才带栈，级别口径就被迫跑偏。
+     */
+    fun w(message: String, throwable: Throwable?, tag: String = LOG_TAG) {
+        val fullMessage = if (throwable != null) {
+            "$message\n${throwable.stackTraceToString()}"
+        } else {
+            message
+        }
+        if (isDebug) Log.w(tag, fullMessage)
+        queueLog("WARN", tag, fullMessage)
+    }
     
     fun e(message: String, throwable: Throwable? = null, tag: String = LOG_TAG) {
         val fullMessage = if (throwable != null) {
@@ -259,6 +275,8 @@ object AppLogger {
             }
 
             synchronized(fileLock) {
+                // 超过 8MB 先轮转（归档保留 4 份），再追加本批日志
+                prepareLogFile(logFile)
                 try {
                     FileWriter(logFile, true).use { fileWriter ->
                         BufferedWriter(fileWriter).use { writer ->
@@ -278,7 +296,6 @@ object AppLogger {
                     // 写失败（磁盘满/文件被占用）也排一次重试：否则回队的行要等下一条日志才再尝试
                     scheduleFlushDelayed()
                 }
-                if (written > 0) trimLogFile(logFile)
             }
             return true
         } catch (e: CancellationException) {
@@ -313,33 +330,35 @@ object AppLogger {
     }
     
     private fun getLogFileSafe(): File? {
-        return try {
-            val context = appContext ?: return null
-            
-            val dir = context.getExternalFilesDir(null)
-                ?.let { File(it, "GoldVault") }
-                ?: return null
-            
-            if (!dir.exists()) {
-                if (!dir.mkdirs()) {
-                    return null
-                }
-            }
-            File(dir, "app.log")
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            null
-        }
+        val dir = getLogDirSafe() ?: return null
+        return logFileAt(dir, 0)
     }
     
+    /** 单份日志文件上限 8MB：超过即轮转，保证单个文件不会无限膨胀 */
+    internal const val MAX_FILE_BYTES = 8L * 1024 * 1024
+
+    /** 保留份数：app.log + app.log.1/.2/.3，合计磁盘占用上限 32MB */
+    internal const val KEEP_LOG_FILES = 4
+
+    /**
+     * 单份文件的行数兜底。
+     *
+     * 字节上限管不住「行很短」的日志（纯坐标/时间戳行可能只有十几字节，8MB 能装几十万行），
+     * 界面过滤、导出、grep 都会被行数拖慢。轮转时把刚归档那份裁到最后 [MAX_LOG_LINES] 行：
+     * 归档文件已不再追加，裁一次即可，不会造成持续写放大。
+     */
+    internal const val MAX_LOG_LINES = 80_000
+
+    /** 活跃日志文件名（其余归档为 app.log.1 ... app.log.N） */
+    private const val LOG_FILE_NAME = "app.log"
+
     /**
      * 截断预判的字节下限。
      *
-     * **必须大于「5000 行」的实际体积**（带时间戳/tag 的日志行约 90~130 字节，
-     * 5000 行约 450~650KB）。从前取 250KB：裁完仍是 400KB+、高于下限，于是**每次**
-     * flush 都全量读 + 重写整个文件（约 800KB I/O / 2 秒），把「廉价预判」做成了写放大。
-     * 取 1MB：文件长到 1MB 才裁一次，裁到约 500KB，之后有约 500KB 的余量再触发。
+     * **必须大于「轮转阈值内的常规体积」**。从前取 250KB：裁完仍是 400KB+、高于下限，于是
+     * **每次** flush 都全量读 + 重写整个文件（约 800KB I/O / 2 秒），把「廉价预判」做成了写放大。
+     * 现在行数兜底只在轮转时做（见 [prepareLogFile]），此下限只用于「轮转失败时就地裁剪」的
+     * 退化路径，取一个远高于常规文件大小的值，避免退化路径上也反复重写。
      * file.length() 只是一次 stat，微秒级。
      */
     private const val TRIM_CHECK_FLOOR_BYTES = 1_000_000L
@@ -363,10 +382,10 @@ object AppLogger {
         return if (window.isEmpty()) "" else window.joinToString("\n", postfix = "\n")
     }
 
-    private fun trimLogFile(file: File, maxLines: Int = 5000) {
+    private fun trimLogFile(file: File, maxLines: Int = MAX_LOG_LINES, force: Boolean = false) {
         try {
             // 廉价预判：没超字节下限直接返回，一次内容读都不做
-            if (file.length() < TRIM_CHECK_FLOOR_BYTES) return
+            if (!force && file.length() < TRIM_CHECK_FLOOR_BYTES) return
             // 流式单遍截断：useLines 逐行喂给 trimToLastLines，只保留最后 maxLines 行，
             // 内存峰值=maxLines 行，避免先数行再整段读两遍。
             val kept = file.useLines { trimToLastLines(it, maxLines) }
@@ -375,6 +394,100 @@ object AppLogger {
             throw e
         } catch (e: Exception) {
             // 忽略
+        }
+    }
+
+    /**
+     * 写盘前检查活跃文件是否超出上限，超了就轮转。
+     *
+     * **必须在 [fileLock] 内调用**，且只能由后台 writer 或崩溃路径的同步 flush 触发。
+     *
+     * 轮转顺序：删除最旧的 `app.log.3` → `.2`→`.3` → `.1`→`.2` → `app.log`→`.1`，
+     * 随后把归档的 `.1` 裁到最后 [MAX_LOG_LINES] 行（归档文件不再追加，裁一次即可）。
+     * 轮转失败（例如文件被占用无法 rename）时就地裁剪活跃文件，保证不会无限增长。
+     */
+    internal fun prepareLogFile(logFile: File) {
+        if (logFile.length() < MAX_FILE_BYTES) return
+        if (rotateLogFiles(logFile)) return
+        // 退化路径：轮转失败时就地保留尾部行数，至少不至于涨到磁盘满
+        trimLogFile(logFile, MAX_LOG_LINES, force = true)
+    }
+
+    /**
+     * 轮转日志文件：`app.log` → `app.log.1`，其余依次后移，最旧的丢弃。
+     *
+     * 刻意做成「入参只有 File」的纯磁盘操作，便于 JVM 单测（无需 Context）。
+     * @return true = 至少完成了从 `app.log` 到 `app.log.1` 的改名
+     */
+    internal fun rotateLogFiles(logFile: File): Boolean {
+        val dir = logFile.parentFile ?: return false
+        return try {
+            // 先删最旧的一份（保留 KEEP_LOG_FILES 份，含活跃文件）
+            logFileAt(dir, KEEP_LOG_FILES - 1).delete()
+            // 由旧到新依次后移：.2→.3、.1→.2
+            for (index in KEEP_LOG_FILES - 2 downTo 1) {
+                val from = logFileAt(dir, index)
+                if (from.exists()) from.renameTo(logFileAt(dir, index + 1))
+            }
+            val rotated = logFile.renameTo(logFileAt(dir, 1))
+            if (rotated) {
+                // 刚归档的这份裁到行数上限：归档后不再追加，不存在持续写放大
+                trimArchivedLog(logFileAt(dir, 1))
+            }
+            rotated
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    /**
+     * 归档文件的行数裁剪。
+     *
+     * 与 [trimLogFile] 的区别：归档文件已是「历史负担」，无论大小都按行数裁一次，
+     * 否则行很短的日志会留下几十万行，拖慢诊断界面与导出。
+     */
+    private fun trimArchivedLog(file: File) {
+        if (!file.exists()) return
+        try {
+            // 行数不超上限就完全不动：先读完再写会让 8MB 文件白白多一次 I/O。
+            // 计数与写回必须在两次独立的读关闭之后（同一文件同时读+写，Windows 上会失败）
+            val over = file.useLines { lines -> lines.take(MAX_LOG_LINES + 1).count() > MAX_LOG_LINES }
+            if (!over) return
+            val kept = file.useLines { trimToLastLines(it, MAX_LOG_LINES) }
+            file.writeText(kept)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // 裁剪失败不影响归档文件本身可用
+        }
+    }
+
+    /** `index=0` 是活跃文件 `app.log`，`index=1..3` 是归档文件 */
+    internal fun logFileAt(dir: File, index: Int): File =
+        File(dir, if (index == 0) LOG_FILE_NAME else "$LOG_FILE_NAME.$index")
+
+    /**
+     * 磁盘上现有的全部日志文件，**新的在前**（活跃文件 → .1 → .2 → .3）。
+     *
+     * 诊断导出、界面浏览都要跨文件读：只读 app.log 会丢掉崩溃前刚轮转出去的那份。
+     */
+    fun getLogFiles(): List<File> {
+        val dir = getLogDirSafe() ?: return emptyList()
+        return (0 until KEEP_LOG_FILES).map { logFileAt(dir, it) }.filter { it.exists() }
+    }
+
+    private fun getLogDirSafe(): File? {
+        return try {
+            val context = appContext ?: return null
+            val dir = context.getExternalFilesDir(null)?.let { File(it, "GoldVault") } ?: return null
+            if (!dir.exists() && !dir.mkdirs()) return null
+            dir
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            null
         }
     }
     
@@ -392,8 +505,11 @@ object AppLogger {
                 try {
                     synchronized(queueLock) { logQueue.clear() }
                     // 文件写入同样要拿 fileLock：崩溃路径的 forceFlush 不走这个执行器，
-                    // 两者若只靠单线程排队串行，forceFlush 会和这里的 writeText("") 交错
-                    synchronized(fileLock) { getLogFileSafe()?.writeText("") }
+                    // 两者若只靠单线程排队串行，forceFlush 会和这里的删除交错
+                    // 归档文件一并清掉：只清 app.log 会让用户以为「清空」了、分享里却还带着旧轮次日志
+                    synchronized(fileLock) {
+                        getLogFiles().forEach { it.delete() }
+                    }
                 } catch (e: Exception) {
                     Log.w(LOG_TAG, "清空日志失败", e)
                 }

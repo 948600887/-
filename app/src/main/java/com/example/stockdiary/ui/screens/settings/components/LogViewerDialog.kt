@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.verticalScroll
@@ -29,6 +30,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -87,6 +89,8 @@ fun LogViewerDialog(onDismiss: () -> Unit) {
     var message by remember { mutableStateOf<String?>(null) }
     var askClear by remember { mutableStateOf(false) }
     var levelFilter by remember { mutableStateOf(LogLevelFilter.ALL) }
+    var keyword by remember { mutableStateOf("") }
+    var roundFilter by remember { mutableStateOf<Int?>(null) }
 
     fun reload() {
         scope.launch {
@@ -117,6 +121,11 @@ fun LogViewerDialog(onDismiss: () -> Unit) {
     }
 
     LaunchedEffect(Unit) { reload() }
+
+    // 轮次索引基于原始日志（多份轮转文件拼起来）：先给「哪一轮有多少失败/跳过」，
+    // 再让用户点某一轮过滤，比在几千行里 grep 快得多
+    val rawLog = report?.logFiles?.joinToString("\n") { it.content } ?: report?.appLog.orEmpty()
+    val roundIndex = remember(rawLog) { LogDiagnostics.buildRoundIndex(rawLog) }
 
     Dialog(
         onDismissRequest = onDismiss,
@@ -178,7 +187,7 @@ fun LogViewerDialog(onDismiss: () -> Unit) {
                         ) {
                             Icon(Icons.Default.Share, null, modifier = Modifier.height(18.dp))
                             Spacer(Modifier.width(8.dp))
-                            Text("分享给我排查（全文，不截断）")
+                            Text("分享给我排查（完整日志，≤12MB）")
                         }
                     }
                 }
@@ -199,6 +208,19 @@ fun LogViewerDialog(onDismiss: () -> Unit) {
                             )
                         }
                     }
+                    // 关键词：定位「某只票/某个源」；轮次索引：先看本轮有多少失败/跳过，再点进去
+                    OutlinedTextField(
+                        value = keyword,
+                        onValueChange = { keyword = it },
+                        singleLine = true,
+                        placeholder = { Text("关键词：股票代码 / 数据源 / 原因", fontSize = 12.sp) },
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp)
+                    )
+                    RoundIndexRow(
+                        entries = roundIndex,
+                        selected = roundFilter,
+                        onSelect = { roundFilter = it }
+                    )
                     Box(modifier = Modifier.fillMaxSize().weight(1f)) {
                         when {
                             loading || text == null -> {
@@ -209,12 +231,12 @@ fun LogViewerDialog(onDismiss: () -> Unit) {
                                 // 用 remember 缓存解析结果：split + 逐行正则过滤是 O(行数) 的全量扫描，
                                 // 放在组合期直接跑的话，每次重组（切 chip、loading 变化、父级刷状态）
                                 // 都会把几千行重扫一遍。只有文本或过滤级别变化时才需要重算。
-                                val visibleLines = remember(text, levelFilter) {
-                                    val allLines = text.orEmpty().split('\n')
-                                    if (levelFilter == LogLevelFilter.ALL) {
-                                        allLines
-                                    } else {
-                                        allLines.filter { isLogLineVisible(it, levelFilter) }
+                                val visibleLines = remember(text, levelFilter, keyword, roundFilter) {
+                                    val kw = keyword.trim()
+                                    text.orEmpty().split('\n').filter { line ->
+                                        isLogLineVisible(line, levelFilter) &&
+                                            (kw.isEmpty() || line.contains(kw, ignoreCase = true)) &&
+                                            (roundFilter == null || roundIdOf(line) == roundFilter)
                                     }
                                 }
                                 // 用 LazyColumn 替代单个巨型 Text：只布局可见项，
@@ -249,7 +271,7 @@ fun LogViewerDialog(onDismiss: () -> Unit) {
             title = { Text("清空日志？", fontWeight = FontWeight.Bold) },
             text = {
                 Text(
-                    "会删掉 app.log 与全部崩溃报告，删了就没了。\n\n" +
+                    "会删掉全部运行日志（含轮转归档 app.log.1~.3）与全部崩溃报告，删了就没了。\n\n" +
                         "如果只是想把这次闪退的线索留下来，应该先点「分享」再清。"
                 )
             },
@@ -284,6 +306,45 @@ fun LogViewerDialog(onDismiss: () -> Unit) {
 private val LOG_LEVEL_PRIORITY = mapOf(
     "DEBUG" to 0, "INFO" to 1, "API" to 1, "DB" to 1, "WARN" to 2, "ERROR" to 3
 )
+
+/**
+ * 轮次索引条：`全部轮次` + 每个 roundId 的 `失败 N / 跳过 N`。
+ *
+ * 日志里最多几千行、十几轮，横向 chip 比下拉框更快；点已选中的轮次可取消过滤。
+ */
+@Composable
+private fun RoundIndexRow(
+    entries: List<LogDiagnostics.RoundIndexEntry>,
+    selected: Int?,
+    onSelect: (Int?) -> Unit
+) {
+    if (entries.isEmpty()) return
+    LazyRow(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        item {
+            FilterChip(
+                selected = selected == null,
+                onClick = { onSelect(null) },
+                label = { Text("全部轮次") }
+            )
+        }
+        items(entries, key = { it.roundId }) { entry ->
+            FilterChip(
+                selected = selected == entry.roundId,
+                onClick = { onSelect(if (selected == entry.roundId) null else entry.roundId) },
+                label = { Text("#${entry.roundId} 失败${entry.failures}/跳过${entry.skips}") }
+            )
+        }
+    }
+}
+
+/** 取日志行里的轮次号；没有 `[轮次#N]` 前缀时返回 null（非同步路径的日志） */
+private fun roundIdOf(line: String): Int? =
+    LOG_LINE_ROUND_REGEX.find(line)?.groupValues?.get(1)?.toIntOrNull()
+
+private val LOG_LINE_ROUND_REGEX = Regex("\\[轮次#(\\d+)]")
 
 /** 匹配 app.log 行的 `[LEVEL/TAG]` 前缀，提取 LEVEL。 */
 private val LOG_LINE_LEVEL_REGEX = Regex("^\\[[^\\]]*\\]\\[([A-Z]+)/")

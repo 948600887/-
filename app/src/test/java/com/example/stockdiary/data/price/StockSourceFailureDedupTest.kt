@@ -115,7 +115,7 @@ class StockSourceFailureDedupTest {
         assertEquals(
             "轮次末统计同样只该显示 1 次源级失败",
             1,
-            manager.sourceStatsSnapshot().first { it.source == ApiManager.API_SINA }.sourceLevelFailure
+            manager.sourceStatsSnapshot(1).first { it.source == ApiManager.API_SINA }.sourceLevelFailure
         )
         assertEquals(
             "单波绝不能误熔",

@@ -1,7 +1,9 @@
 package com.example.stockdiary.network
 
 import com.example.stockdiary.common.Result
+import com.example.stockdiary.data.price.RoundSourceFailureScope
 import com.example.stockdiary.utils.AppLogger
+import com.example.stockdiary.utils.FailureLogFormat
 import com.example.stockdiary.utils.StockCodeManager
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -29,6 +31,7 @@ interface StockAPI {
  * 且测试全绿也看不出来）。
  */
 object TencentStockAPI : StockAPI {
+    private const val TAG = "TencentStockAPI"
     private const val BASE_URL = "https://qt.gtimg.cn/q="
 
     /**
@@ -52,10 +55,12 @@ object TencentStockAPI : StockAPI {
     
     override suspend fun getStockData(stockCode: String): Result<SinaStockData> {
         return withContext(Dispatchers.IO) {
+            val startedAt = System.currentTimeMillis()
+            val roundId = RoundSourceFailureScope.currentRoundId()
             try {
                 val formattedCode = formatStockCode(stockCode)
                 val url = "${BASE_URL}$formattedCode"
-                AppLogger.apiUrl("GET", url, "TencentStockAPI")
+                AppLogger.apiUrl("GET", url, TAG)
                 
                 val request = Request.Builder()
                     .url(url)
@@ -65,37 +70,69 @@ object TencentStockAPI : StockAPI {
                 response.use {
                     if (!it.isSuccessful) {
                         val errorMsg = "API响应错误: ${it.code} ${it.message}"
-                        AppLogger.e(errorMsg, tag = "TencentStockAPI")
+                        AppLogger.e(
+                            FailureLogFormat.failureLine(
+                                roundId, formattedCode, TAG, errorMsg,
+                                System.currentTimeMillis() - startedAt
+                            ),
+                            tag = TAG
+                        )
                         return@withContext Result.failure(IOException(errorMsg))
                     }
 
                     val responseBody = it.body
                     if (responseBody == null) {
-                        AppLogger.e("API返回空数据", tag = "TencentStockAPI")
+                        AppLogger.e(
+                            FailureLogFormat.failureLine(
+                                roundId, formattedCode, TAG, "API返回空数据",
+                                System.currentTimeMillis() - startedAt
+                            ),
+                            tag = TAG
+                        )
                         return@withContext Result.failure(IOException("API返回空数据"))
                     }
 
                     val text = responseBody.use { body -> body.string() }
-                    AppLogger.d("响应长度: ${text.length}", "TencentStockAPI")
+                    AppLogger.d("响应长度: ${text.length} | $formattedCode", TAG)
 
                     val suspended = booleanArrayOf(false)
                     val stockData = parseTencentData(text, formattedCode, suspended)
                     if (stockData != null) {
-                        AppLogger.d("成功解析股票: ${stockData.name} (${stockData.code}), 价格: ${stockData.price}", "TencentStockAPI")
+                        AppLogger.d("成功解析股票: ${stockData.name} (${stockData.code}), 价格: ${stockData.price}", TAG)
                         return@withContext Result.success(stockData)
                     } else if (suspended[0]) {
                         // 响应里有这只票但报价无效＝停牌。这不是数据源故障，
                         // 不能走「未获取到股票数据」那条会被累计失败次数的路径。
+                        AppLogger.i(
+                            FailureLogFormat.skipLine(
+                                roundId, formattedCode, TAG, "无有效报价（疑似停牌）",
+                                System.currentTimeMillis() - startedAt
+                            ),
+                            tag = TAG
+                        )
                         return@withContext Result.failure(QuoteSuspendedException(formattedCode))
                     } else {
-                        AppLogger.e("未获取到股票数据，请检查股票代码", tag = "TencentStockAPI")
+                        AppLogger.e(
+                            FailureLogFormat.failureLine(
+                                roundId, formattedCode, TAG, "未获取到股票数据，请检查股票代码",
+                                System.currentTimeMillis() - startedAt
+                            ),
+                            tag = TAG
+                        )
                         return@withContext Result.failure(IOException("未获取到股票数据，请检查股票代码"))
                     }
                 }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                AppLogger.e("异常: ${e.message}", e, "TencentStockAPI")
+                AppLogger.e(
+                    FailureLogFormat.failureLine(
+                        roundId, stockCode, TAG, e.message,
+                        System.currentTimeMillis() - startedAt
+                    ),
+                    e,
+                    TAG
+                )
                 Result.failure(e)
             }
         }
@@ -136,7 +173,7 @@ object TencentStockAPI : StockAPI {
                 val dataString = matchResult.groupValues[2]
                 val fields = dataString.split("~")
                 
-                AppLogger.d("股票代码: $code, 字段数量: ${fields.size}", "TencentStockAPI")
+                AppLogger.d("股票代码: $code, 字段数量: ${fields.size}", TAG)
 
                 // 字段数门槛必须覆盖**我们实际直接取的最大下标**（37 = 成交额）。
                 // 原门槛是 >= 11，短于 37 的响应会带着有效价格（下标 3/4）一路走到
@@ -172,7 +209,7 @@ object TencentStockAPI : StockAPI {
                     val effectivePrice = if (hasValidPrice) price else prevClose
                     if (effectivePrice <= 0) {
                         suspended[0] = true
-                        AppLogger.w("无有效报价（疑似停牌）: $code（现价=$price, 昨收=$prevClose）", "TencentStockAPI")
+                        // 停牌只在调用方落一行（带轮次/代码/源/耗时），这里不重复打印
                         return null
                     }
 
@@ -201,15 +238,15 @@ object TencentStockAPI : StockAPI {
                         amplitude = amplitude
                     )
                 } else {
-                    AppLogger.d("字段数量不足: ${fields.size}", "TencentStockAPI")
+                    AppLogger.d("字段数量不足: ${fields.size} | $stockCode", TAG)
                 }
             } else {
-                AppLogger.d("未匹配到股票数据", "TencentStockAPI")
+                AppLogger.d("未匹配到股票数据: $stockCode", TAG)
             }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            AppLogger.e("解析错误: ${e.message}", e, "TencentStockAPI")
+            AppLogger.e("解析错误: $stockCode ${e.message}", e, TAG)
         }
         return null
     }

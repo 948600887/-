@@ -6,6 +6,8 @@ import java.net.URLDecoder
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
+import com.example.stockdiary.data.price.RoundSourceFailureScope
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
@@ -492,6 +494,54 @@ class UnifiedPriceServiceCryptoPrewarmTest {
         assertEquals(1, stat.batchFailedShards)
         // 5xx 不喂熔断器，也不应产生「已熔断」的降级原因
         assertNull(stat.degradedReason)
+    }
+
+    @Test
+    fun `并发轮次隔离_加密批量的统计按roundId分开且reset只清本轮`() = runBlocking {
+        // 回归：cryptoStats 从前是进程级单份、每轮开头 reset()。手动轮与后台 Worker
+        // 并发时统计会互相清零/串数。现在每轮一份，快照只读指定轮。
+        UnifiedPriceService.resetSourceStats(1)
+        UnifiedPriceService.resetSourceStats(2)
+        val client = recordingClient { req ->
+            respond(200, tickers(*symbolsOf(req.url.toString()).map { it to "100" }.toTypedArray()), req)
+        }
+
+        withContext(RoundSourceFailureScope(1)) {
+            UnifiedPriceService.prewarmCryptoPrices(
+                listOf("BTC", "ETH"), forceRefresh = true, client = client
+            )
+        }
+        withContext(RoundSourceFailureScope(2)) {
+            UnifiedPriceService.prewarmCryptoPrices(
+                listOf("BTC", "ETH", "BNB"), forceRefresh = true, client = client
+            )
+        }
+
+        assertEquals(
+            "round 1 只统计自己的 2 个成功",
+            2,
+            UnifiedPriceService.cryptoSourceStatsSnapshot(1).single().success
+        )
+        assertEquals(
+            "round 2 只统计自己的 3 个成功",
+            3,
+            UnifiedPriceService.cryptoSourceStatsSnapshot(2).single().success
+        )
+
+        // reset 只清目标轮次：并发中的另一轮必须完整保留
+        UnifiedPriceService.resetSourceStats(1)
+        assertTrue(
+            "reset(1) 后 round 1 应为空",
+            UnifiedPriceService.cryptoSourceStatsSnapshot(1).isEmpty()
+        )
+        assertEquals(
+            "reset(1) 不能清空并发中的 round 2",
+            3,
+            UnifiedPriceService.cryptoSourceStatsSnapshot(2).single().success
+        )
+
+        UnifiedPriceService.discardSourceStats(1)
+        UnifiedPriceService.discardSourceStats(2)
     }
 
     /** 从批量请求 URL 里解出本次请求的 symbols 列表 */

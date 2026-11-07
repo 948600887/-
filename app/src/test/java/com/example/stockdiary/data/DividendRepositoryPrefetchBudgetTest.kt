@@ -1,6 +1,7 @@
 package com.example.stockdiary.data
 
 import com.example.stockdiary.data.repository.DividendRepository
+import com.example.stockdiary.data.dividend.DividendRecord
 import android.content.Context
 import io.mockk.coEvery
 import io.mockk.coVerify
@@ -12,6 +13,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.junit.After
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -144,5 +146,40 @@ class DividendRepositoryPrefetchBudgetTest {
         )
         // 走完这一轮，内存缓存里零写入
         assertTrue(repository.getCacheStats()["size"] == 0)
+    }
+
+    /**
+     * 批量读取（日历一次生成用）：缓存命中的标的不再逐 symbol 抓，缺的才回落；
+     * 返回值必须按调用方的原始 symbol 建 key，调用处才能直接 `recordsBySymbol[asset.symbol]`。
+     */
+    @Test
+    fun `批量读取缓存命中的不逐条抓取_缺数据的才回落且按原始symbol返回`() = runBlocking {
+        val cachedRecord = DividendRecord(
+            exDividendDate = "2026-01-01",
+            dividendPerShare = "1.0",
+            announceDate = "",
+            fiscalYear = "2026",
+            paymentDate = null
+        )
+        // 跳过真实 DB/SP：直接把「批量读」桩成只命中一个标的
+        coEvery { repository.getCachedAllowingStaleBatch(any(), any()) } returns mapOf(
+            "fund_010001" to listOf(cachedRecord)
+        )
+        coEvery { repository.getDividendsBySymbol(any(), any(), any()) } returns emptyList()
+
+        val result = repository.getDividendRecordsBatch(
+            listOf("fund_010001", "fund_010002", "fund_010001")
+        )
+
+        assertEquals(setOf("fund_010001", "fund_010002"), result.keys)
+        assertEquals(listOf(cachedRecord), result["fund_010001"])
+        assertEquals(emptyList<DividendRecord>(), result["fund_010002"])
+        // 命中的标的一次都不再抓；缺的那个走回落（次数与逐 symbol 完全一致）
+        coVerify(exactly = 0) {
+            repository.getDividendsBySymbol("fund_010001", false, any())
+        }
+        coVerify(exactly = 1) {
+            repository.getDividendsBySymbol("fund_010002", false, any())
+        }
     }
 }

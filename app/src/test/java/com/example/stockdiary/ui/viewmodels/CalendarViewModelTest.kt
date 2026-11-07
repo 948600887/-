@@ -18,6 +18,8 @@ import io.mockk.slot
 import io.mockk.verify
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
@@ -27,6 +29,7 @@ import org.junit.AfterClass
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
 import org.junit.BeforeClass
@@ -93,6 +96,9 @@ class CalendarViewModelTest {
         val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {
             if (cond()) return true
+            // UnconfinedTestDispatcher 上排队的续体（如 StateFlow 发射到收集器）不会自己跑；
+            // 这里只跑「当前时刻」的任务，不推进虚拟时钟（避免把午夜 delay 提前触发）。
+            mainDispatcher.scheduler.runCurrent()
             Thread.sleep(5)
         }
         return cond()
@@ -100,7 +106,8 @@ class CalendarViewModelTest {
 
     private fun buildVm(
         assets: List<Asset> = listOf(stockAsset),
-        snapshots: List<AssetSnapshot> = emptyList()
+        snapshots: List<AssetSnapshot> = emptyList(),
+        assetsFlow: Flow<List<Asset>>? = null
     ): CalendarViewModel {
         every { prefsMgr.loadPreferences() } returns DashboardPreferences()
         // 模拟 Manager 的真实契约：拉磁盘最新值 → 套用 mutate → 存盘 → 返回合并结果。
@@ -113,7 +120,7 @@ class CalendarViewModelTest {
             updated
         }
         every { assetRepo.getAllAssets() } returns flowOf(assets)
-        every { assetRepo.getAssetsByTypesFlow(any()) } returns flowOf(assets)
+        every { assetRepo.getAssetsByTypesFlow(any()) } returns (assetsFlow ?: flowOf(assets))
         // E3：日历改用按月查询 getSnapshotsSinceSync，不再整表读取 asset_snapshots
         coEvery { assetRepo.getSnapshotsSinceSync(any()) } returns snapshots
         // 两个日历生成路径都会先调 prefetchDividends，必须显式打桩：
@@ -242,13 +249,15 @@ class CalendarViewModelTest {
         // 步骤满足——高负载下表现为 expected 1000.0 but was 0.0 的偶发失败。
         // 必须用本月内 <= today 的日期：生产只聚合"已到账"分红（date !isAfter(today)），钉 15 号在每月 1–14 号运行会被过滤成 0.0
         val recDate = vm.uiState.value.currentMonth.atDay(1)
-        coEvery { divRepo.getDividendsBySymbol(any(), any()) } returns listOf(
-            DividendRecord(
-                exDividendDate = recDate.toString(),
-                dividendPerShare = "10.0",
-                announceDate = "",
-                fiscalYear = recDate.year.toString(),
-                paymentDate = null
+        coEvery { divRepo.getDividendRecordsBatch(any()) } returns mapOf(
+            "600900" to listOf(
+                DividendRecord(
+                    exDividendDate = recDate.toString(),
+                    dividendPerShare = "10.0",
+                    announceDate = "",
+                    fiscalYear = recDate.year.toString(),
+                    paymentDate = null
+                )
             )
         )
         vm.selectTab("收支日历")
@@ -267,7 +276,7 @@ class CalendarViewModelTest {
 
     @Test
     fun `无分红记录的月份不产生分红日期也不报错`() = runBlocking {
-        coEvery { divRepo.getDividendsBySymbol(any(), any()) } returns emptyList()
+        coEvery { divRepo.getDividendRecordsBatch(any()) } returns emptyMap()
         val vm = buildVm()
         waitUntil { vm.uiState.value.assets.isNotEmpty() }
         vm.selectTab("收支日历")
@@ -284,25 +293,28 @@ class CalendarViewModelTest {
         // 让「生成资产日历」白跑 20+ 次。日历与实时价无关，故按 (symbol,balance,currency) 签名去重。
         // 下面三次发射里，只有「首次」和「数量变化」应触发重算，「仅价格变化」那次必须被去重掉。
         val regenCount = java.util.concurrent.atomic.AtomicInteger(0)
-        // 诊断：用 getSnapshotsSinceSync 的调用次数作为「日历重算」的计数信号（每次 generateAssetCalendarData 必调一次）。
+        every { prefsMgr.loadPreferences() } returns DashboardPreferences()
+        every { assetRepo.getAllAssets() } returns flowOf(emptyList())
+        // 用可手动改值的 StateFlow 逐段驱动：空首值 → 首笔资产 → 仅改价格 → 改数量。
+        // 每段之间轮询等生成落地，避免后一次变更取消前一轮还没开始的生成，导致计数失真。
+        val assetsFlow = kotlinx.coroutines.flow.MutableStateFlow<List<Asset>>(emptyList())
+
+        val vm = buildVm(assetsFlow = assetsFlow)
+        // 桩必须在 buildVm 之后打：buildVm 内部会把 getSnapshotsSinceSync 重置成空快照
         coEvery { assetRepo.getSnapshotsSinceSync(any()) } coAnswers {
             regenCount.incrementAndGet()
             emptyList()
         }
-        every { prefsMgr.loadPreferences() } returns DashboardPreferences()
-        every { assetRepo.getAllAssets() } returns flowOf(emptyList())
-        every { assetRepo.getAssetsByTypesFlow(any()) } returns flowOf(
-            listOf(stockAsset),
-            listOf(stockAsset.copy(currentPrice = 99.0)),  // 仅变实时价 → 不重算
-            listOf(stockAsset.copy(balance = 2000.0))       // 变数量 → 重算
-        )
-        coEvery { divRepo.prefetchDividends(any(), any(), any()) } returns Unit
 
-        val vm = CalendarViewModel(assetRepo, divRepo, prefsMgr, useCase)
+        assetsFlow.value = listOf(stockAsset)
+        waitUntil(timeoutMs = 5000) { regenCount.get() >= 1 && !vm.uiState.value.isLoading }
 
-        // VM 已构造并处理完首次发射（末次发射的 balance=2000 已反映到 assets）
-        waitUntil { vm.uiState.value.assets.firstOrNull()?.balance == 2000.0 }
-        waitUntil(timeoutMs = 6000) { regenCount.get() >= 2 }
+        assetsFlow.value = listOf(stockAsset.copy(currentPrice = 99.0))  // 仅变实时价 → 不重算
+        Thread.sleep(300)
+        assertEquals("仅价格变化应被签名去重", 1, regenCount.get())
+
+        assetsFlow.value = listOf(stockAsset.copy(balance = 2000.0))     // 变数量 → 重算
+        waitUntil(timeoutMs = 6000) { regenCount.get() >= 2 && !vm.uiState.value.isLoading }
         // 再稳一手：若去重失效，价格那次会晚到凑成第 3 次，这里必须仍是 2
         Thread.sleep(400)
         assertEquals("价格抖动应被去重、只重算 2 次（首次 + 数量变化）", 2, regenCount.get())
@@ -324,7 +336,7 @@ class CalendarViewModelTest {
         )
         // 1000 股 × 12.34568 = 12345.68：实时值比旧快照高 1 分，正是那 0.01
         val priced = stockAsset.copy(currentPrice = 12.34568)
-        coEvery { divRepo.getDividendsBySymbol(any(), any()) } returns emptyList()
+        coEvery { divRepo.getDividendRecordsBatch(any()) } returns emptyMap()
 
         val vm = buildVm(assets = listOf(priced), snapshots = listOf(staleSnapshot))
         waitUntil { !vm.uiState.value.isLoading && vm.uiState.value.calendarData.isNotEmpty() }
@@ -337,7 +349,7 @@ class CalendarViewModelTest {
     fun `今天没有快照时也显示实时净值`() = runBlocking {
         val today = LocalDate.now()
         val priced = stockAsset.copy(currentPrice = 8.88) // 1000 股 × 8.88 = 8880
-        coEvery { divRepo.getDividendsBySymbol(any(), any()) } returns emptyList()
+        coEvery { divRepo.getDividendRecordsBatch(any()) } returns emptyMap()
 
         val vm = buildVm(assets = listOf(priced), snapshots = emptyList())
         waitUntil { !vm.uiState.value.isLoading && vm.uiState.value.calendarData.isNotEmpty() }
@@ -354,7 +366,7 @@ class CalendarViewModelTest {
         assumeTrue(today.dayOfMonth > 1)
         val yesterday = today.minusDays(1)
         val priced = stockAsset.copy(currentPrice = 10.0) // 实时 1000 × 10 = 10000
-        coEvery { divRepo.getDividendsBySymbol(any(), any()) } returns emptyList()
+        coEvery { divRepo.getDividendRecordsBatch(any()) } returns emptyMap()
 
         val vm = buildVm(
             assets = listOf(priced),
@@ -389,7 +401,7 @@ class CalendarViewModelTest {
         val lastMonth = thisMonth.minusMonths(1)
         val dayInLastMonth = lastMonth.atDay(lastMonth.lengthOfMonth())
         val priced = stockAsset.copy(currentPrice = 10.0)
-        coEvery { divRepo.getDividendsBySymbol(any(), any()) } returns emptyList()
+        coEvery { divRepo.getDividendRecordsBatch(any()) } returns emptyMap()
 
         val vm = buildVm(
             assets = listOf(priced),
@@ -484,13 +496,15 @@ class CalendarViewModelTest {
         // 命中该过期缓存 → dividends.size 错判为 0（生产环境 init 自己会把分红抓全，缓存恒为正确值；
         // 这里是测试构造时序差异）。recDate 按 YearMonth.now() 提前算好（等于 VM 构造时的 currentMonth）。
         val recDate = YearMonth.now().atDay(1)
-        coEvery { divRepo.getDividendsBySymbol(any(), any()) } returns listOf(
-            DividendRecord(
-                exDividendDate = recDate.toString(),
-                dividendPerShare = "10.0",
-                announceDate = "",
-                fiscalYear = recDate.year.toString(),
-                paymentDate = null
+        coEvery { divRepo.getDividendRecordsBatch(any()) } returns mapOf(
+            "600900" to listOf(
+                DividendRecord(
+                    exDividendDate = recDate.toString(),
+                    dividendPerShare = "10.0",
+                    announceDate = "",
+                    fiscalYear = recDate.year.toString(),
+                    paymentDate = null
+                )
             )
         )
         val vm = buildVm(assets = listOf(a1, a2))
@@ -512,5 +526,81 @@ class CalendarViewModelTest {
         vm.selectTab("资产日历")
         waitUntil { vm.uiState.value.selectedTab == "资产日历" && vm.uiState.value.dividends.size == 1 }
         assertEquals(1, vm.uiState.value.dividends.size)
+    }
+
+    // ---------- 实时资产刷新去抖（P0-3） ----------
+
+    @Test
+    fun `refreshLiveAssets 值没变时不发新 uiState`() = runBlocking {
+        val vm = buildVm()
+        waitUntil(timeoutMs = 6000) { !vm.uiState.value.isLoading }
+        vm.refreshLiveAssets()
+        waitUntil(timeoutMs = 6000) { vm.uiState.value.fireAssets.isNotEmpty() }
+        // 首次生成 / 年度收入重算可能还在收尾，先等它们落地，避免把无关的状态更新算到此次刷新头上
+        Thread.sleep(500)
+
+        val before = vm.uiState.value
+        vm.refreshLiveAssets()
+        // 等 IO 查询跑完；若错误地 new 了 UiState，StateFlow 会换成新实例
+        Thread.sleep(300)
+        assertSame("值完全没变时应原样返回同一实例", before, vm.uiState.value)
+    }
+
+    // ---------- 生成任务取消（P0-1） ----------
+
+    @Test
+    fun `切月会取消上一轮生成_旧任务不再触发分红预取`() = runBlocking {
+        // 旧实现 selectMonth 只 launch 不持有 Job：连续翻月会同时跑多轮生成，
+        // 每轮都各自预热/预取分红，慢的那轮还会把过期的 calendarData 写回来。
+        // 这里让「上个月」的快照查询变慢，再立刻切到下个月：
+        // 若旧任务被正确取消，它在快照查询返回后会抛 CancellationException，根本走不到 prefetch。
+        val slowMonth = YearMonth.now().minusMonths(2)
+        val fastMonth = YearMonth.now().minusMonths(1)
+        val slowStart = slowMonth.atDay(1).atStartOfDay()
+            .atZone(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli()
+        val vm = buildVm()
+        waitUntil(timeoutMs = 6000) { !vm.uiState.value.isLoading }
+        // 打桩必须放在 buildVm 之后：buildVm 内部会重置 getSnapshotsSinceSync 的桩
+        coEvery { assetRepo.getSnapshotsSinceSync(any()) } coAnswers {
+            if (firstArg<Long>() == slowStart) delay(200)
+            emptyList()
+        }
+
+        io.mockk.clearMocks(divRepo, answers = false)
+        vm.selectMonth(slowMonth)
+        vm.selectMonth(fastMonth)
+        waitUntil(timeoutMs = 6000) {
+            vm.uiState.value.currentMonth == fastMonth && !vm.uiState.value.isLoading
+        }
+        // 给被取消的慢任务足够的「如果没被取消就会继续跑」的时间
+        Thread.sleep(400)
+
+        // 只有新一轮走到了 prepareMergedAssets；旧任务应已被取消，压根不该进入这一步
+        coVerify(exactly = 1) { divRepo.primeDividendCache(any(), any()) }
+        assertNull("取消不是失败，不能报错", vm.uiState.value.errorMessage)
+        assertFalse(vm.uiState.value.isLoading)
+        assertEquals(fastMonth, vm.uiState.value.currentMonth)
+    }
+
+    @Test
+    fun `刷新被切月取消时转圈停止且不报失败`() = runBlocking {
+        val targetMonth = YearMonth.now().minusMonths(1)
+        val vm = buildVm()
+        waitUntil(timeoutMs = 6000) { !vm.uiState.value.isLoading }
+        // 刷新时让快照查询变慢，确保「切月」发生在刷新还没结束时（桩要在 buildVm 之后打）
+        coEvery { assetRepo.getSnapshotsSinceSync(any()) } coAnswers {
+            delay(200)
+            emptyList()
+        }
+
+        vm.refresh()
+        assertTrue(vm.uiState.value.isRefreshing)
+        vm.selectMonth(targetMonth)
+        waitUntil(timeoutMs = 6000) {
+            vm.uiState.value.currentMonth == targetMonth &&
+                !vm.uiState.value.isLoading &&
+                !vm.uiState.value.isRefreshing
+        }
+        assertNull("被取消的刷新不能留下「刷新失败」", vm.uiState.value.errorMessage)
     }
 }

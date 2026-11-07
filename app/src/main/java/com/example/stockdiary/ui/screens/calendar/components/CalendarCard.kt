@@ -54,7 +54,17 @@ fun CalendarCard(
     dividendDates: Set<LocalDate>,
     selectedDate: LocalDate?,
     onDateSelected: (LocalDate?) -> Unit,
-    isAssetCalendar: Boolean = false
+    isAssetCalendar: Boolean = false,
+    /**
+     * 「今天」由调用方算一次传进来（原来每个格子各调一次 LocalDate.now()，一屏 42 次）。
+     * 它同时决定「今天」描边与「回到今天」按钮的目标月份。
+     */
+    today: LocalDate = LocalDate.now(),
+    /**
+     * 生成中（切月/切 Tab/刷新）时禁用月份导航：旧任务已被取消、新结果还没回来，
+     * 此时再翻月只会不停打断生成，最后停在哪个个月份全看点击时机。
+     */
+    monthNavEnabled: Boolean = true
 ) {
     Card(
         modifier = Modifier
@@ -70,7 +80,10 @@ fun CalendarCard(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                IconButton(onClick = { onMonthChange(currentMonth.minusMonths(1)) }) {
+                IconButton(
+                    onClick = { onMonthChange(currentMonth.minusMonths(1)) },
+                    enabled = monthNavEnabled
+                ) {
                     Icon(Icons.Filled.ChevronLeft, "上一个月", tint = AppTheme.colors.onSurface)
                 }
 
@@ -81,9 +94,10 @@ fun CalendarCard(
                         fontWeight = FontWeight.Bold,
                         color = AppTheme.colors.onSurface
                     )
-                    if (currentMonth != YearMonth.now()) {
+                    if (currentMonth != YearMonth.from(today)) {
                         TextButton(
-                            onClick = { onMonthChange(YearMonth.now()) },
+                            onClick = { onMonthChange(YearMonth.from(today)) },
+                            enabled = monthNavEnabled,
                             modifier = Modifier.padding(0.dp),
                             contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
                         ) {
@@ -94,7 +108,10 @@ fun CalendarCard(
                     }
                 }
 
-                IconButton(onClick = { onMonthChange(currentMonth.plusMonths(1)) }) {
+                IconButton(
+                    onClick = { onMonthChange(currentMonth.plusMonths(1)) },
+                    enabled = monthNavEnabled
+                ) {
                     Icon(Icons.Filled.ChevronRight, "下一个月", tint = AppTheme.colors.onSurface)
                 }
             }
@@ -119,8 +136,19 @@ fun CalendarCard(
             Spacer(modifier = Modifier.height(4.dp))
 
             // 日历格子（动态行数）
-            val calendarDays = remember(currentMonth, calendarData) {
-                buildCalendarDays(currentMonth, calendarData)
+            val calendarDays = remember(currentMonth, calendarData, today) {
+                buildCalendarDays(currentMonth, calendarData, today)
+            }
+            // 分红日期转成 epochDay 集合：Set<LocalDate> 对 Compose 是不稳定类型，
+            // 传进格子会让所有格子都无法跳过；Long 集合只和「有没有分红」有关。
+            val dividendEpochDays = remember(dividendDates) {
+                dividendDates.mapTo(HashSet(dividendDates.size)) { it.toEpochDay() }
+            }
+            val selectedEpochDay = selectedDate?.toEpochDay()
+            // 把「格子点击」这一步 lambda 提到循环外并 remember：
+            // 格子只收到一个稳定的 (Long) -> Unit，未变化的格子参数全等，Compose 才能跳过重组。
+            val onSelectEpochDay: (Long) -> Unit = remember(onDateSelected) {
+                { epochDay -> onDateSelected(LocalDate.ofEpochDay(epochDay)) }
             }
 
             val totalRows = (calendarDays.size + 6) / 7
@@ -129,20 +157,17 @@ fun CalendarCard(
                     for (col in 0..6) {
                         val index = row * 7 + col
                         if (index < calendarDays.size) {
+                            val day = calendarDays[index]
                             CalendarDayCell(
-                                day = calendarDays[index],
-                                isSelected = selectedDate == calendarDays[index].date,
+                                day = day,
+                                isSelected = selectedEpochDay == day.epochDay,
                                 // 无数据的格子（当日无快照、没有金额）不显示「分」：
                                 // 否则「有分红记录但当日无数据」的日期上只剩一个孤立的红色「分」，像无数据格子上的噪点。
-                                hasDividend = calendarDays[index].isCurrentMonth &&
-                                    calendarDays[index].value != 0.0 &&
-                                    calendarDays[index].date in dividendDates,
+                                hasDividend = day.isCurrentMonth &&
+                                    day.value != 0.0 &&
+                                    day.epochDay in dividendEpochDays,
                                 isAssetCalendar = isAssetCalendar,
-                                onClick = {
-                                    if (calendarDays[index].isCurrentMonth) {
-                                        onDateSelected(calendarDays[index].date)
-                                    }
-                                },
+                                onDayClick = onSelectEpochDay,
                                 modifier = Modifier.weight(1f)
                             )
                         }
@@ -216,12 +241,14 @@ private fun CalendarDayCell(
     day: CalendarDay,
     isSelected: Boolean,
     hasDividend: Boolean,
+    onDayClick: (Long) -> Unit,
     modifier: Modifier = Modifier,
-    isAssetCalendar: Boolean = false,
-    onClick: () -> Unit = {}
+    isAssetCalendar: Boolean = false
 ) {
-    val isToday = day.date == LocalDate.now() && day.isCurrentMonth
-    val isWeekend = day.date.dayOfWeek.value >= 6
+    // day 里已经算好 isToday/isWeekend：这里不再调 LocalDate.now()/取 dayOfWeek，
+    // 格子参数全是 Double/Int/Long/Boolean，未变化的格子可被 Compose 跳过。
+    val isToday = day.isToday
+    val isWeekend = day.isWeekend
     val hasValue = day.isCurrentMonth && day.value != 0.0
 
     Surface(
@@ -229,7 +256,7 @@ private fun CalendarDayCell(
             .height(CALENDAR_CELL_HEIGHT)
             .padding(1.dp)
             .clip(RoundedCornerShape(6.dp))
-            .clickable(onClick = onClick),
+            .clickable(onClick = { if (day.isCurrentMonth) onDayClick(day.epochDay) }),
         color = when {
             isSelected -> AppTheme.colors.primary.copy(alpha = 0.25f)
             else -> AppTheme.colors.surfaceContainerLow
@@ -248,7 +275,7 @@ private fun CalendarDayCell(
         ) {
             Box(modifier = Modifier.height(CALENDAR_SLOT_DATE), contentAlignment = Alignment.Center) {
                 Text(
-                    text = day.date.dayOfMonth.toString(),
+                    text = day.dayOfMonth.toString(),
                     fontSize = 12.sp,
                     fontWeight = if (isToday) FontWeight.Bold else FontWeight.Normal,
                     color = when {
@@ -324,11 +351,16 @@ private fun DividendLegendItem() {
 }
 
 @Composable
-internal fun TabButton(text: String, isSelected: Boolean, onClick: () -> Unit) {
+internal fun TabButton(
+    text: String,
+    isSelected: Boolean,
+    enabled: Boolean = true,
+    onClick: () -> Unit
+) {
     Box(
         modifier = Modifier
             .padding(horizontal = 12.dp, vertical = 8.dp)
-            .clickable(onClick = onClick)
+            .clickable(enabled = enabled, onClick = onClick)
     ) {
         Text(
             text = text,
@@ -340,16 +372,36 @@ internal fun TabButton(text: String, isSelected: Boolean, onClick: () -> Unit) {
 }
 
 internal data class CalendarDay(
-    val date: LocalDate,
+    /** epochDay 是稳定类型：原来直接塞 java.time.LocalDate，Compose 视为不稳定，格子无法跳过。 */
+    val epochDay: Long,
+    val dayOfMonth: Int,
     val isCurrentMonth: Boolean,
-    val value: Double
+    val value: Double,
+    val isWeekend: Boolean,
+    val isToday: Boolean
 )
 
-internal fun buildCalendarDays(month: YearMonth, calendarData: Map<LocalDate, Double>): List<CalendarDay> {
+internal fun buildCalendarDays(
+    month: YearMonth,
+    calendarData: Map<LocalDate, Double>,
+    today: LocalDate = LocalDate.now()
+): List<CalendarDay> {
+    val todayEpochDay = today.toEpochDay()
     val firstDayOfMonth = month.atDay(1)
     val dayOfWeek = firstDayOfMonth.dayOfWeek.value
     val daysInMonth = month.lengthOfMonth()
     val daysInPreviousMonth = month.minusMonths(1).lengthOfMonth()
+
+    fun makeDay(date: LocalDate, isCurrentMonth: Boolean, value: Double) = CalendarDay(
+        epochDay = date.toEpochDay(),
+        dayOfMonth = date.dayOfMonth,
+        isCurrentMonth = isCurrentMonth,
+        value = value,
+        isWeekend = date.dayOfWeek.value >= 6,
+        // 只有当月格子才算「今天」：看别的月份时，今天可能落在上下月填充格里，
+        // 那些格子按旧逻辑也不该有今天描边。
+        isToday = isCurrentMonth && date.toEpochDay() == todayEpochDay
+    )
 
     val result = mutableListOf<CalendarDay>()
 
@@ -357,36 +409,20 @@ internal fun buildCalendarDays(month: YearMonth, calendarData: Map<LocalDate, Do
     val offset = if (dayOfWeek == 7) 0 else dayOfWeek
     for (i in 0 until offset) {
         result.add(
-            CalendarDay(
-                date = month.minusMonths(1).atDay(daysInPreviousMonth - offset + 1 + i),
-                isCurrentMonth = false,
-                value = 0.0
-            )
+            makeDay(month.minusMonths(1).atDay(daysInPreviousMonth - offset + 1 + i), false, 0.0)
         )
     }
 
     // 当月日期
     for (i in 1..daysInMonth) {
         val date = month.atDay(i)
-        result.add(
-            CalendarDay(
-                date = date,
-                isCurrentMonth = true,
-                value = calendarData[date] ?: 0.0
-            )
-        )
+        result.add(makeDay(date, true, calendarData[date] ?: 0.0))
     }
 
     // 下月填充到完整周
     val remainingDays = (7 - result.size % 7) % 7
     for (i in 1..remainingDays) {
-        result.add(
-            CalendarDay(
-                date = month.plusMonths(1).atDay(i),
-                isCurrentMonth = false,
-                value = 0.0
-            )
-        )
+        result.add(makeDay(month.plusMonths(1).atDay(i), false, 0.0))
     }
 
     return result

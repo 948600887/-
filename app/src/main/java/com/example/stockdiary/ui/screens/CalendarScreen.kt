@@ -102,6 +102,9 @@ fun CalendarScreen(
     val errorMessage = uiState.errorMessage
     val monthlyExpense = uiState.monthlyExpense
     val realAnnualIncome = uiState.realAnnualIncome
+    // 「今天」只在页面层算一次（原来每个日历格子各调一次，一屏 42 次）；
+    // 它也是「回到今天」的目标月份来源，避免在组合里反复 YearMonth.now()。
+    val today = LocalDate.now()
 
     val dividendWarning by viewModel.dividendWarning.collectAsStateWithLifecycle()
     // 提示宿主在导航层（见 GoldVaultNavHost）：本页只发消息，不持有 SnackbarHostState
@@ -163,6 +166,8 @@ fun CalendarScreen(
             CalendarHeader(
                 selectedTab = uiState.selectedTab,
                 onTabSelected = { viewModel.selectTab(it) },
+                // 生成中禁用 Tab 切换：旧任务会被取消、新任务重跑，连续点击只会让页面停在中途
+                tabsEnabled = !isLoading,
                 // 与资产页/持仓页同一套刷新交互：按钮置灰 + 转圈；切月/首载期间也禁用，
                 // 避免手动刷新与自动重算并发跑两轮
                 isRefreshing = uiState.isRefreshing,
@@ -182,7 +187,9 @@ fun CalendarScreen(
                 dividendDates = dividendDates,
                 selectedDate = selectedDate,
                 onDateSelected = { viewModel.selectDate(it) },
-                isAssetCalendar = uiState.selectedTab == "资产日历"
+                isAssetCalendar = uiState.selectedTab == "资产日历",
+                today = today,
+                monthNavEnabled = !isLoading
             )
 
             // 选中日期详情
@@ -306,6 +313,7 @@ private fun EmptyCalendarContent(
 private fun CalendarHeader(
     selectedTab: String,
     onTabSelected: (String) -> Unit,
+    tabsEnabled: Boolean,
     isRefreshing: Boolean,
     canRefresh: Boolean,
     onRefresh: () -> Unit,
@@ -333,11 +341,13 @@ private fun CalendarHeader(
                     TabButton(
                         text = "资产日历",
                         isSelected = selectedTab == "资产日历",
+                        enabled = tabsEnabled,
                         onClick = { onTabSelected("资产日历") }
                     )
                     TabButton(
                         text = "收支日历",
                         isSelected = selectedTab == "收支日历",
+                        enabled = tabsEnabled,
                         onClick = { onTabSelected("收支日历") }
                     )
                 }

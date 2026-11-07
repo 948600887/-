@@ -745,6 +745,38 @@ class DividendRepository private constructor(
         }
     }
 
+    /**
+     * 批量取多只标的的分红记录（日历/详情一次生成用）。
+     *
+     * 先用一次 `IN` 查询把内存/数据库能覆盖的标的一次拿齐，只有「连过期数据都没有」的
+     * 标的才回落到逐符号抓取——回落路径就是 [getDividendsBySymbol] 本身，因此 TTL、失败
+     * 退避、空结果 vs 无数据等语义与逐 symbol 完全一致，只是把 N 次查询收成 1 次。
+     *
+     * 返回的 key 是调用方传入的原始 symbol，方便直接按 `asset.symbol` 取值。
+     */
+    suspend fun getDividendRecordsBatch(symbols: List<String>): Map<String, List<DividendRecord>> {
+        val distinct = symbols.distinct()
+        if (distinct.isEmpty()) return emptyMap()
+        val cached = getCachedAllowingStaleBatch(distinct, primeCache = false)
+        val out = LinkedHashMap<String, List<DividendRecord>>(distinct.size)
+        for (symbol in distinct) {
+            val records = cached[StockCodeManager.normalizeSymbol(symbol)]
+            if (records != null) {
+                out[symbol] = records
+                continue
+            }
+            try {
+                out[symbol] = getDividendsBySymbol(symbol)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // 单只失败只影响它自己：与逐 symbol 循环里的 try/catch 行为一致
+                AppLogger.w("批量读取分红失败[$symbol]，按无记录处理: ${e.message}", "DividendRepository")
+            }
+        }
+        return out
+    }
+
     private suspend fun tryGetFromCache(normalizedSymbol: String): List<DividendRecord>? {
         val cached = cache[normalizedSymbol]
         if (cached != null && cached.isValid(cacheTTL)) {

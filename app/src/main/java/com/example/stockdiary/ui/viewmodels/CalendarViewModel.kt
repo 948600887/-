@@ -22,6 +22,7 @@ import com.example.stockdiary.utils.ExchangeRateManager
 import com.example.stockdiary.utils.totalValueCny
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -32,6 +33,8 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.time.Duration
 import java.time.LocalDate
@@ -101,6 +104,23 @@ class CalendarViewModel(
      */
     private val calendarCache = mutableMapOf<String, CalendarResult>()
 
+    /**
+     * 当前日历生成任务。切月/切 Tab/刷新前先取消上一个：
+     * - 旧任务在 withContext(IO) 里的大查询/分红预取不再白跑（取消会随协程树传播到预取子协程）；
+     * - 取消的协程不会走到结果写回，过期结果不可能覆盖新状态；
+     * - CancellationException 已在生成函数里单独重抛，取消不会变成「加载失败」的误报。
+     */
+    private var generationJob: Job? = null
+
+    /**
+     * 分红预取单飞：同一时刻只允许一轮 prime+prefetch 在跑。
+     *
+     * 旧生成任务被取消时，[withLock] 会随协程取消一起释放锁，新任务立刻接手；
+     * 新任务再执行 primeDividendCache 时缓存已被上一轮填好（或确实没填好），
+     * 不会重复打同一批接口。预取本身在 [generationJob] 内，切月/切 Tab 取消任务即取消预取。
+     */
+    private val prefetchMutex = Mutex()
+
     private fun calendarCacheKey(tab: String, month: YearMonth, signature: String): String = "$tab|$month|$signature"
 
     /**
@@ -129,8 +149,7 @@ class CalendarViewModel(
                 .distinctUntilChanged { old, new -> calendarSignature(old) == calendarSignature(new) }
                 .collect { assets ->
                     _uiState.update { state -> state.copy(assets = assets) }
-                    generateCalendarData(assets, invalidateCache = true)
-                    loadDividendIncome(assets)
+                    launchGeneration(invalidateCache = true) { loadDividendIncome(assets) }
                 }
         }
 
@@ -142,15 +161,19 @@ class CalendarViewModel(
         // 代价可忽略（一次本地查询 + 一次实时净资产求和，无网络）。
         viewModelScope.launch {
             while (isActive) {
+                // 「现在」只采一次：跨过零点后 delay 再采，否则两个 now() 之间跨日会把等待时长算错。
                 val now = java.time.LocalDateTime.now()
-                val nextMidnight = LocalDate.now().plusDays(1).atStartOfDay()
+                val today = now.toLocalDate()
+                val nextMidnight = today.plusDays(1).atStartOfDay()
                 delay(Duration.between(now, nextMidnight).toMillis() + 1000)
-                if (generatedOnDate == LocalDate.now()) continue
-                rollMonthIfFollowingToday()
-                generateCalendarData(_uiState.value.assets, invalidateCache = true)
-                // C2：跨零点后一并重算「年度收入 / FIRE」。DividendIncomeCache 以 date 跨日为重算门控，
-                // 这里走 forceRefresh=false：底层 records 未变就零网络复用，跨日则重算，避免 FIRE 停在旧值。
-                loadDividendIncome(_uiState.value.assets, forceRefresh = false)
+                val afterMidnight = LocalDate.now()
+                if (generatedOnDate == afterMidnight) continue
+                rollMonthIfFollowingToday(afterMidnight)
+                launchGeneration(invalidateCache = true) {
+                    // C2：跨零点后一并重算「年度收入 / FIRE」。DividendIncomeCache 以 date 跨日为重算门控，
+                    // 这里走 forceRefresh=false：底层 records 未变就零网络复用，跨日则重算，避免 FIRE 停在旧值。
+                    loadDividendIncome(_uiState.value.assets, forceRefresh = false)
+                }
             }
         }
     }
@@ -164,11 +187,10 @@ class CalendarViewModel(
         // 先把「今天」格刷成当前实时值：日历数据是按实时价生成后被签名去重冻结的，
         // 别页刷新落了新价，回前台/回 Tab 时这里必须跟上，否则今天格与首页差一截。
         refreshLiveAssets()
-        if (generatedOnDate != null && generatedOnDate != LocalDate.now()) {
-            rollMonthIfFollowingToday()
-            viewModelScope.launch { generateCalendarData(_uiState.value.assets) }
-            // C2：回前台且跨日时，同样重算「年度收入 / FIRE」（与午夜逻辑一致）
-            loadDividendIncome(_uiState.value.assets, forceRefresh = false)
+        val today = LocalDate.now()
+        if (generatedOnDate != null && generatedOnDate != today) {
+            rollMonthIfFollowingToday(today)
+            launchGeneration { loadDividendIncome(_uiState.value.assets, forceRefresh = false) }
         }
     }
 
@@ -178,9 +200,9 @@ class CalendarViewModel(
      * 否则 10/31 挂机到 11/1，页面还停在 10 月，11/1 那格永远是「暂无数据」；
      * 用户手动翻去看历史月份时不能动他的视图，所以只在「当前月 = 旧今天所在月」时翻。
      */
-    private fun rollMonthIfFollowingToday() {
+    private fun rollMonthIfFollowingToday(today: LocalDate) {
         val generated = generatedOnDate ?: return
-        val nowMonth = YearMonth.now()
+        val nowMonth = YearMonth.from(today)
         val state = _uiState.value
         if (state.currentMonth == YearMonth.from(generated) && state.currentMonth != nowMonth) {
             _uiState.update { it.copy(currentMonth = nowMonth, selectedDate = null) }
@@ -214,7 +236,14 @@ class CalendarViewModel(
                     } else {
                         state.calendarData
                     }
-                    state.copy(fireAssets = all, calendarData = data)
+                    // 简身：值没变就原样返回同一个 UiState 实例。StateFlow 用实例相等判断，
+                    // 不 new 对象就不会发新状态，整页（尤其日历格子）不会被无意义的「回前台/
+                    // 打开 FIRE」白白重组一次。注意 data 用 Map 内容相等比较，映射新建也无妨。
+                    if (state.fireAssets == all && data == state.calendarData) {
+                        state
+                    } else {
+                        state.copy(fireAssets = all, calendarData = data)
+                    }
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -249,26 +278,24 @@ class CalendarViewModel(
                 "${asset.interestRate}|${asset.millionCopiesIncome}"
         }
 
-    private fun loadDividendIncome(assets: List<Asset>, forceRefresh: Boolean = false) {
+    private suspend fun loadDividendIncome(assets: List<Asset>, forceRefresh: Boolean = false) {
         if (assets.isEmpty()) return
-        viewModelScope.launch {
-            try {
-                // 非强制刷新（进页/切月/切 Tab）走 cacheOnly=true：只读缓存、不为了「预计收入」
-                // 去敲几十个接口；连过期数据都没有（首次安装）时内部会自己走抓取流程。
-                // 手动刷新（forceRefresh=true）则 cacheOnly=false，按刚抓回的最新分红重算年度收入，
-                // 否则网格更新了、喂给 FIRE 的年度收入却停在旧缓存值（优化①）。
-                val result = dividendIncomeUseCase.load(
-                    assets,
-                    forceRefresh = forceRefresh,
-                    tag = "CalendarVM",
-                    cacheOnly = !forceRefresh
-                )
-                _uiState.update { state -> state.copy(realAnnualIncome = result.totalAnnualIncome) }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                AppLogger.e("计算分红收入失败: ${e.message}", e, "CalendarVM")
-            }
+        try {
+            // 非强制刷新（进页/切月/切 Tab）走 cacheOnly=true：只读缓存、不为了「预计收入」
+            // 去敲几十个接口；连过期数据都没有（首次安装）时内部会自己走抓取流程。
+            // 手动刷新（forceRefresh=true）则 cacheOnly=false，按刚抓回的最新分红重算年度收入，
+            // 否则网格更新了、喂给 FIRE 的年度收入却停在旧缓存值（优化①）。
+            val result = dividendIncomeUseCase.load(
+                assets,
+                forceRefresh = forceRefresh,
+                tag = "CalendarVM",
+                cacheOnly = !forceRefresh
+            )
+            _uiState.update { state -> state.copy(realAnnualIncome = result.totalAnnualIncome) }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            AppLogger.e("计算分红收入失败: ${e.message}", e, "CalendarVM")
         }
     }
 
@@ -287,14 +314,34 @@ class CalendarViewModel(
         }
     }
 
+    /**
+     * 取消上一轮生成并启动新一轮。
+     *
+     * 所有会改变「生成输入」（资产、Tab、月份、强制刷新）的入口都必须走这里：
+     * 旧任务被取消后不会再写回结果，新任务的结果永远对应最新的 Tab/月份。
+     * [then] 属于同一轮任务（例如年度收入重算），同样随轮次取消，不会在切月后继续写状态。
+     */
+    private fun launchGeneration(
+        forceRefresh: Boolean = false,
+        invalidateCache: Boolean = false,
+        then: suspend () -> Unit = {}
+    ) {
+        generationJob?.cancel()
+        generationJob = viewModelScope.launch {
+            // 「今天」只采一次并向下传递：生成方与缓存保鲜日期必须基于同一个日期，
+            // 否则跨零点瞬间可能生成 A 日的数据、却记成 B 日的保鲜标记。
+            val today = LocalDate.now()
+            generateCalendarData(_uiState.value.assets, forceRefresh, invalidateCache, today)
+            then()
+        }
+    }
+
     fun selectTab(tab: String) {
         if (_uiState.value.selectedTab == tab) return
         // 与 selectMonth 一致：清掉选中日期。它是「上一个 Tab 里的某一天」，切 Tab 后详情卡
         // 会落到另一套口径的 calendarData（资产日历 vs 收支日历），取到意外的值或无关明细。
         _uiState.update { state -> state.copy(selectedTab = tab, selectedDate = null) }
-        viewModelScope.launch {
-            generateCalendarData(_uiState.value.assets)
-        }
+        launchGeneration()
     }
 
     fun selectMonth(month: YearMonth) {
@@ -302,9 +349,7 @@ class CalendarViewModel(
         // 顺手清掉选中日期：它是「上一张月历里的某一天」，翻月后详情卡会显示一个
         // 当前月根本不存在的日期（金额取不到 → 「暂无数据」，收支明细也是无关的）。
         _uiState.update { state -> state.copy(currentMonth = month, selectedDate = null) }
-        viewModelScope.launch {
-            generateCalendarData(_uiState.value.assets)
-        }
+        launchGeneration()
     }
 
     fun selectDate(date: LocalDate?) {
@@ -321,9 +366,13 @@ class CalendarViewModel(
     fun refresh() {
         if (_uiState.value.isRefreshing) return
         _uiState.update { it.copy(isRefreshing = true) }
-        viewModelScope.launch {
+        // 刷新同样替换掉上一轮生成：否则切月后立刻点刷新，两轮生成会并发跑，
+        // 后完成的那轮可能把先完成的（更新的）结果覆盖掉。
+        generationJob?.cancel()
+        generationJob = viewModelScope.launch {
+            val today = LocalDate.now()
             try {
-                generateCalendarData(_uiState.value.assets, forceRefresh = true)
+                generateCalendarData(_uiState.value.assets, forceRefresh = true, today = today)
                 // 优化①：强制重抓分红后，年度收入（喂给 FIRE 计算器）必须按最新数据重算，
                 // 否则日历分红网格刷新了、FIRE 的年度收入却停在旧缓存值
                 loadDividendIncome(_uiState.value.assets, forceRefresh = true)
@@ -331,7 +380,11 @@ class CalendarViewModel(
                 if (dividendRepository.consumeOtcRateLimitWarning()) {
                     _dividendWarning.value = "今日部分场外基金分红因天天基金限流未能抓取完整，可稍后手动重试"
                 }
+            } catch (e: CancellationException) {
+                // 切月/切 Tab 打断刷新属于正常取消：不清错误态、不弹「刷新失败」
+                throw e
             } finally {
+                // 取消也会走到这里：转圈必须停，否则界面会一直转。
                 _uiState.update { it.copy(isRefreshing = false) }
             }
         }
@@ -341,7 +394,12 @@ class CalendarViewModel(
         _uiState.update { state -> state.copy(errorMessage = null) }
     }
 
-    private suspend fun generateCalendarData(assets: List<Asset>, forceRefresh: Boolean = false, invalidateCache: Boolean = false) {
+    private suspend fun generateCalendarData(
+        assets: List<Asset>,
+        forceRefresh: Boolean = false,
+        invalidateCache: Boolean = false,
+        today: LocalDate = LocalDate.now()
+    ) {
         if (forceRefresh || invalidateCache) calendarCache.clear()
         if (assets.isEmpty()) {
             _uiState.update { state -> state.copy(
@@ -358,7 +416,7 @@ class CalendarViewModel(
         // 缓存命中（非强制刷新、未要求失效、且同 (Tab, 月) 已算过）：直接复用，避免切月/切 Tab 反复重算
         if (!forceRefresh && !invalidateCache && calendarCache.containsKey(cacheKey)) {
             val cached = calendarCache[cacheKey]!!
-            generatedOnDate = LocalDate.now()
+            generatedOnDate = today
             _uiState.update { state -> state.copy(
                 isLoading = false,
                 calendarData = cached.calendarData,
@@ -379,9 +437,9 @@ class CalendarViewModel(
                     assetRepository.getAllAssets().first()
                 }
                 if (requestState.selectedTab == "资产日历") {
-                    generateAssetCalendarData(requestState.currentMonth, assets, forceRefresh, allAssets)
+                    generateAssetCalendarData(requestState.currentMonth, assets, forceRefresh, allAssets, today)
                 } else {
-                    generateIncomeCalendarData(requestState.currentMonth, assets, forceRefresh)
+                    generateIncomeCalendarData(requestState.currentMonth, assets, forceRefresh, today)
                 }
             }
         } catch (e: CancellationException) {
@@ -397,7 +455,7 @@ class CalendarViewModel(
         }
         result.onSuccess { calendarResult ->
             // 生成成功才更新「保鲜日期」：失败的生成不算数，下次回前台还要重试
-            generatedOnDate = LocalDate.now()
+            generatedOnDate = today
             // 缓存本次结果，供后续切回同 (Tab, 月) 时直接复用（B④）
             calendarCache[cacheKey] = calendarResult
             // 用 update{} 原子读-改-写：不能直接拿上面读到的 currentState 去 copy，
@@ -439,13 +497,16 @@ class CalendarViewModel(
         // 冷启动不强制重抓：先宽口径批量读把库里有记录的标的预热进内存缓存（零网络、2 次 IO），
         // 只让「连过期数据都没有」的标的去联网。forceRefresh=true（用户主动刷新）时
         // primeDividendCache 直接放行全部，走原来的全量重抓路径。
-        val needFetch = dividendRepository.primeDividendCache(symbols, forceRefresh)
-        if (needFetch.isNotEmpty()) {
-            dividendRepository.prefetchDividends(
-                symbols = needFetch,
-                forceRefresh = forceRefresh,
-                timeBudgetMs = SyncBudget.MANUAL_SYNC_TIME_LIMIT_MS
-            )
+        // 整段放在单飞锁里：并发生成（例如刷新与切月擦肩而过）不会各跑一遍预取。
+        prefetchMutex.withLock {
+            val needFetch = dividendRepository.primeDividendCache(symbols, forceRefresh)
+            if (needFetch.isNotEmpty()) {
+                dividendRepository.prefetchDividends(
+                    symbols = needFetch,
+                    forceRefresh = forceRefresh,
+                    timeBudgetMs = SyncBudget.MANUAL_SYNC_TIME_LIMIT_MS
+                )
+            }
         }
         return mergedAssets
     }
@@ -454,18 +515,18 @@ class CalendarViewModel(
         month: YearMonth,
         assets: List<Asset>,
         forceRefresh: Boolean,
-        allAssets: List<Asset>
+        allAssets: List<Asset>,
+        today: LocalDate
     ): Result<CalendarResult> = try {
         Result.success(withContext(Dispatchers.IO) {
             if (assets.isEmpty()) {
                 return@withContext CalendarResult(
-                    buildAssetCalendarMonth(month, emptyMap(), liveNetAssetsToday = 0.0, today = LocalDate.now()),
+                    buildAssetCalendarMonth(month, emptyMap(), liveNetAssetsToday = 0.0, today = today),
                     emptySet(),
                     emptyList()
                 )
             }
 
-            val today = LocalDate.now()
             val viewingCurrentMonth = today.year == month.year && today.monthValue == month.monthValue
 
             // 只查"显示月 1 号 00:00（系统默认时区）"起的快照，而不是把整张 asset_snapshots
@@ -514,6 +575,11 @@ class CalendarViewModel(
 
             // 合并同代码多账户 + 预热/补抓分红缓存（与收支日历共用，见 prepareMergedAssets，B③）
             val mergedAssets = prepareMergedAssets(assets, forceRefresh)
+            // 一次批量读取代逐 symbol 查询：缓存命中的标的一次拿齐，只有确实没数据的才在
+            // 批量方法里回落到逐符号抓取（与原来的取数语义完全一致）。
+            val recordsBySymbol = dividendRepository.getDividendRecordsBatch(
+                mergedAssets.mapNotNull { it.symbol }
+            )
 
             val dividendDates = mutableSetOf<LocalDate>()
             val dividends = mutableListOf<Pair<String, List<DividendRecord>>>()
@@ -521,7 +587,7 @@ class CalendarViewModel(
             for (asset in mergedAssets) {
                 val symbol = asset.symbol ?: continue
                 try {
-                val records = dividendRepository.getDividendsBySymbol(symbol)
+                val records = recordsBySymbol[symbol].orEmpty()
                 // 照样只算一次日期：筛当月、记分红日、判是否已到账用的是同一个 LocalDate。
                 // 按**到账日**（派息日，拿不到才除息日）而不是除息日：除息日只决定资格，
                 // 钱 1~4 周后才到账——按除息日打标记会让钱还没到就显示「分」。
@@ -566,7 +632,8 @@ class CalendarViewModel(
     private suspend fun generateIncomeCalendarData(
         month: YearMonth,
         assets: List<Asset>,
-        forceRefresh: Boolean
+        forceRefresh: Boolean,
+        today: LocalDate
     ): Result<CalendarResult> = try {
         Result.success(withContext(Dispatchers.IO) {
             val data = mutableMapOf<LocalDate, Double>()
@@ -574,9 +641,12 @@ class CalendarViewModel(
                 data[month.atDay(day)] = 0.0
             }
 
-            val today = LocalDate.now()
             // 合并同代码多账户 + 预热/补抓分红缓存（与资产日历共用，见 prepareMergedAssets，B③）
             val mergedAssets = prepareMergedAssets(assets, forceRefresh)
+            // 同资产日历：一次批量读取代逐 symbol 查询（语义一致，见 getDividendRecordsBatch）
+            val recordsBySymbol = dividendRepository.getDividendRecordsBatch(
+                mergedAssets.mapNotNull { it.symbol }
+            )
 
             val dividendDates = mutableSetOf<LocalDate>()
             val dividends = mutableListOf<Pair<String, List<DividendRecord>>>()
@@ -584,7 +654,7 @@ class CalendarViewModel(
             for (asset in mergedAssets) {
                 val symbol = asset.symbol ?: continue
                 try {
-                    val records = dividendRepository.getDividendsBySymbol(symbol)
+                    val records = recordsBySymbol[symbol].orEmpty()
                     // 同资产日历：按到账日归日、只算已到账的（到账日不晚于今天）。
                     // 原先按除息日归日，钱还没到就把金额计到了除息日那天
                     val monthEntries = records.mapNotNull { record ->

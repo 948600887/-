@@ -51,14 +51,18 @@ fun DividendDayDetail(
     // 预计算每个分红的金额（避免两次计算）
     // 找不到对应持仓时给出 null 而不是拿 1 份兜底 —— 兜底会凭空变出一个「每份」的假金额，
     // 界面上显示「—」比显示一个错的数诚实
-    val details = dayDividendDetails.map { (sym, record) ->
-        val asset = assetMap[sym]
-        // 折算成人民币：外币基金（USD/HKD）的每份金额按标的币种换算，
-        // 否则界面会把美元金额当人民币显示，钱数错得无声无息。
-        val amount = asset?.let { ExchangeRateManager.toCny(record.amountFor(it.balance), it.currency) }
-        Triple(sym, record, amount)
+    // remember：与上面的 dayDividendDetails 一样，选中日期后的其它重组（例如上方金额/净资产
+    // 刷新）不应重跑 map + 汇率换算；只有「当日明细」或持仓表变化时才重算。
+    val details = remember(dayDividendDetails, assetMap) {
+        dayDividendDetails.map { (sym, record) ->
+            val asset = assetMap[sym]
+            // 折算成人民币：外币基金（USD/HKD）的每份金额按标的币种换算，
+            // 否则界面会把美元金额当人民币显示，钱数错得无声无息。
+            val amount = asset?.let { ExchangeRateManager.toCny(record.amountFor(it.balance), it.currency) }
+            Triple(sym, record, amount)
+        }
     }
-    val totalDividend = details.sumOf { it.third ?: 0.0 }
+    val totalDividend = remember(details) { details.sumOf { it.third ?: 0.0 } }
 
     HorizontalDivider(
         modifier = Modifier.padding(vertical = 12.dp),

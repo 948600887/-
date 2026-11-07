@@ -97,9 +97,10 @@ data class SyncResult(
         }
 
     /**
-     * 把「有源级故障的数据源」渲染成一句给用户看的补充（供刷新结果提示拼接）。
+     * 把「有源级故障 / 有降级事实的数据源」渲染成一句给用户看的补充（供刷新结果提示拼接）。
      *
-     * 只在**源级失败**（超时/连不上/空返回/格式坏）时说话：符号级失败（代码不在此源
+     * 只在**源级失败**（超时/连不上/空返回/格式坏）或**降级原因**（轻量源已熔断改走
+     * legacy、币安 451 粘死未请求、整片 400 切小重试）时说话：符号级失败（代码不在此源
      * 支持范围）是正常现象，说出来只会制造噪音。无异常时返回空串，不占提示篇幅。
      *
      * 包含源名、失败次数与最近一次失败原因，让用户能判断是「这个源今天不行」，
@@ -107,7 +108,9 @@ data class SyncResult(
      */
     val sourceHealthHint: String
         get() {
-            val degraded = sourceStats.filter { it.sourceLevelFailure > 0 }
+            val degraded = sourceStats.filter {
+                it.sourceLevelFailure > 0 || !it.degradedReason.isNullOrBlank()
+            }
             if (degraded.isEmpty()) return ""
             return buildString {
                 append("；数据源异常：")
@@ -116,7 +119,13 @@ data class SyncResult(
                         ?.takeIf { it.isNotBlank() }
                         ?.let { "，${it.take(24)}" }
                         ?: ""
-                    "${stat.source} 源级失败 ${stat.sourceLevelFailure} 次$reason"
+                    val failure = stat.sourceLevelFailure
+                        .takeIf { it > 0 }
+                        ?.let { "源级失败 $it 次$reason" }
+                    val degrade = stat.degradedReason
+                        ?.takeIf { it.isNotBlank() }
+                        ?.take(30)
+                    "${stat.source} " + listOfNotNull(failure, degrade).joinToString("，")
                 })
             }
         }

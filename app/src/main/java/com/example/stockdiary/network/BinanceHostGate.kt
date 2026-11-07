@@ -201,6 +201,15 @@ internal object BinanceHostGate {
     fun isUnavailable(): Boolean = state.get().phase != Phase.CLOSED
 
     /**
+     * 是否已因地区封锁（451/403）**粘死**（纯读、无副作用）。
+     *
+     * 与 [isUnavailable] 的区别：粘死是「本轮不再评估、连探测都不发」的终态，
+     * 给源统计归类用——提示里要能区分「451 地区封锁粘死」与「普通瞬断熔断中」。
+     * **不要**用它替代 [tryAcquireProbe] 做请求闸门。
+     */
+    internal fun isRegionBlocked(): Boolean = regionBlocked
+
+    /**
      * 诊断用文案：当前币安主机可用性，供 [com.example.stockdiary.utils.LogDiagnostics]
      * 头部快照一眼展示。不暴露内部相位细节（OPEN/HALF_OPEN 对用户在语义上都是「暂不可达」）。
      */

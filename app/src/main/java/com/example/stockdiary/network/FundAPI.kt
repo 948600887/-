@@ -5,6 +5,7 @@ import com.example.stockdiary.common.Result
 import com.example.stockdiary.database.FundNavCache
 import com.example.stockdiary.database.FundNavCacheDao
 import com.example.stockdiary.database.StockDatabase
+import com.example.stockdiary.data.price.SourceStats
 import com.example.stockdiary.utils.AppLogger
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -49,6 +50,12 @@ object FundAPI {
 
     /** 轻量源连续失败多少次后**整源熔断**（本进程内不再尝试）。 */
     private const val LIGHTWEIGHT_FAILURE_THRESHOLD = 3
+
+    /** 源统计里的稳定名字：三条链路共用同一个 SourceStats 模型 */
+    private const val SOURCE_LIGHTWEIGHT = "基金-轻量源"
+    private const val SOURCE_LEGACY = "基金-legacy源"
+    private const val HOST_LIGHTWEIGHT = "fundmobapi.eastmoney.com"
+    private const val HOST_LEGACY = "fund.eastmoney.com"
 
     private val client = NetworkClient.fundClient
     private val cache = ConcurrentHashMap<String, CacheEntry>()
@@ -109,6 +116,39 @@ object FundAPI {
     @Volatile
     private var lightweightSourceDisabled = false
 
+    // 轮次级源统计（只观测，不影响回退/熔断判定）
+    private val lightweightStats = SourceStatsCounter(SOURCE_LIGHTWEIGHT, host = HOST_LIGHTWEIGHT)
+    private val legacyStats = SourceStatsCounter(SOURCE_LEGACY, host = HOST_LEGACY)
+
+    /** 每轮同步开始时清零，与股票链路同节奏 */
+    internal fun resetSourceStats() {
+        lightweightStats.reset()
+        legacyStats.reset()
+    }
+
+    /**
+     * 基金两源的统计快照，顺序固定为「轻量 → legacy」，与回退链一致。
+     *
+     * 轻量源已熔断且本轮确实走了 legacy 时，补一行 `degradedReason`；
+     * 这时它没有真实请求，所以成功/失败计数保持 0（不用 0 假装「跑过」）。
+     */
+    internal fun sourceStatsSnapshot(): List<SourceStats> {
+        val lightweight = lightweightStats.snapshot()
+        val legacy = legacyStats.snapshot()
+        return buildList {
+            if (lightweightStats.hasActivity()) {
+                add(lightweight)
+            } else if (lightweightSourceDisabled && legacyStats.hasActivity()) {
+                add(
+                    lightweight.copy(
+                        degradedReason = "连续失败已熔断，本轮直接走 legacy"
+                    )
+                )
+            }
+            if (legacyStats.hasActivity()) add(legacy)
+        }
+    }
+
     /**
      * 轻量源是否已被熔断。
      *
@@ -132,6 +172,8 @@ object FundAPI {
         legacyNavSource = { code -> fetchFundInfoLegacy(code) }
         lightweightFailures.set(0)
         lightweightSourceDisabled = false
+        // 统计计数器同样是进程级单例，测试之间必须清零
+        resetSourceStats()
         // 内存缓存也是进程级单例：测试之间必须清掉，否则上一个用例写入的
         // 基金净值会让下一个用例命中缓存、绕过它刚注入的假源。
         cache.clear()
@@ -445,21 +487,54 @@ object FundAPI {
      */
     internal suspend fun fetchFundInfo(fundCode: String): FundInfo? {
         if (!lightweightSourceDisabled) {
+            // 只测耗时，不改回退/熔断：源函数内部已按 HTTP 状态/解析结果分类计数
+            val lightweightStartedAt = System.currentTimeMillis()
             val lightweight = try {
                 lightweightNavSource(fundCode)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
+                lightweightStats.recordSourceFailure(
+                    "网络异常：${e.message?.take(40) ?: e.javaClass.simpleName}"
+                )
                 AppLogger.w("轻量净值源异常，回退旧数据源: $fundCode ${e.message}", TAG)
                 null
+            } finally {
+                lightweightStats.addDuration(System.currentTimeMillis() - lightweightStartedAt)
             }
             if (lightweight != null) {
+                lightweightStats.recordSuccess()
                 lightweightFailures.set(0)
                 return lightweight
             }
             noteLightweightFailure(fundCode)
+        } else {
+            // 没有真实请求，只记录「本轮为什么没走轻量源」；失败计数保持 0
+            lightweightStats.markDegraded("连续失败已熔断，本轮直接走 legacy")
         }
-        return legacyNavSource(fundCode)
+
+        val legacyStartedAt = System.currentTimeMillis()
+        val legacy = try {
+            legacyNavSource(fundCode)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            legacyStats.recordSourceFailure(
+                "网络异常：${e.message?.take(40) ?: e.javaClass.simpleName}"
+            )
+            AppLogger.w("legacy 净值源异常: $fundCode ${e.message}", TAG)
+            null
+        } finally {
+            legacyStats.addDuration(System.currentTimeMillis() - legacyStartedAt)
+        }
+        if (legacy != null) legacyStats.recordSuccess()
+        return legacy
+    }
+
+    /** 514/429 是限流口径，原因里标出来，便于和普通 5xx 区分（internal 供单测钉死口径） */
+    internal fun httpFailureReason(code: Int): String = when (code) {
+        514, 429 -> "HTTP $code 限流"
+        else -> "HTTP $code"
     }
 
     /**
@@ -505,6 +580,7 @@ object FundAPI {
                 val response = client.newCall(request).execute()
                 response.use {
                     if (!it.isSuccessful) {
+                        lightweightStats.recordSourceFailure(httpFailureReason(it.code))
                         AppLogger.w(
                             "轻量净值源 HTTP ${it.code}，回退旧数据源: $fundCode",
                             TAG
@@ -515,6 +591,8 @@ object FundAPI {
                     val body = it.body?.string().orEmpty()
                     val info = FundNavParser.parseBasicInfo(body, fundCode)
                     if (info == null) {
+                        // HTTP 成功但这条代码没有可解析数据：算符号级缺口，不是源故障
+                        lightweightStats.recordSymbolFailure()
                         AppLogger.w(
                             "轻量净值源返回无法解析的内容，回退旧数据源: $fundCode",
                             TAG
@@ -525,6 +603,9 @@ object FundAPI {
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
+                lightweightStats.recordSourceFailure(
+                    "网络异常：${e.message?.take(40) ?: e.javaClass.simpleName}"
+                )
                 AppLogger.w("轻量净值源请求失败，回退旧数据源: $fundCode ${e.message}", TAG)
                 null
             }
@@ -551,12 +632,15 @@ object FundAPI {
                 val response = client.newCall(request).execute()
                 response.use {
                     if (!it.isSuccessful) {
+                        legacyStats.recordSourceFailure(httpFailureReason(it.code))
                         AppLogger.e("基金请求失败: HTTP ${it.code}", tag = TAG)
                         return@withContext null
                     }
 
-                    val body = it.body?.string() ?: return@withContext null
-                    if (body.length < 100) {
+                    val body = it.body?.string()
+                    if (body == null || body.length < 100) {
+                        // 200 但响应过短：通常是反爬/网关拦截，归为源级响应异常
+                        legacyStats.recordSourceFailure("响应过短")
                         AppLogger.e("基金响应数据过短", tag = TAG)
                         return@withContext null
                     }
@@ -565,6 +649,8 @@ object FundAPI {
                     val code = FundDataParser.extractJsVar(body, "fS_code") ?: fundCode
 
                     if (name.isEmpty()) {
+                        // 文件正常但没这个代码：符号级缺口
+                        legacyStats.recordSymbolFailure()
                         AppLogger.e("未找到基金名称", tag = TAG)
                         return@withContext null
                     }
@@ -574,6 +660,8 @@ object FundAPI {
                     // 净值解析失败时 parseNawData 会返回默认值 0.0。0 净值会让场外基金市值归零，
                     // 且因为没有明显报错用户很难察觉，所以这里宁可不返回这条数据（触发下一数据源）。
                     if (nawData.naw <= 0.0) {
+                        // 解析出 0 是数据质量问题，不是「没有这个代码」
+                        legacyStats.recordSourceFailure("净值无效")
                         AppLogger.w("基金净值无效，丢弃该条: $code naw=${nawData.naw}", tag = TAG)
                         return@withContext null
                     }
@@ -591,6 +679,9 @@ object FundAPI {
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
+                legacyStats.recordSourceFailure(
+                    "网络异常：${e.message?.take(40) ?: e.javaClass.simpleName}"
+                )
                 AppLogger.e("获取基金信息失败: ${e.message}", e, TAG)
                 null
             }

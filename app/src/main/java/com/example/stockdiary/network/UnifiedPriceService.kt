@@ -8,6 +8,7 @@ import com.example.stockdiary.data.price.PriceLineage
 import com.example.stockdiary.data.price.PriceLineageRecorder
 import com.example.stockdiary.data.price.RoundSourceFailureScope
 import com.example.stockdiary.data.price.SourceIds
+import com.example.stockdiary.data.price.SourceStats
 import com.example.stockdiary.data.price.StockDataManager
 import com.example.stockdiary.network.cache.CacheManager
 import com.example.stockdiary.network.model.AssetPrice
@@ -95,6 +96,30 @@ object UnifiedPriceService {
      * 线程安全：getCryptoPrice 被同步扇出 6 并发调用，写入点并发，故用 ConcurrentHashMap 集合。
      */
     private val nonTradableCodes = ConcurrentHashMap.newKeySet<String>()
+
+    /** 源统计里的稳定名字，与股票/基金链路共用同一个 [SourceStats] 模型 */
+    private const val SOURCE_CRYPTO = "币安-镜像"
+
+    /** 公开行情主机（从端点常量派生，避免两处漂移） */
+    private val CRYPTO_HOST: String =
+        APIEndpoints.Binance.MARKET_DATA_BASE_URL.substringAfter("://").substringBefore("/")
+
+    /**
+     * 加密链路轮次级统计（只观测，不参与取价 / 缓存 / 熔断判定）。
+     *
+     * 记录批量分片结果、成功与失败计数、耗时、以及主机熔断/地区封锁的降级原因，
+     * 由同步编排器并入 `SyncResult.sourceStats`，与股票/基金同一条提示。
+     */
+    private val cryptoStats = SourceStatsCounter(SOURCE_CRYPTO, host = CRYPTO_HOST)
+
+    /** 每轮同步开始时清零，与股票/基金链路同节奏 */
+    internal fun resetSourceStats() {
+        cryptoStats.reset()
+    }
+
+    /** 加密链路源统计快照；本轮没有任何批量动作时返回空，不制造噪音 */
+    internal fun cryptoSourceStatsSnapshot(): List<SourceStats> =
+        if (cryptoStats.hasActivity()) listOf(cryptoStats.snapshot()) else emptyList()
 
     private fun isFresh(entry: CacheEntry): Boolean =
         System.currentTimeMillis() - entry.timestamp < PRICE_CACHE_TTL_MS
@@ -448,6 +473,14 @@ object UnifiedPriceService {
 
         // 主机级熔断闸门：一次批量预取 = 一次主机探测（不按片、更不按标的重复记账）
         if (!BinanceHostGate.tryAcquireProbe(System.currentTimeMillis())) {
+            // 只记降级事实、不增加失败计数：本轮压根没发请求，不该假装「源败了 N 次」
+            cryptoStats.markDegraded(
+                if (BinanceHostGate.isRegionBlocked()) {
+                    "HTTP 451/403 地区封锁，主机熔断粘死，本轮未请求"
+                } else {
+                    "主机连续网络失败已熔断，本轮未请求"
+                }
+            )
             AppLogger.d("币安主机熔断中，跳过加密货币批量预取（回落逐标的）", TAG)
             writeCryptoPricesToCache(resultMap)
             return@withContext Result.success(resultMap)
@@ -473,61 +506,108 @@ object UnifiedPriceService {
         /**
          * 把一片的报价回填到 [resultMap]，只处理 [scope]（本次请求的交易对）内的 code。
          * 查不到报价的交易对（币安没返回）不进 map，回落逐标的。
+         *
+         * @return 本片实际回填的 code 数（供源统计记账；0 表示本片一个都没命中）
          */
-        fun applyQuotes(quotes: Map<String, CryptoQuote>, scope: Set<String>) {
+        fun applyQuotes(quotes: Map<String, CryptoQuote>, scope: Set<String>): Int {
+            var applied = 0
             for ((code, pair) in codeToPair) {
                 val p = pair.uppercase()
                 if (p !in scope) continue
                 val quote = quotes[p] ?: continue
                 resultMap[code] = AssetPrice.Crypto(quote.toCryptoData(code))
+                applied++
             }
+            return applied
+        }
+
+        /** 片级失败原因归类（只用于统计展示，不参与熔断判定） */
+        fun shardFailureReason(fetched: ShardFetch): String = when {
+            fetched.failureType == FailureType.REGION_BLOCKED ->
+                "HTTP ${fetched.httpCode ?: 451} 地区封锁"
+            fetched.failureType == FailureType.TRANSIENT ->
+                fetched.httpCode?.let { "HTTP $it" } ?: "网络异常/超时"
+            fetched.httpCode == 429 -> "HTTP 429 限流"
+            fetched.httpCode != null && fetched.httpCode in 500..599 ->
+                "HTTP ${fetched.httpCode} 服务端异常"
+            fetched.httpCode != null -> "HTTP ${fetched.httpCode}"
+            else -> "响应解析为空"
         }
 
         val context = currentCoroutineContext()
-        for (shard in pairsToFetch.chunked(CRYPTO_BATCH_SYMBOLS)) {
-            // 取消 / 预算：预取阻塞在 execute() 里，取消打不断，只能在片与片之间主动收手。
-            // 这两种情况下**不做熔断记账**（不是主机不可达的证据），直接带着已取得的价返回。
-            if (!context.isActive || System.currentTimeMillis() >= deadlineMs) {
-                if (context.isActive) {
-                    AppLogger.w("加密货币批量预取已达时间预算，跳过剩余分片", TAG)
-                }
-                writeCryptoPricesToCache(resultMap)
-                return@withContext Result.success(resultMap)
-            }
-
-            val fetched = fetchCryptoTickerShard(shard, client)
-            if (fetched.quotes != null) {
-                sawQuotes = true
-                applyQuotes(fetched.quotes, shard.toHashSet())
-                continue
-            }
-
-            // 整片失败。只有 **400（非法符号）** 值得切小重试——5xx/451/429/网络异常
-            // 是源或网络层面的问题，重试只会放大请求量，一律不重试。
-            if (fetched.httpCode == 400) {
-                AppLogger.w(
-                    "加密货币批量行情整片 400（${shard.size} 个交易对），" +
-                        "按 $CRYPTO_BATCH_RETRY_SYMBOLS 个一片切小重试一次",
-                    TAG
-                )
-                for (subShard in shard.chunked(CRYPTO_BATCH_RETRY_SYMBOLS)) {
-                    // 切小重试同样受取消与预算约束：一个超时片再切 6 个子片，
-                    // 不拦的话单轮可再烧掉 6 × callTimeout
-                    if (!context.isActive || System.currentTimeMillis() >= deadlineMs) break
-                    val subFetched = fetchCryptoTickerShard(subShard, client)
-                    if (subFetched.quotes != null) {
-                        sawQuotes = true
-                        applyQuotes(subFetched.quotes, subShard.toHashSet())
-                    } else {
-                        // 子片仍失败：直接回落逐标的，**不再往下切**（只切一层，不递归）
-                        noteFailure(subFetched.failureType)
+        val batchStartedAt = System.currentTimeMillis()
+        var shardsAttempted = 0
+        var failedShards = 0
+        try {
+            for (shard in pairsToFetch.chunked(CRYPTO_BATCH_SYMBOLS)) {
+                // 取消 / 预算：预取阻塞在 execute() 里，取消打不断，只能在片与片之间主动收手。
+                // 这两种情况下**不做熔断记账**（不是主机不可达的证据），直接带着已取得的价返回。
+                if (!context.isActive || System.currentTimeMillis() >= deadlineMs) {
+                    if (context.isActive) {
+                        AppLogger.w("加密货币批量预取已达时间预算，跳过剩余分片", TAG)
                     }
+                    writeCryptoPricesToCache(resultMap)
+                    return@withContext Result.success(resultMap)
                 }
-                continue
-            }
 
-            // 非 400 的整片失败：对应 code 不进 map，回落逐标的，不重试
-            noteFailure(fetched.failureType)
+                shardsAttempted++
+                var appliedFromShard = 0
+                val fetched = fetchCryptoTickerShard(shard, client)
+                if (fetched.quotes != null) {
+                    sawQuotes = true
+                    appliedFromShard = applyQuotes(fetched.quotes, shard.toHashSet())
+                    cryptoStats.recordSuccess(appliedFromShard)
+                    continue
+                }
+
+                // 整片失败。只有 **400（非法符号）** 值得切小重试——5xx/451/429/网络异常
+                // 是源或网络层面的问题，重试只会放大请求量，一律不重试。
+                if (fetched.httpCode == 400) {
+                    AppLogger.w(
+                        "加密货币批量行情整片 400（${shard.size} 个交易对），" +
+                            "按 $CRYPTO_BATCH_RETRY_SYMBOLS 个一片切小重试一次",
+                        TAG
+                    )
+                    // 降级事实：整片 400 不是一个「源故障」，而是片内混了无效交易对
+                    cryptoStats.markDegraded("整片 400（无效交易对），已切小重试")
+                    for (subShard in shard.chunked(CRYPTO_BATCH_RETRY_SYMBOLS)) {
+                        // 切小重试同样受取消与预算约束：一个超时片再切 6 个子片，
+                        // 不拦的话单轮可再烧掉 6 × callTimeout
+                        if (!context.isActive || System.currentTimeMillis() >= deadlineMs) break
+                        val subFetched = fetchCryptoTickerShard(subShard, client)
+                        if (subFetched.quotes != null) {
+                            sawQuotes = true
+                            val subApplied = applyQuotes(subFetched.quotes, subShard.toHashSet())
+                            appliedFromShard += subApplied
+                            cryptoStats.recordSuccess(subApplied)
+                        } else {
+                            // 子片仍失败：直接回落逐标的，**不再往下切**（只切一层，不递归）
+                            if (subFetched.httpCode == 400) {
+                                // 子片整片非法：按子片大小近似记符号级失败
+                                cryptoStats.recordSymbolFailure(subShard.size)
+                            } else {
+                                cryptoStats.recordSourceFailure(
+                                    shardFailureReason(subFetched),
+                                    subShard.size
+                                )
+                            }
+                            noteFailure(subFetched.failureType)
+                        }
+                    }
+                    // 切小重试后仍一个都没取到：这一片算最终失败
+                    if (appliedFromShard == 0) failedShards++
+                    continue
+                }
+
+                // 非 400 的整片失败：对应 code 不进 map，回落逐标的，不重试
+                failedShards++
+                cryptoStats.recordSourceFailure(shardFailureReason(fetched), shard.size)
+                noteFailure(fetched.failureType)
+            }
+        } finally {
+            // 提前返回（预算 / 取消）也照常落到这里：耗时不因中途收手而丢失
+            cryptoStats.addDuration(System.currentTimeMillis() - batchStartedAt)
+            cryptoStats.setBatchShards(shardsAttempted, failedShards)
         }
 
         // 协程已取消（切后台等）：这一轮记账不算数，不喂熔断器，直接返回已采集的部分
@@ -545,6 +625,17 @@ object UnifiedPriceService {
             sawTransient -> BinanceHostGate.onNetworkFailure(now, FailureType.TRANSIENT)
             sawQuotes -> BinanceHostGate.onSuccess()
             else -> Unit
+        }
+
+        // 熔断状态归类：把「451/403 粘死」与普通瞬断熔断分开写进降级原因，
+        // 让提示能直接说清「是地区封锁还是网络抖动」，而不是只给一句源级失败。
+        when {
+            sawRegionBlocked && BinanceHostGate.isRegionBlocked() ->
+                cryptoStats.markDegraded("HTTP 451/403 地区封锁，主机已熔断粘死")
+            sawRegionBlocked ->
+                cryptoStats.markDegraded("HTTP 451/403 地区封锁，主机熔断中")
+            BinanceHostGate.isUnavailable() ->
+                cryptoStats.markDegraded("主机连续网络失败，已熔断")
         }
 
         writeCryptoPricesToCache(resultMap)

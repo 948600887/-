@@ -15,6 +15,7 @@ import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -52,6 +53,8 @@ class UnifiedPriceServiceCryptoPrewarmTest {
         UnifiedPriceService.clearPriceCacheForTesting()
         // 黑名单是 object 单例字段，跨用例共享：不清会让上一个用例登记的坏码污染下一个
         UnifiedPriceService.clearNonTradableForTesting()
+        // 源统计同样跨用例共享：每个用例从「本轮零观测」开始
+        UnifiedPriceService.resetSourceStats()
         requestCount.set(0)
         lastUrl.set("")
     }
@@ -62,6 +65,7 @@ class UnifiedPriceServiceCryptoPrewarmTest {
         BinanceHostGate.resetForTesting()
         UnifiedPriceService.clearPriceCacheForTesting()
         UnifiedPriceService.clearNonTradableForTesting()
+        UnifiedPriceService.resetSourceStats()
     }
 
     // ---------- 1. 请求数：N 个标的 1 次请求 ----------
@@ -335,6 +339,126 @@ class UnifiedPriceServiceCryptoPrewarmTest {
             "黑名单命中应直接返回不可交易",
             r.isFailure && r.exceptionOrNull() is NonTradableAssetException
         )
+    }
+
+    // ---------- 7. 源统计：分片结果 / 熔断归类 / 成败计数 ----------
+
+    @Test
+    fun `批量成功_记录成功数分片结果主机与耗时`() = runBlocking {
+        val client = recordingClient { req ->
+            Thread.sleep(5)
+            respond(200, tickers("BTCUSDT" to "67000", "ETHUSDT" to "3000"), req)
+        }
+
+        val map = UnifiedPriceService.prewarmCryptoPrices(
+            listOf("BTC", "ETH", "USDT"),
+            forceRefresh = true,
+            client = client
+        ).getOrThrow()
+        assertEquals("稳定币锚定 1.0 也进 map，但不算批量成功", 3, map.size)
+
+        val stat = UnifiedPriceService.cryptoSourceStatsSnapshot().single()
+        assertEquals("币安-镜像", stat.source)
+        assertEquals("data-api.binance.vision", stat.host)
+        assertEquals("只按批量实际回填的 code 数计成功（USDT 未发请求不计数）", 2, stat.success)
+        assertEquals(0, stat.sourceLevelFailure)
+        assertEquals(0, stat.symbolLevelFailure)
+        assertEquals(1, stat.batchShards)
+        assertEquals(0, stat.batchFailedShards)
+        assertTrue("耗时必须被记录", stat.durationMs >= 5)
+        assertNull(stat.degradedReason)
+    }
+
+    @Test
+    fun `批量451_记源级失败与地区封锁降级原因`() = runBlocking {
+        val codes = (1..10).map { "TOK$it" }
+        val client = recordingClient { req ->
+            respond(451, """{"code":0,"msg":"Service unavailable from a restricted location."}""", req)
+        }
+
+        UnifiedPriceService.prewarmCryptoPrices(codes, forceRefresh = true, client = client)
+
+        val stat = UnifiedPriceService.cryptoSourceStatsSnapshot().single()
+        assertEquals(0, stat.success)
+        assertEquals("整片失败按受影响交易对数记源级失败", 10, stat.sourceLevelFailure)
+        assertEquals("HTTP 451 地区封锁", stat.lastFailureReason)
+        assertEquals(1, stat.batchShards)
+        assertEquals(1, stat.batchFailedShards)
+        // 第一次 451 还没到粘死阈值（2），归类为「熔断中」而不是「粘死」
+        assertEquals("HTTP 451/403 地区封锁，主机熔断中", stat.degradedReason)
+    }
+
+    @Test
+    fun `451粘死后的下一轮_不发请求且归类为粘死`() = runBlocking {
+        val codes = (1..3).map { "TOK$it" }
+        val regionBlockedClient = recordingClient { req ->
+            respond(451, """{"code":0,"msg":"Service unavailable from a restricted location."}""", req)
+        }
+
+        // 连续两轮 451 达到地区封锁阈值 → 粘死
+        repeat(BinanceHostGate.REGION_BLOCKED_FAIL_THRESHOLD) {
+            UnifiedPriceService.prewarmCryptoPrices(codes, forceRefresh = true, client = regionBlockedClient)
+        }
+        assertTrue(BinanceHostGate.regionBlockedForTesting())
+
+        // 新的一轮：本轮统计清零，闸门应直接拒绝，一个请求都不发
+        UnifiedPriceService.resetSourceStats()
+        requestCount.set(0)
+        val neverHit = recordingClient { req -> respond(200, tickers("BTCUSDT" to "1"), req) }
+        UnifiedPriceService.prewarmCryptoPrices(codes, forceRefresh = true, client = neverHit)
+
+        assertEquals("粘死后本轮不应再发任何请求", 0, requestCount.get())
+        val stat = UnifiedPriceService.cryptoSourceStatsSnapshot().single()
+        assertEquals(0, stat.success)
+        assertEquals("没发请求就不能虚增源级失败", 0, stat.sourceLevelFailure)
+        assertEquals("HTTP 451/403 地区封锁，主机熔断粘死，本轮未请求", stat.degradedReason)
+        assertNull("没有批量请求时不用 0 占位", stat.batchShards)
+        assertNull(stat.batchFailedShards)
+    }
+
+    @Test
+    fun `整片400切小重试_记录符号级失败与降级原因`() = runBlocking {
+        val valid = (1..10).map { "TOK$it" }
+        val invalidCode = "LDSHIB2"
+        val invalidPair = "SHIB2USDT"
+        val client = recordingClient { req ->
+            val asked = symbolsOf(req.url.toString())
+            if (invalidPair in asked) {
+                respond(400, """{"code":-1121,"msg":"Invalid symbol."}""", req)
+            } else {
+                respond(200, tickers(*asked.map { it to "100" }.toTypedArray()), req)
+            }
+        }
+
+        UnifiedPriceService.prewarmCryptoPrices(
+            valid + invalidCode,
+            forceRefresh = true,
+            client = client
+        )
+
+        val stat = UnifiedPriceService.cryptoSourceStatsSnapshot().single()
+        assertEquals("切小重试拿到的 10 个合法标的不算失败", 10, stat.success)
+        assertEquals("整片 400 不是源故障", 0, stat.sourceLevelFailure)
+        assertEquals("只有坏码所在的子片记符号级失败", 1, stat.symbolLevelFailure)
+        assertEquals("整片 400（无效交易对），已切小重试", stat.degradedReason)
+        assertEquals(1, stat.batchShards)
+        assertEquals("10 个合法标的最终拿到价，整片不算最终失败", 0, stat.batchFailedShards)
+    }
+
+    @Test
+    fun `批量500_记录源级失败原因与失败分片`() = runBlocking {
+        val client = recordingClient { req -> respond(500, "", req) }
+
+        UnifiedPriceService.prewarmCryptoPrices(listOf("BTC"), forceRefresh = true, client = client)
+
+        val stat = UnifiedPriceService.cryptoSourceStatsSnapshot().single()
+        assertEquals(0, stat.success)
+        assertEquals(1, stat.sourceLevelFailure)
+        assertEquals("HTTP 500 服务端异常", stat.lastFailureReason)
+        assertEquals(1, stat.batchShards)
+        assertEquals(1, stat.batchFailedShards)
+        // 5xx 不喂熔断器，也不应产生「已熔断」的降级原因
+        assertNull(stat.degradedReason)
     }
 
     /** 从批量请求 URL 里解出本次请求的 symbols 列表 */

@@ -41,7 +41,19 @@ data class SourceStats(
      * 最近一次源级失败原因（已截短供提示用）；只在该源发生源级失败时非空。
      * 符号级失败（代码不在此源支持范围）不是源故障，不写这里。
      */
-    val lastFailureReason: String? = null
+    val lastFailureReason: String? = null,
+    /** 本轮实际使用的主机/域名（基金轻量、legacy、币安镜像等）；无法归类时保持 null */
+    val host: String? = null,
+    /** 批量源的分片总数；非批量源或本轮未发批量请求时为 null（不用 0 占位） */
+    val batchShards: Int? = null,
+    /** 失败分片数（含切小重试后仍失败的分片）；非批量源为 null */
+    val batchFailedShards: Int? = null,
+    /**
+     * 不表现为「源级失败计数」但需要用户知道的降级原因，例如：
+     * 轻量基金源已熔断本轮全走 legacy、币安 451 粘死后未发请求、整片 400 切小重试。
+     * null = 本轮无此类降级。
+     */
+    val degradedReason: String? = null
 )
 
 /** 单个数据源的计数器（进程内，由 [StockDataManager.resetSourceStats] 清零） */

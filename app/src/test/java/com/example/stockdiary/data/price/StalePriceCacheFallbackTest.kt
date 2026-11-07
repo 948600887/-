@@ -172,6 +172,9 @@ class StalePriceCacheFallbackTest {
         mockkObject(DividendRepository.Companion)
         every { DividendRepository.getInstance(any()) } returns dividendRepository
         mockkObject(UnifiedPriceService)
+        // 源统计的轮次接口在编排器里被调用；object 被 mockk 后必须显式给出默认行为
+        every { UnifiedPriceService.resetSourceStats() } returns Unit
+        every { UnifiedPriceService.cryptoSourceStatsSnapshot() } returns emptyList()
     }
 
     private fun fundAsset(): Asset = Asset(

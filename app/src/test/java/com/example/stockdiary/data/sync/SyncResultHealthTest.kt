@@ -19,14 +19,16 @@ class SyncResultHealthTest {
         sourceFailure: Int = 0,
         symbolFailure: Int = 0,
         durationMs: Long = 0,
-        reason: String? = null
+        reason: String? = null,
+        degradedReason: String? = null
     ) = SourceStats(
         source = source,
         success = success,
         sourceLevelFailure = sourceFailure,
         symbolLevelFailure = symbolFailure,
         durationMs = durationMs,
-        lastFailureReason = reason
+        lastFailureReason = reason,
+        degradedReason = degradedReason
     )
 
     @Test
@@ -99,5 +101,42 @@ class SyncResultHealthTest {
 
         assertTrue(result.sourceHealthHint.contains("x".repeat(24)))
         assertTrue(!result.sourceHealthHint.contains("x".repeat(25)))
+    }
+
+    @Test
+    fun `仅有降级原因也提示_且不显示源级失败次数`() {
+        // 基金轻量源熔断 / 币安 451 粘死都属于「没发请求的降级」，不能虚增失败次数
+        val result = SyncResult(
+            successCount = 0,
+            failedCount = 0,
+            sourceStats = listOf(
+                stat("币安-镜像", degradedReason = "HTTP 451/403 地区封锁，主机熔断粘死，本轮未请求")
+            )
+        )
+
+        val hint = result.sourceHealthHint
+        assertTrue(hint.startsWith("；数据源异常："))
+        assertTrue(hint.contains("币安-镜像 HTTP 451/403 地区封锁"))
+        assertTrue("降级不是源级失败，不能显示失败次数", !hint.contains("源级失败"))
+    }
+
+    @Test
+    fun `源级失败与降级原因可同时出现`() {
+        val result = SyncResult(
+            successCount = 1,
+            failedCount = 1,
+            sourceStats = listOf(
+                stat(
+                    "基金-轻量源",
+                    sourceFailure = 1,
+                    reason = "HTTP 514 限流",
+                    degradedReason = "连续失败已熔断，本轮直接走 legacy"
+                )
+            )
+        )
+
+        val hint = result.sourceHealthHint
+        assertTrue(hint.contains("基金-轻量源 源级失败 1 次，HTTP 514 限流"))
+        assertTrue(hint.contains("连续失败已熔断"))
     }
 }

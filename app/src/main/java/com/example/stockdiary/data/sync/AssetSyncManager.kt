@@ -479,6 +479,9 @@ object AssetSyncManager {
         // 各数据源的成败统计只反映**本轮**：开头清零，末尾打快照
         val stockManagerForStats = StockDataManager.getInstance(context)
         stockManagerForStats.resetSourceStats()
+        // 基金与加密链路共用同一套 SourceStats，轮次节奏也必须一致
+        FundAPI.resetSourceStats()
+        UnifiedPriceService.resetSourceStats()
         // 跳过原因分类计数：汇总里「跳过 127」必须能拆开，否则等于没统计
         val skipReasons = ConcurrentHashMap<String, AtomicInteger>()
         fun countSkip(reason: String) {
@@ -765,7 +768,10 @@ object AssetSyncManager {
         // 快照只取一次：日志汇总、返回给 UI 的 SyncResult 必须看到同一份数字，
         // 分两次调用会在并发收尾时产生「日志 8 次失败、提示 7 次」这种对不上。
         val elapsedMs = System.currentTimeMillis() - startTime
-        val sourceStats = stockManagerForStats.sourceStatsSnapshot()
+        // 三条链路（股票 / 基金 / 加密）的快照合成一份，顺序稳定：股票在前，基金次之，加密最后
+        val sourceStats = stockManagerForStats.sourceStatsSnapshot() +
+            FundAPI.sourceStatsSnapshot() +
+            UnifiedPriceService.cryptoSourceStatsSnapshot()
 
         logRoundSummary(
             roundId = roundId,
@@ -836,8 +842,17 @@ object AssetSyncManager {
                     ?.takeIf { it.isNotBlank() }
                     ?.let { "（${it.take(24)}）" }
                     ?: ""
+                // 批量源（币安）额外带上分片结果；单源没有批量请求时保持不显示
+                val batch = s.batchShards
+                    ?.takeIf { it > 0 }
+                    ?.let { total -> "/分片败${s.batchFailedShards ?: 0}/$total" }
+                    ?: ""
+                val degrade = s.degradedReason
+                    ?.takeIf { it.isNotBlank() }
+                    ?.let { "（降级：${it.take(30)}）" }
+                    ?: ""
                 "${s.source} 成${s.success}/源败${s.sourceLevelFailure}/" +
-                    "符败${s.symbolLevelFailure}/耗时${s.durationMs}ms$reason"
+                    "符败${s.symbolLevelFailure}/耗时${s.durationMs}ms$batch$reason$degrade"
             }
         }
         val summary = "=== 同步轮次 #$roundId 汇总 [$trigger] === | " +

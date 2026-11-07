@@ -200,14 +200,21 @@ class ErApiExchangeRateSource : RateSource {
 }
 
 /**
- * 主源 + 兜底源：**只有主源失败**（返回 null / 空 Map / 抛异常）才请求兜底源。
+ * 主源 + 兜底源：主源**可用数据为空**（返回 null / 空 Map / 抛异常 / 非空但全被护栏拒绝）
+ * 时才请求兜底源。
  *
  * 刻意不做并联：正常刷新只有一次请求，请求数与单源完全一致；也不会因为两个源
  * 各回一份数据而做取舍/平均。兜底源返回的数据仍由管理器统一过 0.2x~5x 护栏。
  */
 class FallbackRateSource(
     private val primary: RateSource,
-    private val fallback: RateSource
+    private val fallback: RateSource,
+    /**
+     * 选源期护栏。必须在**选择源之前**判定，而不是等管理器事后 sanitize：
+     * 主源返回非空但全部不可信时，若原样返回给管理器，只会被判「刷新失败」，
+     * 兜底源永远不会被请求。这里先过滤，过滤后为空即视为「主源无可用数据」→ 兜底。
+     */
+    private val isAcceptable: (String, Double) -> Boolean = { _, _ -> true }
 ) : RateSource {
 
     override suspend fun fetch(): Map<String, Double>? {
@@ -219,13 +226,15 @@ class FallbackRateSource(
             AppLogger.w("汇率主源失败，转兜底源: ${e.message}", TAG)
             null
         }
-        if (!primaryResult.isNullOrEmpty()) return primaryResult
+        val accepted = primaryResult?.filterUsable()
+        if (!accepted.isNullOrEmpty()) return accepted
 
         if (primaryResult != null) {
-            AppLogger.w("汇率主源返回空数据，转兜底源", TAG)
+            val reason = if (primaryResult.isEmpty()) "返回空数据" else "数据全部被护栏拒绝"
+            AppLogger.w("汇率主源$reason，转兜底源", TAG)
         }
         return try {
-            fallback.fetch()?.takeIf { it.isNotEmpty() }
+            fallback.fetch()?.filterUsable()?.takeIf { it.isNotEmpty() }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -233,6 +242,9 @@ class FallbackRateSource(
             null
         }
     }
+
+    private fun Map<String, Double>.filterUsable(): Map<String, Double> =
+        filter { (code, value) -> isAcceptable(code, value) }
 
     companion object {
         private const val TAG = "FallbackRateSource"

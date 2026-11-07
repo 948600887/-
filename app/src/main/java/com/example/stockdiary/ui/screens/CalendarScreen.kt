@@ -182,11 +182,13 @@ fun CalendarScreen(
 
             CalendarCard(
                 currentMonth = uiState.currentMonth,
-                onMonthChange = { viewModel.selectMonth(it) },
+                // 回调提到 remember(viewModel)：每次重组新建 lambda 会让 CalendarCard 参数变化，
+                // 配合稳定 adapter 后，未变化的格子才能真正跳过重组。
+                onMonthChange = remember(viewModel) { { month: java.time.YearMonth -> viewModel.selectMonth(month) } },
                 calendarData = calendarData,
                 dividendDates = dividendDates,
                 selectedDate = selectedDate,
-                onDateSelected = { viewModel.selectDate(it) },
+                onDateSelected = remember(viewModel) { { date: LocalDate? -> viewModel.selectDate(date) } },
                 isAssetCalendar = uiState.selectedTab == "资产日历",
                 today = today,
                 monthNavEnabled = !isLoading

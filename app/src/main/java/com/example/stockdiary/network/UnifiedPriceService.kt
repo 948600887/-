@@ -1010,6 +1010,9 @@ object UnifiedPriceService {
                     val cryptoData = parseBinanceCrypto(code, body)
 
                     return@withContext if (cryptoData != null) {
+                        // 逐标的补价与批量预取共用同一套源统计：分片失败后回落到这里拿到行情，
+                        // 也必须记一次成功，否则健康面板会显示「有价、0 成功」。
+                        cryptoStats.recordSuccess()
                         Result.success(cryptoData)
                     } else {
                         Result.failure(Exception("解析加密货币数据失败"))

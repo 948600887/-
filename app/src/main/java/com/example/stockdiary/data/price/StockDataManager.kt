@@ -489,6 +489,10 @@ class StockDataManager(
             )
         }
         return sinaResult.map { sinaMap ->
+            // 批量成功的口径与逐标的路径一致：每个真正拿到行情的代码记一次成功。
+            // 原来只加了 durationMs 不加 success，健康统计里新浪「耗时一大截、成功 0 次」，
+            // 看起来像源在空转。
+            countersFor(ApiManager.API_SINA).success.addAndGet(sinaMap.size)
             val now = System.currentTimeMillis()
             sinaMap.mapValues { (code, sina) ->
                 val unified = sina.toUnifiedStockData()

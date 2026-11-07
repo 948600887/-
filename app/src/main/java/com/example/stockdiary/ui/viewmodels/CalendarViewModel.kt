@@ -39,6 +39,7 @@ import kotlinx.coroutines.withContext
 import java.time.Duration
 import java.time.LocalDate
 import java.time.YearMonth
+import java.util.concurrent.atomic.AtomicLong
 
 class CalendarViewModel(
     private val assetRepository: AssetRepository,
@@ -113,6 +114,29 @@ class CalendarViewModel(
     private var generationJob: Job? = null
 
     /**
+     * 年度收入（喂给 FIRE）重算任务，**独立于** [generationJob]。
+     *
+     * 资产变更触发的收入重算是「数据变更的产物」，不是「当前 Tab/月份视图的产物」：
+     * 挂在生成任务的 then 上会被 selectTab/selectMonth 的 cancel 一并取消，导致切页后
+     * [UiState.realAnnualIncome] 永久停在旧口径（直到下一次资产变更）。这里用独立 Job，
+     * 只在新一轮收入重算开始时取消上一轮，保证最新一次计算一定落地。
+     */
+    private var incomeJob: Job? = null
+
+    /**
+     * 最近一次实时净资产快照（日期 + 值 + 单调序号）。
+     *
+     * 用途是「落库前校验新鲜度」：日历生成在 IO 线程里读到的价格可能早于
+     * [refreshLiveAssets] 刚读到的实时值，若直接整体写回，今天格会被旧价覆盖。
+     * 序号单调递增，生成开始时记下当时序号，提交时只有**更新的**快照才允许覆盖。
+     */
+    private data class LiveSnapshot(val date: LocalDate, val netAssets: Double, val seq: Long)
+
+    @Volatile
+    private var liveSnapshot: LiveSnapshot? = null
+    private val liveSnapshotSeq = AtomicLong()
+
+    /**
      * 分红预取单飞：同一时刻只允许一轮 prime+prefetch 在跑。
      *
      * 旧生成任务被取消时，[withLock] 会随协程取消一起释放锁，新任务立刻接手；
@@ -149,7 +173,8 @@ class CalendarViewModel(
                 .distinctUntilChanged { old, new -> calendarSignature(old) == calendarSignature(new) }
                 .collect { assets ->
                     _uiState.update { state -> state.copy(assets = assets) }
-                    launchGeneration(invalidateCache = true) { loadDividendIncome(assets) }
+                    launchGeneration(invalidateCache = true)
+                    launchDividendIncome(assets)
                 }
         }
 
@@ -169,11 +194,11 @@ class CalendarViewModel(
                 val afterMidnight = LocalDate.now()
                 if (generatedOnDate == afterMidnight) continue
                 rollMonthIfFollowingToday(afterMidnight)
-                launchGeneration(invalidateCache = true) {
-                    // C2：跨零点后一并重算「年度收入 / FIRE」。DividendIncomeCache 以 date 跨日为重算门控，
-                    // 这里走 forceRefresh=false：底层 records 未变就零网络复用，跨日则重算，避免 FIRE 停在旧值。
-                    loadDividendIncome(_uiState.value.assets, forceRefresh = false)
-                }
+                launchGeneration(invalidateCache = true, today = afterMidnight)
+                // C2：跨零点后一并重算「年度收入 / FIRE」。DividendIncomeCache 以 date 跨日为重算门控，
+                // 这里走 forceRefresh=false：底层 records 未变就零网络复用，跨日则重算，避免 FIRE 停在旧值。
+                // 收入计算不随生成任务取消（见 incomeJob 注释），跨零点被切页打断也不会丢。
+                launchDividendIncome(_uiState.value.assets, forceRefresh = false)
             }
         }
     }
@@ -183,14 +208,19 @@ class CalendarViewModel(
      * 到解锁后才跑。回前台这一刻补查「生成日是否还是今天」，过期就立即重算，
      * 保证用户切回日历页看到的第一眼就是新一天的数。
      */
-    fun onScreenResumed() {
-        // 先把「今天」格刷成当前实时值：日历数据是按实时价生成后被签名去重冻结的，
-        // 别页刷新落了新价，回前台/回 Tab 时这里必须跟上，否则今天格与首页差一截。
-        refreshLiveAssets()
-        val today = LocalDate.now()
-        if (generatedOnDate != null && generatedOnDate != today) {
+    fun onScreenResumed(today: LocalDate = LocalDate.now()) {
+        val generated = generatedOnDate
+        if (generated != null && generated != today) {
+            // 跨天：缓存里今天格还是「0 / 昨天实时值」，必须整体失效重算，不能走缓存命中
+            // （缓存命中不计为「已生成」，见 generateCalendarData）。
             rollMonthIfFollowingToday(today)
-            launchGeneration { loadDividendIncome(_uiState.value.assets, forceRefresh = false) }
+            refreshLiveAssets(today)
+            launchGeneration(invalidateCache = true, today = today)
+            launchDividendIncome(_uiState.value.assets, forceRefresh = false)
+        } else {
+            // 同一天：先把「今天」格刷成当前实时值。日历数据是按实时价生成后被签名去重冻结的，
+            // 别页刷新落了新价，回前台/回 Tab 时这里必须跟上，否则今天格与首页差一截。
+            refreshLiveAssets(today)
         }
     }
 
@@ -219,12 +249,14 @@ class CalendarViewModel(
      *
      * 只查一次 Room、只改今天一个格子，不触发分红抓取，开销可以忽略。
      */
-    fun refreshLiveAssets() {
+    fun refreshLiveAssets(today: LocalDate = LocalDate.now()) {
         viewModelScope.launch {
             try {
                 val all = withContext(Dispatchers.IO) { assetRepository.getAllAssets().first() }
                 val liveNetAssets = computeLiveNetAssets(all)
-                val today = LocalDate.now()
+                // 先登记快照再写状态：生成任务提交时会用 seq 判断谁的读数更新，
+                // 晚于生成开始的实时读数才允许覆盖「今天」格。
+                liveSnapshot = LiveSnapshot(today, liveNetAssets, liveSnapshotSeq.incrementAndGet())
                 _uiState.update { state ->
                     val todayInView = today.year == state.currentMonth.year &&
                         today.monthValue == state.currentMonth.monthValue
@@ -319,20 +351,31 @@ class CalendarViewModel(
      *
      * 所有会改变「生成输入」（资产、Tab、月份、强制刷新）的入口都必须走这里：
      * 旧任务被取消后不会再写回结果，新任务的结果永远对应最新的 Tab/月份。
-     * [then] 属于同一轮任务（例如年度收入重算），同样随轮次取消，不会在切月后继续写状态。
+     *
+     * ⚠️ 年度收入重算**不**挂在这里的 then 上：它由 [launchDividendIncome] 独立调度，
+     * 否则会被切 Tab/切月一起取消，导致 FIRE 收入停在旧口径。
      */
     private fun launchGeneration(
         forceRefresh: Boolean = false,
         invalidateCache: Boolean = false,
-        then: suspend () -> Unit = {}
+        today: LocalDate = LocalDate.now()
     ) {
         generationJob?.cancel()
         generationJob = viewModelScope.launch {
-            // 「今天」只采一次并向下传递：生成方与缓存保鲜日期必须基于同一个日期，
+            // 「今天」由调用方只采一次并向下传递：生成方与缓存保鲜日期必须基于同一个日期，
             // 否则跨零点瞬间可能生成 A 日的数据、却记成 B 日的保鲜标记。
-            val today = LocalDate.now()
             generateCalendarData(_uiState.value.assets, forceRefresh, invalidateCache, today)
-            then()
+        }
+    }
+
+    /**
+     * 重算年度收入（喂给 FIRE）。独立 Job：只被「新一轮收入计算」取消，
+     * 不随切 Tab/切月取消，保证资产变更/跨天/回前台触发的重算一定落地。
+     */
+    private fun launchDividendIncome(assets: List<Asset>, forceRefresh: Boolean = false) {
+        incomeJob?.cancel()
+        incomeJob = viewModelScope.launch {
+            loadDividendIncome(assets, forceRefresh)
         }
     }
 
@@ -374,8 +417,9 @@ class CalendarViewModel(
             try {
                 generateCalendarData(_uiState.value.assets, forceRefresh = true, today = today)
                 // 优化①：强制重抓分红后，年度收入（喂给 FIRE 计算器）必须按最新数据重算，
-                // 否则日历分红网格刷新了、FIRE 的年度收入却停在旧缓存值
-                loadDividendIncome(_uiState.value.assets, forceRefresh = true)
+                // 否则日历分红网格刷新了、FIRE 的年度收入却停在旧缓存值。
+                // 走独立 Job：刷新即使随后被切页取消，收入重算也不会凭空消失。
+                launchDividendIncome(_uiState.value.assets, forceRefresh = true)
                 // 手动刷新撞过天天基金限流（514/429）→ 提示「部分场外基金分红没抓全」（非阻塞）
                 if (dividendRepository.consumeOtcRateLimitWarning()) {
                     _dividendWarning.value = "今日部分场外基金分红因天天基金限流未能抓取完整，可稍后手动重试"
@@ -413,13 +457,25 @@ class CalendarViewModel(
         }
         val requestState = _uiState.value
         val cacheKey = calendarCacheKey(requestState.selectedTab, requestState.currentMonth, calendarSignature(assets))
+        // 生成开始这一刻的实时快照序号：提交时只有序号更大的快照（= 生成期间/之后新读的实时价）
+        // 才允许覆盖「今天」格，避免用生成开始前读到的旧价整体写回。
+        val liveSeqAtStart = liveSnapshotSeq.get()
         // 缓存命中（非强制刷新、未要求失效、且同 (Tab, 月) 已算过）：直接复用，避免切月/切 Tab 反复重算
         if (!forceRefresh && !invalidateCache && calendarCache.containsKey(cacheKey)) {
             val cached = calendarCache[cacheKey]!!
-            generatedOnDate = today
+            // 缓存命中不是「生成」：不更新 generatedOnDate，否则跨天回前台会把「昨天的缓存」
+            // 误记成今天已生成，新的一天那格永远是 0。
             _uiState.update { state -> state.copy(
                 isLoading = false,
-                calendarData = cached.calendarData,
+                // 缓存里的今天格是生成当时的实时值；若之后 refreshLiveAssets 读了更新的实时价，
+                // 这里必须保留实时值，不能被旧缓存整体覆盖。
+                calendarData = overlayNewerLiveToday(
+                    cached.calendarData,
+                    state.selectedTab,
+                    state.currentMonth,
+                    today,
+                    cached.generatedLiveSeq
+                ),
                 dividendDates = cached.dividendDates,
                 dividends = cached.dividends,
                 errorMessage = null
@@ -456,13 +512,22 @@ class CalendarViewModel(
         result.onSuccess { calendarResult ->
             // 生成成功才更新「保鲜日期」：失败的生成不算数，下次回前台还要重试
             generatedOnDate = today
-            // 缓存本次结果，供后续切回同 (Tab, 月) 时直接复用（B④）
-            calendarCache[cacheKey] = calendarResult
+            // 缓存本次结果，供后续切回同 (Tab, 月) 时直接复用（B④）。同时记下生成起始的
+            // 实时快照序号：缓存命中时据此判断实时值是否比缓存里的今天格更新。
+            calendarCache[cacheKey] = calendarResult.copy(generatedLiveSeq = liveSeqAtStart)
             // 用 update{} 原子读-改-写：不能直接拿上面读到的 currentState 去 copy，
-            // 期间 loadDividendIncome 等协程可能已经写过 uiState，那会把它们的更新整体冲掉
+            // 期间 loadDividendIncome 等协程可能已经写过 uiState，那会把它们的更新整体冲掉。
+            // 「今天」格在落库前再校验一次新鲜度：生成期间 refreshLiveAssets 可能已读了更新的
+            // 实时净资产，用序号判断，更新的才覆盖，避免旧价写回。
             _uiState.update { state -> state.copy(
                 isLoading = false,
-                calendarData = calendarResult.calendarData,
+                calendarData = overlayNewerLiveToday(
+                    calendarResult.calendarData,
+                    state.selectedTab,
+                    state.currentMonth,
+                    today,
+                    liveSeqAtStart
+                ),
                 dividendDates = calendarResult.dividendDates,
                 dividends = calendarResult.dividends,
                 errorMessage = null
@@ -476,10 +541,32 @@ class CalendarViewModel(
         }
     }
 
+    /**
+     * 用**更新的**实时快照覆盖「资产日历」当前月的今天格。
+     *
+     * @param newerThanSeq 生成/缓存对应的快照序号；快照序号必须严格更大才算更新，
+     *   否则可能把生成开始前读到的旧价写回。
+     */
+    private fun overlayNewerLiveToday(
+        data: Map<LocalDate, Double>,
+        tab: String,
+        month: YearMonth,
+        today: LocalDate,
+        newerThanSeq: Long
+    ): Map<LocalDate, Double> {
+        if (tab != "资产日历") return data
+        if (month.year != today.year || month.monthValue != today.monthValue) return data
+        val snapshot = liveSnapshot ?: return data
+        if (snapshot.date != today || snapshot.seq <= newerThanSeq) return data
+        return data + (today to snapshot.netAssets)
+    }
+
     private data class CalendarResult(
         val calendarData: Map<LocalDate, Double>,
         val dividendDates: Set<LocalDate>,
-        val dividends: List<Pair<String, List<DividendRecord>>>
+        val dividends: List<Pair<String, List<DividendRecord>>>,
+        /** 生成/缓存时对应的实时快照序号，缓存命中时用于判断实时值是否更新 */
+        val generatedLiveSeq: Long = 0L
     )
 
     /**

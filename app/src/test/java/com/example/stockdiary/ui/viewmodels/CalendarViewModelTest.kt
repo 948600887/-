@@ -16,10 +16,12 @@ import io.mockk.every
 import io.mockk.mockk
 import io.mockk.slot
 import io.mockk.verify
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
@@ -36,6 +38,7 @@ import org.junit.BeforeClass
 import org.junit.Test
 import java.time.LocalDate
 import java.time.YearMonth
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * CalendarViewModel 单测。
@@ -107,7 +110,12 @@ class CalendarViewModelTest {
     private fun buildVm(
         assets: List<Asset> = listOf(stockAsset),
         snapshots: List<AssetSnapshot> = emptyList(),
-        assetsFlow: Flow<List<Asset>>? = null
+        assetsFlow: Flow<List<Asset>>? = null,
+        /** 快照查询的人为延时：用于让「生成期间发生实时刷新」的时序可控 */
+        snapshotDelayMs: Long = 0,
+        /** getAllAssets 的可控返回：调用次数不同可返回不同价（用于新鲜度校验回归） */
+        allAssetsFlow: (() -> Flow<List<Asset>>)? = null,
+        incomeUseCase: DividendIncomeUseCase = useCase
     ): CalendarViewModel {
         every { prefsMgr.loadPreferences() } returns DashboardPreferences()
         // 模拟 Manager 的真实契约：拉磁盘最新值 → 套用 mutate → 存盘 → 返回合并结果。
@@ -119,14 +127,19 @@ class CalendarViewModelTest {
             prefsMgr.savePreferences(updated)
             updated
         }
-        every { assetRepo.getAllAssets() } returns flowOf(assets)
+        every { assetRepo.getAllAssets() } answers {
+            (allAssetsFlow ?: { flowOf(assets) }).invoke()
+        }
         every { assetRepo.getAssetsByTypesFlow(any()) } returns (assetsFlow ?: flowOf(assets))
         // E3：日历改用按月查询 getSnapshotsSinceSync，不再整表读取 asset_snapshots
-        coEvery { assetRepo.getSnapshotsSinceSync(any()) } returns snapshots
+        coEvery { assetRepo.getSnapshotsSinceSync(any()) } coAnswers {
+            if (snapshotDelayMs > 0) delay(snapshotDelayMs)
+            snapshots
+        }
         // 两个日历生成路径都会先调 prefetchDividends，必须显式打桩：
         // 只依赖 relaxed 会让它落到未初始化字段的真实实现上抛异常，日历生成整体失败
         coEvery { divRepo.prefetchDividends(any(), any(), any()) } returns Unit
-        return CalendarViewModel(assetRepo, divRepo, prefsMgr, useCase)
+        return CalendarViewModel(assetRepo, divRepo, prefsMgr, incomeUseCase)
     }
 
     @Test
@@ -602,5 +615,131 @@ class CalendarViewModelTest {
                 !vm.uiState.value.isRefreshing
         }
         assertNull("被取消的刷新不能留下「刷新失败」", vm.uiState.value.errorMessage)
+    }
+
+    // ---------- 资产变更触发的收入重算不被切页取消（d17195a 回归） ----------
+
+    @Test
+    fun `资产变更触发的收入重算_切页取消生成后仍会落地`() = runBlocking {
+        // 回归（d17195a）：资产变更触发的 loadDividendIncome 曾挂在 generationJob 的 then 上，
+        // selectTab/selectMonth 的 cancel 会把它一起取消 → realAnnualIncome/FIRE 永久停在旧口径。
+        val incomeCalls = AtomicInteger(0)
+        val secondStarted = CompletableDeferred<Unit>()
+        val gate = CompletableDeferred<Unit>()
+        val gatedUseCase = DividendIncomeUseCase { _assets, _force, _tag, _cacheOnly ->
+            if (incomeCalls.incrementAndGet() >= 2) {
+                secondStarted.complete(Unit)
+                gate.await()
+                DividendIncomeLoader.IncomeResult(emptyMap(), emptyMap(), 4321.0, true)
+            } else {
+                DividendIncomeLoader.IncomeResult(emptyMap(), emptyMap(), 1234.5, true)
+            }
+        }
+        val assetsFlow = MutableStateFlow(listOf(stockAsset))
+        val vm = buildVm(assetsFlow = assetsFlow, incomeUseCase = gatedUseCase)
+        waitUntil(timeoutMs = 6000) { vm.uiState.value.realAnnualIncome == 1234.5 }
+
+        // 资产变更（数量变化才改签名）→ 第二轮收入计算在 gate 上挂起
+        assetsFlow.value = listOf(stockAsset.copy(balance = 2000.0))
+        assertTrue("第二轮收入计算应已开始", waitUntil(timeoutMs = 6000) { secondStarted.isCompleted })
+
+        // 切页：只取消「生成」；收入重算必须独立于它
+        vm.selectTab("收支日历")
+        gate.complete(Unit)
+
+        assertTrue(
+            "切页后收入重算仍必须落地（修复前会被 then 一起取消，永远停在 1234.5）",
+            waitUntil(timeoutMs = 6000) { vm.uiState.value.realAnnualIncome == 4321.0 }
+        )
+        assertEquals(4321.0, vm.uiState.value.realAnnualIncome, 0.001)
+    }
+
+    // ---------- 今天格新鲜度：缓存命中保留实时值 / 跨天回前台失效 / 落库前校验 ----------
+
+    @Test
+    fun `缓存命中保留刷新后的实时值`() = runBlocking {
+        val today = LocalDate.now()
+        val oldPriced = stockAsset.copy(currentPrice = 10.0) // 1000 × 10 = 10000
+        val newPriced = oldPriced.copy(currentPrice = 12.0)  // 12000，签名不变（不触发重算）
+        coEvery { divRepo.getDividendRecordsBatch(any()) } returns emptyMap()
+
+        val vm = buildVm(assets = listOf(oldPriced))
+        waitUntil(timeoutMs = 6000) {
+            !vm.uiState.value.isLoading && vm.uiState.value.calendarData[today] == 10000.0
+        }
+
+        // 别页刷新落了新价：refreshLiveAssets 读到 12000
+        every { assetRepo.getAllAssets() } returns flowOf(listOf(newPriced))
+        vm.refreshLiveAssets()
+        waitUntil(timeoutMs = 6000) { vm.uiState.value.calendarData[today] == 12000.0 }
+
+        // 切走再切回 → 命中 init 那轮缓存；缓存里的今天格还是 10000，必须被实时值覆盖
+        vm.selectTab("收支日历")
+        waitUntil(timeoutMs = 6000) { vm.uiState.value.selectedTab == "收支日历" && !vm.uiState.value.isLoading }
+        vm.selectTab("资产日历")
+        waitUntil(timeoutMs = 6000) { vm.uiState.value.selectedTab == "资产日历" && !vm.uiState.value.isLoading }
+
+        assertEquals(
+            "缓存命中不能把今天格写回旧价",
+            12000.0,
+            vm.uiState.value.calendarData[today] ?: 0.0,
+            0.001
+        )
+    }
+
+    @Test
+    fun `跨天回前台强制失效_新的一天按实时值生成`() = runBlocking {
+        val today = LocalDate.now()
+        val tomorrow = today.plusDays(1)
+        val priced = stockAsset.copy(currentPrice = 10.0)
+        coEvery { divRepo.getDividendRecordsBatch(any()) } returns emptyMap()
+
+        val vm = buildVm(assets = listOf(priced))
+        waitUntil(timeoutMs = 6000) {
+            !vm.uiState.value.isLoading && vm.uiState.value.calendarData[today] == 10000.0
+        }
+
+        // 修复前：onScreenResumed 未传 invalidateCache → 命中昨天的缓存（tomorrow 格为 0），
+        // 且把 generatedOnDate 记成 tomorrow，之后再也不会补算。
+        vm.onScreenResumed(today = tomorrow)
+        assertTrue(
+            "跨天后 tomorrow 格必须按实时净值生成，而不是沿用昨天缓存里的 0",
+            waitUntil(timeoutMs = 6000) {
+                !vm.uiState.value.isLoading && vm.uiState.value.calendarData[tomorrow] == 10000.0
+            }
+        )
+        assertEquals(10000.0, vm.uiState.value.calendarData[tomorrow] ?: 0.0, 0.001)
+        // 「强制失效」的可观测判据：跨天回前台必须重新查快照（缓存命中则不会发起第二次查询）
+        coVerify(exactly = 2) { assetRepo.getSnapshotsSinceSync(any()) }
+    }
+
+    @Test
+    fun `生成期间刷新读到新价_提交用更新的实时值`() = runBlocking {
+        val today = LocalDate.now()
+        val oldPriced = stockAsset.copy(currentPrice = 10.0) // 生成开始时读到：10000
+        val newPriced = oldPriced.copy(currentPrice = 12.0)  // 生成期间实时刷新读到：12000
+        val allAssetsReads = AtomicInteger(0)
+        coEvery { divRepo.getDividendRecordsBatch(any()) } returns emptyMap()
+
+        // 生成在读完资产后会在快照查询上停留 250ms，给实时刷新留出完成的窗口
+        val vm = buildVm(
+            assets = listOf(oldPriced),
+            snapshotDelayMs = 250,
+            allAssetsFlow = {
+                if (allAssetsReads.incrementAndGet() == 1) flowOf(listOf(oldPriced)) else flowOf(listOf(newPriced))
+            }
+        )
+        assertTrue("生成应已开始读取资产", waitUntil { allAssetsReads.get() >= 1 })
+
+        // 生成还在 IO 里，实时刷新已读到新价（快照序号更新）
+        vm.refreshLiveAssets()
+
+        assertTrue(
+            "落库前应校验新鲜度：更新的实时值必须覆盖生成开始时读到的旧价",
+            waitUntil(timeoutMs = 6000) {
+                !vm.uiState.value.isLoading && vm.uiState.value.calendarData[today] == 12000.0
+            }
+        )
+        assertEquals(12000.0, vm.uiState.value.calendarData[today] ?: 0.0, 0.001)
     }
 }

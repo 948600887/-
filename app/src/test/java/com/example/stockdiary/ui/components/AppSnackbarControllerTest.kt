@@ -90,9 +90,33 @@ class AppSnackbarControllerTest {
         testScheduler.runCurrent()
 
         assertEquals("重试", hostState.currentSnackbarData?.visuals?.actionLabel)
+        assertTrue(
+            "即使是 Indefinite，也必须提供关闭按钮，否则会堵死全局唯一宿主队列",
+            hostState.currentSnackbarData?.visuals?.withDismissAction == true
+        )
         hostState.currentSnackbarData?.performAction()
         testScheduler.runCurrent()
 
         assertEquals(1, clicked)
+    }
+
+    @Test
+    fun `带操作的提示默认可关闭且不会无限阻塞队列`() = runTest {
+        val hostState = SnackbarHostState()
+        val controller = AppSnackbarController(hostState, backgroundScope)
+
+        controller.showWithAction(
+            message = "批量删除失败，请重试",
+            actionLabel = "重试"
+        ) { }
+        testScheduler.runCurrent()
+
+        val visuals = hostState.currentSnackbarData?.visuals
+        assertEquals(
+            "默认时长必须是 Long：应用只有一个宿主，Indefinite 会把后续提示一直压在队列里",
+            SnackbarDuration.Long,
+            visuals?.duration
+        )
+        assertTrue("必须可手动关闭", visuals?.withDismissAction == true)
     }
 }

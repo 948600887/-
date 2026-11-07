@@ -145,11 +145,12 @@ fun CalendarCard(
                 dividendDates.mapTo(HashSet(dividendDates.size)) { it.toEpochDay() }
             }
             val selectedEpochDay = selectedDate?.toEpochDay()
-            // 把「格子点击」这一步 lambda 提到循环外并 remember：
-            // 格子只收到一个稳定的 (Long) -> Unit，未变化的格子参数全等，Compose 才能跳过重组。
-            val onSelectEpochDay: (Long) -> Unit = remember(onDateSelected) {
-                { epochDay -> onDateSelected(LocalDate.ofEpochDay(epochDay)) }
-            }
+            // 上层每次重组都会新建 onDateSelected（如 `{ viewModel.selectDate(it) }`），
+            // `remember(onDateSelected)` 会被新 lambda 击穿：整屏格子收到新的 onDayClick 身份，
+            // 未变化的格子也随之失效。适配器身份只创建一次、回调只做「更新」，
+            // 这样格子参数保持全等，跳过重组才真正生效。
+            val dateClickAdapter = remember { StableDateClickAdapter(onDateSelected) }
+            dateClickAdapter.update(onDateSelected)
 
             val totalRows = (calendarDays.size + 6) / 7
             for (row in 0 until totalRows) {
@@ -167,7 +168,7 @@ fun CalendarCard(
                                     day.value != 0.0 &&
                                     day.epochDay in dividendEpochDays,
                                 isAssetCalendar = isAssetCalendar,
-                                onDayClick = onSelectEpochDay,
+                                onDayClick = dateClickAdapter.onEpochDay,
                                 modifier = Modifier.weight(1f)
                             )
                         }
@@ -201,6 +202,25 @@ fun CalendarCard(
                 LegendItem(color = AppTheme.colors.primary, label = "今天", outlined = true)
             }
         }
+    }
+}
+
+/**
+ * 「身份稳定、但永远调用最新回调」的格子点击适配器。
+ *
+ * 为什么需要它：格子只认 `(Long) -> Unit`，而上层给的是 `(LocalDate?) -> Unit` 且**每次重组新建**。
+ * 若用 `remember(onDateSelected) { ... }`，每次上层换 lambda 都会重新生成 adapter，
+ * 所有格子的 `onDayClick` 参数随之变化 → 未变化的格子也无法跳过重组。
+ *
+ * 这里把 adapter 用无 key 的 `remember` 创建一次，后续重组只调用 [update] 更新回调引用；
+ * [onEpochDay] 始终是同一个实例，格子才能稳定跳过。
+ * 单测（CalendarCardTest）锁住「身份不变 + 调用最新回调」这两条契约。
+ */
+internal class StableDateClickAdapter(private var onDateSelected: (LocalDate?) -> Unit) {
+    val onEpochDay: (Long) -> Unit = { epochDay -> onDateSelected(LocalDate.ofEpochDay(epochDay)) }
+
+    fun update(callback: (LocalDate?) -> Unit) {
+        onDateSelected = callback
     }
 }
 

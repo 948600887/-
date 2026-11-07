@@ -19,10 +19,12 @@ import java.time.LocalTime
 import java.time.ZoneId
 import java.time.temporal.ChronoUnit
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlin.coroutines.AbstractCoroutineContextElement
+import kotlin.coroutines.CoroutineContext
 
 /**
  * 基金数据 API：获取场外基金最新净值。
@@ -52,6 +54,14 @@ object FundAPI {
 
     /** 轻量源连续失败多少次后**整源熔断**（本进程内不再尝试）。 */
     private const val LIGHTWEIGHT_FAILURE_THRESHOLD = 3
+
+    /**
+     * 连续失败的判据时间窗：两次失败间隔超过 10 分钟就不算「同一轮持续故障」。
+     *
+     * 没有时间窗的话，「昨天挂机累计 2 次、今天再失败 1 次」也会把整源熔断，
+     * 一次瞬时抖动要拖到进程重启才恢复。
+     */
+    private const val LIGHTWEIGHT_FAILURE_WINDOW_MS = 10 * 60 * 1000L
 
     /** 主机级短退避时长：与分红链路同口径（60s），覆盖限流窗口与一次网络切换恢复。 */
     private const val HOST_BACKOFF_MS = 60_000L
@@ -114,8 +124,11 @@ object FundAPI {
         fetchFundInfoLegacy(code)
     }
 
-    /** 轻量源连续失败计数（跨基金码累计，成功一次即清零）。 */
-    private val lightweightFailures = AtomicInteger(0)
+    /** 轻量源连续失败计数（跨基金码、带时间窗累计，成功一次即清零）。 */
+    private val lightweightFailureWindow = ConsecutiveFailureWindow(
+        threshold = LIGHTWEIGHT_FAILURE_THRESHOLD,
+        windowMs = LIGHTWEIGHT_FAILURE_WINDOW_MS
+    )
 
     /** 轻量源是否已熔断。进程级：下次启动自动重置。 */
     @Volatile
@@ -177,7 +190,7 @@ object FundAPI {
     internal fun isLightweightSourceDisabled(): Boolean = lightweightSourceDisabled
 
     /** 轻量源当前连续失败次数（单测用）。 */
-    internal fun lightweightFailureCount(): Int = lightweightFailures.get()
+    internal fun lightweightFailureCount(): Int = lightweightFailureWindow.count()
 
     /**
      * 把数据源与熔断状态恢复成出厂值。
@@ -188,7 +201,7 @@ object FundAPI {
     internal fun resetNavSourcesForTest() {
         lightweightNavSource = { code -> fetchFundInfoLightweight(code) }
         legacyNavSource = { code -> fetchFundInfoLegacy(code) }
-        lightweightFailures.set(0)
+        lightweightFailureWindow.reset()
         lightweightSourceDisabled = false
         // 主机退避窗口也是进程级单例，测试之间必须清零
         lightweightHostCooldown.reset()
@@ -475,7 +488,7 @@ object FundAPI {
         }
         if (previous != null && previous.navDate > navDate) {
             AppLogger.d(
-                "库内存量净值更新（${previous.navDate} > $navDate），跳过写入: $code",
+                "库内存量净值更新（${previous.navDate} > ${navDate}），跳过写入: $code",
                 TAG
             )
             return
@@ -521,13 +534,19 @@ object FundAPI {
             else -> {
                 // 只测耗时，不改回退/熔断：源函数内部已按 HTTP 状态/解析结果分类计数
                 val lightweightStartedAt = System.currentTimeMillis()
+                // 本次调用的失败分类与「是否计入熔断」由源函数写入：
+                // 符号级缺口（200 但解析不出净值）不该算作源级故障；
+                // 同一批并发请求撞 514 限流时，只有真正开启冷却的那一路计数。
+                val trace = NavFetchTrace()
                 val lightweight = try {
-                    lightweightNavSource(fundCode)
+                    withContext(trace) { lightweightNavSource(fundCode) }
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
                     if (isHostUnreachable(e)) {
-                        lightweightHostCooldown.start("主机不可达（DNS 解析失败）")
+                        // DNS 不可达也是「一轮故障」：并发的其余请求不重复计数
+                        trace.countsTowardBreaker =
+                            lightweightHostCooldown.start("主机不可达（DNS 解析失败）")
                     }
                     lightweightStats.recordSourceFailure(
                         "网络异常：${e.message?.take(40) ?: e.javaClass.simpleName}"
@@ -539,10 +558,13 @@ object FundAPI {
                 }
                 if (lightweight != null) {
                     lightweightStats.recordSuccess()
-                    lightweightFailures.set(0)
+                    lightweightFailureWindow.recordSuccess()
                     return lightweight
                 }
-                noteLightweightFailure(fundCode)
+                // 源级故障才喂熔断；符号级缺口、冷却期内的重复失败都不计。
+                if (trace.failureKind != NavFailureKind.SYMBOL && trace.countsTowardBreaker) {
+                    noteLightweightFailure(fundCode)
+                }
             }
         }
 
@@ -576,13 +598,18 @@ object FundAPI {
     }
 
     /**
-     * 514/429 命中后让该主机进入 60s 冷却（只做冷却，不改变失败计数——计数由调用点负责）。
+     * 514/429 命中后让该主机进入 60s 冷却。
+     *
+     * @return true 表示**本次**真正开启了一个新的冷却窗口（这一路失败应计入熔断）；
+     *   false 表示已经在同一冷却窗口内（并发撞限流的其余请求、或冷却期内的重复失败），
+     *   这些失败不再重复计入，避免一路限流被打成「源级 3 连败」。
      * 其他状态码（5xx 等）不进冷却：那些是服务端瞬时故障，立即重试或回退更划算。
      */
-    internal fun noteRateLimit(cooldown: HostCooldown, code: Int) {
+    internal fun noteRateLimit(cooldown: HostCooldown, code: Int): Boolean {
         if (code == 514 || code == 429) {
-            cooldown.start(httpFailureReason(code))
+            return cooldown.start(httpFailureReason(code))
         }
+        return false
     }
 
     /** 514/429 是限流口径，原因里标出来，便于和普通 5xx 区分（internal 供单测钉死口径） */
@@ -603,11 +630,11 @@ object FundAPI {
      * 短暂故障在用户反复重启后仍然生效，反而更难自愈。
      */
     private fun noteLightweightFailure(fundCode: String) {
-        val failures = lightweightFailures.incrementAndGet()
+        val failures = lightweightFailureWindow.recordFailure()
         if (failures >= LIGHTWEIGHT_FAILURE_THRESHOLD && !lightweightSourceDisabled) {
             lightweightSourceDisabled = true
             AppLogger.w(
-                "轻量净值源连续失败 $failures 次（最后一只 $fundCode），本进程后续基金直接走旧数据源",
+                "轻量净值源连续失败 $failures 次（最后一只 ${fundCode}），本进程后续基金直接走旧数据源",
                 TAG
             )
         }
@@ -635,8 +662,15 @@ object FundAPI {
                 response.use {
                     if (!it.isSuccessful) {
                         lightweightStats.recordSourceFailure(httpFailureReason(it.code))
-                        // 514/429 对该主机做 60s 短退避，冷却期内直接跳过请求
-                        noteRateLimit(lightweightHostCooldown, it.code)
+                        val trace = currentCoroutineContext()[NavFetchTrace]
+                        if (it.code == 514 || it.code == 429) {
+                            trace?.failureKind = NavFailureKind.RATE_LIMITED
+                            // 并发撞限流时只有「真正开启冷却」的那一路计入熔断，
+                            // 其余请求在冷却期内失败不重复计数（否则 4 路并发 = 直接熔断）
+                            trace?.countsTowardBreaker = noteRateLimit(lightweightHostCooldown, it.code)
+                        } else {
+                            trace?.failureKind = NavFailureKind.SOURCE
+                        }
                         AppLogger.w(
                             "轻量净值源 HTTP ${it.code}，回退旧数据源: $fundCode",
                             TAG
@@ -649,6 +683,7 @@ object FundAPI {
                     if (info == null) {
                         // HTTP 成功但这条代码没有可解析数据：算符号级缺口，不是源故障
                         lightweightStats.recordSymbolFailure()
+                        currentCoroutineContext()[NavFetchTrace]?.failureKind = NavFailureKind.SYMBOL
                         AppLogger.w(
                             "轻量净值源返回无法解析的内容，回退旧数据源: $fundCode",
                             TAG
@@ -659,8 +694,11 @@ object FundAPI {
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
+                val trace = currentCoroutineContext()[NavFetchTrace]
+                trace?.failureKind = NavFailureKind.SOURCE
                 if (isHostUnreachable(e)) {
-                    lightweightHostCooldown.start("主机不可达（DNS 解析失败）")
+                    trace?.countsTowardBreaker =
+                        lightweightHostCooldown.start("主机不可达（DNS 解析失败）")
                 }
                 lightweightStats.recordSourceFailure(
                     "网络异常：${e.message?.take(40) ?: e.javaClass.simpleName}"
@@ -869,21 +907,96 @@ internal class HostCooldown(private val windowMs: Long) {
     /** 当前是否仍在冷却窗口内（`now` 显式传入，便于单测钉住到期边界）。 */
     fun isCooling(now: Long = System.currentTimeMillis()): Boolean = now < until.get()
 
-    /** 进入冷却：重置窗口起点；并发下以后到的原因为准（只用于展示）。 */
-    fun start(reason: String, now: Long = System.currentTimeMillis()) {
+    /**
+     * 进入冷却：只有从「未冷却」进入「冷却」才返回 true。
+     *
+     * 同一窗口内的重复故障（例如 4 路并发同时撞 514）返回 false：既不再计一次失败，
+     * 也不延长窗口 —— 否则一次限流会被记成多次故障并拖长退避。
+     */
+    fun start(reason: String, now: Long = System.currentTimeMillis()): Boolean {
+        if (isCooling(now)) return false
         this.reason.set(reason)
         until.set(now + windowMs)
+        return true
     }
 
     /** 冷却期跳过请求时写进源统计的降级原因；没有记录原因时用通用口径兜底。 */
     fun degradedReason(): String {
         val why = reason.get()?.takeIf { it.isNotBlank() } ?: "主机退避中"
-        return "$why（${windowMs / 1000}s 退避中），本轮跳过"
+        return "${why}（${windowMs / 1000}s 退避中），本轮跳过"
     }
 
     fun reset() {
         until.set(0L)
         reason.set(null)
+    }
+}
+
+/**
+ * 轻量源熔断的失败分类。
+ *
+ * - [SOURCE]：源级故障（HTTP 非 2xx、网络异常）→ 喂熔断；
+ * - [SYMBOL]：符号级缺口（200 但解析不出净值/没有该代码）→ **不**喂熔断，
+ *   与股票侧「停牌不喂熔断」同一约定：个别标的数据缺失不该连坐整个源；
+ * - [RATE_LIMITED]：514/429 限流 → 只有真正开启冷却窗口的那一路才喂熔断。
+ */
+internal enum class NavFailureKind { SOURCE, SYMBOL, RATE_LIMITED }
+
+/**
+ * 单次取净值调用的失败分类信标。
+ *
+ * 挂在协程上下文上而不是进程级字段：净值是并发拉取的，进程级字段会被其他协程覆盖。
+ * 注入的假源（单测）不写它 → 默认 SOURCE / 计数，保持原有「null 即源故障」的测试口径。
+ */
+internal class NavFetchTrace : AbstractCoroutineContextElement(NavFetchTrace) {
+    companion object Key : CoroutineContext.Key<NavFetchTrace>
+
+    @Volatile
+    var failureKind: NavFailureKind = NavFailureKind.SOURCE
+
+    @Volatile
+    var countsTowardBreaker: Boolean = true
+}
+
+/**
+ * 带时间窗的「连续失败」计数。
+ *
+ * 只在两次失败间隔不超过 [windowMs] 时累加；超过则从 1 重新开始。
+ * 目的：一次瞬时抖动不该和几十分钟后的失败拼成「连续 3 次」把整源熔断。
+ */
+internal class ConsecutiveFailureWindow(
+    private val threshold: Int,
+    private val windowMs: Long,
+    private val now: () -> Long = { System.currentTimeMillis() }
+) {
+    private var count = 0
+    private var lastFailureAt = 0L
+
+    @Synchronized
+    fun recordFailure(): Int {
+        val at = now()
+        if (count > 0 && at - lastFailureAt > windowMs) count = 0
+        count++
+        lastFailureAt = at
+        return count
+    }
+
+    @Synchronized
+    fun recordSuccess() {
+        count = 0
+        lastFailureAt = 0L
+    }
+
+    @Synchronized
+    fun count(): Int = count
+
+    @Synchronized
+    fun thresholdReached(): Boolean = count >= threshold
+
+    @Synchronized
+    fun reset() {
+        count = 0
+        lastFailureAt = 0L
     }
 }
 

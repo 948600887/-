@@ -502,6 +502,16 @@ fun PortfolioScreen(
             }
     }
 
+    // 重试时的选择集校验：snackbar 跑在应用作用域，页面切走/回来时 rememberSaveable 的选择态
+    // 已复位，闭包里旧的 id 可能失效。用「页面是否仍在组合 + id 是否仍存在于当前资产」过滤，
+    // 只重试真实有效的 id（纯函数见文件底部 retrySelectionIds）。
+    var screenActive by remember { mutableStateOf(true) }
+    DisposableEffect(Unit) {
+        onDispose { screenActive = false }
+    }
+    val latestSelectedIds by rememberUpdatedState(selectedIds)
+    val latestExistingIds by rememberUpdatedState(assets.map { it.id }.toSet())
+
     // 批量删除结果：成功才退出多选并清空选择；失败保留选择态并给可重试的提示（#12）。
     //
     // 改用 snapshotFlow + 应用级作用域（原来 LaunchedEffect(deleteResult) + 页面协程 await）：
@@ -516,12 +526,20 @@ fun PortfolioScreen(
                     selectionMode = false
                     selectedIds = emptySet()
                 } else {
+                    // 失败那一刻的选择集：重试应针对它，而不是用户之后又改成的选择
+                    val failedIds = latestSelectedIds
                     appSnackbar.showWithAction(
                         message = "批量删除失败，请重试",
                         actionLabel = "重试"
                     ) {
-                        // 选择态仍保留着（删除失败没清），直接再发一次
-                        viewModel.batchDelete(selectedIds)
+                        // 选择态可能已失效（切页后复位、资产被删），只提交仍然有效的 id；
+                        // 空则视为失效，什么都不做。
+                        val retryIds = retrySelectionIds(
+                            screenActive = screenActive,
+                            selectedIds = failedIds,
+                            existingIds = latestExistingIds
+                        )
+                        if (retryIds.isNotEmpty()) viewModel.batchDelete(retryIds)
                     }
                 }
             }
@@ -908,4 +926,20 @@ fun PortfolioScreen(
             }
         )
     }
+}
+
+/**
+ * 重试批量删除时实际提交的 id 集合。
+ *
+ * 返回空表示「选择集已失效」：页面已离开组合（rememberSaveable 的选择态复位），
+ * 或失败批次的 id 已不在当前资产列表里（资产被删除/被过滤）。空集时调用方应放弃重试，
+ * 而不是拿过期 id 再发一次删除请求。
+ */
+internal fun retrySelectionIds(
+    screenActive: Boolean,
+    selectedIds: Set<Long>,
+    existingIds: Set<Long>
+): Set<Long> {
+    if (!screenActive) return emptySet()
+    return selectedIds intersect existingIds
 }

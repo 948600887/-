@@ -2,6 +2,7 @@ package com.example.stockdiary.ui.screens.calendar.components
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.time.LocalDate
@@ -47,5 +48,21 @@ class CalendarCardTest {
         assertFalse("填充格不算今天", padding.isCurrentMonth)
         assertFalse("否则看 12 月时 11-30 会被画上今天描边", padding.isToday)
         assertTrue("12 月里没有任何一天是今天", days.none { it.isToday })
+    }
+
+    @Test
+    fun `格子点击适配器身份稳定且总调用最新回调`() {
+        // 回归：上层每次重组新建 onDateSelected，remember(onDateSelected) 会被击穿 →
+        // 所有格子的 onDayClick 身份变化，跳过重组失效。适配器必须「身份不变、回调最新」。
+        var received: LocalDate? = null
+        val adapter = StableDateClickAdapter { received = it }
+        val stableClick = adapter.onEpochDay
+
+        // 模拟上层重组时传入新的 lambda
+        adapter.update { received = it?.plusDays(1) }
+
+        assertSame("身份必须稳定，否则格子无法跳过重组", stableClick, adapter.onEpochDay)
+        adapter.onEpochDay(LocalDate.of(2026, 11, 7).toEpochDay())
+        assertEquals("必须调用最新传入的回调", LocalDate.of(2026, 11, 8), received)
     }
 }

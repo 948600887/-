@@ -101,7 +101,9 @@ object ExchangeRateManager {
      */
     internal var rateSource: RateSource = FallbackRateSource(
         primary = SinaExchangeRateSource(),
-        fallback = ErApiExchangeRateSource()
+        fallback = ErApiExchangeRateSource(),
+        // 护栏前移到选源处：主源非空但全被拒绝时也能触发兜底
+        isAcceptable = ::isAcceptedRate
     )
 
     /** 持久化层。默认进程内空存储，[init] 之后换成 SharedPreferences */
@@ -239,13 +241,22 @@ object ExchangeRateManager {
         val accepted = HashMap<String, Double>()
         for ((rawCode, value) in fetched) {
             val code = rawCode.trim().uppercase()
-            val base = defaultRates[code] ?: continue
-            if (!value.isFinite() || value <= 0.0) continue
-            if (value < base * MIN_RATE_FACTOR) continue
-            if (value > base * MAX_RATE_FACTOR) continue
-            accepted[code] = value
+            if (isAcceptedRate(code, value)) accepted[code] = value
         }
         return accepted
+    }
+
+    /**
+     * 单条汇率是否可信。与 [sanitize] 共用同一套规则：
+     * [FallbackRateSource] 用它做选源判定，保证「护栏拒绝」与「是否需要兜底」口径一致。
+     */
+    internal fun isAcceptedRate(rawCode: String, value: Double): Boolean {
+        val code = rawCode.trim().uppercase()
+        val base = defaultRates[code] ?: return false
+        if (!value.isFinite() || value <= 0.0) return false
+        if (value < base * MIN_RATE_FACTOR) return false
+        if (value > base * MAX_RATE_FACTOR) return false
+        return true
     }
 
     /**

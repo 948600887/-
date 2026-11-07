@@ -35,17 +35,23 @@ class AppSnackbarController(
      *
      * 等待用户操作的过程也必须跑在应用作用域里：改用页面协程 await 的话，
      * 切走页面会取消 await，连正在显示的提示一起关掉，与普通提示是同一个毛病。
+     *
+     * 两个防「堵死全局队列」的约束：
+     * - 默认时长是 [SnackbarDuration.Long] 而不是 Indefinite：应用只有一个宿主，
+     *   无限期的提示会把后续所有提示（包括错误/限流提醒）一直压在队列里；
+     * - 显式 `withDismissAction = true`：即使调用方传了 Indefinite，用户也能主动关掉。
      */
     fun showWithAction(
         message: String,
         actionLabel: String,
-        duration: SnackbarDuration = SnackbarDuration.Indefinite,
+        duration: SnackbarDuration = SnackbarDuration.Long,
         onAction: () -> Unit
     ) {
         scope.launch {
             val result = hostState.showSnackbar(
                 message = message,
                 actionLabel = actionLabel,
+                withDismissAction = true,
                 duration = duration
             )
             if (result == SnackbarResult.ActionPerformed) onAction()

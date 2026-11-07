@@ -94,6 +94,39 @@ class ExchangeRateSourceTest {
         assertNull(result)
     }
 
+    @Test
+    fun `主源非空但全被护栏拒绝时转兜底`() = runTest {
+        // 回归：主源「非空但全是脏值」原先被当成成功返回，管理器事后 sanitize 才发现全不可信，
+        // 此时兜底源永远不会被请求。护栏必须前移到选源处。
+        val primary = CountingRateSource(mapOf("USD" to 725.0, "HKD" to 93.0)) // 约 100 倍，全被拒
+        val fallback = CountingRateSource(mapOf("USD" to 7.25))
+
+        val result = FallbackRateSource(
+            primary,
+            fallback,
+            isAcceptable = { _, value -> value in 5.0..10.0 }
+        ).fetch()
+
+        assertEquals(7.25, result!!["USD"]!!, 1e-9)
+        assertEquals("主源无可用数据必须走兜底", 1, fallback.callCount)
+    }
+
+    @Test
+    fun `主源部分可信时只保留可信条目且不请求兜底`() = runTest {
+        val primary = CountingRateSource(mapOf("USD" to 7.2, "JPY" to 4.8))
+        val fallback = CountingRateSource(mapOf("USD" to 7.0))
+
+        val result = FallbackRateSource(
+            primary,
+            fallback,
+            isAcceptable = { _, value -> value in 5.0..10.0 }
+        ).fetch()
+
+        assertEquals(7.2, result!!["USD"]!!, 1e-9)
+        assertFalse("脏条目要过滤掉", result.containsKey("JPY"))
+        assertEquals("还有可用数据时不应兜底", 0, fallback.callCount)
+    }
+
     // ---------- ErApiExchangeRateSource.parse ----------
 
     @Test

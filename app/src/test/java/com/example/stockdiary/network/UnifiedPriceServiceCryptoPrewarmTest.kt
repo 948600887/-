@@ -212,6 +212,39 @@ class UnifiedPriceServiceCryptoPrewarmTest {
         assertEquals(67000.0, single.getOrNull()!!.price, 1e-9)
     }
 
+    @Test
+    fun `分片失败后逐只补价成功也计入源统计`() = runBlocking {
+        // 回归：批量分片失败后逐只 getCryptoPrice 拿到 2xx，若不计成功，
+        // 健康面板会出现「有价、0 成功」的自相矛盾口径。逐只补价与批量预取必须同口径。
+        val client = recordingClient { req ->
+            if (req.url.toString().contains("symbols=")) {
+                respond(500, "", req)
+            } else {
+                val sym = req.url.toString().substringAfter("symbol=").substringBefore("&")
+                respond(200, singleTicker(sym, "67000"), req)
+            }
+        }
+
+        val map = UnifiedPriceService.prewarmCryptoPrices(
+            listOf("BTC"),
+            forceRefresh = true,
+            client = client
+        ).getOrNull()!!
+        assertTrue("批量 500 时不应把 BTC 塞进 map（回落逐标的）", map.isEmpty())
+        assertEquals(
+            "批量失败只记源级失败、不能虚增成功",
+            0,
+            UnifiedPriceService.cryptoSourceStatsSnapshot().single().success
+        )
+
+        val single = UnifiedPriceService.getCryptoPrice("BTC", client = client)
+        assertTrue("逐只补价应成功", single.isSuccess)
+
+        val stat = UnifiedPriceService.cryptoSourceStatsSnapshot().single()
+        assertEquals("逐只补价成功必须计入 success", 1, stat.success)
+        assertEquals("批量 500 的源级失败仍保留", 1, stat.sourceLevelFailure)
+    }
+
     // ---------- 5. 整片 400：切小重试一层 ----------
 
     @Test

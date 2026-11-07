@@ -305,6 +305,24 @@ class ExchangeRateManagerTest {
         assertEquals(7.25, ExchangeRateManager.getRate("USD"), 1e-9)
         assertEquals(0L, ExchangeRateManager.getLastRefreshTimeMillis())
     }
+
+    @Test
+    fun `主源非空但全被护栏拒绝时仍然兜底`() = runTest {
+        // 回归：主源返回 100 倍脏值（非空），旧实现直接返回给管理器 → sanitize 后为空 → 刷新失败，
+        // 兜底源永不触发。护栏前移后必须真的走兜底源。
+        val primary = FakeRateSource(result = mapOf("USD" to 725.0))
+        val fallback = FakeRateSource(result = mapOf("USD" to 7.25))
+        ExchangeRateManager.rateSource = FallbackRateSource(
+            primary,
+            fallback,
+            isAcceptable = ExchangeRateManager::isAcceptedRate
+        )
+
+        assertTrue(ExchangeRateManager.refresh())
+        assertEquals("主源全部被拒时必须请求兜底源", 1, fallback.callCount)
+        assertEquals(7.25, ExchangeRateManager.getRate("USD"), 1e-9)
+        assertTrue(ExchangeRateManager.getLastRefreshTimeMillis() > 0)
+    }
 }
 
 /**

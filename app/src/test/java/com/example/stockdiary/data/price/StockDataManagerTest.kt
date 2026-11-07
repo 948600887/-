@@ -5,6 +5,7 @@ import com.example.stockdiary.common.Result
 import com.example.stockdiary.network.EastmoneySkillApi
 import com.example.stockdiary.network.NetworkRetryHelper
 import com.example.stockdiary.network.SinaStockAPI
+import com.example.stockdiary.network.SinaStockData
 import com.example.stockdiary.network.TencentStockAPI
 import com.example.stockdiary.network.model.StockData
 import io.mockk.coEvery
@@ -125,6 +126,35 @@ class StockDataManagerTest {
         // 失败原因必须随快照出来：UI 提示要能说清「为什么这个源今天不行」
         assertEquals("批量预取整体 0 命中", stats[0].lastFailureReason)
         assertTrue("耗时累计不能为负", stats[0].durationMs >= 0)
+    }
+
+    // ---------- 批量成功计入源统计 ----------
+
+    @Test
+    fun `新浪批量成功按命中代码数计入成功_耗时同时记录`() = runBlocking {
+        EastmoneySkillApi.apiKey = ""
+        manager.resetSourceStats()
+        mockkObject(SinaStockAPI)
+        coEvery { SinaStockAPI.getRealtimeData(any(), any(), any(), any()) } returns Result.success(
+            mapOf(
+                "sh600519" to SinaStockData(name = "贵州茅台", code = "sh600519", price = 1800.0),
+                "sz000858" to SinaStockData(name = "五粮液", code = "sz000858", price = 150.0)
+            )
+        )
+
+        val result = manager.getBatchStockDataThroughSina(
+            listOf("sh600519", "sz000858"),
+            forceRefresh = true
+        )
+
+        assertTrue("批量应成功", result.isSuccess)
+        val stat = manager.sourceStatsSnapshot().single { it.source == ApiManager.API_SINA }
+        // 旧实现只加 durationMs 不加 success，健康面板会显示「耗时一大截、成功 0 次」，
+        // 看起来像源在空转。批量拿到的每个代码都必须计一次成功。
+        assertEquals("批量命中的每个代码计一次成功", 2, stat.success)
+        assertEquals(0, stat.sourceLevelFailure)
+        assertEquals(0, stat.symbolLevelFailure)
+        assertTrue("批量请求耗时要记录", stat.durationMs >= 0)
     }
 
     // ---------- 批量整体 0 命中的源级判定 ----------

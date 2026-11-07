@@ -163,6 +163,9 @@ fun DashboardScreen(
                     // 跳过必须报：只说「成功 107」的话，用户不知道还有上百个加密货币
                     // 因行情源不可达（熔断）压根没更新，会以为刷新没生效而反复去点
                     append(result.skippedHint)
+                    // 源级故障（新浪超时/空返回等）也要让人看见：否则「成功 120」
+                    // 会掩盖某个源整轮都在失败，用户只会觉得价格没更新却不知为何
+                    append(result.sourceHealthHint)
                 }
                 snackbarHostState.showSnackbar(msg)
             }

@@ -1,5 +1,6 @@
 package com.example.stockdiary.utils
 
+import com.example.stockdiary.network.FallbackRateSource
 import com.example.stockdiary.network.RateSource
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -264,6 +265,45 @@ class ExchangeRateManagerTest {
         assertEquals(7.25, ExchangeRateManager.getRate("USD"), 1e-9)
         assertEquals(0.88, ExchangeRateManager.getRate("HKD"), 1e-9)
         assertEquals(123L, ExchangeRateManager.getLastRefreshTimeMillis())
+    }
+
+    // ==================== 汇率第二源降级 ====================
+
+    @Test
+    fun `主源失败时兜底源生效_主源成功时兜底源零请求`() = runTest {
+        // 主源失败 → 兜底源更新成功
+        val primary = FakeRateSource(result = null)
+        val fallback = FakeRateSource(result = mapOf("USD" to 7.1))
+        ExchangeRateManager.rateSource = FallbackRateSource(primary, fallback)
+
+        assertTrue(ExchangeRateManager.refresh())
+        assertEquals(7.1, ExchangeRateManager.getRate("USD"), 1e-9)
+        assertEquals(1, primary.callCount)
+        assertEquals(1, fallback.callCount)
+
+        // 下一轮（force）主源成功 → 不应再请求兜底源
+        ExchangeRateManager.resetForTesting()
+        val okPrimary = FakeRateSource(result = mapOf("USD" to 7.2))
+        val untouchedFallback = FakeRateSource(result = mapOf("USD" to 6.0))
+        ExchangeRateManager.rateSource = FallbackRateSource(okPrimary, untouchedFallback)
+
+        assertTrue(ExchangeRateManager.refresh())
+        assertEquals(7.2, ExchangeRateManager.getRate("USD"), 1e-9)
+        assertEquals("正常链路不能多打兜底源", 0, untouchedFallback.callCount)
+    }
+
+    @Test
+    fun `兜底源数据同样过0_2x到5x护栏`() = runTest {
+        // 兜底源按「每百日元」报价（4.8，约 100 倍），必须被护栏拒绝、保持默认值
+        ExchangeRateManager.rateSource = FallbackRateSource(
+            primary = FakeRateSource(result = null),
+            fallback = FakeRateSource(result = mapOf("JPY" to 4.8, "USD" to 0.0))
+        )
+
+        assertFalse("全部不可信时应判刷新失败", ExchangeRateManager.refresh())
+        assertEquals(0.048, ExchangeRateManager.getRate("JPY"), 1e-9)
+        assertEquals(7.25, ExchangeRateManager.getRate("USD"), 1e-9)
+        assertEquals(0L, ExchangeRateManager.getLastRefreshTimeMillis())
     }
 }
 

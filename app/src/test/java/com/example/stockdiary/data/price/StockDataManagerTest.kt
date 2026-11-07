@@ -122,6 +122,9 @@ class StockDataManagerTest {
         assertEquals(1, stats[0].sourceLevelFailure)
         assertEquals(0, stats[0].success)
         assertEquals(0, stats[0].symbolLevelFailure)
+        // 失败原因必须随快照出来：UI 提示要能说清「为什么这个源今天不行」
+        assertEquals("批量预取整体 0 命中", stats[0].lastFailureReason)
+        assertTrue("耗时累计不能为负", stats[0].durationMs >= 0)
     }
 
     // ---------- 批量整体 0 命中的源级判定 ----------

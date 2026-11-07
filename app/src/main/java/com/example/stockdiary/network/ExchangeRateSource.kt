@@ -6,6 +6,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.Request
+import org.json.JSONObject
 import java.nio.charset.Charset
 
 /**
@@ -114,6 +115,127 @@ class SinaExchangeRateSource : RateSource {
 
         /** 形如 `var hq_str_fx_susdcny="..."` 的声明；组 1 为币种代码（小写），组 2 为字段串 */
         private val QUOTE_REGEX = Regex("""var hq_str_fx_s([a-z]+)cny="([^"]*)"""")
+    }
+}
+
+/**
+ * 兜底数据源：open.er-api.com 的免费汇率接口（以 USD 为基准，一次请求返回全币种）。
+ *
+ * ## 为什么选它做主源之外的兜底
+ *
+ * - **无需 Key、无配额**，返回标准 JSON，不含 HTML/GB18030 这类易变文本；
+ * - 一次请求就能算出全部外币兑人民币：先取 `rates["CNY"]` 得到「1 USD = ? CNY」，
+ *   再用 `1 USD = rates[cur]` 反推「1 cur = ? CNY」；
+ * - 只做**主源失败时**的兜底（见 [FallbackRateSource]），正常链路不会多打一次网络。
+ *
+ * ## 取舍
+ *
+ * - 接口以 USD 为基准，人民币汇率是换算出来的，与新浪直接报 CNY 存在千分位差异；
+ *   管理器侧 0.2x~5x 护栏与静态表兜底不变，折算用途足够。
+ * - 只返回 [FOREIGN_CURRENCIES] 白名单内的币种；缺失/非有限/非正数的条目**直接跳过**，
+ *   绝不落成 0（0 会让该币种资产在汇总时凭空消失）。
+ */
+class ErApiExchangeRateSource : RateSource {
+
+    override suspend fun fetch(): Map<String, Double>? = withContext(Dispatchers.IO) {
+        try {
+            val request = Request.Builder()
+                .url(URL)
+                .addHeader("User-Agent", APIEndpoints.Headers.USER_AGENT)
+                .build()
+
+            NetworkClient.defaultClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    AppLogger.w("汇率兜底源 HTTP ${response.code}", TAG)
+                    return@use null
+                }
+                val body = response.body?.string() ?: return@use null
+                parse(body)
+            }
+        } catch (e: CancellationException) {
+            // 协程取消原样抛出，不能被当成兜底失败吞掉（项目铁律）
+            throw e
+        } catch (e: Exception) {
+            AppLogger.w("汇率兜底源请求失败: ${e.message}", TAG)
+            null
+        }
+    }
+
+    /**
+     * 解析 `{"result":"success","rates":{"USD":1.0,"CNY":7.2,...}}`。
+     *
+     * 只接受 `result == success` 且 `rates.CNY` 为有限正数的响应；单个币种缺失/为 0/NaN
+     * 一律跳过，保证返回的 Map 里没有「0 汇率」这种会把资产折算成 0 的脏值。
+     */
+    internal fun parse(json: String): Map<String, Double>? {
+        val root = runCatching { JSONObject(json) }.getOrNull() ?: return null
+        if (root.optString("result") != "success") return null
+        val rates = root.optJSONObject("rates") ?: return null
+
+        val cnyPerUsd = rates.optDouble("CNY", Double.NaN)
+        if (!cnyPerUsd.isFinite() || cnyPerUsd <= 0.0) return null
+
+        val result = HashMap<String, Double>()
+        for (code in FOREIGN_CURRENCIES) {
+            val perUsd = rates.optDouble(code, Double.NaN)
+            if (!perUsd.isFinite() || perUsd <= 0.0) continue
+            val cnyPerUnit = cnyPerUsd / perUsd
+            if (cnyPerUnit.isFinite() && cnyPerUnit > 0.0) {
+                result[code] = cnyPerUnit
+            }
+        }
+        return result.takeIf { it.isNotEmpty() }
+    }
+
+    companion object {
+        private const val TAG = "ErApiExchangeRateSource"
+
+        /** 与 [SinaExchangeRateSource] / 管理器静态默认表一致的外币集合。CNY 由 USD 基准换算，不单列 */
+        private val FOREIGN_CURRENCIES =
+            listOf("USD", "EUR", "HKD", "JPY", "GBP", "AUD", "CAD", "SGD", "CHF")
+
+        /** USD 基准：一次请求拿全币种，避免按币种逐个请求 */
+        private const val URL = "https://open.er-api.com/v6/latest/USD"
+    }
+}
+
+/**
+ * 主源 + 兜底源：**只有主源失败**（返回 null / 空 Map / 抛异常）才请求兜底源。
+ *
+ * 刻意不做并联：正常刷新只有一次请求，请求数与单源完全一致；也不会因为两个源
+ * 各回一份数据而做取舍/平均。兜底源返回的数据仍由管理器统一过 0.2x~5x 护栏。
+ */
+class FallbackRateSource(
+    private val primary: RateSource,
+    private val fallback: RateSource
+) : RateSource {
+
+    override suspend fun fetch(): Map<String, Double>? {
+        val primaryResult = try {
+            primary.fetch()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            AppLogger.w("汇率主源失败，转兜底源: ${e.message}", TAG)
+            null
+        }
+        if (!primaryResult.isNullOrEmpty()) return primaryResult
+
+        if (primaryResult != null) {
+            AppLogger.w("汇率主源返回空数据，转兜底源", TAG)
+        }
+        return try {
+            fallback.fetch()?.takeIf { it.isNotEmpty() }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            AppLogger.w("汇率兜底源失败: ${e.message}", TAG)
+            null
+        }
+    }
+
+    companion object {
+        private const val TAG = "FallbackRateSource"
     }
 }
 

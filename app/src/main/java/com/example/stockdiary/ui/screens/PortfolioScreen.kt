@@ -455,7 +455,7 @@ fun PortfolioScreen(
                     "刷新完成：成功 ${result.successCount}，失败 ${result.failedCount}"
                 } else {
                     "刷新完成：成功 ${result.successCount}"
-                } + result.skippedHint // 上百个加密货币若因行情源不可达没更新，得让用户看见
+                } + result.skippedHint + result.sourceHealthHint
                 snackbarHostState.showSnackbar(msg)
             }
     }

@@ -762,6 +762,11 @@ object AssetSyncManager {
         // 排障时最先想知道的三件事——「这轮跑了多少、卡在哪、哪个数据源在掉链子」——
         // 从前全散落在上百行里，只能靠人肉 grep 才能拼出来（真机日志分析时为确认
         // "新浪是否全挂"连跑多次 grep -c）。现在一轮一段，打开日志尾部就能看完。
+        // 快照只取一次：日志汇总、返回给 UI 的 SyncResult 必须看到同一份数字，
+        // 分两次调用会在并发收尾时产生「日志 8 次失败、提示 7 次」这种对不上。
+        val elapsedMs = System.currentTimeMillis() - startTime
+        val sourceStats = stockManagerForStats.sourceStatsSnapshot()
+
         logRoundSummary(
             roundId = roundId,
             trigger = syncTrigger,
@@ -769,9 +774,9 @@ object AssetSyncManager {
             success = successCount.get(),
             failed = failedCount.get(),
             truncated = truncated.get(),
-            elapsedMs = System.currentTimeMillis() - startTime,
+            elapsedMs = elapsedMs,
             skipReasons = skipReasons.mapValues { it.value.get() },
-            sourceStats = stockManagerForStats.sourceStatsSnapshot()
+            sourceStats = sourceStats
         )
 
         SyncResult(
@@ -783,7 +788,9 @@ object AssetSyncManager {
             unknownErrorCount = unknownErrorCount,
             dominantErrorType = dominantErrorType,
             truncatedByTimeLimit = truncated.get(),
-            skippedByReason = skipReasons.mapValues { it.value.get() }
+            skippedByReason = skipReasons.mapValues { it.value.get() },
+            sourceStats = sourceStats,
+            elapsedMs = elapsedMs
         ).also {
             AppLogger.i(
                 "价格同步结束 [轮次#$roundId][$syncTrigger]：成功 ${it.successCount}，失败 ${it.failedCount}，" +
@@ -825,7 +832,12 @@ object AssetSyncManager {
             "无"
         } else {
             sourceStats.joinToString(" · ") { s ->
-                "${s.source} 成${s.success}/源败${s.sourceLevelFailure}/符败${s.symbolLevelFailure}"
+                val reason = s.lastFailureReason
+                    ?.takeIf { it.isNotBlank() }
+                    ?.let { "（${it.take(24)}）" }
+                    ?: ""
+                "${s.source} 成${s.success}/源败${s.sourceLevelFailure}/" +
+                    "符败${s.symbolLevelFailure}/耗时${s.durationMs}ms$reason"
             }
         }
         val summary = "=== 同步轮次 #$roundId 汇总 [$trigger] === | " +

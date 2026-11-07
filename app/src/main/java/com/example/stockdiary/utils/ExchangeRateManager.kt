@@ -2,6 +2,8 @@ package com.example.stockdiary.utils
 
 import android.content.Context
 import com.example.stockdiary.common.CacheConfig
+import com.example.stockdiary.network.ErApiExchangeRateSource
+import com.example.stockdiary.network.FallbackRateSource
 import com.example.stockdiary.network.NoOpRateSource
 import com.example.stockdiary.network.RateSource
 import com.example.stockdiary.network.SinaExchangeRateSource
@@ -93,8 +95,14 @@ object ExchangeRateManager {
     /** 刷新互斥：防止启动触发与导入触发并发回源（TTL 判定在锁内进行） */
     private val refreshMutex = Mutex()
 
-    /** 数据源。默认走新浪外汇；单测注入假源，完全离线可跑 */
-    internal var rateSource: RateSource = SinaExchangeRateSource()
+    /**
+     * 数据源。默认「新浪外汇主源 + open.er-api 兜底」——兜底只在主源失败时触发，
+     * 正常链路仍是一次请求，不并联、不增加请求数。单测注入假源，完全离线可跑。
+     */
+    internal var rateSource: RateSource = FallbackRateSource(
+        primary = SinaExchangeRateSource(),
+        fallback = ErApiExchangeRateSource()
+    )
 
     /** 持久化层。默认进程内空存储，[init] 之后换成 SharedPreferences */
     internal var rateStore: RateStore = InMemoryRateStore()

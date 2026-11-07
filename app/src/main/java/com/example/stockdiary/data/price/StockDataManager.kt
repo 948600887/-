@@ -34,7 +34,14 @@ data class SourceStats(
     val source: String,
     val success: Int,
     val sourceLevelFailure: Int,
-    val symbolLevelFailure: Int
+    val symbolLevelFailure: Int,
+    /** 本轮该源累计耗时（含重试与网络等待），用于识别慢源；无调用为 0 */
+    val durationMs: Long = 0L,
+    /**
+     * 最近一次源级失败原因（已截短供提示用）；只在该源发生源级失败时非空。
+     * 符号级失败（代码不在此源支持范围）不是源故障，不写这里。
+     */
+    val lastFailureReason: String? = null
 )
 
 /** 单个数据源的计数器（进程内，由 [StockDataManager.resetSourceStats] 清零） */
@@ -42,6 +49,8 @@ private class SourceCounters {
     val success = java.util.concurrent.atomic.AtomicInteger()
     val sourceFailure = java.util.concurrent.atomic.AtomicInteger()
     val symbolFailure = java.util.concurrent.atomic.AtomicInteger()
+    val durationMs = java.util.concurrent.atomic.AtomicLong()
+    val lastFailureReason = java.util.concurrent.atomic.AtomicReference<String?>(null)
 }
 
 /**
@@ -94,7 +103,9 @@ class StockDataManager(
                     source = name,
                     success = c.success.get(),
                     sourceLevelFailure = c.sourceFailure.get(),
-                    symbolLevelFailure = c.symbolFailure.get()
+                    symbolLevelFailure = c.symbolFailure.get(),
+                    durationMs = c.durationMs.get(),
+                    lastFailureReason = c.lastFailureReason.get()
                 )
             }
 
@@ -279,9 +290,18 @@ class StockDataManager(
             }
 
             AppLogger.d("尝试使用数据源: $apiName", TAG)
-            
-            val result = NetworkRetryHelper.executeWithRetry {
-                dataSource.getStockData(symbol)
+
+            // 耗时按「源」累计：包含该源的重试与网络等待，跨标的累加后能看出慢源。
+            // 放在 try/finally 里，取消/抛异常时也记账，避免某一轮时长凭空变短。
+            val sourceStartedAt = System.currentTimeMillis()
+            val result = try {
+                NetworkRetryHelper.executeWithRetry {
+                    dataSource.getStockData(symbol)
+                }
+            } finally {
+                countersFor(apiName).durationMs.addAndGet(
+                    System.currentTimeMillis() - sourceStartedAt
+                )
             }
             
             if (result.isSuccess) {
@@ -387,6 +407,9 @@ class StockDataManager(
             } else {
                 breakerFor(apiName).onFailure(System.currentTimeMillis())
                 countersFor(apiName).sourceFailure.incrementAndGet()
+                countersFor(apiName).lastFailureReason.set(
+                    failure.message?.take(60) ?: failure.javaClass.simpleName
+                )
                 AppLogger.w("${apiName}获取数据失败: ${failure.message}", TAG)
             }
         }
@@ -444,7 +467,15 @@ class StockDataManager(
     ): Result<Map<String, StockData>> {
         if (symbols.isEmpty()) return Result.success(emptyMap())
         val lineageRoundId = currentCoroutineContext()[RoundSourceFailureScope.Key]?.roundId ?: 0
-        val sinaResult = SinaStockAPI.getRealtimeData(symbols, context = context, forceRefresh = forceRefresh)
+        // 批量路径也要计入该源耗时：只统计逐标的回退，会漏掉整轮最耗时的那次批量请求
+        val batchStartedAt = System.currentTimeMillis()
+        val sinaResult = try {
+            SinaStockAPI.getRealtimeData(symbols, context = context, forceRefresh = forceRefresh)
+        } finally {
+            countersFor(ApiManager.API_SINA).durationMs.addAndGet(
+                System.currentTimeMillis() - batchStartedAt
+            )
+        }
         return sinaResult.map { sinaMap ->
             val now = System.currentTimeMillis()
             sinaMap.mapValues { (code, sina) ->
@@ -547,6 +578,7 @@ class StockDataManager(
         )
         breakerFor(sourceName).onFailure(System.currentTimeMillis())
         countersFor(sourceName).sourceFailure.incrementAndGet()
+        countersFor(sourceName).lastFailureReason.set("批量预取整体 0 命中")
         return true
     }
 

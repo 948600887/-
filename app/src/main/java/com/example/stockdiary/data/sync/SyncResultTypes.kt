@@ -1,6 +1,7 @@
 package com.example.stockdiary.data.sync
 
 import com.example.stockdiary.data.contract.SyncErrorType
+import com.example.stockdiary.data.price.SourceStats
 
 /**
  * 同步结果相关的纯数据类型，从 [AssetSyncManager] 抽出独立成文件，
@@ -31,7 +32,16 @@ data class SyncResult(
      * 不可达压根没更新（诊断日志里的典型一轮：成功 107 / 跳过 131（币安熔断 130）），
      * 会以为刷新成功却没生效、于是反复去点刷新——每点一次又白等一轮。
      */
-    val skippedByReason: Map<String, Int> = emptyMap()
+    val skippedByReason: Map<String, Int> = emptyMap(),
+    /**
+     * 本轮各数据源的成败与耗时快照（成功 / 源级失败 / 符号级失败 / 耗时 / 最近失败原因）。
+     *
+     * 与 [skippedByReason] 的分工：这边答「哪个源在掉链子、慢在哪」，那边答
+     * 「哪些标的没更新、为什么」。两者都随结果回给 UI，不再只埋在日志里。
+     */
+    val sourceStats: List<SourceStats> = emptyList(),
+    /** 本轮同步总耗时（毫秒），用于和下一轮对比判断是否变慢 */
+    val elapsedMs: Long = 0L
 ) {
     val hasRetryableErrors: Boolean
         get() = networkErrorCount > 0 || serverErrorCount > 0 || unknownErrorCount > 0
@@ -83,6 +93,31 @@ data class SyncResult(
                 if (gated > 0) append("；$gated 个加密货币行情源不可达，本次未更新")
                 if (stale > 0) append("；$stale 个仅有过期的旧价，本次未更新（价格保持上次的值）")
                 if (others > 0) append("；$others 个无需更新（退市/停牌等）")
+            }
+        }
+
+    /**
+     * 把「有源级故障的数据源」渲染成一句给用户看的补充（供刷新结果提示拼接）。
+     *
+     * 只在**源级失败**（超时/连不上/空返回/格式坏）时说话：符号级失败（代码不在此源
+     * 支持范围）是正常现象，说出来只会制造噪音。无异常时返回空串，不占提示篇幅。
+     *
+     * 包含源名、失败次数与最近一次失败原因，让用户能判断是「这个源今天不行」，
+     * 而不是「App 刷新坏了」。
+     */
+    val sourceHealthHint: String
+        get() {
+            val degraded = sourceStats.filter { it.sourceLevelFailure > 0 }
+            if (degraded.isEmpty()) return ""
+            return buildString {
+                append("；数据源异常：")
+                append(degraded.joinToString("、") { stat ->
+                    val reason = stat.lastFailureReason
+                        ?.takeIf { it.isNotBlank() }
+                        ?.let { "，${it.take(24)}" }
+                        ?: ""
+                    "${stat.source} 源级失败 ${stat.sourceLevelFailure} 次$reason"
+                })
             }
         }
 }

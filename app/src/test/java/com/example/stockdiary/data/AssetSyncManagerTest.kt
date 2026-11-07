@@ -8,6 +8,8 @@ import com.example.stockdiary.data.sync.SyncBudget
 import android.content.Context
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
+import com.example.stockdiary.data.price.ApiManager
+import com.example.stockdiary.data.price.SourceStats
 import com.example.stockdiary.network.UnifiedPriceService
 import com.example.stockdiary.network.BinanceHostUnavailableException
 import com.example.stockdiary.network.model.AssetPrice
@@ -144,6 +146,35 @@ class AssetSyncManagerTest {
             delay(10)
         }
         return cond()
+    }
+
+    @Test
+    fun `同步结果携带源统计与总耗时`() = runBlocking {
+        coEvery { UnifiedPriceService.getPrice(any(), AssetType.FUND, any()) } returns
+            Result.success(fundPrice("010001"))
+        every { stockDataManager.sourceStatsSnapshot() } returns listOf(
+            SourceStats(
+                source = ApiManager.API_SINA,
+                success = 1,
+                sourceLevelFailure = 2,
+                symbolLevelFailure = 3,
+                durationMs = 120,
+                lastFailureReason = "连接超时"
+            )
+        )
+
+        val result = AssetSyncManager.syncAllAssets(
+            context, repository, listOf(fundAsset("fund_010001")), {}, forceRefresh = true
+        )
+
+        assertEquals(1, result.sourceStats.size)
+        assertEquals(ApiManager.API_SINA, result.sourceStats[0].source)
+        assertEquals(2, result.sourceStats[0].sourceLevelFailure)
+        assertEquals(3, result.sourceStats[0].symbolLevelFailure)
+        assertEquals(120L, result.sourceStats[0].durationMs)
+        assertEquals("连接超时", result.sourceStats[0].lastFailureReason)
+        assertTrue("总耗时不能为负", result.elapsedMs >= 0)
+        assertTrue("源级失败要出现在给用户的提示里", result.sourceHealthHint.contains("新浪财经"))
     }
 
     @Test

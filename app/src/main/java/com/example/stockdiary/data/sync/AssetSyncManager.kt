@@ -997,9 +997,12 @@ object AssetSyncManager {
             // 持仓里的真基金。误杀后不发行情请求、不计失败，价格永久冻结且用户端零信号，
             // 比没有豁免更糟。isDelistedForSync 会放行 fund_ 前缀的场外份额，
             // 同时仍能认出老三板真退市股（bj400264 / sh400123）。
-            if ((asset.type == AssetType.STOCK || asset.type == AssetType.FUND) &&
-                StockCodeManager.isDelistedForSync(symbol)
-            ) {
+            //
+            // 还要再加一道**类型闸**：只兜底 STOCK。FUND 且不带 fund_ 前缀的 400/420
+            // （手动录入 400030/420102 后规范化成 bj400030/bj420102）仍是场外基金，
+            // 东财股票 K 线里没有它的行情；放进兜底只会拿错价或白等一次请求。
+            // 这类标的必须落到下面 FUND 分支，按纯数字代码走天天基金净值。
+            if (asset.type == AssetType.STOCK && StockCodeManager.isDelistedForSync(symbol)) {
                 val delistedSymbol = symbol ?: return
                 // 同一自然日已经确认过：不再请求东财（失败也落检查日，避免每轮重试）
                 if (delistedQuoteCache.isCheckedOn(delistedSymbol)) {

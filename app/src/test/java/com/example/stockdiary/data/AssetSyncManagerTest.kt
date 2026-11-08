@@ -11,6 +11,7 @@ import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.data.price.ApiManager
 import com.example.stockdiary.data.price.SourceStats
 import com.example.stockdiary.network.UnifiedPriceService
+import com.example.stockdiary.network.EastmoneyDelistedQuoteApi
 import com.example.stockdiary.network.BinanceHostUnavailableException
 import com.example.stockdiary.network.NonTradableAssetException
 import com.example.stockdiary.network.model.AssetPrice
@@ -454,6 +455,43 @@ class AssetSyncManagerTest {
         assertEquals(0, result.successCount)
         assertEquals(0, result.failedCount)
         coVerify(exactly = 0) { repository.updatePricesInTransaction(any()) }
+    }
+
+    // ---------- 退市兜底只能服务股票，不得吞掉 400/420 号段的场外基金 ----------
+
+    /**
+     * 回归：手动以 FUND 类型录入 400030 / 420102，`normalizeSymbol` 会落成
+     * `bj400030` / `bj420102`（400/420 既是老三板号段，也是天天基金场外代码）。
+     *
+     * 这类标的**不是**退市股，东财股票 K 线里没有它的行情：若走进退市兜底，
+     * 轻则白等一次请求，重则把 K 线里的数字当基金净值写进库、污染净资产。
+     * 因此退市兜底必须加类型闸（只服务 STOCK），FUND 一律走基金分支：
+     * 剥掉 `bj` 前缀、用纯数字代码 `400030` 走天天基金净值。
+     */
+    @Test
+    fun `FUND 类型 400 号段场外基金不走退市兜底_按基金净值落价`() = runBlocking {
+        every { stockDataManager.isNetworkAvailableNow() } returns true
+        mockkObject(EastmoneyDelistedQuoteApi)
+        coEvery { UnifiedPriceService.getPrice("400030", AssetType.FUND, any()) } returns
+            Result.success(fundPrice("400030"))
+
+        val otcFund = Asset(
+            name = "东方添益债券", type = AssetType.FUND, symbol = "bj400030",
+            account = "默认", balance = 1000.0
+        )
+        val result = AssetSyncManager.syncAllAssets(
+            context, repository, listOf(otcFund), {}, forceRefresh = true
+        )
+
+        coVerify(exactly = 0) { EastmoneyDelistedQuoteApi.fetchLastClose(any(), any()) }
+
+        val slot = slot<List<com.example.stockdiary.data.contract.PendingPriceWrite>>()
+        coVerify { repository.updatePricesInTransaction(capture(slot)) }
+        val write = slot.captured.single()
+        assertEquals("落库 key 必须保留原始 symbol", "bj400030", write.symbol)
+        assertEquals("必须落基金净值，不能落东财股票 K 线价", 1.5, write.price, 1e-9)
+        assertEquals(1, result.successCount)
+        assertEquals(0, result.failedCount)
     }
 
     /**

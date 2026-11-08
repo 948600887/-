@@ -74,6 +74,9 @@ class CalendarViewModelTest {
     private val divRepo = mockk<DividendRepository>(relaxed = true)
     private val prefsMgr = mockk<DashboardPreferencesManager>(relaxed = true)
 
+    /** 模拟 Manager 的唯一偏好副本：CalendarViewModel 直接订阅它，不再自己读磁盘 */
+    private val prefsFlow = MutableStateFlow(DashboardPreferences())
+
     /** 模拟 Manager 落盘后的完整偏好（updatePreferences 的返回/写入结果） */
     private var lastWrittenPrefs: DashboardPreferences? = null
     // DividendIncomeUseCase 本身用挂起 lambda 注入，直接用真实对象做桩。
@@ -120,14 +123,18 @@ class CalendarViewModelTest {
         allAssetsFlow: (() -> Flow<List<Asset>>)? = null,
         incomeUseCase: DividendIncomeUseCase = useCase
     ): CalendarViewModel {
-        every { prefsMgr.loadPreferences() } returns DashboardPreferences()
-        // 模拟 Manager 的真实契约：拉磁盘最新值 → 套用 mutate → 存盘 → 返回合并结果。
+        prefsFlow.value = DashboardPreferences()
+        every { prefsMgr.preferences } returns prefsFlow
+        every { prefsMgr.loadPreferences() } answers { prefsFlow.value }
+        // 模拟 Manager 的真实契约：拉磁盘最新值 → 套用 mutate → 存盘 → 同步唯一 Flow。
         // prefsMgr 是 mock，其 updatePreferences 是桩、真实方法体不会执行；这里把合并结果
-        // 记到 lastWrittenPrefs，供「只改该字段不覆盖其他偏好」的断言使用。
+        // 记到 lastWrittenPrefs，并写回 prefsFlow（模拟 Manager 更新唯一副本），
+        // 供「只改该字段不覆盖其他偏好」「别处改支出日历跟随」两类断言使用。
         every { prefsMgr.updatePreferences(any()) } answers {
             val mutate = firstArg<(DashboardPreferences) -> DashboardPreferences>()
             val updated = mutate(prefsMgr.loadPreferences())
             lastWrittenPrefs = updated
+            prefsFlow.value = updated
             updated
         }
         every { assetRepo.getAllAssets() } answers {
@@ -246,6 +253,28 @@ class CalendarViewModelTest {
         // 其余字段必须原样保留——这正是「共享整块偏好互相踩踏」要锁的契约
         assertTrue(written.showTotalAssets)
         assertEquals("3M", written.defaultPeriod)
+    }
+
+    /**
+     * 跨页面回归：月度生活费被**别的页面**（设置 → 自定义仪表盘 / 持仓页）修改后，
+     * 日历页必须立即跟随。
+     *
+     * 从前 CalendarViewModel 只在构造时 `loadPreferences()` 读一次快照，之后不再订阅：
+     * 用户离开日历页改完支出再回来，FIRE 仍按旧值算（只有杀进程重进才恢复）。
+     * 现在它订阅 Manager 的唯一 [DashboardPreferencesManager.preferences] Flow，这里直接
+     * 推进该 Flow 模拟别处写入，断言 uiState 的月度支出跟着变。
+     */
+    @Test
+    fun `别处修改月度生活费后日历立即跟随`() = runBlocking {
+        val vm = buildVm()
+        waitUntil { vm.uiState.value.assets.isNotEmpty() }
+        assertEquals("5000", vm.uiState.value.monthlyExpense)
+
+        // 模拟 Manager 在设置页 / 持仓页写入后同步更新唯一副本
+        prefsFlow.value = DashboardPreferences(monthlyExpense = "12000")
+
+        waitUntil(timeoutMs = 2000) { vm.uiState.value.monthlyExpense == "12000" }
+        assertEquals("12000", vm.uiState.value.monthlyExpense)
     }
 
     @Test

@@ -5,6 +5,8 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 /**
  * 五套取价缓存合并为一份实现后的回归：钉住「存储机制」等价，
@@ -109,5 +111,67 @@ class BoundedTtlCacheTest {
         cache.trim(expireBeforeMillis = 10_000L)
 
         assertEquals(1, cache.size())
+    }
+
+    /**
+     * 并发回归：trim 拍完快照后、按快照条目删除前，同一 key 被写入新值——
+     * 旧实现按 key 删除，会把这条**新价**一起删掉（用户可见：刚刷新的价格消失）。
+     *
+     * 冻结时序的做法：[BlockingKey.hashCode] 只在 trim 线程上阻塞一次，位置正好是
+     * `map.remove(...)` 计算哈希、尚未进入桶锁之前。主线程等它进入删除阶段后再写新值，
+     * 然后放行 trim。
+     */
+    @Test
+    fun `trim 不误删快照之后并发写入的新值`() {
+        val enteredRemoval = CountDownLatch(1)
+        val releaseRemoval = CountDownLatch(1)
+        val oldest = BlockingKey("oldest", enteredRemoval, releaseRemoval)
+
+        val cache = BoundedTtlCache<BlockingKey, String>(maxEntries = 2)
+        cache.put(oldest, "stale", timestamp = 1L)
+        cache.put(BlockingKey("keep1"), "b", timestamp = 2L)
+        cache.put(BlockingKey("keep2"), "c", timestamp = 3L)
+
+        val trimmer = Thread({ cache.trim(expireBeforeMillis = Long.MIN_VALUE) }, "trim-thread")
+        trimmer.start()
+        assertTrue(
+            "trim 应已进入删除阶段（快照已固定、正在删除最旧条目）",
+            enteredRemoval.await(3, TimeUnit.SECONDS)
+        )
+
+        // 此刻 trim 已拍完快照，最旧条目是 (oldest, stale, ts=1)；
+        // 同一 key 写入更新价，若按 key 删除就会把它误删。
+        cache.put(oldest, "fresh", timestamp = 4L)
+
+        releaseRemoval.countDown()
+        trimmer.join(3000)
+
+        assertEquals("并发写入的新值不能被当成旧条目删除", "fresh", cache.getValue(oldest))
+        assertEquals(4L, cache.get(oldest)?.timestamp)
+
+        // 保守选择：宁可本轮少删一条（容量短暂超限），也不能删掉刚写入的新价；
+        // 下一轮 trim 会按新的时间戳重新收回到上限。
+        cache.trim(expireBeforeMillis = Long.MIN_VALUE)
+        assertEquals("后续 trim 仍应把容量收回到上限", 2, cache.size())
+    }
+
+    /**
+     * trim 线程上在删除阶段会调用一次 [hashCode]；用它把 trim 暂停在「快照之后、删除之前」。
+     * 其他线程/其他 key 不受影响，避免把正常读写也卡住。
+     */
+    private class BlockingKey(
+        private val name: String,
+        private val enteredRemoval: CountDownLatch? = null,
+        private val releaseRemoval: CountDownLatch? = null
+    ) {
+        override fun hashCode(): Int {
+            if (enteredRemoval != null && Thread.currentThread().name == "trim-thread") {
+                enteredRemoval.countDown()
+                releaseRemoval?.await(3, TimeUnit.SECONDS)
+            }
+            return name.hashCode()
+        }
+
+        override fun equals(other: Any?): Boolean = other is BlockingKey && other.name == name
     }
 }

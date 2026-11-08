@@ -162,8 +162,20 @@ class CalendarViewModel(
     private val supportedTypes = listOf(AssetType.STOCK, AssetType.FUND, AssetType.BANK_DEPOSIT)
 
     init {
-        val prefs = dashboardPreferencesManager.loadPreferences()
-        _uiState.update { state -> state.copy(monthlyExpense = prefs.monthlyExpense) }
+        // 月度生活费唯一来源是 Manager 的偏好 Flow。这里先用当前副本填初值（volatile 读，
+        // 不碰磁盘），随后订阅同一条流：别的页面（设置 → 自定义仪表盘 / 持仓页）改了月度支出，
+        // 日历页的 FIRE 计算立即跟随，不再等重进页面才刷新。
+        _uiState.update { state ->
+            state.copy(monthlyExpense = dashboardPreferencesManager.preferences.value.monthlyExpense)
+        }
+        viewModelScope.launch {
+            dashboardPreferencesManager.preferences
+                .map { it.monthlyExpense }
+                .distinctUntilChanged()
+                .collect { expense ->
+                    _uiState.update { state -> state.copy(monthlyExpense = expense) }
+                }
+        }
 
         viewModelScope.launch {
             // 类型过滤下推到 SQL（getAssetsByTypesFlow 的 WHERE type IN）：不再全表拉取后内存 filter，

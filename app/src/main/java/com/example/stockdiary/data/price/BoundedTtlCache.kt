@@ -24,8 +24,10 @@ class BoundedTtlCache<K : Any, V : Any>(private val maxEntries: Int) {
 
     /**
      * 整段淘汰加锁：先读 size 决定淘汰多少、再排序删除，这组操作本身不是原子的。
-     * ConcurrentHashMap 只保证单次操作原子，两个线程同时看到超限时可能各删一批，
-     * 把刚写进去的新价一起淘汰（用户可见：刚刷新的价格显示不出来，要点第二次）。
+     * 但**只锁 trim 不够**——[put] 不参与这把锁，仍可能「快照之后、删除之前」把同一个 key
+     * 写成新价，随后按 key 删除会把这条新价一起删掉。因此淘汰一律用
+     * `map.remove(key, 快照里的 Entry)`（ConcurrentHashMap 的「值相等才删」原子操作）：
+     * 时间戳/值已变就删不掉，并发写入的新价不会被当成旧条目误删。
      */
     private val trimLock = Any()
 
@@ -73,14 +75,16 @@ class BoundedTtlCache<K : Any, V : Any>(private val maxEntries: Int) {
             if (expireBeforeMillis != Long.MIN_VALUE) {
                 map.entries.toList()
                     .filter { it.value.timestamp < expireBeforeMillis }
-                    .forEach { map.remove(it.key) }
+                    // 条件删除：仅当当前值与快照完全一致（含时间戳）才删。
+                    // 若并发 put 已写入新值，这里删不掉，避免把刚刷新的价当旧条目误删。
+                    .forEach { map.remove(it.key, it.value) }
             }
 
             val overflow = map.size - maxEntries
             if (overflow > 0) {
                 map.entries.sortedBy { it.value.timestamp }
                     .take(overflow)
-                    .forEach { map.remove(it.key) }
+                    .forEach { map.remove(it.key, it.value) }
             }
         }
     }

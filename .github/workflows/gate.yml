@@ -36,5 +36,12 @@ jobs:
       - name: 确保 gradlew 可执行（仓库里可能没带 +x 位）
         run: chmod +x gradlew
 
+      - name: 适配 CI 内存（ubuntu-latest runner 仅 7GB）
+        # 本地开发机 16G 用 -Xmx4096m；CI 托管 runner 仅 7GB，照搬 4096m 会让 Gradle
+        # daemon + 编译 + 全量单测叠加 OOM，整条 job 失败、每次 push 都发失败邮件。
+        # 这里把堆降到 3G、限制 Metaspace，给系统与其他进程留出余量。
+        # 只改 CI 工作副本，不改动仓库里的 gradle.properties（本地开发仍用 4096m）。
+        run: sed -i 's/-Xmx4096m/-Xmx3072m -XX:MaxMetaspaceSize=512m/' gradle.properties
+
       - name: 跑全量质量门禁
         run: bash tools/check_gate.sh

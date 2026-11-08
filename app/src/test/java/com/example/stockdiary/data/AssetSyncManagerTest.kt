@@ -12,7 +12,9 @@ import com.example.stockdiary.data.price.ApiManager
 import com.example.stockdiary.data.price.SourceStats
 import com.example.stockdiary.network.UnifiedPriceService
 import com.example.stockdiary.network.BinanceHostUnavailableException
+import com.example.stockdiary.network.NonTradableAssetException
 import com.example.stockdiary.network.model.AssetPrice
+import com.example.stockdiary.network.model.CryptoData
 import com.example.stockdiary.network.model.FundData
 import io.mockk.coEvery
 import io.mockk.coVerify
@@ -386,6 +388,72 @@ class AssetSyncManagerTest {
         assertEquals(0, result.failedCount)
         assertTrue("熔断跳过不该产生可重试错误", !result.hasRetryableErrors)
         assertNull("熔断跳过不该计入任何错误类型（否则触发误导性通知）", result.dominantErrorType)
+    }
+
+    // ---------- 稳定币 1.0 短路必须被视为有效更新 ----------
+
+    /**
+     * 稳定币按 1.0 计价时，批量预取会直接把 `AssetPrice.Crypto(price=1.0)` 回填进 map。
+     * 编排器必须把它当**成功**落库——`AssetRepository.updatePricesInTransaction` 写库时
+     * 用 `System.currentTimeMillis()` 刷新 `lastSyncTime`，卡片才不会把 1.0 的稳定币
+     * 误判成「超过 24 小时未更新」。
+     *
+     * 落库 key 仍必须是带 `#collateral` 后缀的原始 symbol：查价口径剥后缀，库内唯一键不剥。
+     */
+    @Test
+    fun `稳定币按 1_0 计价的批量结果算成功并落库`() = runBlocking {
+        every { stockDataManager.isNetworkAvailableNow() } returns true
+        val usdt = Asset(
+            name = "USDT", type = AssetType.CRYPTO, symbol = "USDT#collateral",
+            account = "币安", balance = 367.18
+        )
+        val stable = AssetPrice.Crypto(
+            CryptoData(
+                code = "USDT#COLLATERAL", name = "USDT#COLLATERAL",
+                price = 1.0, change = null, changePercent = null
+            )
+        )
+        coEvery { UnifiedPriceService.prewarmCryptoPrices(any(), any(), any(), any()) } returns
+            Result.success(mapOf("USDT#collateral" to stable))
+
+        val result = AssetSyncManager.syncAllAssets(
+            context, repository, listOf(usdt), {}, forceRefresh = true
+        )
+
+        assertEquals("稳定币 1.0 是有效更新，必须计成功", 1, result.successCount)
+        assertEquals(0, result.failedCount)
+
+        val slot = slot<List<com.example.stockdiary.data.contract.PendingPriceWrite>>()
+        coVerify { repository.updatePricesInTransaction(capture(slot)) }
+        val write = slot.captured.single()
+        assertEquals("USDT#collateral", write.symbol)
+        assertEquals(1.0, write.price, 1e-9)
+    }
+
+    /**
+     * 反向护栏：真正的不可交易标的（`NonTradableAssetException`）仍按「跳过」处理——
+     * 既不落库（不刷新 lastSyncTime、不把旧价伪装成新价），也不计失败推高失败通知。
+     * 稳定币的 1.0 短路不得把这类标的顺带放过。
+     */
+    @Test
+    fun `不可交易标的仍跳过_不落库也不计失败`() = runBlocking {
+        every { stockDataManager.isNetworkAvailableNow() } returns true
+        val shib = Asset(
+            name = "SHIB2", type = AssetType.CRYPTO, symbol = "SHIB2",
+            account = "币安", balance = 1.0
+        )
+        coEvery { UnifiedPriceService.prewarmCryptoPrices(any(), any(), any(), any()) } returns
+            Result.success(emptyMap())
+        coEvery { UnifiedPriceService.getPrice("SHIB2", AssetType.CRYPTO, any(), any(), any()) } returns
+            Result.failure(NonTradableAssetException("SHIB2 在币安现货无交易对"))
+
+        val result = AssetSyncManager.syncAllAssets(
+            context, repository, listOf(shib), {}, forceRefresh = true
+        )
+
+        assertEquals(0, result.successCount)
+        assertEquals(0, result.failedCount)
+        coVerify(exactly = 0) { repository.updatePricesInTransaction(any()) }
     }
 
     /**

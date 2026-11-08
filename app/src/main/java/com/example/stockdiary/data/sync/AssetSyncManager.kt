@@ -19,6 +19,7 @@ import com.example.stockdiary.data.price.SourceStats
 import com.example.stockdiary.data.price.StockDataManager
 import com.example.stockdiary.common.SyncLimits
 import com.example.stockdiary.network.FundAPI
+import com.example.stockdiary.network.EastmoneyDelistedQuoteApi
 import com.example.stockdiary.network.UnifiedPriceService
 import com.example.stockdiary.network.model.AssetPrice
 import com.example.stockdiary.utils.AppLogger
@@ -503,6 +504,10 @@ object AssetSyncManager {
         // 价格批量落库器：落价不再逐条 UPDATE，而是攒够一批走一个事务（见 [SyncPriceWriter]）
         val priceWriter = SyncPriceWriter(repository, PRICE_WRITE_BATCH_SIZE)
 
+        // 退市股兜底：每个自然日最多向东财确认一次最后收盘，避免逐轮重复请求。
+        // 交易日只用于内部去重/日志，不进入界面。
+        val delistedQuoteCache = DelistedQuoteCache(context)
+
         // 进度回调节流的时间戳闸门。AtomicLong + CAS 保证「同一时刻只有一个协程拿到发送权」，
         // 避免三个并发标的各发各的、把节流窗口冲掉
         val lastProgressNotifyAt = java.util.concurrent.atomic.AtomicLong(0L)
@@ -668,6 +673,7 @@ object AssetSyncManager {
                                     asset,
                                     repository,
                                     priceWriter,
+                                    delistedQuoteCache,
                                     successCount,
                                     failedCount,
                                     errorTypes,
@@ -957,6 +963,8 @@ object AssetSyncManager {
         repository: AssetRepository,
         /** 落价出口：拿到的价交给它攒批，不再逐条 UPDATE（见 [SyncPriceWriter]） */
         priceWriter: SyncPriceWriter,
+        /** 退市股兜底收盘的按日缓存（同一自然日不重复请求东财） */
+        delistedQuoteCache: DelistedQuoteCache,
         successCount: AtomicInteger,
         failedCount: AtomicInteger,
         errorTypes: ConcurrentLinkedQueue<SyncErrorType>,
@@ -979,9 +987,11 @@ object AssetSyncManager {
         var lastError: Throwable? = null
 
         try {
-            // 退市标的（400xxx/420xxx 老三板）没有任何行情源可取：UI 已显示「退市」，
-            // 同步侧再为它轮询三源只是白烧请求额度，还会把数据源失败计数推高
-            // （累计到阈值会「跳过数据源（失败次数过多）」禁用 30 分钟，连累正常标的）。
+            // 退市标的（400xxx/420xxx 老三板）新浪 / 腾讯都没有报价，但东财 K 线仍保留
+            // 最后一根周收盘（实测 R东方1 2026-11-06 收盘 0.22）。这里做一次**隔离的兜底**：
+            // 只更新价格，不计成功、不计失败，也不喂任何数据源健康 / 熔断——东财这条链路
+            // 与正常股票的取价源完全分开，失败只回落成原来的「跳过(退市)」，价格不动。
+            //
             // 必须走 isDelistedForSync 而不是 isDelisted：后者的「6 位数字 + 400/420 前缀」
             // 和天天基金场外代码段是重叠的——400030（东方添益债券）、420102 都是用户
             // 持仓里的真基金。误杀后不发行情请求、不计失败，价格永久冻结且用户端零信号，
@@ -990,7 +1000,34 @@ object AssetSyncManager {
             if ((asset.type == AssetType.STOCK || asset.type == AssetType.FUND) &&
                 StockCodeManager.isDelistedForSync(symbol)
             ) {
-                AppLogger.i("跳过退市标的: ${asset.name}（$symbol，无行情源）", TAG)
+                val delistedSymbol = symbol ?: return
+                // 同一自然日已经确认过：不再请求东财（失败也落检查日，避免每轮重试）
+                if (delistedQuoteCache.isCheckedOn(delistedSymbol)) {
+                    AppLogger.d("跳过退市标的（今日已确认无新收盘）: ${asset.name}（$delistedSymbol）", TAG)
+                    skipReason = "退市"; onSkip("退市")
+                    return
+                }
+                if (networkAvailable == false) {
+                    AppLogger.i("跳过退市标的（当前无网络，待恢复后再取历史收盘）: ${asset.name}（$delistedSymbol）", TAG)
+                    skipReason = "退市"; onSkip("退市")
+                    return
+                }
+
+                val quote = EastmoneyDelistedQuoteApi.fetchLastClose(delistedSymbol)
+                delistedQuoteCache.record(delistedSymbol, quote)
+                if (quote != null) {
+                    withContext(NonCancellable) {
+                        priceWriter.write(PendingPriceWrite(delistedSymbol, quote.price))
+                    }
+                    // 交易日只进日志/缓存，界面按普通价格展示，不加「历史收盘」标注
+                    AppLogger.i(
+                        "退市标的按东财最后收盘更新: ${asset.name}（$delistedSymbol，" +
+                            "交易日 ${quote.tradeDate}，收盘 ${quote.price}）",
+                        TAG
+                    )
+                } else {
+                    AppLogger.i("跳过退市标的: ${asset.name}（$delistedSymbol，东财无可用历史收盘）", TAG)
+                }
                 skipReason = "退市"; onSkip("退市")
                 return
             }

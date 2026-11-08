@@ -24,15 +24,11 @@ import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Sync
-import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.CurrencyBitcoin
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.Text
-import androidx.compose.material3.TimePicker
-import androidx.compose.material3.rememberTimePickerState
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -42,7 +38,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
@@ -66,7 +61,6 @@ import com.example.stockdiary.ui.screens.settings.components.ImportSource
 import com.example.stockdiary.ui.screens.settings.components.ImportSourceDialog
 import com.example.stockdiary.ui.screens.settings.components.LogViewerDialog
 import com.example.stockdiary.ui.screens.settings.components.HoldingSnapshotDialog
-import com.example.stockdiary.ui.screens.settings.components.ReminderTimePickerDialog
 import com.example.stockdiary.ui.screens.settings.components.SettingsItem
 import com.example.stockdiary.ui.screens.settings.components.SettingsSection
 import com.example.stockdiary.ui.screens.settings.components.ThemeSelectionDialog
@@ -77,7 +71,6 @@ import com.example.stockdiary.ui.viewmodels.SettingsViewModel
 import com.example.stockdiary.ui.viewmodels.createSettingsViewModelFactory
 
 import com.example.stockdiary.utils.format
-import kotlinx.coroutines.flow.filterNotNull
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -99,16 +92,13 @@ fun SettingsScreen(
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     // 仪表盘偏好保留独立流（跨页面共享的整块偏好，写入路径与 UiState 不同，见 VM KDoc）
     val dashboardPrefs by viewModel.dashboardPreferences.collectAsStateWithLifecycle()
-    // 价格同步与每日提醒的 8 个快照字段已合入 uiState（同 Dashboard/Portfolio 模式）：
-    // 原来十条流各自 collect，一次 refreshPriceSyncState 连发八次、整页重组八遍；
+    // 价格同步的 4 个快照字段已合入 uiState（同 Dashboard/Portfolio 模式）：
+    // 原来多条流各自 collect，一次 refreshPriceSyncState 连发多次、整页重组多遍；
     // 现在按原变量名从 uiState 取别名，页面主体逻辑不动。
     val autoPriceSyncEnabled = uiState.autoPriceSyncEnabled
     val lastPriceSyncTime = uiState.lastPriceSyncTime
     val stockIntradaySyncEnabled = uiState.stockIntradaySyncEnabled
     val cryptoAutoSyncEnabled = uiState.cryptoAutoSyncEnabled
-    val reminderEnabled = uiState.reminderEnabled
-    val reminderHour = uiState.reminderHour
-    val reminderMinute = uiState.reminderMinute
     val currentTheme = rememberThemeMode()
 
     // 当前生效的美元汇率与上次刷新时间：从 UiState 读（刷新后要能重组），
@@ -142,22 +132,14 @@ fun SettingsScreen(
     var showFundSnapshotDialog by remember { mutableStateOf(false) }
     var showBinanceImportDialog by remember { mutableStateOf(false) }
     var showLogViewerDialog by remember { mutableStateOf(false) }
-    var showReminderTimePicker by remember { mutableStateOf(false) }
-    /** 记录这次通知权限请求是哪个开关发起的，权限回调时按来源给出准确文案 */
-    var pendingPermissionReason by remember { mutableStateOf<String?>(null) }
 
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { isGranted ->
         notificationsGranted = isGranted
         if (!isGranted) {
-            val message = when (pendingPermissionReason) {
-                "每日查看提醒" -> "已开启每日查看提醒，但通知权限被拒绝，到点不会弹出通知"
-                else -> "已开启自动同步，但通知权限被拒绝，同步结果将不会显示通知"
-            }
-            appSnackbar.show(message)
+            appSnackbar.show("已开启自动同步，但通知权限被拒绝，同步结果将不会显示通知")
         }
-        pendingPermissionReason = null
     }
 
     // 只保留计数，不常驻整表（快照/交易只在导出时按需查库）
@@ -198,31 +180,6 @@ fun SettingsScreen(
         }
     }
 
-    // 精确闹钟权限缺失的提示：SCHEDULE_EXACT_ALARM 无法用弹窗申请，
-    // 必须让用户手动去系统设置开启。给一个「去设置」动作直接跳转，
-    // 否则这行错误只是干巴巴的一句话，用户不知道下一步该做什么。
-    //
-    // 用 snapshotFlow + Unit key：先清状态再展示，清空不会取消本效应；
-    // 等按钮点击的协程在 controller 的应用级作用域里，切走「我的」页提示仍在。
-    LaunchedEffect(Unit) {
-        snapshotFlow { uiState.reminderError }
-            .filterNotNull()
-            .collect { message ->
-                viewModel.clearReminderError()
-                if (message.contains("精确闹钟权限")) {
-                    appSnackbar.showWithAction(
-                        message = message,
-                        actionLabel = "去设置",
-                        duration = SnackbarDuration.Long
-                    ) {
-                        viewModel.openAlarmSettings()
-                    }
-                } else {
-                    appSnackbar.show(message)
-                }
-            }
-    }
-
     LaunchedEffect(uiState.deleteResult) {
         uiState.deleteResult?.let { result ->
             viewModel.clearDeleteResult()
@@ -249,9 +206,6 @@ fun SettingsScreen(
         lastPriceSyncTime,
         stockIntradaySyncEnabled,
         cryptoAutoSyncEnabled,
-        reminderEnabled,
-        reminderHour,
-        reminderMinute,
         usdRate,
         usdRateUpdatedAt,
         isRefreshingRate,
@@ -343,7 +297,6 @@ fun SettingsScreen(
                                 Manifest.permission.POST_NOTIFICATIONS
                             ) != PackageManager.PERMISSION_GRANTED
                         ) {
-                            pendingPermissionReason = "自动同步"
                             notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
                         }
                     }
@@ -403,39 +356,6 @@ fun SettingsScreen(
                 ))
             }),
             SettingsSectionData("应用", listOf(
-                SettingsItemData(
-                    icon = Icons.Default.Notifications,
-                    title = "每日查看提醒",
-                    subtitle = when {
-                        !reminderEnabled -> "已关闭"
-                        !notificationsGranted -> "每天 ${reminderHour.toString().padStart(2, '0')}:${reminderMinute.toString().padStart(2, '0')} 提醒（通知权限未开启，不会弹出）"
-                        else -> "每天 ${reminderHour.toString().padStart(2, '0')}:${reminderMinute.toString().padStart(2, '0')} 提醒查看资产"
-                    },
-                    isSwitch = true,
-                    switchChecked = reminderEnabled,
-                    onSwitchCheckedChange = { enabled ->
-                        // 开启前先看通知权限：没授权也能把闹钟排上，但通知永远发不出来，
-                        // 界面上却显示"每天 09:00 提醒"，用户根本无从自查。
-                        if (enabled &&
-                            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-                            ContextCompat.checkSelfPermission(
-                                context,
-                                Manifest.permission.POST_NOTIFICATIONS
-                            ) != PackageManager.PERMISSION_GRANTED
-                        ) {
-                            pendingPermissionReason = "每日查看提醒"
-                            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-                        }
-                        viewModel.setReminderEnabled(enabled)
-                    }
-                ),
-                SettingsItemData(
-                    icon = Icons.Default.Schedule,
-                    title = "提醒时间",
-                    subtitle = "${reminderHour.toString().padStart(2, '0')}:${reminderMinute.toString().padStart(2, '0')}",
-                    enabled = reminderEnabled,
-                    onClick = { if (reminderEnabled) showReminderTimePicker = true }
-                ),
                 SettingsItemData(
                     icon = Icons.Default.BugReport,
                     title = "运行日志与崩溃报告",
@@ -604,18 +524,6 @@ fun SettingsScreen(
         )
     }
 
-    if (showReminderTimePicker) {
-        ReminderTimePickerDialog(
-            initialHour = reminderHour,
-            initialMinute = reminderMinute,
-            onDismiss = { showReminderTimePicker = false },
-            onConfirm = { hour, minute ->
-                viewModel.setReminderTime(hour, minute)
-                showReminderTimePicker = false
-            }
-        )
-    }
-
     if (showDataSourceDialog) {
         // 之前这里写成 uiState.dataSourceHealth?.let { ... }：健康列表初始是 null，
         // 点开后要等好几个网络请求跑完才突然出现；一旦检测抛异常（离线）就永远为 null，
@@ -643,7 +551,7 @@ private data class SettingsItemData(
     val isSwitch: Boolean = false,
     val switchChecked: Boolean = false,
     val onSwitchCheckedChange: ((Boolean) -> Unit)? = null,
-    /** false 时置灰且不可点击（用于依赖其它开关的子项，如「提醒时间」依赖「每日提醒」） */
+    /** false 时置灰且不可点击（如在刷新汇率期间不可再点） */
     val enabled: Boolean = true
 )
 

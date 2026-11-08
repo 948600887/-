@@ -17,7 +17,6 @@ import com.example.stockdiary.utils.AppLogger
 import com.example.stockdiary.utils.DataSourceHealth
 import com.example.stockdiary.utils.DataSourceHealthChecker
 import com.example.stockdiary.utils.ExchangeRateManager
-import com.example.stockdiary.utils.NotificationHelper
 import io.mockk.Runs
 import io.mockk.coEvery
 import io.mockk.coVerify
@@ -95,17 +94,11 @@ class SettingsViewModelTest {
 
     @Before
     fun setUp() {
-        // 构造前必须先 mock 这些 object：VM 字段初始化会调 NotificationHelper.isReminderEnabled /
-        // getReminderTime，且 deleteAllData 会取消 PriceSyncScheduler / SnapshotScheduler / 提醒。
-        mockkObject(NotificationHelper)
-        every { NotificationHelper.isReminderEnabled(any()) } returns false
-        every { NotificationHelper.getReminderTime(any()) } returns Pair(8, 0)
+        // 构造前必须先 mock 这些 object：deleteAllData 会取消 PriceSyncScheduler / SnapshotScheduler。
         mockkObject(PriceSyncScheduler)
         mockkObject(SnapshotScheduler)
         every { PriceSyncScheduler.cancelDailySync(any()) } just Runs
         every { SnapshotScheduler.cancelDailySnapshot(any()) } just Runs
-        every { NotificationHelper.cancelReminder(any()) } just Runs
-        every { NotificationHelper.saveReminderTime(any(), any(), any()) } just Runs
 
         // init 里的三个 Flow 收集必须给确定性数据源，否则会挂住或落到未初始化实现上抛异常
         every { assetRepository.getAllAssets() } returns flowOf(emptyList())
@@ -171,7 +164,7 @@ class SettingsViewModelTest {
     }
 
     @Test
-    fun `deleteAllData 清空数据库并取消价格同步与每日快照与提醒`() = runBlocking {
+    fun `deleteAllData 清空数据库并取消价格同步与每日快照`() = runBlocking {
         coEvery { assetRepository.deleteAllData() } just Runs
 
         vm.deleteAllData()
@@ -181,36 +174,11 @@ class SettingsViewModelTest {
         coVerify { assetRepository.deleteAllData() }
         // 派生缓存必须走数据层门面清理（设置页不再直接认识各数据源单例）
         coVerify { priceCacheMaintenance.clearDerivedCaches() }
-        // 三个后台任务必须被取消（这是此前漏掉的快照取消 + 价格同步 + 提醒）
+        // 两个后台任务必须被取消（这是此前漏掉的快照取消 + 价格同步）
         verify { PriceSyncScheduler.cancelDailySync(any()) }
         verify { SnapshotScheduler.cancelDailySnapshot(any()) }
-        verify { NotificationHelper.cancelReminder(any()) }
         // 终态应为成功
         assertTrue(vm.uiState.value.deleteResult?.isSuccess == true)
-    }
-
-    @Test
-    fun `openAlarmSettings 转发到 NotificationHelper`() = runBlocking {
-        vm.openAlarmSettings()
-        verify { NotificationHelper.openAlarmSettings(appContext) }
-    }
-
-    @Test
-    fun `clearReminderError 清空错误状态且不抛异常`() = runBlocking {
-        vm.clearReminderError()
-        assertNull(vm.uiState.value.reminderError)
-    }
-
-    @Test
-    fun `提醒关闭时改时间仍落盘_只是不排闹钟`() = runBlocking {
-        // 默认 reminderEnabled=false（见 setUp 的 isReminderEnabled stub）
-        vm.setReminderTime(7, 30)
-
-        verify { NotificationHelper.saveReminderTime(appContext, 7, 30) }
-        // 关闭状态不该排闹钟
-        verify(exactly = 0) { NotificationHelper.setDailyReminder(any(), any(), any()) }
-        assertEquals(7, vm.uiState.value.reminderHour)
-        assertEquals(30, vm.uiState.value.reminderMinute)
     }
 
     @Test
@@ -488,20 +456,5 @@ class SettingsViewModelTest {
         assertEquals(1_700_000_000_000L, vm.uiState.value.lastPriceSyncTime)
         assertTrue(vm.uiState.value.stockIntradaySyncEnabled)
         assertTrue(vm.uiState.value.cryptoAutoSyncEnabled)
-    }
-
-    @Test
-    fun `refreshPriceSyncState 把每日提醒开关与时间写进 uiState`() = runBlocking {
-        // 构造期桩值是 false / 8:00，磁盘真值改成 true / 21:30
-        every { NotificationHelper.isReminderEnabled(any()) } returns true
-        every { NotificationHelper.getReminderTime(any()) } returns Pair(21, 30)
-
-        vm.refreshPriceSyncState()
-        waitUntil { vm.uiState.value.reminderEnabled }
-
-        assertTrue(vm.uiState.value.reminderEnabled)
-        assertEquals(21, vm.uiState.value.reminderHour)
-        assertEquals(30, vm.uiState.value.reminderMinute)
-        assertNull(vm.uiState.value.reminderError)
     }
 }

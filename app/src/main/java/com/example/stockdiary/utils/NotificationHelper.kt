@@ -4,41 +4,39 @@ import android.app.AlarmManager
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
-import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import android.net.Uri
 import android.os.Build
-import android.provider.Settings
 import androidx.core.app.NotificationCompat
 import com.example.stockdiary.MainActivity
 import com.example.stockdiary.utils.format
-import java.time.LocalDateTime
-import java.time.ZoneId
 import kotlin.math.abs
 import kotlinx.coroutines.CancellationException
 
 object NotificationHelper {
-    private const val ALARM_REQUEST_CODE = 1001
-    private const val PREFS_NAME = "notification_prefs"
-    private const val KEY_REMINDER_ENABLED = "reminder_enabled"
-    private const val KEY_REMINDER_HOUR = "reminder_hour"
-    private const val KEY_REMINDER_MINUTE = "reminder_minute"
-
     // 不同通知类型使用不同 ID，避免互相覆盖
     private const val NOTIFICATION_ID_GENERAL = 1
     private const val NOTIFICATION_ID_STOCK_UPDATE = 2
     private const val NOTIFICATION_ID_DIVIDEND = 3
     private const val NOTIFICATION_ID_PRICE_SYNC = 4
-    private const val NOTIFICATION_ID_REMINDER = 5
     private const val NOTIFICATION_ID_PRICE_SYNC_FAILURE = 6
 
     // 通知渠道：按业务类型拆分，方便用户分别控制
     private const val CHANNEL_ID_PRICE = "price_updates"
     private const val CHANNEL_ID_DIVIDEND = "dividend_updates"
     private const val CHANNEL_ID_SYNC = "sync_status"
-    private const val CHANNEL_ID_REMINDER = "daily_reminder"
     private const val CHANNEL_ID_GENERAL = "general"
+
+    // ---- 「每日查看提醒」已下线：以下标识只用于升级后清理残留，不要新增使用方 ----
+    private const val LEGACY_REMINDER_RECEIVER_CLASS =
+        "com.example.stockdiary.utils.NotificationHelper\$ReminderReceiver"
+    private const val LEGACY_REMINDER_ALARM_REQUEST_CODE = 1001
+    private const val LEGACY_REMINDER_NOTIFICATION_ID = 5
+    private const val LEGACY_CHANNEL_ID_REMINDER = "daily_reminder"
+    private const val LEGACY_PREFS_NAME = "notification_prefs"
+    private const val LEGACY_KEY_REMINDER_ENABLED = "reminder_enabled"
+    private const val LEGACY_KEY_REMINDER_HOUR = "reminder_hour"
+    private const val LEGACY_KEY_REMINDER_MINUTE = "reminder_minute"
 
     private var notificationManager: NotificationManager? = null
 
@@ -79,7 +77,6 @@ object NotificationHelper {
                 NotificationChannel(CHANNEL_ID_PRICE, "价格更新", NotificationManager.IMPORTANCE_DEFAULT),
                 NotificationChannel(CHANNEL_ID_DIVIDEND, "股息到账", NotificationManager.IMPORTANCE_DEFAULT),
                 NotificationChannel(CHANNEL_ID_SYNC, "同步状态", NotificationManager.IMPORTANCE_LOW),
-                NotificationChannel(CHANNEL_ID_REMINDER, "每日提醒", NotificationManager.IMPORTANCE_DEFAULT),
                 NotificationChannel(CHANNEL_ID_GENERAL, "一般通知", NotificationManager.IMPORTANCE_DEFAULT)
             )
             channels.forEach { channel ->
@@ -87,11 +84,63 @@ object NotificationHelper {
                     CHANNEL_ID_PRICE -> "股票价格变动通知"
                     CHANNEL_ID_DIVIDEND -> "股息到账通知"
                     CHANNEL_ID_SYNC -> "数据同步结果通知"
-                    CHANNEL_ID_REMINDER -> "每日资产查看提醒"
                     else -> "金库应用的其他通知"
                 }
             }
             it.createNotificationChannels(channels)
+        }
+    }
+
+    /**
+     * 清理已下线的「每日查看提醒」遗留状态（升级自愈）。
+     *
+     * 旧版本把闹钟注册在 [AlarmManager] 里，AlarmManager 的排期不会随应用升级自动消失：
+     * 若不主动取消，已升级用户的旧闹钟仍会按旧时间触发 `ReminderReceiver`。
+     * 但该 Receiver 已删除，触发后只会静默失败；更重要的是偏好键与渠道残留会让
+     * 用户看到已不存在的「每日提醒」渠道。
+     *
+     * 这里在每次启动时幂等执行：按旧组件名匹配 PendingIntent（[Intent.filterEquals]
+     * 不含 extras，组件 + requestCode 即可命中），取消后删除渠道、通知与旧偏好键。
+     * 旧组件类已不存在并不影响匹配——PendingIntent 记录保存在系统进程里。
+     */
+    fun cleanupRemovedDailyReminder(context: Context) {
+        try {
+            // 1. 取消旧的每日提醒闹钟
+            val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as? AlarmManager
+            if (alarmManager != null) {
+                // 只按旧身份查找、不存在时不创建（FLAG_NO_CREATE），避免清理动作自己排出一个新闹钟
+                val legacyIntent = Intent().setClassName(context, LEGACY_REMINDER_RECEIVER_CLASS)
+                val legacyPendingIntent = PendingIntent.getBroadcast(
+                    context,
+                    LEGACY_REMINDER_ALARM_REQUEST_CODE,
+                    legacyIntent,
+                    PendingIntent.FLAG_NO_CREATE or PendingIntent.FLAG_IMMUTABLE
+                )
+                if (legacyPendingIntent != null) {
+                    alarmManager.cancel(legacyPendingIntent)
+                    legacyPendingIntent.cancel()
+                    AppLogger.i("已取消遗留的每日提醒闹钟", "NotificationHelper")
+                }
+            }
+
+            // 2. 删除旧通知渠道，并撤掉可能仍留在通知栏的旧通知
+            getNotificationManager(context)?.let {
+                it.deleteNotificationChannel(LEGACY_CHANNEL_ID_REMINDER)
+                it.cancel(LEGACY_REMINDER_NOTIFICATION_ID)
+            }
+
+            // 3. 清除旧偏好键（该文件历史上只存这三个键，逐个删除以免误伤未来新增项）
+            context.getSharedPreferences(LEGACY_PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .remove(LEGACY_KEY_REMINDER_ENABLED)
+                .remove(LEGACY_KEY_REMINDER_HOUR)
+                .remove(LEGACY_KEY_REMINDER_MINUTE)
+                .apply()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // 清理失败不影响应用运行；下次启动会再试一次
+            AppLogger.e("清理每日提醒遗留状态失败: ${e.message}", e, "NotificationHelper")
         }
     }
 
@@ -205,255 +254,5 @@ object NotificationHelper {
             requestCode = NOTIFICATION_ID_PRICE_SYNC_FAILURE,
             channelId = CHANNEL_ID_SYNC
         )
-    }
-
-    /**
-     * 检查当前应用是否可以设置精确闹钟。
-     * Android 12+ 需要 SCHEDULE_EXACT_ALARM 权限且用户未在系统设置中关闭。
-     */
-    fun canScheduleExactAlarms(context: Context): Boolean {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as? AlarmManager
-            alarmManager?.canScheduleExactAlarms() ?: false
-        } else {
-            true
-        }
-    }
-
-    /**
-     * 引导用户前往系统设置开启精确闹钟权限。
-     * SCHEDULE_EXACT_ALARM 为特殊权限，无法通过普通请求弹窗获取。
-     */
-    fun openAlarmSettings(context: Context) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            try {
-                val intent = Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM).apply {
-                    data = Uri.parse("package:${context.packageName}")
-                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
-                }
-                context.startActivity(intent)
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                AppLogger.e("打开闹钟设置失败: ${e.message}", e, "NotificationHelper")
-            }
-        }
-    }
-
-    fun setDailyReminder(context: Context, hour: Int, minute: Int): Boolean {
-        return try {
-            // setAlarmClock 不需要 SCHEDULE_EXACT_ALARM 权限（Android 12+ 推荐方式），
-            // 因此不应以 canScheduleExactAlarms() 为前置阻塞——否则用户未授予精确闹钟权限时
-            // 每日提醒会静默失效。仅保留日志观察，仍照常排期。
-            if (!canScheduleExactAlarms(context)) {
-                AppLogger.w("未授予精确闹钟权限，但 setAlarmClock 无需该权限，仍尝试设置每日提醒", "NotificationHelper")
-            }
-            setReminderEnabled(context, true)
-            // 持久化提醒时间：开机广播重排闹钟时只能从 prefs 读（闹钟 Intent 随重启清空）
-            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                .edit()
-                .putInt(KEY_REMINDER_HOUR, hour)
-                .putInt(KEY_REMINDER_MINUTE, minute)
-                .apply()
-            val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as? AlarmManager
-            if (alarmManager != null) {
-                val intent = Intent(context, ReminderReceiver::class.java).apply {
-                    putExtra("reminder_hour", hour)
-                    putExtra("reminder_minute", minute)
-                }
-                val pendingIntent = PendingIntent.getBroadcast(
-                    context,
-                    ALARM_REQUEST_CODE,
-                    intent,
-                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-                )
-
-                val now = LocalDateTime.now()
-                var scheduledTime = now.withHour(hour).withMinute(minute).withSecond(0).withNano(0)
-
-                // 如果设置的时间已经过去，则设置为明天的同一时间
-                if (scheduledTime.isBefore(now)) {
-                    scheduledTime = scheduledTime.plusDays(1)
-                }
-
-                val triggerMillis = scheduledTime.atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
-
-                // 已通过 canScheduleExactAlarms() 检查 SCHEDULE_EXACT_ALARM 权限
-                @Suppress("MissingPermission")
-                val alarmInfo = AlarmManager.AlarmClockInfo(triggerMillis, pendingIntent)
-                @Suppress("MissingPermission")
-                alarmManager.setAlarmClock(alarmInfo, pendingIntent)
-                true
-            } else {
-                // 拿不到 AlarmManager 就等于没排上闹钟，不能回报成功——
-                // 否则设置页显示"已开启"，用户却永远收不到提醒。
-                AppLogger.w("无法获取 AlarmManager，每日提醒未生效", "NotificationHelper")
-                // 上面的 setReminderEnabled(true) 已写盘，这里必须回滚，
-                // 否则磁盘说"开"、实际没闹钟，重进设置页开关会自己亮回去
-                runCatching { setReminderEnabled(context, false) }
-                false
-            }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            AppLogger.e("设置每日提醒失败: ${e.message}", e, "NotificationHelper")
-            // 排闹钟中途异常：同样把磁盘开关回滚，保持"磁盘状态 = 真的有闹钟"
-            runCatching { setReminderEnabled(context, false) }
-            // 提醒设置失败，不影响应用运行
-            false
-        }
-    }
-
-    /**
-     * 只持久化提醒时间，不动启停状态。
-     *
-     * 用于开关关闭时改时间：此时不该排闹钟，但时间仍要落盘，
-     * 否则退出再进设置页会读回旧时间（内存新值、磁盘旧值）。
-     */
-    fun saveReminderTime(context: Context, hour: Int, minute: Int) {
-        try {
-            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                .edit()
-                .putInt(KEY_REMINDER_HOUR, hour)
-                .putInt(KEY_REMINDER_MINUTE, minute)
-                .apply()
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            AppLogger.e("保存提醒时间失败: ${e.message}", e, "NotificationHelper")
-        }
-    }
-
-    // 取消提醒
-    fun cancelReminder(context: Context) {
-        try {
-            setReminderEnabled(context, false)
-            val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as? AlarmManager
-            if (alarmManager != null) {
-                val intent = Intent(context, ReminderReceiver::class.java)
-                val pendingIntent = PendingIntent.getBroadcast(
-                    context,
-                    ALARM_REQUEST_CODE,
-                    intent,
-                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-                )
-                alarmManager.cancel(pendingIntent)
-            }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            AppLogger.e("取消提醒失败: ${e.message}", e, "NotificationHelper")
-            // 取消提醒失败，不影响应用运行
-        }
-    }
-
-    fun isReminderEnabled(context: Context): Boolean {
-        return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .getBoolean(KEY_REMINDER_ENABLED, false)
-    }
-
-    /** 读取已保存的提醒时间（供开机重排使用），默认 9:00 */
-    fun getReminderTime(context: Context): Pair<Int, Int> {
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        return prefs.getInt(KEY_REMINDER_HOUR, 9) to prefs.getInt(KEY_REMINDER_MINUTE, 0)
-    }
-    
-    private fun setReminderEnabled(context: Context, enabled: Boolean) {
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .edit()
-            .putBoolean(KEY_REMINDER_ENABLED, enabled)
-            .apply()
-    }
-
-    // 提醒接收器
-    class ReminderReceiver : BroadcastReceiver() {
-        override fun onReceive(context: Context, intent: Intent) {
-            // 读取保存的提醒时间（防御性收敛：异常 extra 值参与闹钟计算前先夹到合法范围）
-            val hour = intent.getIntExtra("reminder_hour", 9).coerceIn(0, 23)
-            val minute = intent.getIntExtra("reminder_minute", 0).coerceIn(0, 59)
-
-            // 先排明天的闹钟，再发今天这条通知。
-            //
-            // 顺序很重要：原先两段都在同一个 try 里、通知在前。Android 13 未授予
-            // POST_NOTIFICATIONS 时 notify() 会抛 SecurityException，
-            // 异常被外层 catch 吞掉 → 排下一天闹钟的那段被整段跳过 →
-            // 提醒只响一次就永久断链，而设置页开关依然显示"已开启"，用户完全查不出原因。
-            // 排期与通知互不依赖，必须各自独立兜底。
-            runCatching { scheduleNextDay(context, hour, minute) }
-                .onFailure { AppLogger.e("续期提醒失败: ${it.message}", it, "NotificationHelper") }
-
-            runCatching { showReminderNotification(context) }
-                .onFailure { AppLogger.e("显示提醒失败: ${it.message}", it, "NotificationHelper") }
-        }
-
-        private fun showReminderNotification(context: Context) {
-            // Android 13+ 未授权时 notify() 抛 SecurityException，这里先挡一道
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-                !NotificationPermissionHelper.isGranted(context)
-            ) {
-                AppLogger.w("未授予通知权限，跳过每日提醒", "NotificationHelper")
-                return
-            }
-
-            val localNotificationManager =
-                context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
-                    ?: return
-
-            // 创建通知通道（minSdk 26，无需版本判断）
-            val channel = NotificationChannel(
-                CHANNEL_ID_REMINDER,
-                "每日提醒",
-                NotificationManager.IMPORTANCE_DEFAULT
-            ).apply {
-                description = "每日资产查看提醒"
-            }
-            localNotificationManager.createNotificationChannel(channel)
-
-            val notificationIntent = Intent(context, MainActivity::class.java)
-            val pendingIntent = PendingIntent.getActivity(
-                context,
-                NOTIFICATION_ID_REMINDER,
-                notificationIntent,
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-            )
-
-            val notification = NotificationCompat.Builder(context, CHANNEL_ID_REMINDER)
-                .setContentTitle("金库提醒")
-                .setContentText("记得查看今日股票行情和资产状况")
-                .setSmallIcon(android.R.drawable.ic_dialog_info)
-                .setContentIntent(pendingIntent)
-                .setAutoCancel(true)
-                .build()
-
-            localNotificationManager.notify(NOTIFICATION_ID_REMINDER, notification)
-        }
-
-        /** 设置下一天的提醒（保留原始时间），Android 12+ 需先检查权限 */
-        private fun scheduleNextDay(context: Context, hour: Int, minute: Int) {
-            // setAlarmClock 无需 SCHEDULE_EXACT_ALARM 权限，不再以该权限为前置阻塞
-            val tomorrowScheduledTime = LocalDateTime.now().plusDays(1)
-                .withHour(hour).withMinute(minute).withSecond(0).withNano(0)
-            val tomorrowMillis = tomorrowScheduledTime
-                .atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
-            val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as? AlarmManager
-                ?: return
-
-            val nextIntent = Intent(context, ReminderReceiver::class.java).apply {
-                putExtra("reminder_hour", hour)
-                putExtra("reminder_minute", minute)
-            }
-            val reminderPendingIntent = PendingIntent.getBroadcast(
-                context,
-                ALARM_REQUEST_CODE,
-                nextIntent,
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-            )
-
-            // 已通过 canScheduleExactAlarms() 检查 SCHEDULE_EXACT_ALARM 权限
-            @Suppress("MissingPermission")
-            val alarmInfo = AlarmManager.AlarmClockInfo(tomorrowMillis, reminderPendingIntent)
-            @Suppress("MissingPermission")
-            alarmManager.setAlarmClock(alarmInfo, reminderPendingIntent)
-        }
     }
 }

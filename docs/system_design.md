@@ -314,7 +314,7 @@ fun Double.profitColor(): Color =
 
 ### 5.3 范围外（已核实无语义色直引）
 
-MainActivity、SettingsScreen、ThemeSelectionDialog、ApiSelectionDialog、AddAssetDialog、EditAssetDialog、AdjustPositionDialog、DialogComponents、SafeComponents、LoadingIndicator、ErrorMessage、ImportBrokerageComponents、ImportBrokerageDialog、SettingsItems、ClearDataDialog、DataSourceStatusDialog、DashboardConfigSheet、AboutDialog、LogViewerDialog、ReminderTimePickerDialog、DataVisualization、network/**、data/**、database/**、di/**。
+MainActivity、SettingsScreen、ThemeSelectionDialog、ApiSelectionDialog、AddAssetDialog、EditAssetDialog、AdjustPositionDialog、DialogComponents、SafeComponents、LoadingIndicator、ErrorMessage、ImportBrokerageComponents、ImportBrokerageDialog、SettingsItems、ClearDataDialog、DataSourceStatusDialog、DashboardConfigSheet、AboutDialog、LogViewerDialog、DataVisualization、network/**、data/**、database/**、di/**。
 
 ---
 

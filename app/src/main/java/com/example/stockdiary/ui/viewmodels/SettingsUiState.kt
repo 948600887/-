@@ -7,15 +7,14 @@ import com.example.stockdiary.utils.DataSourceHealth
  * 设置页状态机（原 [SettingsViewModel] 的嵌套 UiState，抽出为独立顶层类型）。
  *
  * 原为「SettingsUiState(10 字段) + 9 个附加流」混用：数据类列表/导出/删除/体检走 SettingsUiState，
- * 而价格同步与每日提醒的 8 个快照字段各自为政（开关 ×4、上次同步时间、提醒开关、
- * 时/分、提醒错误），写入点散落在 setReminderEnabled / setReminderTime /
- * setAutoPriceSyncEnabled / refreshPriceSyncState 等处；UI 同层 collect 十条流，
- * 一次 refreshPriceSyncState 要连发八次、整页重组八遍。
+ * 而价格同步的 4 个快照字段各自为政（开关 ×3、上次同步时间），写入点散落在
+ * setAutoPriceSyncEnabled / refreshPriceSyncState 等处；UI 同层 collect 多条流，
+ * 一次 refreshPriceSyncState 要连发多次、整页重组多遍。
  *
  * 合流判断：
- * - 8 个同步/提醒快照字段并入本 SettingsUiState——它们同属「持久化设置的内存镜像」，
+ * - 4 个同步快照字段并入本 SettingsUiState——它们同属「持久化设置的内存镜像」，
  *   由 [SettingsViewModel.refreshPriceSyncState] 整组刷新、由设置页同一个 remember 块整组消费，
- *   合起来后一次刷新只发射一次（原来八次）；
+ *   合起来后一次刷新只发射一次（原来多次）；
  * - [SettingsViewModel.dashboardPreferences] **刻意保留独立流**：它是跨页面共享的整块偏好
  *   （日历写月度生活费、仪表盘/持仓写分红缓存），与 Dashboard/Portfolio 两个 VM
  *   保持同样的「preferences 独立流」先例；且它的写入路径（config sheet 整块提交）
@@ -53,11 +52,5 @@ data class SettingsUiState(
     /** 盘中是否也自动刷股票/场内基金。关=仅盘后刷(默认) */
     val stockIntradaySyncEnabled: Boolean = false,
     /** 是否自动刷虚拟货币。关=只手动刷(默认) */
-    val cryptoAutoSyncEnabled: Boolean = false,
-    // ---- 每日提醒快照：与 NotificationHelper 内部状态一一对应 ----
-    val reminderEnabled: Boolean = false,
-    val reminderHour: Int = 8,
-    val reminderMinute: Int = 0,
-    /** 提醒是否真的排上了（无精确闹钟权限时会失败，需要给用户可见反馈） */
-    val reminderError: String? = null
+    val cryptoAutoSyncEnabled: Boolean = false
 )

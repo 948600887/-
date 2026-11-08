@@ -35,7 +35,7 @@ fun ClearDataDialog(
                 Spacer(modifier = Modifier.height(8.dp))
                 Text("• $assetCount 个资产记录")
                 Text("• 所有历史快照与交易/分红记录")
-                Text("• 全部设置（主题、自动同步、每日提醒、API Key 等）")
+                Text("• 全部设置（主题、自动同步、API Key 等）")
                 Text("• 已导出的 CSV 与本地日志文件")
                 Spacer(modifier = Modifier.height(8.dp))
                 Text("此操作不可撤销，请谨慎操作！", color = MaterialTheme.colorScheme.error)

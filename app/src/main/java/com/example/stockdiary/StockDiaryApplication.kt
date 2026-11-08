@@ -12,6 +12,7 @@ import com.example.stockdiary.utils.CrashRecoveryManager
 import com.example.stockdiary.utils.ExchangeRateManager
 import com.example.stockdiary.utils.GlobalExceptionHandler
 import com.example.stockdiary.utils.LogDiagnostics
+import com.example.stockdiary.utils.NotificationHelper
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -39,6 +40,10 @@ class StockDiaryApplication : Application() {
         // 会话标记：每次启动写一条带环境信息的日志——诊断报告里能看出第几次启动、
         // 装的什么版本、什么机型系统（从前报告头部只有生成时间和行数，看不出环境）
         AppLogger.i("会话开始 · ${LogDiagnostics.environmentInfo(this)}", "AppInit")
+        // 「每日查看提醒」已下线：旧版本注册的 AlarmManager 闹钟不会随应用升级消失，
+        // 启动时取消残留闹钟、删除旧通知渠道与旧偏好键，避免升级用户继续被旧闹钟打扰。
+        // 幂等操作，旧版残留清完后后续启动为空转。
+        NotificationHelper.cleanupRemovedDailyReminder(this)
         container = AppContainer(this)
         // 行情门面初始化：STOCK/场内基金分支委托 data/price/StockDataManager
         // （多源容错策略），必须在第一次取价之前注入，否则该分支返回失败

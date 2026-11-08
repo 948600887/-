@@ -24,7 +24,6 @@ import com.example.stockdiary.utils.AppLogger
 import com.example.stockdiary.utils.DataSourceHealth
 import com.example.stockdiary.utils.DataSourceHealthChecker
 import com.example.stockdiary.utils.LogDiagnostics
-import com.example.stockdiary.utils.NotificationHelper
 import com.example.stockdiary.utils.ExchangeRateManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -58,9 +57,6 @@ class SettingsViewModel(
             lastPriceSyncTime = priceSyncPreferencesManager.getLastSyncTimeMillis(),
             stockIntradaySyncEnabled = priceSyncPreferencesManager.isStockIntradaySyncEnabled(),
             cryptoAutoSyncEnabled = priceSyncPreferencesManager.isCryptoAutoSyncEnabled(),
-            reminderEnabled = NotificationHelper.isReminderEnabled(appContext),
-            reminderHour = NotificationHelper.getReminderTime(appContext).first,
-            reminderMinute = NotificationHelper.getReminderTime(appContext).second,
             usdRate = ExchangeRateManager.getRate("USD"),
             usdRateUpdatedAt = ExchangeRateManager.getLastRefreshTimeMillis()
         )
@@ -73,75 +69,6 @@ class SettingsViewModel(
      */
     val dashboardPreferences: StateFlow<DashboardPreferences> =
         dashboardPreferencesManager.preferences
-
-    fun setReminderEnabled(enabled: Boolean) {
-        viewModelScope.launch {
-            try {
-                _uiState.update { it.copy(reminderError = null) }
-                val ok = if (enabled) {
-                    NotificationHelper.setDailyReminder(appContext, _uiState.value.reminderHour, _uiState.value.reminderMinute)
-                } else {
-                    NotificationHelper.cancelReminder(appContext)
-                    true
-                }
-                if (ok) {
-                    _uiState.update { it.copy(reminderEnabled = NotificationHelper.isReminderEnabled(appContext)) }
-                } else {
-                    // 排闹钟失败时磁盘上的开关可能仍是 true（权限检查前就 return），
-                    // 必须显式取消一次，否则退出再进设置页开关会自己亮回去
-                    NotificationHelper.cancelReminder(appContext)
-                    _uiState.update {
-                        it.copy(
-                            reminderEnabled = false,
-                            reminderError = "无法设置提醒：系统未提供精确闹钟权限，请在系统闹钟设置中允许"
-                        )
-                    }
-                }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                AppLogger.e("设置每日提醒失败: ${e.message}", e, "SettingsVM")
-                NotificationHelper.cancelReminder(appContext)
-                _uiState.update { it.copy(reminderEnabled = false, reminderError = "设置提醒失败: ${e.message}") }
-            }
-        }
-    }
-
-    fun setReminderTime(hour: Int, minute: Int) {
-        viewModelScope.launch {
-            try {
-                _uiState.update {
-                    it.copy(reminderError = null, reminderHour = hour, reminderMinute = minute)
-                }
-                // 开关打开时改时间要立刻重排，否则要等到第二天闹钟触发后才用新时间
-                if (_uiState.value.reminderEnabled) {
-                    val ok = NotificationHelper.setDailyReminder(appContext, hour, minute)
-                    if (!ok) {
-                        // 同 setReminderEnabled：失败必须把磁盘开关也关掉，保持「有闹钟才显示开」
-                        NotificationHelper.cancelReminder(appContext)
-                        _uiState.update {
-                            it.copy(
-                                reminderEnabled = false,
-                                reminderError = "无法更新提醒时间：缺少精确闹钟权限"
-                            )
-                        }
-                    }
-                } else {
-                    // 开关关闭时不排闹钟，但时间仍要落盘：否则退出再进设置页会读回旧时间
-                    NotificationHelper.saveReminderTime(appContext, hour, minute)
-                }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                AppLogger.e("设置提醒时间失败: ${e.message}", e, "SettingsVM")
-                _uiState.update { it.copy(reminderError = "设置提醒时间失败: ${e.message}") }
-            }
-        }
-    }
-
-    fun clearReminderError() {
-        _uiState.update { it.copy(reminderError = null) }
-    }
 
     init {
         // Room Flow 在数据库异常时会向收集者抛错，不兜住会让 viewModelScope 崩溃
@@ -293,15 +220,6 @@ class SettingsViewModel(
         context.startActivity(Intent.createChooser(shareIntent, title))
     }
 
-    /** 跳转系统设置开启精确闹钟权限（SCHEDULE_EXACT_ALARM 无法用弹窗请求，只能手动开） */
-    fun openAlarmSettings() {
-        try {
-            NotificationHelper.openAlarmSettings(appContext)
-        } catch (e: Exception) {
-            AppLogger.e("打开闹钟设置失败: ${e.message}", e, "SettingsVM")
-        }
-    }
-
     fun deleteAllData() {
         viewModelScope.launch(Dispatchers.IO) {
             _uiState.update { state -> state.copy(isDeleting = true, deleteResult = null) }
@@ -309,13 +227,12 @@ class SettingsViewModel(
                 assetRepository.deleteAllData()
                 clearAllPreferences()
                 // 数据清了，后台任务和内存缓存不能留着：否则用户以为关干净了，
-                // 后台还在按旧偏好跑同步、到点还弹提醒。最后从磁盘回读真实状态。
+                // 后台还在按旧偏好跑同步。最后从磁盘回读真实状态。
                 PriceSyncScheduler.cancelDailySync(appContext)
-                // 每日快照任务同样要取消：原先只取消了价格同步与提醒，漏了快照。
+                // 每日快照任务同样要取消：原先只取消了价格同步，漏了快照。
                 // 于是清库后 SnapshotWorker 仍在每天 15:10 运行，对已清空的组合继续建快照
                 // （createSnapshot 不判空），历史净值曲线会多出一串净资产为 0 的点。
                 SnapshotScheduler.cancelDailySnapshot(appContext)
-                NotificationHelper.cancelReminder(appContext)
                 // 本地文件同样要清：导出的 CSV、诊断报告都在 cacheDir/exports，运行日志在
                 // externalFilesDir。不清的话「清除所有数据」之后，账目快照还躺在手机里。
                 runCatching { dataExporter.clearExportedFiles() }
@@ -345,7 +262,7 @@ class SettingsViewModel(
     /**
      * 清掉所有 SharedPreferences。
      *
-     * `deleteAllData` 原先只清数据库：显示偏好、提醒开关与时间、畅想 api 配置、
+     * `deleteAllData` 原先只清数据库：显示偏好、畅想 api 配置、
      * 「名称→代码」记忆、崩溃记录、通知去重记录全都留在磁盘上。用户以为"清干净了"，
      * 重新录入时旧记忆/旧设置还在，而且散落七处，出问题时根本想不到是残留造成的。
      *
@@ -563,14 +480,14 @@ class SettingsViewModel(
     }
 
     /**
-     * 从磁盘重读价格同步与每日提醒的快照状态。
+     * 从磁盘重读价格同步的快照状态。
      *
      * StateFlow 初值只在 ViewModel 创建时读一次：别处（后台任务、系统设置、
      * 清除数据）改过磁盘后，内存里的值就过期了。进入设置页或清除数据后调用，
      * 保证界面显示的是真实值。
      *
-     * 八个字段已在同一 SettingsUiState 里，整组刷新合并为**一次** update：原先八条流各写一次，
-     * UI 要连收八个状态、整页重组八遍（设置页的 remember 块同时 key 着其中七个值）。
+     * 四个字段已在同一 SettingsUiState 里，整组刷新合并为**一次** update：原先多条流各写一次，
+     * UI 要连收多个状态、整页重组多遍（设置页的 remember 块同时 key 着其中四个值）。
      */
     fun refreshPriceSyncState() {
         viewModelScope.launch(Dispatchers.IO) {
@@ -585,7 +502,7 @@ class SettingsViewModel(
     }
 
     /**
-     * 进入页面时一次性重读「磁盘镜像」：价格同步/提醒 + 汇率。
+     * 进入页面时一次性重读「磁盘镜像」：价格同步 + 汇率。
      *
      * 偏好本身不再需要重读：全应用唯一偏好流在任一页面写入时就同步更新了，
      * 本页订阅的 [dashboardPreferences] 自然已是最新值。
@@ -604,7 +521,6 @@ class SettingsViewModel(
 
     /** 同一次 IO 内读齐所有磁盘镜像，一次 update 写回（含汇率快照） */
     private suspend fun readSettingsSnapshot() {
-        val reminderTime = NotificationHelper.getReminderTime(appContext)
         val rate = ExchangeRateManager.getRate("USD")
         val rateAt = ExchangeRateManager.getLastRefreshTimeMillis()
         _uiState.update { state ->
@@ -613,9 +529,6 @@ class SettingsViewModel(
                 lastPriceSyncTime = priceSyncPreferencesManager.getLastSyncTimeMillis(),
                 stockIntradaySyncEnabled = priceSyncPreferencesManager.isStockIntradaySyncEnabled(),
                 cryptoAutoSyncEnabled = priceSyncPreferencesManager.isCryptoAutoSyncEnabled(),
-                reminderEnabled = NotificationHelper.isReminderEnabled(appContext),
-                reminderHour = reminderTime.first,
-                reminderMinute = reminderTime.second,
                 usdRate = rate,
                 usdRateUpdatedAt = rateAt
             )

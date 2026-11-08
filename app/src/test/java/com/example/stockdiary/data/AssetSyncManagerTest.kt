@@ -161,10 +161,12 @@ class AssetSyncManagerTest {
         coEvery { UnifiedPriceService.getPrice(any(), AssetType.FUND, any()) } returns
             Result.success(fundPrice("010001"))
         // 源统计按 roundId 隔离：编排器取的是「本轮快照」，任意轮号都返回这份桩数据
+        // 源级失败要出现在提示里：本轮该源**没有任何成功**（有成功就算逐只回补成功，
+        // 按口径不算异常，见 SyncResultHealthTest 的同名用例）
         every { stockDataManager.sourceStatsSnapshot(any()) } returns listOf(
             SourceStats(
                 source = ApiManager.API_SINA,
-                success = 1,
+                success = 0,
                 sourceLevelFailure = 2,
                 symbolLevelFailure = 3,
                 durationMs = 120,

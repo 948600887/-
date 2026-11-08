@@ -86,12 +86,20 @@ data class SyncResult(
             if (skippedByReason.isEmpty()) return ""
             val gated = skippedByReason["币安熔断"] ?: 0
             val stale = skippedByReason["缓存过期"] ?: 0
+            // 时间预算截断 / 看门狗取消级联：这两类既不是「无需更新」，也不是源故障，
+            // 单独说清「没轮到它、可稍后重试」，不要混进退市/停牌那一句。
+            val truncated = (skippedByReason["超时截断"] ?: 0) +
+                (skippedByReason["取消级联"] ?: 0)
             val others = skippedByReason
-                .filterKeys { it != "币安熔断" && it != "缓存过期" }
+                .filterKeys {
+                    it != "币安熔断" && it != "缓存过期" &&
+                        it != "超时截断" && it != "取消级联"
+                }
                 .values.sum()
             return buildString {
                 if (gated > 0) append("；$gated 个加密货币行情源不可达，本次未更新")
                 if (stale > 0) append("；$stale 个仅有过期的旧价，本次未更新（价格保持上次的值）")
+                if (truncated > 0) append("；$truncated 个因本轮时间预算未更新（可稍后重试）")
                 if (others > 0) append("；$others 个无需更新（退市/停牌等）")
             }
         }
@@ -108,8 +116,20 @@ data class SyncResult(
      */
     val sourceHealthHint: String
         get() {
-            val degraded = sourceStats.filter {
-                it.sourceLevelFailure > 0 || !it.degradedReason.isNullOrBlank()
+            val degraded = sourceStats.filter { stat ->
+                // 两种「不是故障」的事实必须排除，否则提示会天天喊狼来了：
+                // ① 逐只回补成功：批量/整片失败后靠逐只兜底把价格补齐了（success > 0），
+                //    源本轮实际可用，不该报「异常」；
+                // ② 60s 短退避跳过：只有跳过、没有源级失败，说明源在主动冷却而不是坏了。
+                val recoveredByFallback = stat.success > 0
+                val backoffSkipOnly = !recoveredByFallback &&
+                    stat.sourceLevelFailure == 0 &&
+                    stat.skipped > 0
+                val unrecoveredFailure = stat.sourceLevelFailure > 0 && !recoveredByFallback
+                val unrecoveredDegrade = !stat.degradedReason.isNullOrBlank() &&
+                    !recoveredByFallback &&
+                    !backoffSkipOnly
+                unrecoveredFailure || unrecoveredDegrade
             }
             if (degraded.isEmpty()) return ""
             return buildString {

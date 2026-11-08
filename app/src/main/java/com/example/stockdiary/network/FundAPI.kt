@@ -1,7 +1,6 @@
 package com.example.stockdiary.network
 
 import com.example.stockdiary.common.Result
-import com.example.stockdiary.database.FundNavCache
 import com.example.stockdiary.data.price.BoundedTtlCache
 import com.example.stockdiary.data.price.RoundSourceFailureScope
 import com.example.stockdiary.data.price.SourceStats
@@ -235,7 +234,7 @@ object FundAPI {
      * 端口未注入、或读库抛异常，一律返回 null —— 持久化只是**加速**手段，
      * 读不到就回到内存缓存 + 网络，不能让它成为新的失败点。
      */
-    internal suspend fun readPersistentNav(code: String): FundNavCache? {
+    internal suspend fun readPersistentNav(code: String): FundNavSnapshot? {
         val store = navCacheStore ?: return null
         return try {
             store.get(code)
@@ -466,14 +465,14 @@ object FundAPI {
      * navDate 为空则无从判断新旧，nav 非正 / NaN 会把持仓市值算没 —— 三者
      * 都判定为不可用，宁可重新下载。
      */
-    private fun isUsableNavRow(row: FundNavCache): Boolean {
+    private fun isUsableNavRow(row: FundNavSnapshot): Boolean {
         return row.name.isNotBlank() &&
             row.navDate.isNotBlank() &&
             row.nav.isFinite() &&
             row.nav > 0.0
     }
 
-    private fun FundNavCache.toFundInfo(): FundInfo = FundInfo(
+    private fun FundNavSnapshot.toFundInfo(): FundInfo = FundInfo(
         name = name,
         code = code,
         price = nav,
@@ -497,7 +496,7 @@ object FundAPI {
      *
      * @param previous 本次流程里已经读过的旧行（可能为空），用来省一次查询
      */
-    private suspend fun persistNav(code: String, info: FundInfo, previous: FundNavCache?) {
+    private suspend fun persistNav(code: String, info: FundInfo, previous: FundNavSnapshot?) {
         val store = navCacheStore ?: return
         val navDate = info.date?.trim().orEmpty()
         if (navDate.isEmpty()) {
@@ -515,7 +514,7 @@ object FundAPI {
             )
             return
         }
-        val row = FundNavCache(
+        val row = FundNavSnapshot(
             code = code,
             name = info.name,
             nav = info.price,
@@ -585,7 +584,7 @@ object FundAPI {
                     }
                     lightweightStats.recordSourceFailure(
                         roundId,
-                        "网络异常：${e.message?.take(40) ?: e.javaClass.simpleName}"
+                        FailureLogFormat.accountingReason(e)
                     )
                     AppLogger.w(
                         FailureLogFormat.failureLine(
@@ -640,7 +639,7 @@ object FundAPI {
             }
             legacyStats.recordSourceFailure(
                 roundId,
-                "网络异常：${e.message?.take(40) ?: e.javaClass.simpleName}"
+                FailureLogFormat.accountingReason(e)
             )
             AppLogger.w(
                 FailureLogFormat.failureLine(

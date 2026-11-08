@@ -54,6 +54,24 @@ class AssetRepository private constructor(
      */
     private fun Asset.sanitizeForWrite(): Asset {
         var a = this
+        // 存储边界统一代码形态：insert / update / import 全部经过这里，
+        // 新写入一律落成 [StockCodeManager.normalizeSymbolForType] 的结果。
+        // 存量不回填、不做迁移：旧形态仍靠既有 repair 任务处理，读侧（如日历聚合）
+        // 自己按归一键分组兜住。
+        a.symbol?.let { raw ->
+            val trimmed = raw.trim()
+            // 加密行里 `#loan` / `#collateral` 是库内**稳定唯一键**（重复导入必须命中同一行）。
+            // normalizeSymbolForType 对 CRYPTO 做字母数字过滤，会把 `#` 和后缀一起剥掉，
+            // 于是每次导入都插一条新的负债行、净值随导入次数线性崩坏。带后缀的一律原样保留。
+            val normalized = when {
+                a.type == AssetType.STOCK || a.type == AssetType.FUND ->
+                    StockCodeManager.normalizeSymbolForType(a.type, trimmed)
+                a.type == AssetType.CRYPTO && '#' !in trimmed ->
+                    StockCodeManager.normalizeSymbolForType(a.type, trimmed)
+                else -> trimmed
+            }
+            a = a.copy(symbol = normalized.takeIf { it.isNotBlank() })
+        }
         if (a.name.isBlank()) a = a.copy(name = a.symbol ?: "未命名资产")
         if (a.purchasePrice < 0) a = a.copy(purchasePrice = 0.0)
         if (a.balance < 0 && a.type != AssetType.CRYPTO) a = a.copy(balance = 0.0)
@@ -164,7 +182,8 @@ class AssetRepository private constructor(
         StockDatabase.getInstance(context).withTransaction(block)
     
     suspend fun updateAsset(asset: Asset) {
-        assetDao.updateAsset(asset)
+        // 与 insert/import 同一边界：更新也走归一，避免编辑后写回旧形态
+        assetDao.updateAsset(asset.sanitizeForWrite())
         refreshTodaySnapshotAfterAssetChange()
     }
     

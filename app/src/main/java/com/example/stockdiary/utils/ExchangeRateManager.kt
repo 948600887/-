@@ -87,6 +87,16 @@ object ExchangeRateManager {
     private var lastRefreshTimeMs: Long = 0L
 
     /**
+     * 汇率版本号：汇率表或时间戳每次变化就 +1。
+     *
+     * 供 Compose `remember(...)` 做 key——否则汇率刷新后面板不重组，
+     * 缓存住的外币折算结果会一直显示旧值。只增不减，进程内单调。
+     */
+    @Volatile
+    var rateRevision: Int = 0
+        private set
+
+    /**
      * 已经告警过的未知币种集合：每个未知币种只警告一次，避免 Compose 重组合期
      * 反复调 [getRate] 把日志刷爆。同进程内去重，不落盘——重启后重新告警即可。
      */
@@ -130,6 +140,7 @@ object ExchangeRateManager {
         if (accepted.isEmpty()) return
         liveRates = defaultRates + accepted
         lastRefreshTimeMs = saved.timestampMs
+        rateRevision++
     }
 
     /**
@@ -142,6 +153,7 @@ object ExchangeRateManager {
         liveRates = defaultRates
         lastRefreshTimeMs = 0L
         warnedUnknownCurrencies.clear()
+        rateRevision++
     }
 
     fun getRate(currency: String): Double {
@@ -228,6 +240,7 @@ object ExchangeRateManager {
         // 只覆盖响应里有的币种，其余保留现值（静态默认或上次的 live 值）
         liveRates = liveRates + accepted
         lastRefreshTimeMs = now
+        rateRevision++
         rateStore.save(liveRates, now)
         AppLogger.i(
             "汇率已刷新: ${accepted.entries.joinToString { "${it.key}=${it.value}" }}",

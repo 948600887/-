@@ -642,14 +642,14 @@ object UnifiedPriceService {
             return@withContext Result.success(resultMap)
         }
 
-        // 整轮只记一次成败：地区封锁优先于瞬断（语义更重）。
-        // ⚠️ 只有**真的取到行情**（sawQuotes）才复位计数：全片 5xx / 429 / 解析为空时
-        // 一律不喂熔断器，但也不能当成功去清零——否则一次机房故障就把累计的瞬断计数洗白。
+        // 整轮只记一次成败：只要有任意一片真的取到行情就记成功——部分分片瞬时失败不代表
+        // 主机不可用，若按最坏分片记失败会把累计瞬断计数越攒越高、误触熔断。
+        // 只有**全片失败**时才看失败类型：地区封锁优先于瞬断（语义更重）。
         val now = System.currentTimeMillis()
         when {
+            sawQuotes -> BinanceHostGate.onSuccess()
             sawRegionBlocked -> BinanceHostGate.onNetworkFailure(now, FailureType.REGION_BLOCKED)
             sawTransient -> BinanceHostGate.onNetworkFailure(now, FailureType.TRANSIENT)
-            sawQuotes -> BinanceHostGate.onSuccess()
             else -> Unit
         }
 

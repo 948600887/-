@@ -85,10 +85,11 @@ class CalendarMonthTest {
 
         assertEquals(1, map.size)
         // 日历金额是两账户之和，明细必须按合计持仓折算，否则会比格子少一个账户
-        assertEquals(1500.0, map.getValue("600900").balance, 1e-9)
+        // 读侧按归一键分组（600900 → sh600900），两种旧写法会合并到同一格
+        assertEquals(1500.0, map.getValue("sh600900").balance, 1e-9)
         // 名称/类型等属性取第一条，不被合并改写
-        assertEquals("600900", map.getValue("600900").name)
-        assertEquals(AssetType.STOCK, map.getValue("600900").type)
+        assertEquals("600900", map.getValue("sh600900").name)
+        assertEquals(AssetType.STOCK, map.getValue("sh600900").type)
     }
 
     @Test
@@ -103,7 +104,7 @@ class CalendarMonthTest {
         val map = aggregateAssetsBySymbol(listOf(a, b, deposit))
 
         assertEquals(2, map.size)
-        assertEquals(1000.0, map.getValue("600900").balance, 1e-9)
-        assertEquals(300.0, map.getValue("600519").balance, 1e-9)
+        assertEquals(1000.0, map.getValue("sh600900").balance, 1e-9)
+        assertEquals(300.0, map.getValue("sh600519").balance, 1e-9)
     }
 }

@@ -172,6 +172,22 @@ private sealed interface PortfolioRow {
     }
 }
 
+/**
+ * 一级分组在渲染前的统一形态：市场组与负债组共用。
+ *
+ * 负债从前是「永远追加在最后」的另一段逻辑，导致按金额排序时它固定垫底。
+ * 收成同一形态后才能把负债也丢进同一套排序里。
+ */
+private data class HeaderGroup(
+    val market: HoldingsMarket,
+    val assets: List<Asset>,
+    /** 组头显示的金额：市场组 = 组内市值和；负债组 = 绝对值合计（取正显示） */
+    val headerValue: Double,
+    val expandKey: String,
+    /** 负债组借用 OTHER 枚举，标题需覆盖成「负债」；市场组为 null */
+    val displayLabel: String?
+)
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PortfolioScreen(
@@ -291,30 +307,67 @@ fun PortfolioScreen(
      * 账户名是用户填的，两次导入填同一个名字就会混在一起。
      * 展开/收起只影响要不要把资产行放进去，各级头始终在。
      */
-    val rows = remember(marketGroups, liabilities, expandedAccounts) {
+    val rows = remember(marketGroups, liabilities, expandedAccounts, preferences.sortOrder) {
         buildList {
-            marketGroups.forEach { group ->
-                val market = group.market
+            // 负债组与市场组一起进同一套组间排序：金额一律按**绝对值**比较
+            // （币安借币以负余额存储、负债类型存正数，只有绝对值才和资产组同尺度）。
+            // 按类型/名称排序时保持既有展示顺序，负债仍排最后。
+            val headerGroups = buildList {
+                marketGroups.forEach { group ->
+                    add(
+                        HeaderGroup(
+                            market = group.market,
+                            assets = group.assets,
+                            headerValue = group.totalValue,
+                            expandKey = "market:${group.market.name}",
+                            displayLabel = null
+                        )
+                    )
+                }
+                if (liabilities.isNotEmpty()) {
+                    add(
+                        HeaderGroup(
+                            market = HoldingsMarket.OTHER,
+                            assets = liabilities,
+                            // 负债金额取正显示：借币是负数，组头不能显示成负资产
+                            headerValue = liabilities.sumDebtValueCny(),
+                            // expandKey 必须显式给 LIABILITY_GROUP_KEY，否则会与「其他」市场撞车
+                            expandKey = LIABILITY_GROUP_KEY,
+                            displayLabel = "负债"
+                        )
+                    )
+                }
+            }
+            val orderedGroups = when (preferences.sortOrder) {
+                SortOrder.BY_VALUE_DESC -> headerGroups.sortedByDescending { kotlin.math.abs(it.headerValue) }
+                SortOrder.BY_VALUE_ASC -> headerGroups.sortedBy { kotlin.math.abs(it.headerValue) }
+                SortOrder.BY_TYPE, SortOrder.BY_NAME -> headerGroups
+            }
 
+            orderedGroups.forEach { group ->
                 add(
                     PortfolioRow.MarketHeader(
-                        market = market,
+                        market = group.market,
                         assetCount = group.assets.size,
-                        totalValue = group.totalValue
+                        totalValue = group.headerValue,
+                        expandKey = group.expandKey,
+                        displayLabel = group.displayLabel
                     )
                 )
-                // 这个市场大区的展开 key
-                val marketKey = "market:${market.name}"
                 // 市场大区收起时，它下面的**账户头也要一起藏起来**。
                 // 之前只藏资产行、账户头无条件 add，于是收起「场内」后底下一排账户头
                 // 还挂在那儿 —— 看着就像点了没反应、一级标题根本折叠不了。
-                if (marketKey in expandedAccounts) {
+                if (group.expandKey !in expandedAccounts) return@forEach
+                if (group.expandKey == LIABILITY_GROUP_KEY) {
+                    // 负债单独成组：混进账户小计里会让「这个账户有多少钱」变得不可读。
+                    group.assets.forEach { add(PortfolioRow.AssetRow(it, LIABILITY_GROUP_KEY)) }
+                } else {
                     group.assets.groupBy { it.account }.forEach { (account, list) ->
                         val header = PortfolioRow.AccountHeader(
                             account = account,
                             assetCount = list.size,
                             totalValue = list.sumOf { it.totalValueCny },
-                            market = market
+                            market = group.market
                         )
                         add(header)
                         // 账户 key 必须带市场：否则场内/场外的同名账户共用一个展开态，
@@ -323,23 +376,6 @@ fun PortfolioScreen(
                             list.forEach { add(PortfolioRow.AssetRow(it, account)) }
                         }
                     }
-                }
-            }
-
-            // 负债单独成组：混进账户小计里会让「这个账户有多少钱」变得不可读。
-            // expandKey 必须显式给 LIABILITY_GROUP_KEY，否则会与「其他」市场撞车
-            if (liabilities.isNotEmpty()) {
-                add(
-                    PortfolioRow.MarketHeader(
-                        market = HoldingsMarket.OTHER,
-                        assetCount = liabilities.size,
-                        totalValue = liabilities.sumDebtValueCny(),
-                        expandKey = LIABILITY_GROUP_KEY,
-                        displayLabel = "负债"
-                    )
-                )
-                if (LIABILITY_GROUP_KEY in expandedAccounts) {
-                    liabilities.forEach { add(PortfolioRow.AssetRow(it, LIABILITY_GROUP_KEY)) }
                 }
             }
         }

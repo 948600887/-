@@ -53,7 +53,9 @@ fun DividendDayDetail(
     // 界面上显示「—」比显示一个错的数诚实
     // remember：与上面的 dayDividendDetails 一样，选中日期后的其它重组（例如上方金额/净资产
     // 刷新）不应重跑 map + 汇率换算；只有「当日明细」或持仓表变化时才重算。
-    val details = remember(dayDividendDetails, assetMap) {
+    // 汇率版本必须进 key：外币分红折算的是汇率，汇率刷新后若只靠 date/assetMap 变化，
+    // 这里会一直返回旧金额。
+    val details = remember(dayDividendDetails, assetMap, ExchangeRateManager.rateRevision) {
         dayDividendDetails.map { (sym, record) ->
             val asset = assetMap[sym]
             // 折算成人民币：外币基金（USD/HKD）的每份金额按标的币种换算，

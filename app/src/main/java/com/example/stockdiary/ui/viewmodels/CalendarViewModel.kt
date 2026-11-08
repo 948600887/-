@@ -19,6 +19,7 @@ import com.example.stockdiary.database.perTenSharesToAmount
 import com.example.stockdiary.di.AppContainer
 import com.example.stockdiary.utils.AppLogger
 import com.example.stockdiary.utils.ExchangeRateManager
+import com.example.stockdiary.utils.StockCodeManager
 import com.example.stockdiary.utils.totalValueCny
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -603,7 +604,9 @@ class CalendarViewModel(
                 dividendRepository.prefetchDividends(
                     symbols = needFetch,
                     forceRefresh = forceRefresh,
-                    timeBudgetMs = SyncBudget.MANUAL_SYNC_TIME_LIMIT_MS
+                    // 日历预取只能吃自己的独立子预算（总预算的 2/5，封顶 30s），
+                    // 不能拿整轮 70s——否则分红阶段会把价格同步的预算一起吃光。
+                    timeBudgetMs = SyncBudget.prefetchPhaseBudget(SyncBudget.MANUAL_SYNC_TIME_LIMIT_MS)
                 )
             }
         }
@@ -866,9 +869,15 @@ internal fun buildAssetCalendarMonth(
  * 名称/币种取第一条（同一代码这两个属性一致）。
  */
 internal fun aggregateAssetsBySymbol(assets: List<Asset>): Map<String, Asset> =
-    assets.mapNotNull { asset -> asset.symbol?.let { it to asset } }
+    assets.mapNotNull { asset ->
+        // 读侧聚合按**归一键**分组：库里的存量符号可能还有 fund_/纯数字、大小写等旧形态，
+        // 直接按原始 symbol 分组会把同一只基金算成两笔、日历金额翻倍。
+        asset.symbol?.let { StockCodeManager.normalizeSymbolForType(asset.type, it) to asset }
+    }
         .groupBy({ it.first }, { it.second })
-        .mapValues { (_, group) ->
+        .mapValues { (key, group) ->
             val first = group.first()
-            if (group.size == 1) first else first.copy(balance = group.sumOf { it.balance })
+            // 合并后的资产也统一带归一键：下游按 asset.symbol 去查分红缓存/聚合金额，
+            // 单账户未合并时若保留旧写法（600900），就会与归一键（sh600900）对不上而查空。
+            first.copy(symbol = key, balance = group.sumOf { it.balance })
         }

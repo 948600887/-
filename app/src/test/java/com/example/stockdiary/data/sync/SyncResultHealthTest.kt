@@ -59,10 +59,10 @@ class SyncResultHealthTest {
     @Test
     fun `源级失败带上源名次数与原因`() {
         val result = SyncResult(
-            successCount = 20,
+            successCount = 0,
             failedCount = 3,
             sourceStats = listOf(
-                stat("新浪", success = 20, sourceFailure = 3, durationMs = 1200, reason = "连接超时"),
+                stat("新浪", success = 0, sourceFailure = 3, durationMs = 1200, reason = "连接超时"),
                 stat("腾讯", success = 20, durationMs = 400)
             )
         )
@@ -73,6 +73,43 @@ class SyncResultHealthTest {
         assertTrue(hint.contains("连接超时"))
         // 正常源不点名，避免提示越滚越长
         assertTrue(!hint.contains("腾讯"))
+    }
+
+    @Test
+    fun `批量失败但逐只回补成功_不算源异常`() {
+        // 批量/整片失败后逐只兜底把价格补齐了：源本轮实际可用，
+        // 再报「源级失败」等于每轮都喊狼来了。
+        val result = SyncResult(
+            successCount = 120,
+            failedCount = 0,
+            sourceStats = listOf(
+                stat("币安", success = 120, sourceFailure = 3, reason = "批量 500"),
+                stat("新浪", success = 30, sourceFailure = 2, reason = "批量 0 命中")
+            )
+        )
+
+        assertEquals("", result.sourceHealthHint)
+    }
+
+    @Test
+    fun `60s 退避跳过不算源异常`() {
+        // 只有跳过、没有源级失败：源在主动冷却而不是坏了。
+        val result = SyncResult(
+            successCount = 50,
+            failedCount = 0,
+            sourceStats = listOf(
+                SourceStats(
+                    source = "基金-轻量源",
+                    success = 0,
+                    sourceLevelFailure = 0,
+                    symbolLevelFailure = 0,
+                    skipped = 12,
+                    degradedReason = "主机退避中（60s 退避中），跳过本次请求"
+                )
+            )
+        )
+
+        assertEquals("", result.sourceHealthHint)
     }
 
     @Test
@@ -123,11 +160,12 @@ class SyncResultHealthTest {
     @Test
     fun `源级失败与降级原因可同时出现`() {
         val result = SyncResult(
-            successCount = 1,
+            successCount = 0,
             failedCount = 1,
             sourceStats = listOf(
                 stat(
                     "基金-轻量源",
+                    success = 0,
                     sourceFailure = 1,
                     reason = "HTTP 514 限流",
                     degradedReason = "连续失败已熔断，本轮直接走 legacy"

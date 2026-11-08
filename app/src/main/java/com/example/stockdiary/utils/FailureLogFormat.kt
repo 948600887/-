@@ -112,6 +112,27 @@ object FailureLogFormat {
         if (durationMs > 0) append(" | 耗时 ").append(durationMs).append("ms")
     }
 
+    /**
+     * 异常 → 记账原因（**各源唯一的「失败分类 → 记账」入口**，纯函数）。
+     *
+     * 只统一「写进源统计/逐标的日志的文案与归类」，**不动**各源自己的重试次数、
+     * 熔断档位、退避窗口——那些是各源策略，互不相同是合理的。
+     *
+     * 之前新浪/腾讯/基金各拼各的（`e.message`、「网络异常：…」、「请求失败」），
+     * 同一场 DNS 故障在不同源里落成三个不同的原因桶，轮次汇总与健康提示各说各话。
+     */
+    fun accountingReason(e: Throwable, maxLen: Int = 40): String {
+        val head = when (e) {
+            is java.net.UnknownHostException -> "主机不可达"
+            is java.net.SocketTimeoutException -> "网络超时"
+            is java.net.ConnectException -> "连接失败"
+            is java.io.IOException -> "网络异常"
+            else -> e.javaClass.simpleName
+        }
+        val detail = e.message?.trim()?.take(maxLen)?.takeIf { it.isNotEmpty() }
+        return if (detail != null) "$head：$detail" else head
+    }
+
     private fun StringBuilder.appendDistribution(distribution: Map<String, Int>) {
         if (distribution.isEmpty()) return
         append("（")

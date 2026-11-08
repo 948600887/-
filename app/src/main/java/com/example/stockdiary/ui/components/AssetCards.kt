@@ -364,7 +364,10 @@ fun StockAssetItem(
                         "¥" + ExchangeRateManager.toCny(currentPrice, asset.currency).formatTrim(CRYPTO_DECIMALS)
                     else
                         ExchangeRateManager.toCny(currentPrice, asset.currency).formatMoney(digits = pricePrecision)
-                StockCodeManager.isDelistedForSync(asset.symbol) -> "退市"
+                // 退市标记必须和同步链路的判断同口径：只有 STOCK 才可能走老三板兜底。
+                // 400xxx/420xxx 与天天基金场外代码段重叠——手动录入的 400030/420102
+                // 规范成 bj400030/bj420102 后仍是 FUND，这里若只看 symbol 会误标「退市」。
+                asset.type == AssetType.STOCK && StockCodeManager.isDelistedForSync(asset.symbol) -> "退市"
                 // 币安主机级熔断期间（连不上币安公开行情）要给一个
                 // 区别于「价格待更新」的提示：前者是网络/主机问题，后者可能是数据源缺数据。
                 // 注意 isUnavailable 是普通 volatile 读、不可观察；列表在每轮同步结束后会重组，
@@ -376,7 +379,11 @@ fun StockAssetItem(
                 else -> "价格待更新"
             }
             Column(modifier = Modifier.weight(1f), horizontalAlignment = Alignment.End) {
-                Text(asset.totalValueCny.formatMoney(), style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold, color = AppTheme.colors.onSurface)
+                // 负债行按「欠多少」取正数展示：借币以负余额存储，直接透出会变成
+                // 「-¥12,000」，组内/组间看起来像负资产，与「负债合计取正」的口径也不一致。
+                val displayValue =
+                    if (isLiability) kotlin.math.abs(asset.totalValueCny) else asset.totalValueCny
+                Text(displayValue.formatMoney(), style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold, color = AppTheme.colors.onSurface)
                 Text(
                     // 状态词（「价格待更新」「退市」「币安暂不可达」）保持原样，不再拼任何相对时间。
                     priceText,

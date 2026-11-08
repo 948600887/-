@@ -290,7 +290,8 @@ class CalendarViewModelTest {
         // 必须用本月内 <= today 的日期：生产只聚合"已到账"分红（date !isAfter(today)），钉 15 号在每月 1–14 号运行会被过滤成 0.0
         val recDate = vm.uiState.value.currentMonth.atDay(1)
         coEvery { divRepo.getDividendRecordsBatch(any()) } returns mapOf(
-            "600900" to listOf(
+            // 读侧按归一键分组后，mock 的返回 map 也要用归一键（600900 → sh600900）
+            "sh600900" to listOf(
                 DividendRecord(
                     exDividendDate = recDate.toString(),
                     dividendPerShare = "10.0",
@@ -310,7 +311,7 @@ class CalendarViewModelTest {
         assertEquals(1000.0, vm.uiState.value.calendarData[recDate] ?: 0.0, 0.001)
         assertTrue(vm.uiState.value.dividendDates.contains(recDate))
         assertEquals(1, vm.uiState.value.dividends.size)
-        assertEquals("600900", vm.uiState.value.dividends.first().first)
+        assertEquals("sh600900", vm.uiState.value.dividends.first().first)
         assertFalse(vm.uiState.value.isLoading)
     }
 
@@ -537,7 +538,7 @@ class CalendarViewModelTest {
         // 这里是测试构造时序差异）。recDate 按 YearMonth.now() 提前算好（等于 VM 构造时的 currentMonth）。
         val recDate = YearMonth.now().atDay(1)
         coEvery { divRepo.getDividendRecordsBatch(any()) } returns mapOf(
-            "600900" to listOf(
+            "sh600900" to listOf(
                 DividendRecord(
                     exDividendDate = recDate.toString(),
                     dividendPerShare = "10.0",
@@ -559,7 +560,7 @@ class CalendarViewModelTest {
         assertEquals(3000.0, vm.uiState.value.calendarData[recDate] ?: 0.0, 0.001)
         // 关键断言：同一 symbol 的 dividends 条目只能出现一次（修复前 = 2，详情卡金额翻倍）
         assertEquals(1, vm.uiState.value.dividends.size)
-        assertEquals("600900", vm.uiState.value.dividends.first().first)
+        assertEquals("sh600900", vm.uiState.value.dividends.first().first)
         assertEquals(1, vm.uiState.value.dividends.first().second.size)
 
         // 两 Tab 共用同一 dividends 来源，切回资产日历详情卡同样不能翻倍

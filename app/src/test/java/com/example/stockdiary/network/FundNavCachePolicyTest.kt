@@ -1,6 +1,5 @@
 package com.example.stockdiary.network
 
-import com.example.stockdiary.database.FundNavCache
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -114,7 +113,7 @@ class FundNavCachePolicyTest {
     fun `T1_进程被杀后重启的场景_库里是今日净值就该直接复用`() {
         // 这个 case 就是本次修复的主场景：早上第一次刷新把今日净值落库，
         // 进程随后被系统回收，再次打开刷新时应直接读库返回，一次网络都不打。
-        val row = FundNavCache(
+        val row = FundNavSnapshot(
             code = "000306",
             name = "天弘沪深300",
             nav = 1.2345,
@@ -346,7 +345,7 @@ class FundNavCachePolicyTest {
 
     @Test
     fun `注入端口后_FundAPI 通过端口读写_不再直接依赖 DAO`() = runBlocking {
-        val row = FundNavCache(
+        val row = FundNavSnapshot(
             code = "000306",
             name = "天弘中证银行ETF联接A",
             nav = 1.2345,
@@ -367,10 +366,10 @@ class FundNavCachePolicyTest {
     }
 
     /** 端口假实现：证明 FundAPI 只认接口，替换存储实现不需要碰网络层 */
-    private class FakeNavStore(private val row: FundNavCache?) : FundNavCacheStore {
+    private class FakeNavStore(private val row: FundNavSnapshot?) : FundNavCacheStore {
         var cleared = false
-        override suspend fun get(code: String): FundNavCache? = row
-        override suspend fun upsert(row: FundNavCache) = Unit
+        override suspend fun get(code: String): FundNavSnapshot? = row
+        override suspend fun upsert(row: FundNavSnapshot) = Unit
         override suspend fun clear() {
             cleared = true
         }

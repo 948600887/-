@@ -60,12 +60,23 @@ class FundDividendApiService {
          * 本轮是否撞过天天基金限流（514/429）。
          *
          * 与 [rateLimitedUntil]（进程级退避窗口，撞了就别再打）分开：
-         * 这里只是「**本轮**打过且被限」的一个信号，供 Repository 在每轮预取结尾读走、
-         * 再由 ViewModel 在刷新收尾时弹一个非阻塞 Snackbar
-         * 「今天部分分红可能因限流没抓全」。Repository 每轮开头清零、结尾非消费读走。
+         * 这里只是「打过且被限」的一个**只增信号**，供 Repository 比对轮次开始/结束时的值，
+         * 判断「这一轮」是否撞过，再由 ViewModel 在刷新收尾时弹一个非阻塞 Snackbar
+         * 「今天部分分红可能因限流没抓全」。
+         *
+         * 为什么不用 Boolean：资产页刷新与日历预取可能并发，两轮各把共享 flag 清零，
+         * 会把对方刚置位的信号抹掉（先结束那轮提示丢失）。改成长整型计数后，
+         * 每轮只做前后差值比较，互不清零。
          */
-        @Volatile
-        internal var otcRateLimitHit = false
+        private val otcRateLimitEpoch = java.util.concurrent.atomic.AtomicLong(0L)
+
+        /** 当前限流信号值（只增）；调用方在轮次开始/结束各取一次做差。 */
+        internal val otcRateLimitSignal: Long get() = otcRateLimitEpoch.get()
+
+        /** 记录一次限流（514/429）。 */
+        internal fun markOtcRateLimitHit() {
+            otcRateLimitEpoch.incrementAndGet()
+        }
 
         // ---- 天天基金 fhsp 整源熔断（通用失败：5xx / 超时 / 反爬空页 / 解析失败）----
         // 与上面两个「确定性单一原因」的短退避（rateLimitedUntil=514/429、hostUnreachableUntil=DNS）
@@ -311,7 +322,7 @@ class FundDividendApiService {
                     // 注意：514/429 由 rateLimitedUntil 单独处理，**不计入整源熔断**（见 fhspOnFailure）。
                     if (response.code == 514 || response.code == 429) {
                         rateLimitedUntil = System.currentTimeMillis() + RATE_LIMIT_BACKOFF_MS
-                        otcRateLimitHit = true
+                        markOtcRateLimitHit()
                         AppLogger.w("天天基金限流（${response.code}），本周期退避，不再用 Jsoup 兜底猛打", TAG)
                         return Result.failure(Exception("天天基金限流（${response.code}），本周期退避"))
                     }
@@ -363,7 +374,7 @@ class FundDividendApiService {
             // 514/429 由 rateLimitedUntil 单独处理，**不计入整源熔断**。
             if (e.statusCode == 514 || e.statusCode == 429) {
                 rateLimitedUntil = System.currentTimeMillis() + RATE_LIMIT_BACKOFF_MS
-                otcRateLimitHit = true
+                markOtcRateLimitHit()
                 AppLogger.w("天天基金限流（${e.statusCode}），本周期退避，不再用 Jsoup 兜底猛打", TAG)
                 return Result.failure(Exception("天天基金限流（${e.statusCode}），本周期退避"))
             }

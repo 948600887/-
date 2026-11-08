@@ -554,10 +554,11 @@ class StockDataManager(
                 recordSourceSkip(apiName, roundId, "批量已记账，逐标的回落不重复计数")
             } else {
                 breakerFor(apiName).onFailure(System.currentTimeMillis())
-                recordSourceFailure(apiName, roundId, failure.message ?: failure.javaClass.simpleName)
+                val failureReason = FailureLogFormat.accountingReason(failure)
+                recordSourceFailure(apiName, roundId, failureReason)
                 AppLogger.w(
                     FailureLogFormat.failureLine(
-                        roundId, symbol, apiName, failure.message,
+                        roundId, symbol, apiName, failureReason,
                         System.currentTimeMillis() - sourceStartedAt
                     ),
                     TAG
@@ -635,7 +636,7 @@ class StockDataManager(
             // 看起来像源在空转。
             recordSourceSuccess(ApiManager.API_SINA, lineageRoundId, sinaMap.size)
             val now = System.currentTimeMillis()
-            sinaMap.mapValues { (code, sina) ->
+            val mapped = sinaMap.mapValues { (code, sina) ->
                 val unified = sina.toUnifiedStockData()
                 cache.put(code, unified)
                 PriceCacheManager.cachePrice(code, sina, SourceIds.SINA)
@@ -654,6 +655,10 @@ class StockDataManager(
                 )
                 unified
             }
+            // 批量路径同样要淘汰：单只路径每次成功都 trim，回填整批却漏了，
+            // 持仓多时内存缓存会一直涨到下次单只请求才收缩。
+            trimCacheIfNeeded()
+            mapped
         }
     }
 

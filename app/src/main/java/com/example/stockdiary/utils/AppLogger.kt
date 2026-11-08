@@ -22,13 +22,24 @@ object AppLogger {
     private const val LOG_TAG = "GoldVault"
 
     /**
+     * 一条待落盘日志（**未格式化**）。
+     *
+     * 时间戳在写盘线程落笔时才取：从前在调用线程取 `LocalDateTime.now()`，
+     * 一次全量同步的日志在队列里排 2 秒甚至更久，落盘时间与调用时间差出几个批次，
+     * 逐条日志的先后次序会被时间戳说反。
+     */
+    private data class LogRecord(val level: String, val tag: String, val message: String) {
+        fun render(timestamp: String): String = "[$timestamp] [$level/$tag] $message"
+    }
+
+    /**
      * 内存队列。
      *
      * 用 [ArrayDeque] + [queueLock] 而不是 ConcurrentLinkedQueue：失败回队需要
      * 「插回队首 + 保持顺序」，无锁队列没有 addFirst，靠 clear 重建会与并发 offer 竞争丢日志。
      * 锁内只有几十次内存操作、没有 IO，开销可忽略。
      */
-    private val logQueue = ArrayDeque<String>()
+    private val logQueue = ArrayDeque<LogRecord>()
     private val queueLock = Any()
     private val isWriting = AtomicBoolean(false)
 
@@ -178,15 +189,15 @@ object AppLogger {
     
     private fun queueLog(level: String, tag: String, message: String) {
         try {
-            val timestamp = LocalDateTime.now().format(logTimestampFormatter)
-            val logLine = "[$timestamp] [$level/$tag] $message"
+            // 时间戳不在这里取：由写盘线程在真正写文件那一刻统一生成（见 [flushLogs]）
+            val record = LogRecord(level, tag, message)
 
             // 达到上限：丢弃最旧、保留最新（崩溃前后最新段最该保留），并立即落盘一次，
             // 把「爆发期持续丢最早日志」的窗口压到最小——否则要等 2 秒窗口。
             val reachedLimit = synchronized(queueLock) {
                 val full = logQueue.size >= MAX_QUEUE_SIZE
                 if (full) logQueue.removeFirst()
-                logQueue.addLast(logLine)
+                logQueue.addLast(record)
                 full
             }
 
@@ -253,7 +264,7 @@ object AppLogger {
 
         // 这两项必须在 try 之外声明：意外异常时要把「还没写下去的行」放回队列，
         // 否则一次非 IO 异常（如 OOM 之外的意外）就等于整批日志蒸发。
-        val logsToWrite = ArrayList<String>()
+        val logsToWrite = ArrayList<LogRecord>()
         var written = 0
         try {
             synchronized(queueLock) {
@@ -278,10 +289,12 @@ object AppLogger {
                 // 超过 8MB 先轮转（归档保留 4 份），再追加本批日志
                 prepareLogFile(logFile)
                 try {
+                    // 写盘线程统一取一次时间戳：同一批日志时间戳一致，且反映真实落盘时刻
+                    val timestamp = LocalDateTime.now().format(logTimestampFormatter)
                     FileWriter(logFile, true).use { fileWriter ->
                         BufferedWriter(fileWriter).use { writer ->
                             for (log in logsToWrite) {
-                                writer.write(log)
+                                writer.write(log.render(timestamp))
                                 writer.newLine()
                                 written++
                             }
@@ -316,7 +329,7 @@ object AppLogger {
      * 回队也受 [MAX_QUEUE_SIZE] 约束：超限时丢最旧的（即这批里最靠前的），
      * 与「保最新」策略一致，避免磁盘长期异常把内存撑爆。
      */
-    private fun requeue(logs: List<String>, written: Int) {
+    private fun requeue(logs: List<LogRecord>, written: Int) {
         val pending = logs.subList(written, logs.size)
         if (pending.isEmpty()) return
         synchronized(queueLock) {

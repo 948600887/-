@@ -13,8 +13,11 @@ import android.content.res.Configuration
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.data.price.ApiManager
+import com.example.stockdiary.data.price.LineageOrigin
+import com.example.stockdiary.data.price.PriceLineage
 import com.example.stockdiary.data.price.PriceLineageRecorder
 import com.example.stockdiary.data.price.RoundSourceFailureScope
+import com.example.stockdiary.data.price.SourceIds
 import com.example.stockdiary.data.price.SourceStats
 import com.example.stockdiary.data.price.StockDataManager
 import com.example.stockdiary.common.SyncLimits
@@ -40,6 +43,8 @@ import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
+import java.time.LocalDate
+import java.time.ZoneId
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicBoolean
@@ -100,12 +105,18 @@ object AssetSyncManager {
     private val manualSyncMutex = Mutex()
 
     /**
-     * 同步轮次序号（进程内自增）。
+     * 同步轮次序号（进程内自增，带进程前缀）。
      *
      * 一轮同步会在日志里留下上百行（逐标的、每源、每个 OkHttp 请求）。没有轮次 ID 时，
      * 几轮混在同一份日志里根本分不清哪行属于哪一轮，用户报「刚才刷新不对」也无从对起。
+     *
+     * 前缀 = 进程 pid × 4096：日志文件跨进程存活（8MB 轮转、多份归档），若每轮都从 1 起，
+     * 进程重启后的「轮次#1」和上一份归档里的「轮次#1」会撞在一起，按轮次 grep 就串了。
+     * 单测环境 pid 读不到时前缀为 0（退回纯自增，不影响断言）。
      */
-    private val syncRoundSeq = AtomicInteger(0)
+    private val syncRoundSeq = AtomicInteger(
+        runCatching { android.os.Process.myPid() shl 12 }.getOrDefault(0)
+    )
 
     /**
      * 最近一轮同步的汇总文本，供诊断报告头部直接引用。
@@ -502,6 +513,13 @@ object AssetSyncManager {
         // 并发子任务各自写入，收尾时一次性套用到 [AssetSyncFailureStore]，避免逐标的写磁盘。
         val succeededAssetIds = ConcurrentHashMap.newKeySet<Long>()
         val failedAssetIds = ConcurrentHashMap.newKeySet<Long>()
+        // 「走完同步流程」的资产：成功/失败/显式跳过都算。取消级联只统计
+        // 这个集合之外、又不在成功/失败集合里的标的——它们是被取消/没来得及开始的，
+        // 既不是真失败也不是源的问题，必须如实计进 skipped 原因。
+        val settledAssetIds = ConcurrentHashMap.newKeySet<Long>()
+        // 因预算/取消而根本没开始的标的：已单独计入「超时截断」，
+        // 收尾统计取消级联时必须排除，否则会重复计一次。
+        val budgetSkippedAssetIds = ConcurrentHashMap.newKeySet<Long>()
 
         val semaphore = Semaphore(MAX_CONCURRENT_SYNC)
         val dividendRepository = DividendRepository.getInstance(context)
@@ -664,6 +682,10 @@ object AssetSyncManager {
                                     TAG
                                 )
                             }
+                            // 没来得及开始的标的也是「跳过」，必须进轮次摘要，
+                            // 否则 total 与 成功/失败/跳过 三项之和对不上。
+                            budgetSkippedAssetIds.add(asset.id)
+                            countSkip("超时截断")
                             return@withPermit
                         }
                         val label = "${asset.name}（${asset.symbol ?: "无代码"}）".take(24)
@@ -695,6 +717,9 @@ object AssetSyncManager {
                         } finally {
                             inFlightAssets.remove(label)
                         }
+                        // 同步流程正常走完（含显式跳过）：之后才登记为 settled。
+                        // 被取消的标的走不到这一句，留给收尾统一计入「取消级联」。
+                        settledAssetIds.add(asset.id)
                         val completed = completedCount.incrementAndGet()
                         // 收尾那一次强制发出：否则标题栏会停在「103 / 106」这类中间态
                         notifyProgress(
@@ -745,6 +770,21 @@ object AssetSyncManager {
                             throw e
                         }
                         // 只是被看门狗取消的子任务：吞掉，继续收尾
+                    }
+                }
+                // 取消级联如实计入 skipped：被看门狗取消的在途标的既不成功也不失败，
+                // 不计的话轮次摘要会出现「总数 106，但成功+失败+跳过只有 50」的缺口。
+                // 只加统计，不改取消传播（外部取消仍原样上抛）。
+                if (truncated.get()) {
+                    val cancelledCascade = orderedAssets.count { asset ->
+                        asset.id !in settledAssetIds &&
+                            asset.id !in succeededAssetIds &&
+                            asset.id !in failedAssetIds &&
+                            asset.id !in budgetSkippedAssetIds
+                    }
+                    if (cancelledCascade > 0) {
+                        skipReasons.computeIfAbsent("取消级联") { AtomicInteger() }
+                            .addAndGet(cancelledCascade)
                     }
                 }
             } finally {
@@ -1046,20 +1086,54 @@ object AssetSyncManager {
                 }
 
                 val quote = EastmoneyDelistedQuoteApi.fetchLastClose(delistedSymbol)
-                delistedQuoteCache.record(delistedSymbol, quote)
                 if (quote != null) {
-                    withContext(NonCancellable) {
-                        priceWriter.write(PendingPriceWrite(delistedSymbol, quote.price))
+                    // 顺序很重要：先写价、成功后再落检查日。
+                    // 反过来的话，写价被打断/失败时检查日已经记下，当天不会再重试，
+                    // 这只退市股的价格就会一直停在旧值。
+                    val written = runCatching {
+                        withContext(NonCancellable) {
+                            priceWriter.write(PendingPriceWrite(delistedSymbol, quote.price))
+                        }
+                    }.isSuccess
+                    if (written) {
+                        delistedQuoteCache.record(delistedSymbol, quote)
+                        // 兜底价也要有血缘：asOf 用行情交易日（老三板按周成交，可能滞后一周），
+                        // 不能用抓取时刻冒充。
+                        val asOf = runCatching {
+                            LocalDate.parse(quote.tradeDate)
+                                .atTime(15, 0)
+                                .atZone(ZoneId.systemDefault())
+                                .toInstant()
+                                .toEpochMilli()
+                        }.getOrDefault(System.currentTimeMillis())
+                        PriceLineageRecorder.report(
+                            delistedSymbol,
+                            PriceLineage(
+                                code = delistedSymbol,
+                                sourceId = SourceIds.EASTMONEY_DELISTED,
+                                origin = LineageOrigin.IN_MEMORY,
+                                asOf = asOf,
+                                fetchedAt = System.currentTimeMillis(),
+                                roundId = roundId
+                            )
+                        )
+                        // 退市兜底也是**成功落到新价**：卡片上的「上次更新未成功」必须随之消失
+                        onSyncSucceeded(asset.id)
+                        // 交易日只进日志/缓存，界面按普通价格展示，不加「历史收盘」标注
+                        AppLogger.i(
+                            "退市标的按东财最后收盘更新: ${asset.name}（$delistedSymbol，" +
+                                "交易日 ${quote.tradeDate}，收盘 ${quote.price}）",
+                            TAG
+                        )
+                    } else {
+                        AppLogger.w(
+                            "退市兜底写价失败，保留原价、下一轮重试: ${asset.name}（$delistedSymbol）",
+                            TAG
+                        )
                     }
-                    // 退市兜底也是**成功落到新价**：卡片上的「上次更新未成功」必须随之消失
-                    onSyncSucceeded(asset.id)
-                    // 交易日只进日志/缓存，界面按普通价格展示，不加「历史收盘」标注
-                    AppLogger.i(
-                        "退市标的按东财最后收盘更新: ${asset.name}（$delistedSymbol，" +
-                            "交易日 ${quote.tradeDate}，收盘 ${quote.price}）",
-                        TAG
-                    )
                 } else {
+                    // 没拿到价也要落检查日：同一交易日不重复打东财
+                    delistedQuoteCache.record(delistedSymbol, null)
                     AppLogger.i("跳过退市标的: ${asset.name}（$delistedSymbol，东财无可用历史收盘）", TAG)
                 }
                 skipReason = "退市"; onSkip("退市")

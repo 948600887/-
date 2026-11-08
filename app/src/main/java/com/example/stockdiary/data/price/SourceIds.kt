@@ -31,6 +31,9 @@ object SourceIds {
     /** 仅用于内存/磁盘缓存命中且原始源不可考时，避免把缓存价错标成某个真实行情源 */
     const val MEMORY_CACHE = "memory_cache"
 
+    /** 退市股兜底：东财 K 线最后一根收盘（独立于正常股票取价源，不喂健康/熔断） */
+    const val EASTMONEY_DELISTED = "eastmoney_delisted"
+
     /** 稳定 ID → 中文展示名。未知 ID 原样返回，绝不抛异常。 */
     fun displayName(id: String): String = when (id) {
         SINA -> "新浪财经"
@@ -39,6 +42,7 @@ object SourceIds {
         EASTMONEY_FUND -> "东方财富"
         BINANCE -> "币安"
         MEMORY_CACHE -> "内存缓存"
+        EASTMONEY_DELISTED -> "东财历史收盘"
         else -> id
     }
 

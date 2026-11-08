@@ -28,11 +28,12 @@ import com.example.stockdiary.utils.formatMoney
 import com.example.stockdiary.utils.CRYPTO_DECIMALS
 import com.example.stockdiary.utils.formatCryptoQuantity
 import com.example.stockdiary.utils.formatTrim
-import com.example.stockdiary.utils.isPriceStale
-import com.example.stockdiary.utils.priceAgeStamp
 import com.example.stockdiary.utils.pricePrecisionFor
 import com.example.stockdiary.utils.quantityPrecisionFor
 import com.example.stockdiary.utils.totalValueCny
+
+/** 参与行情同步、因而可能带上「上次更新未成功」提示的资产类型。 */
+private val QUOTE_ASSET_TYPES = setOf(AssetType.STOCK, AssetType.FUND, AssetType.CRYPTO)
 
 @Composable
 fun PortfolioOverviewCard(
@@ -346,11 +347,13 @@ fun StockAssetItem(
                     }
                 }
             }
-            // 数据年龄：与资产详情页共用 utils/PriceAge 的同一判定与格式，杜绝两套口径。
-            // lastSyncTime == 0（从未成功同步）→ 空串，卡片保持原有的「价格待更新」；
-            // 超过 1 小时 → " · N小时前更新"；超过 24 小时 → 额外给可见警示。
-            val ageStamp = priceAgeStamp(asset.lastSyncTime)
-            val stale = currentPrice != null && isPriceStale(asset.lastSyncTime)
+            // 行情提示只看「上一次刷新该资产的结果」，不再显示「N小时前 / N天前更新」。
+            // lastSyncFailed 仅由同步编排器在**真失败**时置位（断网无可用缓存、服务端/解析错误等），
+            // 熔断、不可交易、停牌、退市跳过、缓存过期等「跳过」一律不算失败；成功落价即清除。
+            // 读 StateFlow 而不是读 Asset 字段：该状态是轻量持久层（见 AssetSyncFailureStore），
+            // 不占 Room 列、不需要迁移；收藏集变化会精确触发本卡片重组。
+            val lastSyncFailed = asset.id in
+                LocalAppContainer.current.assetSyncFailureStore.failedAssetIds.collectAsState().value
             val priceText = when {
                 isLiability -> "待偿还"
                 // 价格是原币口径（与 totalValue 同币种），而同行市值是折算后人民币。
@@ -375,17 +378,18 @@ fun StockAssetItem(
             Column(modifier = Modifier.weight(1f), horizontalAlignment = Alignment.End) {
                 Text(asset.totalValueCny.formatMoney(), style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold, color = AppTheme.colors.onSurface)
                 Text(
-                    // 年龄只跟在真实价格后面；「价格待更新」「退市」「币安暂不可达」等状态词保持原样。
-                    if (currentPrice != null) priceText + ageStamp else priceText,
+                    // 状态词（「价格待更新」「退市」「币安暂不可达」）保持原样，不再拼任何相对时间。
+                    priceText,
                     style = MaterialTheme.typography.bodySmall,
-                    // >24h 用主题 error 色（MaterialTheme.colorScheme 明暗主题各自适配），
-                    // 不硬编码深色/浅色。
-                    color = if (stale) MaterialTheme.colorScheme.error else AppTheme.colors.onSurfaceVariant,
+                    color = AppTheme.colors.onSurfaceVariant,
                     fontWeight = FontWeight.Medium
                 )
-                if (stale) {
+                // 只有「这次刷新确实失败」才出现；成功后自动消失。
+                // 与「价格旧」无关：价格三天没变但每次刷新都成功时，这里不会出现任何提示。
+                // 类型闸：存款/负债不参与行情同步；若资产被改成这些类型，旧失败标记不应再露出。
+                if (lastSyncFailed && asset.type in QUOTE_ASSET_TYPES) {
                     Text(
-                        "价格数据已超过 24 小时未更新",
+                        "上次更新未成功",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.error,
                         fontWeight = FontWeight.Medium

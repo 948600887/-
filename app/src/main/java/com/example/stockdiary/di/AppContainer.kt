@@ -17,6 +17,7 @@ import com.example.stockdiary.data.repository.TransactionRepository
 import com.example.stockdiary.data.importer.HoldingSnapshotService
 import com.example.stockdiary.data.importer.ImageTextRecognizer
 import com.example.stockdiary.data.importer.OcrStatementService
+import com.example.stockdiary.data.sync.AssetSyncFailureStore
 import com.example.stockdiary.data.sync.PriceSyncPreferencesManager
 import com.example.stockdiary.data.fund.FundNavCacheStoreImpl
 import com.example.stockdiary.data.price.DefaultPriceCacheMaintenance
@@ -58,6 +59,14 @@ class AppContainer(private val context: Context) {
     }
     val dashboardPreferencesManager: DashboardPreferencesManager by lazy { DashboardPreferencesManager.getInstance(context) }
     val priceSyncPreferencesManager: PriceSyncPreferencesManager by lazy { PriceSyncPreferencesManager.getInstance(context) }
+    /**
+     * 按资产的「上次行情刷新是否失败」。界面与同步编排器必须共用这一份单例：
+     * 卡片据此只在**真失败**时显示「上次更新未成功」，成功落价即清除。
+     * 纯展示状态、存 SharedPreferences，不占 Room 列（避免 DB 版本迁移）。
+     */
+    val assetSyncFailureStore: AssetSyncFailureStore by lazy {
+        AssetSyncFailureStore.getInstance(context)
+    }
     /** 派生缓存清理门面：设置页只认它，不直接调各数据源单例的清除方法 */
     val priceCacheMaintenance: PriceCacheMaintenance by lazy {
         DefaultPriceCacheMaintenance(applicationContext)

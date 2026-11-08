@@ -217,7 +217,8 @@ fun AssetDetailScreen(
                                         ExchangeRateManager.toCny(price, a.currency)
                                             .formatMoney(digits = pricePrecisionFor(a.type, a.symbol))) +
                                         syncStamp(a.lastSyncTime),
-                                    // 与首页/持仓卡片同一分级：>24h 用主题 error 色给可见警示
+                                    // 详情页保留「价格有多旧」的口径（>24h 用主题 error 色）；
+                                    // 首页/持仓卡片已改为只看「这次刷新是否失败」，两者语义不同
                                     valueColor = if (isPriceStale(a.lastSyncTime))
                                         MaterialTheme.colorScheme.error else AppTheme.colors.onSurface
                                 )
@@ -403,8 +404,8 @@ fun AssetDetailScreen(
  * 用户看到「¥12.34」时无从判断这个价是刚抓的还是三天前的——尤其页面已经给出
  * 「价格待更新 / 币安暂不可达」这类状态时，一个"多久之前"比状态词更有用。
  *
- * 判定/格式/阈值全部委托给 [com.example.stockdiary.utils.priceAgeStamp]，与首页、
- * 持仓卡片共用**同一套口径**（原来这里另写了一份私有 when，两页迟早漂移）：
+ * 判定/格式/阈值全部委托给 [com.example.stockdiary.utils.priceAgeStamp]，
+ * 这里只保留给**资产详情页**用（首页/持仓卡片已改为只看「这次刷新是否失败」）：
  * - `lastSyncTime == 0`（从未同步）→ 空串（toRelativeTime(0) 会算成"几十年前"）；
  * - 1 小时内 → 空串（足够新鲜，不占篇幅）；
  * - 超过 1 小时 → " · N小时前更新" / " · N天前更新"；

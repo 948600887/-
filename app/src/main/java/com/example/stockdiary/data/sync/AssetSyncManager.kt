@@ -498,6 +498,11 @@ object AssetSyncManager {
         val errorTypes = ConcurrentLinkedQueue<SyncErrorType>()
         val truncated = java.util.concurrent.atomic.AtomicBoolean(false)
 
+        // 本轮「卡片提示」口径的账本：只有真成功 / 真失败进集合，跳过与被截断的资产两边都不出现。
+        // 并发子任务各自写入，收尾时一次性套用到 [AssetSyncFailureStore]，避免逐标的写磁盘。
+        val succeededAssetIds = ConcurrentHashMap.newKeySet<Long>()
+        val failedAssetIds = ConcurrentHashMap.newKeySet<Long>()
+
         val semaphore = Semaphore(MAX_CONCURRENT_SYNC)
         val dividendRepository = DividendRepository.getInstance(context)
 
@@ -682,7 +687,9 @@ object AssetSyncManager {
                                     batchResult = batchPriceMap[asset.symbol] ?: cryptoPriceMap[asset.symbol],
                                     networkAvailable = networkAvailable,
                                     roundId = roundId,
-                                    onSkip = ::countSkip
+                                    onSkip = ::countSkip,
+                                    onSyncSucceeded = { id -> succeededAssetIds.add(id) },
+                                    onSyncFailed = { id -> failedAssetIds.add(id) }
                                 )
                             }
                         } finally {
@@ -758,6 +765,15 @@ object AssetSyncManager {
                         // 收尾这批无法归属到单个标的（不像逐标的写库能记进那个资产的失败计数），
                         // 所以只告警、不让整轮同步判失败——上面已成功的计数仍然有效。
                         AppLogger.e("收尾批量落价失败，本轮最后一批价格未写入: ${e.message}", e, TAG)
+                    }
+                    // 卡片提示的落盘也必须在 NonCancellable 里：取消时本轮已判定的
+                    // 成功 / 失败结果不能丢，否则提示会停在上一轮的旧状态。
+                    try {
+                        AssetSyncFailureStore.getInstance(context)
+                            .applyOutcomes(succeededAssetIds, failedAssetIds)
+                    } catch (e: Exception) {
+                        // 提示状态是纯展示信息，写失败绝不能让整轮同步判失败
+                        AppLogger.e("落盘上次同步失败标记出错: ${e.message}", e, TAG)
                     }
                 }
             }
@@ -977,7 +993,11 @@ object AssetSyncManager {
         /** 本轮轮次 ID，只用于日志归属（由 runSync 显式传入，无默认值） */
         roundId: Int,
         /** 跳过原因回调（退市/停牌/币安熔断…），供轮次末汇总分类计数 */
-        onSkip: (String) -> Unit = {}
+        onSkip: (String) -> Unit = {},
+        /** 本轮该资产**确实**成功落到新价（含退市股东财兜底成功） */
+        onSyncSucceeded: (Long) -> Unit = {},
+        /** 本轮该资产计入 `failedCount`（真失败，不含任何「跳过」） */
+        onSyncFailed: (Long) -> Unit = {}
     ) {
         val symbol = asset.symbol
         val startedAt = System.currentTimeMillis()
@@ -985,6 +1005,9 @@ object AssetSyncManager {
 
         var isSuccess = false
         var lastError: Throwable? = null
+        // 只有真正计进 failedCount 才置 true；被取消（我们主动放弃）的异常不置位，
+        // 避免把「退后台 / 看门狗截断」误标成「上次更新失败」。
+        var failureRecorded = false
 
         try {
             // 退市标的（400xxx/420xxx 老三板）新浪 / 腾讯都没有报价，但东财 K 线仍保留
@@ -1022,6 +1045,8 @@ object AssetSyncManager {
                     withContext(NonCancellable) {
                         priceWriter.write(PendingPriceWrite(delistedSymbol, quote.price))
                     }
+                    // 退市兜底也是**成功落到新价**：卡片上的「上次更新未成功」必须随之消失
+                    onSyncSucceeded(asset.id)
                     // 交易日只进日志/缓存，界面按普通价格展示，不加「历史收盘」标注
                     AppLogger.i(
                         "退市标的按东财最后收盘更新: ${asset.name}（$delistedSymbol，" +
@@ -1039,6 +1064,7 @@ object AssetSyncManager {
                 AssetType.FUND -> {
                     val fundCode = symbol?.removePrefix("fund_")
                     if (fundCode == null) {
+                        failureRecorded = true
                         failedCount.incrementAndGet()
                         errorTypes.offer(SyncErrorType.DATA)
                         return
@@ -1129,6 +1155,7 @@ object AssetSyncManager {
                 AssetType.STOCK -> {
                     val stockSymbol = symbol
                     if (stockSymbol == null) {
+                        failureRecorded = true
                         failedCount.incrementAndGet()
                         errorTypes.offer(SyncErrorType.DATA)
                         return
@@ -1160,6 +1187,7 @@ object AssetSyncManager {
                 AssetType.CRYPTO -> {
                     val cryptoSymbol = symbol
                     if (cryptoSymbol == null) {
+                        failureRecorded = true
                         failedCount.incrementAndGet()
                         errorTypes.offer(SyncErrorType.DATA)
                         return
@@ -1234,6 +1262,7 @@ object AssetSyncManager {
                 // （真机日志 22:29 那批：2854ms 成功记录后紧接「判失败且无堆栈」）。
                 // 已成功取得的价在上面的 isSuccess 分支已记成功，这里只跳过失败计数，避免误伤。
                 if (currentCoroutineContext().isActive) {
+                    failureRecorded = true
                     failedCount.incrementAndGet()
                     errorTypes.offer(SyncStrategy.classifyError(lastError))
                 } else {
@@ -1250,6 +1279,7 @@ object AssetSyncManager {
             // 分支之外漏进来的情形，这里同样不记账。
             if (currentCoroutineContext().isActive) {
                 AppLogger.w("同步资产 ${asset.name} 失败: ${e.message}", TAG)
+                failureRecorded = true
                 failedCount.incrementAndGet()
                 errorTypes.offer(SyncStrategy.classifyError(e))
             } else {
@@ -1265,6 +1295,11 @@ object AssetSyncManager {
                 isSuccess -> "成功"
                 skipReason != null -> "跳过($skipReason)"
                 else -> "失败"
+            }
+            // 卡片提示口径：成功 → 清除；真失败 → 置位；跳过 / 被截断 / 取消 → 两边都不动。
+            when {
+                isSuccess -> onSyncSucceeded(asset.id)
+                failureRecorded -> onSyncFailed(asset.id)
             }
             AppLogger.d(
                 "[轮次#$roundId] $outcome ${asset.name}（${symbol ?: "无代码"}）" +

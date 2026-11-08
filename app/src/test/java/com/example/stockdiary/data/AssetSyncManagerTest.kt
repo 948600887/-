@@ -4,6 +4,7 @@ import com.example.stockdiary.data.repository.AssetRepository
 import com.example.stockdiary.data.repository.DividendRepository
 import com.example.stockdiary.data.price.StockDataManager
 import com.example.stockdiary.data.sync.AssetSyncManager
+import com.example.stockdiary.data.sync.AssetSyncFailureStore
 import com.example.stockdiary.data.sync.SyncBudget
 import android.content.Context
 import com.example.stockdiary.database.Asset
@@ -38,6 +39,7 @@ import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.AfterClass
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -580,5 +582,112 @@ class AssetSyncManagerTest {
         // 注意：不要在本方法末尾调用 gate.complete(Unit) —— 它返回 Boolean，
         // 会让整个测试方法的推断返回类型变成 Boolean，JUnit4 直接判为非法测试类。
         // 挂在 gate 上的协程已随 job 取消而结束，无需补完。
+    }
+
+    // ---------- 卡片提示口径：只有「这次刷新确实失败」才置位，成功清除，跳过不动 ----------
+
+    /**
+     * 真失败（取价异常）必须出现在卡片提示集合里。
+     * 用独立的资产 id，避免与其它用例默认的 id=0 互相污染（store 是进程级单例）。
+     */
+    @Test
+    fun `行情真失败时置位上次更新未成功`() = runBlocking {
+        every { stockDataManager.isNetworkAvailableNow() } returns true
+        val asset = fundAsset("010001").copy(id = 900001L)
+        coEvery { UnifiedPriceService.getPrice("010001", AssetType.FUND, any()) } returns
+            Result.failure(RuntimeException("模拟服务端失败"))
+
+        val result = AssetSyncManager.syncAllAssets(
+            context, repository, listOf(asset), {}, forceRefresh = true
+        )
+
+        assertEquals(1, result.failedCount)
+        assertTrue(
+            "真失败应置位卡片提示",
+            AssetSyncFailureStore.getInstance(context).failedAssetIds.value.contains(900001L)
+        )
+    }
+
+    /**
+     * 断网但仍有可用旧价（`isStale`）属于「跳过(缓存过期)」：
+     * 既不置位新提示，也不清除已有的失败标记——上一次真失败仍然如实保留。
+     */
+    @Test
+    fun `缓存过期跳过不置位也不清除既有失败标记`() = runBlocking {
+        every { stockDataManager.isNetworkAvailableNow() } returns true
+        val asset = fundAsset("010002").copy(id = 900002L)
+        val store = AssetSyncFailureStore.getInstance(context)
+        store.applyOutcomes(emptySet(), listOf(900002L))
+
+        val staleFund = AssetPrice.Fund(
+            FundData(
+                code = "010002", name = "测试基金", price = 1.4,
+                change = 0.0, changePercent = 0.0, isStale = true
+            )
+        )
+        coEvery { UnifiedPriceService.getPrice("010002", AssetType.FUND, any()) } returns
+            Result.success(staleFund)
+
+        val result = AssetSyncManager.syncAllAssets(
+            context, repository, listOf(asset), {}, forceRefresh = true
+        )
+
+        assertEquals(0, result.failedCount)
+        assertEquals(1, result.skippedByReason["缓存过期"])
+        assertTrue(
+            "跳过不能洗白上一次真失败",
+            store.failedAssetIds.value.contains(900002L)
+        )
+    }
+
+    /** 成功落价必须清除提示（成功后卡片上的「上次更新未成功」消失）。 */
+    @Test
+    fun `成功落价后清除上次更新未成功`() = runBlocking {
+        every { stockDataManager.isNetworkAvailableNow() } returns true
+        val asset = fundAsset("010003").copy(id = 900003L)
+        val store = AssetSyncFailureStore.getInstance(context)
+        store.applyOutcomes(emptySet(), listOf(900003L))
+
+        coEvery { UnifiedPriceService.getPrice("010003", AssetType.FUND, any()) } returns
+            Result.success(fundPrice("010003"))
+
+        val result = AssetSyncManager.syncAllAssets(
+            context, repository, listOf(asset), {}, forceRefresh = true
+        )
+
+        assertEquals(1, result.successCount)
+        assertFalse(
+            "成功落价后提示必须消失",
+            store.failedAssetIds.value.contains(900003L)
+        )
+    }
+
+    /**
+     * 退市跳过（东财也拿不到历史收盘）不算失败，也不清除既有失败标记：
+     * 「上次更新未成功」只对真实刷新失败负责，不能因为标的退市就被顺手洗白。
+     */
+    @Test
+    fun `退市跳过不置位也不清除既有失败标记`() = runBlocking {
+        every { stockDataManager.isNetworkAvailableNow() } returns true
+        mockkObject(EastmoneyDelistedQuoteApi)
+        coEvery { EastmoneyDelistedQuoteApi.fetchLastClose(any(), any()) } returns null
+
+        val delisted = Asset(
+            id = 900004L, name = "退市股", type = AssetType.STOCK,
+            symbol = "bj400264", account = "默认", balance = 100.0
+        )
+        val store = AssetSyncFailureStore.getInstance(context)
+        store.applyOutcomes(emptySet(), listOf(900004L))
+
+        val result = AssetSyncManager.syncAllAssets(
+            context, repository, listOf(delisted), {}, forceRefresh = true
+        )
+
+        assertEquals(0, result.failedCount)
+        assertEquals(1, result.skippedByReason["退市"])
+        assertTrue(
+            "退市跳过不能洗白上一次真失败",
+            store.failedAssetIds.value.contains(900004L)
+        )
     }
 }

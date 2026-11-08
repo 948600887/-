@@ -71,6 +71,7 @@ fun HistoryScreen(
     var showSaveDialog by remember { mutableStateOf(false) }
     var showSnapshotManager by remember { mutableStateOf(false) }
     val managerSnapshots by viewModel.managerSnapshots.collectAsStateWithLifecycle()
+    val manualAdjustedDates by viewModel.manualAdjustedDates.collectAsStateWithLifecycle()
 
     // 快照管理列表只在其打开时订阅全表，关闭即停
     LaunchedEffect(showSnapshotManager) {
@@ -197,6 +198,7 @@ fun HistoryScreen(
                             historyTrendChart(
                                 snapshots = uiState.filteredSnapshots,
                                 selectedPeriod = uiState.selectedPeriod,
+                                manualAdjustedDates = manualAdjustedDates,
                                 height = trendChartHeight
                             )
                             historyPeriodReturnCard(
@@ -232,8 +234,10 @@ fun HistoryScreen(
     if (showSnapshotManager) {
         SnapshotManagerDialog(
             snapshots = managerSnapshots,
+            manualAdjustedDates = manualAdjustedDates,
             onDelete = viewModel::deleteManagedSnapshot,
             onResave = viewModel::resaveManagedSnapshot,
+            onUpdate = viewModel::updateManagedSnapshot,
             onDismiss = { showSnapshotManager = false }
         )
     }

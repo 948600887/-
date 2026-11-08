@@ -17,6 +17,9 @@ import com.example.stockdiary.database.Transaction
 import com.example.stockdiary.database.TransactionType
 import com.example.stockdiary.data.contract.PendingPriceWrite
 import com.example.stockdiary.data.contract.planSnapshotDedup
+import com.example.stockdiary.data.calculator.SnapshotAmountEditor
+import com.example.stockdiary.data.calculator.SnapshotAmountInput
+import com.example.stockdiary.data.prefs.SnapshotManualAdjustmentStore
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import java.time.LocalDate
@@ -304,6 +307,8 @@ class AssetRepository private constructor(
             // 清完库后最长 7 天不再真正重抓，分红一直空白（见 DividendRepository.clearFetchState）。
             DividendRepository.getInstance(context).clearFetchState()
         }
+        // 快照都没了，手动修正标记也没有指向对象
+        SnapshotManualAdjustmentStore.getInstance(context).clearAll()
     }
     
     suspend fun getAssetsByTypes(types: List<AssetType>): List<Asset> {
@@ -535,7 +540,7 @@ class AssetRepository private constructor(
      * （清库后重建数据的场景）会把最大回撤打成 100%、月度收益做出假暴跌。
      */
     suspend fun createSnapshot(date: String): AssetSnapshot? {
-        return try {
+        val created = try {
             StockDatabase.getInstance(context).withTransaction {
                 // 先取持仓、确认非空，才删同日旧行。
                 //
@@ -577,6 +582,31 @@ class AssetRepository private constructor(
             AppLogger.e("Failed to create snapshot: ${e.message}", e)
             throw e
         }
+        // 重存/自动快照覆盖都是机器重算，该日原来的「手动修正」标记不再成立。
+        // 失败或主动跳过（null）不动标记：库里那一行并没有被覆盖。
+        created?.let { SnapshotManualAdjustmentStore.getInstance(context).clear(date) }
+        return created
+    }
+
+    /**
+     * 快照编辑：直接改写某一天的五个分类金额并重算总资产/净资产。
+     *
+     * 只改金额与汇总字段，`date`/`timestamp`/历史成本列原样保留（快照日期不可改）。
+     * 与旧值完全一致时直接返回 false，不写库也不打标记。
+     *
+     * @return 是否真的写入了一行
+     */
+    suspend fun updateSnapshotAmounts(date: String, input: SnapshotAmountInput): Boolean {
+        val snapshot = snapshotDao.getSnapshotByDate(date) ?: return false
+        val updated = SnapshotAmountEditor.apply(snapshot, input)
+        if (updated == snapshot) return false
+        snapshotDao.updateSnapshot(updated)
+        SnapshotManualAdjustmentStore.getInstance(context).mark(date)
+        AppLogger.i(
+            "Snapshot edited: $date, totalAssets=${updated.totalAssets}, netAssets=${updated.netAssets}",
+            "AssetRepository"
+        )
+        return true
     }
 
     /** 库里有没有任何资产。用于冷启动决定要不要排自动快照（清库后不排，导入资产后自然恢复） */
@@ -683,7 +713,11 @@ class AssetRepository private constructor(
     suspend fun deleteSnapshot(snapshot: AssetSnapshot) = snapshotDao.deleteSnapshot(snapshot)
 
     /** 快照管理用：删掉某一天的全部快照行（同日多行一并清掉） */
-    suspend fun deleteSnapshotsByDate(date: String) = snapshotDao.deleteSnapshotsByDate(date)
+    suspend fun deleteSnapshotsByDate(date: String) {
+        snapshotDao.deleteSnapshotsByDate(date)
+        // 该日已不存在，手动修正标记一并清掉，避免删除后重新自动生成时误标
+        SnapshotManualAdjustmentStore.getInstance(context).clear(date)
+    }
     
     /**
      * 添加或合并股票/基金资产（替代旧 Portfolio 逻辑）

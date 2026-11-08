@@ -68,6 +68,10 @@ interface SnapshotDao {
     
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertSnapshot(snapshot: AssetSnapshot): Long
+
+    /** 快照编辑：只改金额与汇总字段；date/timestamp 原样带回，快照日期不可改 */
+    @Update
+    suspend fun updateSnapshot(snapshot: AssetSnapshot)
     
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertSnapshots(snapshots: List<AssetSnapshot>)

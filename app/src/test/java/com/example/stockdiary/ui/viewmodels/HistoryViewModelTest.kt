@@ -1,11 +1,14 @@
 package com.example.stockdiary.ui.viewmodels
 
+import com.example.stockdiary.data.calculator.SnapshotAmountInput
 import com.example.stockdiary.data.prefs.DashboardPreferences
 import com.example.stockdiary.data.prefs.DashboardPreferencesManager
+import com.example.stockdiary.data.prefs.SnapshotManualAdjustmentStore
 import com.example.stockdiary.data.repository.AssetRepository
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
 import io.mockk.coEvery
+import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
 import kotlinx.coroutines.Dispatchers
@@ -54,6 +57,7 @@ class HistoryViewModelTest {
 
     private val assetRepository = mockk<AssetRepository>(relaxed = true)
     private val preferencesManager = mockk<DashboardPreferencesManager>(relaxed = true)
+    private val manualAdjustmentStore = mockk<SnapshotManualAdjustmentStore>(relaxed = true)
 
     private val asset = Asset(
         name = "长江电力", type = AssetType.STOCK, symbol = "600900",
@@ -74,7 +78,7 @@ class HistoryViewModelTest {
         every { assetRepository.getSnapshotBeforeDate(any()) } returns flowOf(null)
         every { assetRepository.getSnapshotCountFlow() } returns flowOf(1)
 
-        val vm = HistoryViewModel(assetRepository, preferencesManager)
+        val vm = HistoryViewModel(assetRepository, preferencesManager, manualAdjustmentStore)
 
         val state = withTimeout(5_000) {
             vm.uiState.first { it.snapshotsFrameReady }
@@ -95,7 +99,7 @@ class HistoryViewModelTest {
         every { assetRepository.getSnapshotCountFlow() } returns flowOf(1)
         coEvery { assetRepository.createSnapshot(any()) } throws RuntimeException("disk full")
 
-        val vm = HistoryViewModel(assetRepository, preferencesManager)
+        val vm = HistoryViewModel(assetRepository, preferencesManager, manualAdjustmentStore)
         vm.saveSnapshot()
 
         val state = withTimeout(5_000) {
@@ -108,5 +112,24 @@ class HistoryViewModelTest {
             "当天没有持仓，未保存快照",
             state.errorMessage
         )
+    }
+
+    @Test
+    fun `五项资产全为 0 时拒绝保存并提示`() = runBlocking {
+        stubPreferences()
+        every { assetRepository.getAllAssets() } returns flowOf(listOf(asset))
+        every { assetRepository.getSnapshotsInDateRange(any(), any()) } returns flowOf(emptyList())
+        every { assetRepository.getInvalidDateSnapshots() } returns flowOf(emptyList())
+        every { assetRepository.getSnapshotBeforeDate(any()) } returns flowOf(null)
+        every { assetRepository.getSnapshotCountFlow() } returns flowOf(1)
+
+        val vm = HistoryViewModel(assetRepository, preferencesManager, manualAdjustmentStore)
+        vm.updateManagedSnapshot("2026-11-01", SnapshotAmountInput())
+
+        val state = withTimeout(5_000) {
+            vm.uiState.first { it.errorMessage != null }
+        }
+        assertEquals("编辑快照失败：至少填写一项资产金额", state.errorMessage)
+        coVerify(exactly = 0) { assetRepository.updateSnapshotAmounts(any(), any()) }
     }
 }

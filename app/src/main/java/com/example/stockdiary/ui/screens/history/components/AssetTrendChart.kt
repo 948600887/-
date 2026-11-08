@@ -490,6 +490,7 @@ private fun buildTrendChartGeometry(
 @Composable
 fun AssetTrendChart(
     snapshots: List<AssetSnapshot>,
+    manualAdjustedDates: Set<String> = emptySet(),
     modifier: Modifier = Modifier
 ) {
     val selectedPointIndex = remember { mutableStateOf<Int?>(null) }
@@ -639,6 +640,7 @@ fun AssetTrendChart(
             selectedPointIndex = selectedPointIndex,
             snapshots = snapshots,
             geometry = geometry,
+            manuallyAdjustedDates = manualAdjustedDates,
             modifier = Modifier
                 .fillMaxWidth()
                 .align(Alignment.BottomCenter)
@@ -653,6 +655,7 @@ private fun TrendSelectionCard(
     selectedPointIndex: State<Int?>,
     snapshots: List<AssetSnapshot>,
     geometry: TrendChartGeometry?,
+    manuallyAdjustedDates: Set<String>,
     modifier: Modifier = Modifier
 ) {
     val idx = selectedPointIndex.value
@@ -689,6 +692,13 @@ private fun TrendSelectionCard(
                         spanText,
                         style = MaterialTheme.typography.labelSmall,
                         color = colors.onSurfaceVariant
+                    )
+                }
+                if (snapshot.date in manuallyAdjustedDates) {
+                    Text(
+                        "手动修正",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary
                     )
                 }
                 // 不要再在这里显示 totalAssets（总资产，含负债）：本页所有卡片

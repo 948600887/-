@@ -7,9 +7,12 @@ import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import androidx.lifecycle.viewModelScope
 import com.example.stockdiary.data.calculator.MonthlyReturn
+import com.example.stockdiary.data.calculator.SnapshotAmountEditor
+import com.example.stockdiary.data.calculator.SnapshotAmountInput
 import com.example.stockdiary.data.calculator.SnapshotAnalyzer
 import com.example.stockdiary.data.calculator.SnapshotStats
 import com.example.stockdiary.data.prefs.DashboardPreferencesManager
+import com.example.stockdiary.data.prefs.SnapshotManualAdjustmentStore
 import com.example.stockdiary.data.repository.AssetRepository
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetSnapshot
@@ -48,7 +51,8 @@ import java.time.format.DateTimeFormatter
 @OptIn(ExperimentalCoroutinesApi::class)
 class HistoryViewModel(
     private val assetRepository: AssetRepository,
-    private val dashboardPreferencesManager: DashboardPreferencesManager
+    private val dashboardPreferencesManager: DashboardPreferencesManager,
+    private val snapshotManualAdjustmentStore: SnapshotManualAdjustmentStore
 ) : ViewModel() {
 
     companion object {
@@ -65,7 +69,8 @@ class HistoryViewModel(
             initializer {
                 HistoryViewModel(
                     assetRepository = container.assetRepository,
-                    dashboardPreferencesManager = container.dashboardPreferencesManager
+                    dashboardPreferencesManager = container.dashboardPreferencesManager,
+                    snapshotManualAdjustmentStore = container.snapshotManualAdjustmentStore
                 )
             }
         }
@@ -139,6 +144,9 @@ class HistoryViewModel(
             }
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    /** 手动修正过的快照日期：列表与趋势图据此显示「手动修正」 */
+    val manualAdjustedDates: StateFlow<Set<String>> = snapshotManualAdjustmentStore.dates
 
     private val _selectedPeriod = MutableStateFlow(defaultPeriod)
 
@@ -448,6 +456,33 @@ class HistoryViewModel(
             _uiState.update {
                 it.copy(
                     errorMessage = result.exceptionOrNull()?.let { e -> "重存快照失败：${e.message}" }
+                )
+            }
+        }
+    }
+
+    /**
+     * 快照管理：手动修正某一天的五个分类金额（UI 已做二次确认，这里不再重复确认）。
+     *
+     * 五项资产全为 0 时拒绝保存：全 0 快照会被「丢弃前导空快照」规则从图表里隐藏，
+     * 用户会以为保存丢了。与旧值一致时 repository 直接返回 false，不写库、不打标记。
+     */
+    fun updateManagedSnapshot(date: String, input: SnapshotAmountInput) {
+        viewModelScope.launch {
+            val result = runCatching {
+                // 与 UI 同一句提示：UI 侧内联校验是第一道，这里是写入边界兜底
+                require(SnapshotAmountEditor.isValid(input)) {
+                    SnapshotAmountEditor.AT_LEAST_ONE_ASSET_MESSAGE
+                }
+                assetRepository.updateSnapshotAmounts(date, input)
+            }
+            result.onFailure { e ->
+                if (e is CancellationException) throw e
+                AppLogger.e("编辑快照失败: ${e.message}", e, "HistoryVM")
+            }
+            _uiState.update {
+                it.copy(
+                    errorMessage = result.exceptionOrNull()?.let { e -> "编辑快照失败：${e.message}" }
                 )
             }
         }

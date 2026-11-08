@@ -28,6 +28,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import com.example.stockdiary.data.calculator.SnapshotAmountInput
 import com.example.stockdiary.database.AssetSnapshot
 import com.example.stockdiary.ui.theme.AppTheme
 import com.example.stockdiary.utils.format
@@ -35,19 +36,23 @@ import com.example.stockdiary.utils.toProfitDisplay
 import com.example.stockdiary.ui.theme.profitColor
 
 /**
- * 快照管理：按日期倒序列出历史快照，行内可删除或用当前持仓重存。
+ * 快照管理：按日期倒序列出历史快照，行内可编辑、用当前持仓重存、删除。
  *
  * 入口只在历史页右上角；趋势图不承担编辑入口。
- * 两个操作都必须二次确认——重存会用当前持仓覆盖历史点（汇率按重存时刻冻结）。
+ * 三个操作都必须二次确认——编辑逐项列出新旧值，重存会用当前持仓覆盖历史点
+ * （汇率按重存时刻冻结）。手动修正过的日期在行内带「手动修正」标记。
  */
 @Composable
 fun SnapshotManagerDialog(
     snapshots: List<AssetSnapshot>,
+    manualAdjustedDates: Set<String>,
     onDelete: (String) -> Unit,
     onResave: (String) -> Unit,
+    onUpdate: (String, SnapshotAmountInput) -> Unit,
     onDismiss: () -> Unit
 ) {
     var pendingAction by remember { mutableStateOf<PendingAction?>(null) }
+    var editingSnapshot by remember { mutableStateOf<AssetSnapshot?>(null) }
 
     Dialog(onDismissRequest = onDismiss) {
         Surface(
@@ -90,6 +95,8 @@ fun SnapshotManagerDialog(
                             SnapshotManagerRow(
                                 snapshot = snapshot,
                                 previous = previous,
+                                manuallyAdjusted = snapshot.date in manualAdjustedDates,
+                                onEdit = { editingSnapshot = snapshot },
                                 onDelete = {
                                     pendingAction = PendingAction.Delete(snapshot.date)
                                 },
@@ -144,6 +151,17 @@ fun SnapshotManagerDialog(
             }
         )
     }
+
+    editingSnapshot?.let { snapshot ->
+        SnapshotEditDialog(
+            snapshot = snapshot,
+            onDismiss = { editingSnapshot = null },
+            onConfirm = { input ->
+                onUpdate(snapshot.date, input)
+                editingSnapshot = null
+            }
+        )
+    }
 }
 
 private sealed interface PendingAction {
@@ -157,6 +175,8 @@ private sealed interface PendingAction {
 private fun SnapshotManagerRow(
     snapshot: AssetSnapshot,
     previous: AssetSnapshot?,
+    manuallyAdjusted: Boolean,
+    onEdit: () -> Unit,
     onDelete: () -> Unit,
     onResave: () -> Unit
 ) {
@@ -174,6 +194,14 @@ private fun SnapshotManagerRow(
                 style = MaterialTheme.typography.bodyMedium,
                 fontWeight = FontWeight.Medium
             )
+            if (manuallyAdjusted) {
+                Text(
+                    text = "手动修正",
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = MaterialTheme.colorScheme.primary
+                )
+            }
             Text(
                 text = "净资产 ¥${snapshot.netAssets.format(2)}",
                 fontSize = 12.sp,
@@ -190,6 +218,7 @@ private fun SnapshotManagerRow(
                 color = if (dailyChange != null) dailyChange.profitColor() else AppTheme.colors.onSurfaceVariant
             )
         }
+        TextButton(onClick = onEdit) { Text("编辑", fontSize = 12.sp) }
         TextButton(onClick = onResave) { Text("重存", fontSize = 12.sp) }
         TextButton(onClick = onDelete) {
             Text("删除", fontSize = 12.sp, color = MaterialTheme.colorScheme.error)

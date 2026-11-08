@@ -18,6 +18,7 @@ import com.example.stockdiary.data.importer.HoldingSnapshotService
 import com.example.stockdiary.data.importer.ImageTextRecognizer
 import com.example.stockdiary.data.importer.OcrStatementService
 import com.example.stockdiary.data.sync.AssetSyncFailureStore
+import com.example.stockdiary.data.prefs.SnapshotManualAdjustmentStore
 import com.example.stockdiary.data.sync.PriceSyncPreferencesManager
 import com.example.stockdiary.data.fund.FundNavCacheStoreImpl
 import com.example.stockdiary.data.price.DefaultPriceCacheMaintenance
@@ -66,6 +67,10 @@ class AppContainer(private val context: Context) {
      */
     val assetSyncFailureStore: AssetSyncFailureStore by lazy {
         AssetSyncFailureStore.getInstance(context)
+    }
+    /** 手动修正过的快照日期（列表/趋势图标记）。同样走轻量存储，不占 Room 列 */
+    val snapshotManualAdjustmentStore: SnapshotManualAdjustmentStore by lazy {
+        SnapshotManualAdjustmentStore.getInstance(context)
     }
     /** 派生缓存清理门面：设置页只认它，不直接调各数据源单例的清除方法 */
     val priceCacheMaintenance: PriceCacheMaintenance by lazy {

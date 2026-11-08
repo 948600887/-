@@ -138,6 +138,7 @@ fun LazyListScope.historyOverviewCard(
 fun LazyListScope.historyTrendChart(
     snapshots: List<AssetSnapshot>,
     selectedPeriod: String,
+    manualAdjustedDates: Set<String>,
     height: Dp
 ) {
     item {
@@ -146,6 +147,7 @@ fun LazyListScope.historyTrendChart(
         key(selectedPeriod) {
             AssetTrendChart(
                 snapshots = snapshots,
+                manualAdjustedDates = manualAdjustedDates,
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(height)

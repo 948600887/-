@@ -105,6 +105,49 @@ class UnifiedPriceServiceCryptoPrewarmTest {
         )
     }
 
+    // ---------- 1b. 借币后缀 / 旧 ticker 归一 ----------
+
+    @Test
+    fun `借币后缀与旧ticker归一_USDT按1_0不进请求_旧ticker按新交易对取价`() = runBlocking {
+        val client = recordingClient { req ->
+            respond(
+                200,
+                tickers("USDCUSDT" to "1.0001", "1MBABYDOGEUSDT" to "0.0000001"),
+                req
+            )
+        }
+
+        val map = UnifiedPriceService.prewarmCryptoPrices(
+            listOf(
+                "USDT#collateral", "USDT#loan",
+                "USDCUSDT#collateral",
+                "1MBBDOGE", "1MBABYDOGE"
+            ),
+            forceRefresh = true,
+            client = client
+        ).getOrNull()!!
+
+        assertEquals("只应发 1 次批量请求", 1, requestCount.get())
+        // USDT 抵押/负债：`#` 被剥掉后按稳定币 1.0 计，不进批量请求
+        assertEquals(1.0, priceOf(map, "USDT#collateral"), 1e-9)
+        assertEquals(1.0, priceOf(map, "USDT#loan"), 1e-9)
+        // 结果 code 保留原始后缀（负债/抵押行的库内唯一键）
+        assertEquals("USDT#COLLATERAL", codeOf(map, "USDT#collateral"))
+        // 既有能成功的抵押行口径不变：仍按 USDCUSDT 查价
+        assertEquals(1.0001, priceOf(map, "USDCUSDT#collateral"), 1e-9)
+        // 旧 ticker 归一到 1MBABYDOGEUSDT，新旧持仓拿同一个市价
+        assertEquals(0.0000001, priceOf(map, "1MBBDOGE"), 1e-9)
+        assertEquals(0.0000001, priceOf(map, "1MBABYDOGE"), 1e-9)
+        assertEquals("1MBBDOGE", codeOf(map, "1MBBDOGE"))
+
+        val decoded = URLDecoder.decode(lastUrl.get(), "UTF-8")
+        val asked = symbolsOf(lastUrl.get())
+        assertEquals("只请求 USDCUSDT 与 1MBABYDOGEUSDT 两个交易对", 2, asked.size)
+        assertTrue("应请求 USDCUSDT: $decoded", "USDCUSDT" in asked)
+        assertTrue("旧 ticker 应请求新的 1MBABYDOGEUSDT: $decoded", "1MBABYDOGEUSDT" in asked)
+        assertFalse("URL 里绝不能出现 #（会被当 fragment 截断）: $decoded", decoded.contains("#"))
+    }
+
     // ---------- 2. 分片 ----------
 
     @Test

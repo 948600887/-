@@ -31,6 +31,9 @@ class UnifiedPriceServiceTest {
     fun resetGate() {
         // getCryptoPrice 会真去喂 BinanceHostGate；必须复位，否则漏给同 JVM 的其它测试类
         BinanceHostGate.resetForTesting()
+        // 不可交易黑名单与价格缓存都是进程级单例：用例之间必须互不污染
+        UnifiedPriceService.clearNonTradableForTesting()
+        UnifiedPriceService.clearPriceCacheForTesting()
     }
 
     @After
@@ -68,6 +71,77 @@ class UnifiedPriceServiceTest {
         val price = result.getOrNull()
         assertTrue(price is AssetPrice.Crypto)
         assertEquals(1.0, (price as AssetPrice.Crypto).data.price, 1e-9)
+    }
+
+    @Test
+    fun `借币USDT抵押与负债_剥掉后缀按1美元计且不发网络`() = runBlocking {
+        var hits = 0
+        val neverHit = fakeClient(object : Interceptor {
+            override fun intercept(chain: Interceptor.Chain): Response {
+                hits++
+                throw AssertionError("USDT#collateral / USDT#loan 不应发网络请求")
+            }
+        })
+
+        for (code in listOf("USDT#collateral", "USDT#loan")) {
+            val result = UnifiedPriceService.getCryptoPrice(code, client = neverHit)
+            assertTrue("$code 应成功取价", result.isSuccess)
+            assertEquals(1.0, result.getOrThrow().price, 1e-9)
+            // 结果里的 code 保留原始形态（后缀是负债/抵押行的库内唯一键）
+            assertEquals(code.uppercase(), result.getOrThrow().code)
+        }
+        assertEquals("稳定币短路口径不应发任何网络请求", 0, hits)
+    }
+
+    @Test
+    fun `借币抵押USDCUSDT_剥后缀后仍按USDCUSDT查询_既有口径不变`() = runBlocking {
+        var requested: String? = null
+        val client = fakeClient(object : Interceptor {
+            override fun intercept(chain: Interceptor.Chain): Response {
+                requested = chain.request().url.queryParameter("symbol")
+                val body = """{"symbol":"USDCUSDT","lastPrice":"1.0001","priceChange":"0",""" +
+                    """"priceChangePercent":"0","highPrice":"1.0002","lowPrice":"0.9999","volume":"1000"}"""
+                return Response.Builder()
+                    .request(chain.request())
+                    .protocol(Protocol.HTTP_1_1)
+                    .code(200)
+                    .message("OK")
+                    .body(body.toResponseBody("application/json".toMediaType()))
+                    .build()
+            }
+        })
+
+        val result = UnifiedPriceService.getCryptoPrice("USDCUSDT#collateral", client = client)
+        assertTrue("既有的 USDC 抵押行必须继续成功", result.isSuccess)
+        assertEquals("请求的交易对与剥后缀前完全一致", "USDCUSDT", requested)
+        assertEquals(1.0001, result.getOrThrow().price, 1e-9)
+        assertEquals("USDCUSDT#collateral", result.getOrThrow().code)
+    }
+
+    @Test
+    fun `LD1MBBDOGE走别名映射_按1MBABYDOGEUSDT取价`() = runBlocking {
+        var requested: String? = null
+        val client = fakeClient(object : Interceptor {
+            override fun intercept(chain: Interceptor.Chain): Response {
+                requested = chain.request().url.queryParameter("symbol")
+                val body = """{"symbol":"1MBABYDOGEUSDT","lastPrice":"0.0000001","priceChange":"0",""" +
+                    """"priceChangePercent":"0","highPrice":"0.0000001","lowPrice":"0.0000001","volume":"1000"}"""
+                return Response.Builder()
+                    .request(chain.request())
+                    .protocol(Protocol.HTTP_1_1)
+                    .code(200)
+                    .message("OK")
+                    .body(body.toResponseBody("application/json".toMediaType()))
+                    .build()
+            }
+        })
+
+        val result = UnifiedPriceService.getCryptoPrice("LD1MBBDOGE", client = client)
+        assertTrue("旧 ticker 的理财壳应能取到价", result.isSuccess)
+        assertEquals("1MBABYDOGEUSDT", requested)
+        assertEquals(0.0000001, result.getOrThrow().price, 1e-9)
+        // 资产代码不能被改写
+        assertEquals("LD1MBBDOGE", result.getOrThrow().code)
     }
 
     // ---------- 假 Interceptor：模拟币安 ticker/24hr 的各类「网络语义」 ----------
@@ -286,30 +360,43 @@ class UnifiedPriceServiceTest {
     }
 
     @Test
-    fun `getCryptoPrice 用户填错符号两个候选都400仍真实失败`() = runBlocking {
-        // SHIB2USDT 是错误符号（真实是 SHIBUSDT）：primary=SHIB2USDT、fallback=SHIB2USDTUSDT
-        // 都非法。两个都 400 时不能误以为成功，必须如实失败，让用户自己改对代码。
-        val result = UnifiedPriceService.getCryptoPrice("SHIB2USDT", client = fakeClient(Ticker400Interceptor()))
-        assertTrue("填错的符号无法猜对，必须失败", result.isFailure)
+    fun `getCryptoPrice 普通无盘符号 SHIB2 归为不可交易而非每轮失败`() = runBlocking {
+        // SHIB2USDT 在币安现货不存在（真实是 SHIBUSDT）。SHIB2 绝不能映射成 SHIB：
+        // 两者在持仓里是独立记录，映射会给本无行情的记录安上 SHIB 的价格、把总资产算重。
+        // 正确口径是「不可交易」——不计同步失败，登记黑名单后后续轮次不再每轮 400。
+        val result = UnifiedPriceService.getCryptoPrice("SHIB2", client = fakeClient(Ticker400Interceptor()))
+        assertTrue("无盘符号应是失败结果（不是成功）", result.isFailure)
+        assertTrue(
+            "SHIB2 的 -1121 必须归为不可交易（不计同步失败）",
+            NonTradableAssetException.isNonTradable(result.exceptionOrNull())
+        )
         // 400 是主机可达的正常业务错误：不喂 onNetworkFailure，计数保持 0
         assertEquals(0, BinanceHostGate.consecutiveFailuresForTesting())
         assertEquals(Phase.CLOSED, BinanceHostGate.phaseForTesting())
+
+        // 黑名单生效：第二次直接短路，一个网络请求都不发
+        var hits = 0
+        val neverHit = fakeClient(object : Interceptor {
+            override fun intercept(chain: Interceptor.Chain): Response {
+                hits++
+                throw AssertionError("已登记不可交易的 SHIB2 不应再发请求")
+            }
+        })
+        val again = UnifiedPriceService.getCryptoPrice("SHIB2", client = neverHit)
+        assertEquals("黑名单命中应短路，不再发网络请求", 0, hits)
+        assertTrue(NonTradableAssetException.isNonTradable(again.exceptionOrNull()))
     }
 
     /**
-     * LD 理财/锁仓产品的底层交易对在币安现货根本没有可交易对（如 1MBBDOGE / SHIB2 这类币安
+     * LD 理财/锁仓产品的底层交易对在币安现货根本没有可交易对（如 LDSHIB2 这类币安
      * 理财持仓但无 USDT 现货盘）时，底层返回 -1121 Invalid symbol：这是「底层无行情」而非同步
      * 故障，必须归为 [NonTradableAssetException]，让同步侧不计入失败数。否则每轮同步都会把
-     * 这两条真实持有的理财持仓当成"失败 2"骚扰用户（2026-10-28 诊断日志实锤：v11 每轮稳定
-     * 失败 2 = LD1MBBDOGE + LDSHIB2）。
-     *
-     * 注意与上面「用户填错符号」用例的区别：那个是非 LD 的普通符号，确实应当如实失败；
-     * 这个是 LD 产品、底层币安根本没上现货盘，归为不可交易（不计失败）。
+     * 这条真实持有的理财持仓当成"失败"骚扰用户。
      */
     @Test
     fun `getCryptoPrice LD底层无交易对返回不可交易而非失败`() = runBlocking {
         BinanceHostGate.resetForTesting()
-        val result = UnifiedPriceService.getCryptoPrice("LD1MBBDOGE", client = fakeClient(Ticker400Interceptor()))
+        val result = UnifiedPriceService.getCryptoPrice("LDSHIB2", client = fakeClient(Ticker400Interceptor()))
         // 业务上仍是失败结果（不是成功），但必须是「不可交易」语义
         assertTrue("LD 底层无行情应是失败结果", result.isFailure)
         assertTrue(

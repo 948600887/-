@@ -115,6 +115,43 @@ object BinanceAPI {
     }
 
     /**
+     * 库里存的加密货币代码 → 查价用的基础代码。
+     *
+     * 币安借币的负债 / 抵押行以 `USDT#loan` / `USDCUSDT#collateral` 落库（`#` 后缀是
+     * 它们在库里的稳定唯一键，见 BinanceImportService）。但 `#` 在 URL 里是 fragment
+     * 分隔符：直接拼进 `?symbol=` 时，`#` 之后整段根本不会发给服务端——`USDT#loan`
+     * 实际请求成了 `symbol=USDT`，币安恒回 400，负债也就永远拿不到 1.0 的价格
+     * （负数量按 0 估值 → 净资产被高估）。
+     *
+     * 因此查价前统一剥掉 `#` 后缀：`USDT#loan` → `USDT`（稳定币按 1.0），
+     * `USDCUSDT#collateral` → `USDCUSDT`（与剥掉前实际请求到的交易对完全一致，
+     * 不改变既有行为）。**只影响取价**，落库 symbol 仍保留后缀。
+     */
+    internal fun cryptoPriceCode(symbol: String): String =
+        symbol.substringBefore('#').uppercase().trim()
+
+    /**
+     * 旧 ticker → 币安现行 ticker 的别名归一。
+     *
+     * 库里可能同时存着新旧两套代码（旧代码来自历史导入 / 手动录入），它们指向同一资产，
+     * 但旧代码在币安没有现货盘（如 `1MBBDOGEUSDT` 恒 -1121）。取价时按新代码查，
+     * 落库 symbol 保持原样（两条记录不会被合并）。
+     *
+     * 裸代码与「旧代码 + 报价币」两种形态都要认：库里既有 `1MBBDOGE`，也有
+     * `1MBBDOGEUSDT`（导入时补过 USDT）。
+     */
+    internal fun applyCryptoSymbolAlias(symbol: String): String {
+        val s = symbol.uppercase().trim()
+        BINANCE_SYMBOL_ALIASES[s]?.let { return it }
+        val quote = BINANCE_QUOTE_ASSETS.firstOrNull { s.length > it.length && s.endsWith(it) }
+        if (quote != null) {
+            val base = s.removeSuffix(quote)
+            BINANCE_SYMBOL_ALIASES[base]?.let { return it + quote }
+        }
+        return s
+    }
+
+    /**
      * 把库里存的加密货币代码映射成币安的**交易对**；稳定币返回 null（无需查价，按 1 美元计）。
      *
      * ## 为什么不能直接用 [formatSymbol]
@@ -134,7 +171,7 @@ object BinanceAPI {
      * @return 交易对（如 BTCUSDT）；稳定币返回 null，调用方按 1.0 美元计
      */
     internal fun cryptoTradingPairFor(symbol: String): String? {
-        val s = symbol.uppercase().trim()
+        val s = applyCryptoSymbolAlias(cryptoPriceCode(symbol))
         if (s.isEmpty()) return null
         // 稳定币锚定 1 美元，币安上没有 XXXUSDT 自我交易对，查价必然空
         if (s in BINANCE_STABLECOINS) return null
@@ -166,14 +203,16 @@ object BinanceAPI {
      * - `BTC`       → primary `BTCUSDT`，fallback `BTCUSDT`（相同，去重）→ 单候选，无浪费；
      * - `WBETH`     → primary `WBETH`，fallback `WBETHUSDT`
      *                → 主候选 400 时落兜底，命中真实对；
-     * - `SHIB2USDT`（用户填错的符号）→ primary `SHIB2USDT`，fallback `SHIB2USDTUSDT`
-     *                → 两个都 400，仍是真实失败（用户必须自己改对符号，App 无法猜出 SHIB）。
+     * - `SHIB2`    → primary `SHIB2USDT`，fallback `SHIB2USDT`（相同，去重）→ 单候选；
+     *                币安回 400 -1121 后由调用方按「不可交易」登记（**不**映射成 `SHIB`，
+     *                否则会把一条本无行情的记录安上 SHIB 的价格、总资产算重）
+     * - `1MBBDOGE` → 先经 [applyCryptoSymbolAlias] 归一到 `1MBABYDOGE` → `1MBABYDOGEUSDT`
      *
      * @return 候选交易对（裸基础资产或已是交易对形态）；稳定币 / 空串返回空列表
      *   （调用方按「无行情」处理，不在此补 USDT——稳定币没有 XXXUSDT 自我交易对）
      */
     internal fun cryptoSymbolCandidates(symbol: String): List<String> {
-        val s = symbol.uppercase().trim()
+        val s = applyCryptoSymbolAlias(cryptoPriceCode(symbol))
         val primary = cryptoTradingPairFor(s) ?: return emptyList()
         // 原始符号若已是 USDT 计价对（如 earnUnderlyingPair 算出的 1MBBDOGEUSDT、
         // 用户误填的 SHIB2USDT），再拼一次 USDT 必成脏对（1MBBDOGEUSDTUSDT），
@@ -344,6 +383,22 @@ internal val BINANCE_STABLECOINS: Set<String> = setOf(
  */
 internal val BINANCE_LD_EXCEPTIONS: Set<String> = setOf(
     "LDO", "LDOUSDT", "LDOBTC", "LDOETH"
+)
+
+/**
+ * 旧 ticker → 币安现行 ticker 的别名表（只用于取价归一，见 [BinanceAPI.applyCryptoSymbolAlias]）。
+ *
+ * `1MBBDOGE` 是 Baby Doge 旧口径的代号，币安现货只有 `1MBABYDOGE`（1 个单位 = 100 万个
+ * BABYDOGE）；拿旧代号直接拼 `1MBBDOGEUSDT` 必然 -1121。映射后旧持仓与新持仓都按
+ * `1MBABYDOGEUSDT` 取到同一个市价。
+ *
+ * ⚠️ 不要把 `SHIB2` 加进来：SHIB2 不是 SHIB 的旧代号（币安现货只有 `SHIB`）。
+ * 用户持仓里 SHIB 与 SHIB2 同时存在，把 SHIB2 映射成 SHIB 会给一条本无行情的记录
+ * 安上 SHIB 的价格、把总资产算重。SHIB2 由 [UnifiedPriceService] 按「无效符号」
+ * 确认为不可交易（跳过、不计失败），见那里的 400 -1121 分支。
+ */
+private val BINANCE_SYMBOL_ALIASES: Map<String, String> = mapOf(
+    "1MBBDOGE" to "1MBABYDOGE"
 )
 
 /** 币安常见报价币（quote asset）。判断「symbol 是裸资产还是已是交易对」时用 */

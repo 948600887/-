@@ -149,11 +149,45 @@ class BinanceAPITest {
     }
 
     @Test
-    fun `LD 底层已是USDT对时不拼脏兜底`() {
-        // earnUnderlyingPair("LD1MBBDOGE") = "1MBBDOGEUSDT"（已是对），getCryptoPrice 套用
-        // cryptoSymbolCandidates 时不能再拼出 1MBBDOGEUSDTUSDT 脏对——那正是诊断日志里
-        // GET /ticker/24hr (symbol=1MBBDOGEUSDTUSDT) 的源头。
-        assertEquals(listOf("1MBBDOGEUSDT"), BinanceAPI.cryptoSymbolCandidates("1MBBDOGEUSDT"))
+    fun `旧 ticker 归一到现行交易对_新旧持仓取同一个价`() {
+        // 1MBBDOGE 是 Baby Doge 旧口径代号，币安现货只有 1MBABYDOGEUSDT。
+        // 裸码与「旧码+USDT」两种落库形态都要归一，且不能再拼出 1MBBDOGEUSDTUSDT 脏对。
+        assertEquals(listOf("1MBABYDOGEUSDT"), BinanceAPI.cryptoSymbolCandidates("1MBBDOGE"))
+        assertEquals(listOf("1MBABYDOGEUSDT"), BinanceAPI.cryptoSymbolCandidates("1MBBDOGEUSDT"))
+        assertEquals(listOf("1MBABYDOGEUSDT"), BinanceAPI.cryptoSymbolCandidates("1MBABYDOGE"))
+        // 已按新代码落库的持仓保持原样，不受影响
+        assertEquals(listOf("1MBABYDOGEUSDT"), BinanceAPI.cryptoSymbolCandidates("1MBABYDOGEUSDT"))
+    }
+
+    @Test
+    fun `理财壳走别名后的底层交易对`() {
+        assertEquals("1MBABYDOGEUSDT", BinanceAPI.earnUnderlyingPair("LD1MBBDOGE"))
+        assertEquals("1MBABYDOGEUSDT", BinanceAPI.earnUnderlyingPair("LD1MBBDOGEUSDT"))
+    }
+
+    @Test
+    fun `借币后缀 _collateral 与 _loan 在查价前被剥掉`() {
+        // `#` 是 URL fragment 分隔符：带后缀直接拼 ?symbol= 会被截断成 symbol=USDT。
+        assertEquals("USDT", BinanceAPI.cryptoPriceCode("USDT#collateral"))
+        assertEquals("USDT", BinanceAPI.cryptoPriceCode("USDT#loan"))
+        // 非 USDT 抵押行：剥掉后缀后与「剥掉前实际请求到的交易对」完全一致，口径不变
+        assertEquals("USDCUSDT", BinanceAPI.cryptoPriceCode("USDCUSDT#collateral"))
+        assertEquals("BTCUSDT", BinanceAPI.cryptoPriceCode("BTCUSDT#loan"))
+        // 无后缀原样（大小写/空格仍归一）
+        assertEquals("BTCUSDT", BinanceAPI.cryptoPriceCode(" btcusdt "))
+        // 稳定币负债/抵押剥掉后缀后无候选（由 getCryptoPrice 按 1.0 短路口径处理）
+        assertEquals(emptyList<String>(), BinanceAPI.cryptoSymbolCandidates("USDT#loan"))
+        // 既有可成功的抵押行仍是同一个交易对
+        assertEquals(listOf("USDCUSDT"), BinanceAPI.cryptoSymbolCandidates("USDCUSDT#collateral"))
+    }
+
+    @Test
+    fun `SHIB2 保持错误符号口径_不映射成 SHIB`() {
+        // SHIB2 不是 SHIB 的旧代号：SHIB 与 SHIB2 在持仓里是独立记录，映射会给
+        // 一条本无行情的记录安上 SHIB 的价格、把总资产算重。查价口径保持错误符号，
+        // 由 UnifiedPriceService 按「无效符号」判不可交易（跳过、不计失败）。
+        assertEquals(listOf("SHIB2USDT"), BinanceAPI.cryptoSymbolCandidates("SHIB2USDT"))
+        assertEquals(listOf("SHIB2USDT"), BinanceAPI.cryptoSymbolCandidates("SHIB2"))
     }
 
     @Test

@@ -433,10 +433,13 @@ object UnifiedPriceService {
             val code = rawCode.trim()
             if (code.isEmpty()) continue
             val codeNorm = code.uppercase()
+            // 剥掉 #loan / #collateral 等库内后缀再查价：`#` 在 URL 里是 fragment 分隔符，
+            // 带后缀的 code 拼进 ?symbol= 会被截断（见 BinanceAPI.cryptoPriceCode）。
+            val priceCode = BinanceAPI.cryptoPriceCode(code)
 
             // 已知在币安现货无交易对的 code（逐只回落时已向币安确认过）：直接剔除，不进
             // 批量请求——否则会污染整片、导致整片 400 吃掉批量预取收益（见 [nonTradableCodes]）。
-            if (codeNorm in nonTradableCodes) {
+            if (priceCode in nonTradableCodes) {
                 AppLogger.d("跳过已知不可交易标的 $code，不进批量行情请求", TAG)
                 continue
             }
@@ -445,17 +448,17 @@ object UnifiedPriceService {
             // 稳定币识别统一走 BinanceAPI.isLikelyStablecoin（白名单 + 命名兜底），
             // 与导入路径口径一致——白名单外、命名疑似稳定币的币（如 NEWUSD/USDG）
             // 也能按 1.0 美元计，不再退化成裸码查价 → 查不到 → 市值 0。
-            if (BinanceAPI.isLikelyStablecoin(codeNorm)) {
+            if (BinanceAPI.isLikelyStablecoin(priceCode)) {
                 resultMap[code] = AssetPrice.Crypto(stableCoinData(codeNorm))
                 continue
             }
 
-            val candidates: List<String> = if (BinanceAPI.isEarnProduct(code)) {
-                val underlying = BinanceAPI.earnUnderlyingPair(code)
+            val candidates: List<String> = if (BinanceAPI.isEarnProduct(priceCode)) {
+                val underlying = BinanceAPI.earnUnderlyingPair(priceCode)
                 if (underlying == null) {
                     // 底层仍是稳定币壳（如 LDUSDT）：没有现货交易对，但锚定 1 美元，
                     // 与现货稳定币同口径按 1.0 计（否则存量 LDUSDT 市值恒为 0）
-                    val stripped = codeNorm.removePrefix("LD")
+                    val stripped = priceCode.removePrefix("LD")
                     if (BinanceAPI.isLikelyStablecoin(stripped)) {
                         resultMap[code] = AssetPrice.Crypto(stableCoinData(codeNorm))
                     }
@@ -464,7 +467,7 @@ object UnifiedPriceService {
                 }
                 BinanceAPI.cryptoSymbolCandidates(underlying)
             } else {
-                BinanceAPI.cryptoSymbolCandidates(code)
+                BinanceAPI.cryptoSymbolCandidates(priceCode)
             }
 
             // 批量端点一次查多个 symbols，无法像单只那样「首候选 400 再试兜底候选」
@@ -884,15 +887,19 @@ object UnifiedPriceService {
         // 逐只补价与批量预取共用同一轮源统计：这里必须取当前轮次号
         val roundId = RoundSourceFailureScope.currentRoundId()
         val codeNorm = code.uppercase().trim()
+        // 剥掉 #loan / #collateral 等库内后缀再查价：`#` 在 URL 里是 fragment 分隔符，
+        // 带后缀的 code 拼进 ?symbol= 会被截断（USDT#loan 实际请求成 symbol=USDT → 恒 400）。
+        // 落库 / 结果里的 code 仍用原始 codeNorm，只换查价口径。
+        val priceCode = BinanceAPI.cryptoPriceCode(code)
         // 是否币安理财/锁仓（LD 前缀）产品：这类持仓的底层交易对若在币安现货根本没有
         // 可交易对（如 1MBBDOGE / SHIB2 这类币安理财持仓但无 USDT 现货盘），应归为
         // 「不可交易」（NonTradableAssetException，不计同步失败），而非网络/符号错误。
-        val isLdProduct = BinanceAPI.isEarnProduct(codeNorm)
+        val isLdProduct = BinanceAPI.isEarnProduct(priceCode)
 
         // 稳定币识别统一走 BinanceAPI.isLikelyStablecoin（白名单 + 命名兜底），
         // 与导入路径口径一致——白名单外、命名疑似稳定币的币（如 NEWUSD/USDG）
         // 也能按 1.0 美元计，不再退化成裸码查价 → 查不到 → 市值 0。
-        if (BinanceAPI.isLikelyStablecoin(codeNorm)) {
+        if (BinanceAPI.isLikelyStablecoin(priceCode)) {
             AppLogger.d("稳定币 $code 按 1.0 美元计，跳过查价", TAG)
             return@withContext Result.success(
                 CryptoData(code = codeNorm, name = codeNorm, price = 1.0, change = null, changePercent = null)
@@ -901,7 +908,7 @@ object UnifiedPriceService {
 
         // 已知在币安现货无交易对的 code（本轮同步逐只回落时已向币安确认过 400 无效符号）：
         // 直接判不可交易、不再发网络请求，也不进批量预取（否则每轮整片 400 吃掉批量收益）。
-        if (codeNorm in nonTradableCodes) {
+        if (priceCode in nonTradableCodes) {
             return@withContext Result.failure(
                 NonTradableAssetException("$code 在币安现货无交易对（已知不可交易）")
             )
@@ -912,15 +919,15 @@ object UnifiedPriceService {
         // （详见 [BinanceAPI.cryptoSymbolCandidates]）。LD 理财/锁仓走底层 1:1 计价，
         // 但底层本身也可能是 WBETH 这种「以报价币结尾」的码——所以锁仓分支同样套用
         // cryptoSymbolCandidates（而非裸 listOf），让 WBETH 类底层也能落到 WBETHUSDT 兜底。
-        val candidates: List<String> = if (BinanceAPI.isEarnProduct(code)) {
-            val underlying = BinanceAPI.earnUnderlyingPair(code)
+        val candidates: List<String> = if (isLdProduct) {
+            val underlying = BinanceAPI.earnUnderlyingPair(priceCode)
             if (underlying == null) {
                 // 底层仍是稳定币壳（如 LDUSDT）：没有现货交易对，但锚定 1 美元，
                 // 与现货稳定币同口径按 1.0 计，而不是当成「无行情」跳过——
                 // 否则存量 LDUSDT 的 currentPrice 永远留着导入前的 0，市值恒为 0
                 // （用户看到的「USDT 价格默认为 0」正是这个）。earnUnderlyingPair
                 // 返回 null 当且仅当剥掉 LD 后底层是稳定币，所以这里判一次集合即可。
-                val stripped = codeNorm.removePrefix("LD")
+                val stripped = priceCode.removePrefix("LD")
                 if (BinanceAPI.isLikelyStablecoin(stripped)) {
                     AppLogger.d("理财/锁仓稳定币 $code 按 1.0 美元计", TAG)
                     return@withContext Result.success(
@@ -928,7 +935,7 @@ object UnifiedPriceService {
                     )
                 }
                 AppLogger.d("理财/锁仓产品 $code 无底层交易对，跳过查价", TAG)
-                nonTradableCodes.add(codeNorm)
+                nonTradableCodes.add(priceCode)
                 return@withContext Result.failure(
                     NonTradableAssetException("$code 是币安理财/锁仓产品，没有现货行情")
                 )
@@ -936,12 +943,12 @@ object UnifiedPriceService {
             AppLogger.d("理财/锁仓产品 $code 按底层 $underlying 1:1 计价", TAG)
             BinanceAPI.cryptoSymbolCandidates(underlying)
         } else {
-            BinanceAPI.cryptoSymbolCandidates(code)
+            BinanceAPI.cryptoSymbolCandidates(priceCode)
         }
 
         if (candidates.isEmpty()) {
             AppLogger.d("无可用交易对（无法归一化的符号）：$code，跳过查价", TAG)
-            nonTradableCodes.add(codeNorm)
+            nonTradableCodes.add(priceCode)
             return@withContext Result.failure(NonTradableAssetException("$code 没有可用的现货行情"))
         }
 
@@ -1008,19 +1015,22 @@ object UnifiedPriceService {
                             return@use
                         }
                         val err = BinanceAccountAPI.binanceError(body, it.code)
-                        // LD 理财/锁仓产品的底层交易对若返回「非法符号」(-1121)，说明底层在币安
-                        // 现货根本没有可交易对（如 1MBBDOGE / SHIB2 这类币安理财持仓但无 USDT
-                        // 现货盘）：不是同步故障、也不是用户填错符号，而是「底层无行情」。
-                        // 归为不可交易（NonTradableAssetException）——同步侧不计入失败数，
-                        // 否则每轮同步都会把这两条真实持有的理财持仓当成"失败 2"骚扰用户。
-                        if (isLdProduct && it.code == 400 && isInvalidSymbolError(err)) {
+                        // 币安明确回 400「-1121 Invalid symbol」：这个代码在现货没有市场。
+                        // - LD 理财/锁仓（如 LDSHIB2）：底层无盘，按不可交易，不计同步失败
+                        // - 普通代码（如 SHIB2，用户从别的渠道抄来的旧码）：同样无盘可查；
+                        //   登记黑名单后后续轮次不再每轮 400，也不再污染批量整片（见 [nonTradableCodes]）
+                        // 注意 SHIB2 绝不映射成 SHIB：两者在持仓里是独立记录，映射会把总资产算重。
+                        if (it.code == 400 && isInvalidSymbolError(err)) {
                             AppLogger.i(
-                                "理财/锁仓产品 $code 的底层交易对($rawPair)在币安不存在（无效符号），按不可交易处理",
+                                "$code 在币安现货无交易对（无效符号），按不可交易处理",
                                 TAG
                             )
-                            nonTradableCodes.add(codeNorm)
+                            nonTradableCodes.add(priceCode)
                             return@withContext Result.failure(
-                                NonTradableAssetException("$code 的底层资产在币安现货无交易对")
+                                NonTradableAssetException(
+                                    if (isLdProduct) "$code 的底层资产在币安现货无交易对"
+                                    else "$code 在币安现货无交易对（无效符号）"
+                                )
                             )
                         }
                         return@withContext Result.failure(err)
@@ -1082,15 +1092,19 @@ object UnifiedPriceService {
             }
         }
 
-        // 所有候选都因 400 失败（如用户填错的符号 SHIB2USDT → SHIB2USDTUSDT）：真实失败，
-        // 用户必须自己改对 symbol，App 无法猜出正确交易对。
+        // 所有候选都因 400 失败（如 SHIB2USDT → SHIB2USDTUSDT 这类无盘符号）。
         val finalError = lastFailure ?: Exception("所有候选交易对均查询失败: $code")
-        // LD 理财/锁仓产品的底层交易对若全部「非法符号」(-1121)，底层在币安现货无交易对，
-        // 归为不可交易（不计同步失败），与上面单候选分支同口径。
-        if (isLdProduct && lastFailure != null && isInvalidSymbolError(finalError)) {
-            AppLogger.i("理财/锁仓产品 $code 的底层交易对均无效（无现货盘），按不可交易处理", TAG)
-            nonTradableCodes.add(codeNorm)
-            Result.failure(NonTradableAssetException("$code 的底层资产在币安现货无交易对"))
+        // 全部候选都是「非法符号」(-1121)：币安现货确定没有这个代码的市场。
+        // 统一归为不可交易（不计同步失败），登记后后续轮次不再重试，与上面的单候选分支同口径。
+        if (lastFailure != null && isInvalidSymbolError(finalError)) {
+            AppLogger.i("$code 的候选交易对均无效（无现货盘），按不可交易处理", TAG)
+            nonTradableCodes.add(priceCode)
+            Result.failure(
+                NonTradableAssetException(
+                    if (isLdProduct) "$code 的底层资产在币安现货无交易对"
+                    else "$code 在币安现货无交易对（无效符号）"
+                )
+            )
         } else {
             Result.failure(finalError)
         }

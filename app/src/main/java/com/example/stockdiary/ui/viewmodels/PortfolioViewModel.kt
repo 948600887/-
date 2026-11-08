@@ -123,28 +123,10 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
 
     val existingAccounts: StateFlow<List<String>> = _existingAccounts.asStateFlow()
 
-    // 资产列表已从资产页并入这里，显示开关与排序偏好随之接管
-    private val _preferences = MutableStateFlow(
-        container.dashboardPreferencesManager.loadPreferences()
-    )
-    val preferences: StateFlow<DashboardPreferences> = _preferences.asStateFlow()
-
-    /**
-     * 回前台时从磁盘重新加载偏好，推送到 [_preferences]。
-     *
-     * 与 DashboardViewModel.reloadPreferences 是同一类问题：本 VM 挂在 Activity 作用域、
-     * 跨标签页长期存活，而偏好只在构造期加载一次（见 [_preferences]）。用户在
-     * 「设置 → 自定义仪表盘」改完开关后，设置页只写磁盘，本 VM 的内存副本仍是旧值，
-     * 表现为「回持仓页设置没生效」——负债照旧显示、隐藏低价值开关改不动；
-     * 而首页因为有 ON_RESUME reload 却是正常的，同一份设置两个页面表现不一致。
-     */
-    fun reloadPreferences() {
-        // 与 Dashboard 一致：一次要读 20 个 SharedPreferences 键（含 getStringSet），
-        // 放主线程会让「回到持仓页」那一帧卡一下 → 切 IO 线程读
-        viewModelScope.launch(Dispatchers.IO) {
-            _preferences.value = container.dashboardPreferencesManager.loadPreferences()
-        }
-    }
+    // 资产列表已从资产页并入这里，显示开关与排序偏好随之接管。
+    // 直接复用 Manager 的全应用唯一偏好流：设置页写入立即推送过来，
+    // 不再持有本地副本、也不需要回前台 reload。
+    val preferences: StateFlow<DashboardPreferences> = container.dashboardPreferencesManager.preferences
 
     /**
      * 持仓页各分组的展开/收起状态。
@@ -246,7 +228,7 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
 
         val symbols = stockAssets.mapNotNull { it.symbol }.toSet()
         val fingerprint = dividendInputFingerprint(stockAssets)
-        val cached = _preferences.value
+        val cached = preferences.value
 
         // 缓存命中：直接用旧值，不抓。
         // 判据是指纹而不是代码集合：加仓 / 改存款利率时代码集合不变，但收入已变，
@@ -483,9 +465,9 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
 
     /**
      * 持久化偏好：统一走 [com.example.stockdiary.data.prefs.DashboardPreferencesManager.updatePreferences]，
-     * 即「先拉磁盘最新值 → 只合并要改的字段 → 整体回写」，并同步内存副本。
+     * 即「先拉磁盘最新值 → 只合并要改的字段 → 整体回写」，由 Manager 同步更新全应用唯一偏好流。
      *
-     * 必须的修复点：原先直接 `savePreferences(_preferences.value)` 把**构造期一次性加载、
+     * 必须的修复点：原先直接把**构造期一次性加载、
      * 可能已过期**的内存副本整体回写，会覆盖别的页面刚写盘的值——最典型的就是
      * 日历页 FIRE 计算里改的 [DashboardPreferences.monthlyExpense]：用户在日历改了月度生活费，
      * 一旦持仓页（或任何持有一份陈旧偏好的页面）因为刷新/排序/恢复显示等无关操作触发保存，
@@ -496,8 +478,7 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
      * 从根上保证「只动我改的字段」，杜绝互相踩踏。
      */
     private fun persistPreferences(mutate: (DashboardPreferences) -> DashboardPreferences) {
-        val updated = container.dashboardPreferencesManager.updatePreferences(mutate)
-        _preferences.value = updated
+        container.dashboardPreferencesManager.updatePreferences(mutate)
     }
 
     fun batchDelete(assetIds: Set<Long>) {

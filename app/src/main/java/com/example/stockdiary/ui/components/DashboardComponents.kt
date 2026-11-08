@@ -27,7 +27,6 @@ import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.ui.theme.*
 import com.example.stockdiary.utils.format
 import com.example.stockdiary.utils.formatMoney
-import com.example.stockdiary.utils.profitColor
 import com.example.stockdiary.utils.toProfitDisplay
 import com.example.stockdiary.utils.totalValueCny
 import kotlin.math.absoluteValue

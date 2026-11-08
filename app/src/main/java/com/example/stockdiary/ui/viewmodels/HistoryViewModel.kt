@@ -69,7 +69,7 @@ class HistoryViewModel(
         val errorMessage: String? = null
     )
 
-    private val defaultPeriod = dashboardPreferencesManager.loadPreferences().defaultPeriod
+    private val defaultPeriod = dashboardPreferencesManager.preferences.value.defaultPeriod
         .takeIf { it in VALID_PERIODS } ?: "1M"
 
     private val _uiState = MutableStateFlow(UiState())
@@ -77,18 +77,11 @@ class HistoryViewModel(
 
     /**
      * 用户偏好（含 [com.example.stockdiary.data.prefs.DashboardPreferences.showHistoryMonthlyGrowth]
-     * 等历史页相关开关）。只在构造期加载一次，进入历史页时由 [reloadPreferences] 从磁盘刷新，
-     * 否则在「设置 → 自定义仪表盘」改完开关返回本页不会生效（与 DashboardViewModel 同源问题）。
+     * 等历史页相关开关）。直接复用 Manager 的全应用唯一偏好流，设置页改完开关立即推送过来，
+     * 不再持有本地副本、也不需要 reload 补丁。
      */
-    private val _preferences = MutableStateFlow(dashboardPreferencesManager.loadPreferences())
-    val preferences: StateFlow<com.example.stockdiary.data.prefs.DashboardPreferences> = _preferences.asStateFlow()
-
-    /** 进入历史页时从磁盘重读偏好，使刚改的开关（如「显示月度增值」）立即生效 */
-    fun reloadPreferences() {
-        viewModelScope.launch(Dispatchers.IO) {
-            _preferences.value = dashboardPreferencesManager.loadPreferences()
-        }
-    }
+    val preferences: StateFlow<com.example.stockdiary.data.prefs.DashboardPreferences> =
+        dashboardPreferencesManager.preferences
 
     private val _selectedPeriod = MutableStateFlow(defaultPeriod)
 
@@ -145,25 +138,17 @@ class HistoryViewModel(
     }
 
     /**
-     * 重读设置页的「默认历史周期」。
+     * 应用设置页的「默认历史周期」。
      *
      * 本 VM 挂 Activity 作用域、默认周期只在构造时读一次；用户在设置里改了默认周期后，
-     * 进历史页仍是旧值，必须杀进程才生效。每次进入历史页调一次即可。
-     * 用户已经在本次会话内手动点过周期 chip 的，不覆盖他的选择。
+     * 进历史页需要重新应用。偏好的唯一流在设置页写入时已同步更新，这里直接读内存即可，
+     * 不需要再读磁盘。用户已经在本次会话内手动点过周期 chip 的，不覆盖他的选择。
      */
     fun reloadDefaultPeriod() {
         if (periodChosenByUser) return
-        viewModelScope.launch(Dispatchers.IO) {
-            try {
-                val period = dashboardPreferencesManager.loadPreferences().defaultPeriod
-                    .takeIf { it in VALID_PERIODS } ?: "1M"
-                if (!periodChosenByUser) _selectedPeriod.value = period
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                AppLogger.e("重读默认历史周期失败: ${e.message}", e, "HistoryVM")
-            }
-        }
+        val period = dashboardPreferencesManager.preferences.value.defaultPeriod
+            .takeIf { it in VALID_PERIODS } ?: "1M"
+        if (!periodChosenByUser) _selectedPeriod.value = period
     }
 
     fun saveSnapshot() {

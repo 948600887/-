@@ -23,7 +23,8 @@ fun createSettingsViewModelFactory(container: AppContainer): ViewModelProvider.F
             dataExporter = container.dataExporter,
             dashboardPreferencesManager = container.dashboardPreferencesManager,
             dataSourceHealthChecker = DataSourceHealthChecker,
-            priceSyncPreferencesManager = container.priceSyncPreferencesManager
+            priceSyncPreferencesManager = container.priceSyncPreferencesManager,
+            priceCacheMaintenance = container.priceCacheMaintenance
         )
     }
 }

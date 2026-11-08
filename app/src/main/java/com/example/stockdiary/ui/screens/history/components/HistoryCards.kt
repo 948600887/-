@@ -34,7 +34,7 @@ import com.example.stockdiary.database.AssetSnapshot
 import com.example.stockdiary.ui.theme.AppTheme
 import com.example.stockdiary.utils.format
 import com.example.stockdiary.utils.formatDateLabel
-import com.example.stockdiary.utils.profitColor
+import com.example.stockdiary.ui.theme.profitColor
 import com.example.stockdiary.utils.toProfitDisplay
 
 private val periodOptions = listOf(

@@ -1,10 +1,8 @@
 package com.example.stockdiary.network
 
-import android.content.Context
 import com.example.stockdiary.common.Result
 import com.example.stockdiary.database.FundNavCache
-import com.example.stockdiary.database.FundNavCacheDao
-import com.example.stockdiary.database.StockDatabase
+import com.example.stockdiary.data.price.BoundedTtlCache
 import com.example.stockdiary.data.price.RoundSourceFailureScope
 import com.example.stockdiary.data.price.SourceStats
 import com.example.stockdiary.utils.AppLogger
@@ -75,38 +73,39 @@ object FundAPI {
     private const val HOST_LEGACY = "fund.eastmoney.com"
 
     private val client = NetworkClient.fundClient
-    private val cache = ConcurrentHashMap<String, CacheEntry>()
+    /**
+     * 基金净值内存缓存。统一实现见 [BoundedTtlCache]，但这里保留原有两个「刻意口径」：
+     * 1. **TTL 固定 5 分钟**（[CACHE_DURATION_MS]），且「已是今日净值」时 forceRefresh
+     *    也复用（判定留在 [getFundInfoWithCache] 调用点，不搬进缓存层）；
+     * 2. 历史上**没有容量上限**（基金数量远小于股票，且清缓存 / 进程回收是主要出口）。
+     *    因此 maxEntries 取 [Int.MAX_VALUE]，不为「统一」而引入新的淘汰行为。
+     */
+    private val cache = BoundedTtlCache<String, FundInfo>(Int.MAX_VALUE)
 
     /**
-     * 净值持久化缓存 DAO（Room）。
+     * 净值持久化端口（由 data 层实现）。
      *
      * 与 [UnifiedPriceService.init] 同一模式：在 Application.onCreate 注入一次。
      * **未注入时必须整体降级为空**（单测不注入；数据库初始化失败时也是 null）：
-     * 拿不到 DAO 只是没有跨进程复用，退回原来的纯内存缓存即可，绝不能 NPE
+     * 拿不到持久化只是没有跨进程复用，退回原来的纯内存缓存即可，绝不能 NPE
      * 把整条同步链路打断。
      */
     @Volatile
-    private var navCacheDao: FundNavCacheDao? = null
+    private var navCacheStore: FundNavCacheStore? = null
 
     /**
-     * 注入净值持久化缓存 DAO。在 Application.onCreate 调用一次。
+     * 注入净值持久化端口。在 Application.onCreate 调用一次。
      *
-     * [StockDatabase.getInstance] 只构造 builder 与 DAO 对象，真正开库要等第一次
-     * 查询，所以放在启动阶段不会拖慢 Application.onCreate。
+     * 网络层不再直接打开 Room：DAO 的构造在 data 层的
+     * [com.example.stockdiary.data.fund.FundNavCacheStoreImpl]，本层只依赖接口。
+     * 传 null 表示持久化不可用（降级为纯内存缓存）。
      */
-    fun init(context: Context) {
-        navCacheDao = try {
-            StockDatabase.getInstance(context.applicationContext).fundNavCacheDao()
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            AppLogger.w("基金净值持久化缓存未启用（DAO 注入失败）: ${e.message}", TAG)
-            null
-        }
+    fun init(store: FundNavCacheStore?) {
+        navCacheStore = store
     }
 
     /** 持久化缓存是否可用（未注入时 false）。单测用它钉住「未注入也不炸」。 */
-    internal fun hasPersistentNavCache(): Boolean = navCacheDao != null
+    internal fun hasPersistentNavCache(): Boolean = navCacheStore != null
 
     // ==================== 轻量源 / legacy 源 ====================
     //
@@ -233,13 +232,13 @@ object FundAPI {
     /**
      * 读一条持久化净值。
      *
-     * DAO 未注入、或读库抛异常，一律返回 null —— 持久化只是**加速**手段，
+     * 端口未注入、或读库抛异常，一律返回 null —— 持久化只是**加速**手段，
      * 读不到就回到内存缓存 + 网络，不能让它成为新的失败点。
      */
     internal suspend fun readPersistentNav(code: String): FundNavCache? {
-        val dao = navCacheDao ?: return null
+        val store = navCacheStore ?: return null
         return try {
-            dao.get(code)
+            store.get(code)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -265,11 +264,6 @@ object FundAPI {
         val isStale: Boolean = false
     )
 
-    private data class CacheEntry(
-        val data: FundInfo,
-        val timestamp: Long
-    )
-
     /** 获取基金净值（无缓存，始终请求最新） */
     suspend fun getFundPrice(fundCode: String): Double? {
         return getFundInfo(fundCode)?.price
@@ -286,7 +280,7 @@ object FundAPI {
         forceRefresh: Boolean = false
     ): Result<FundInfo> = withContext(Dispatchers.IO) {
         try {
-            val cachedEntry = cache[fundCode]
+            val cachedEntry = cache.get(fundCode)
             val now = System.currentTimeMillis()
 
             // forceRefresh 也要分情况，不能一律绕过缓存。
@@ -303,7 +297,7 @@ object FundAPI {
             if (cachedEntry != null &&
                 (now - cachedEntry.timestamp) < CACHE_DURATION_MS &&
                 (!forceRefresh || isTodaysNav(
-                    navDate = cachedEntry.data.date,
+                    navDate = cachedEntry.value.date,
                     today = java.time.LocalDate.now().toString()
                 ))
             ) {
@@ -312,7 +306,7 @@ object FundAPI {
                     TAG
                 )
                 return@withContext Result.success(
-                    cachedEntry.data.copy(isFromCache = true)
+                    cachedEntry.value.copy(isFromCache = true)
                 )
             }
 
@@ -337,7 +331,7 @@ object FundAPI {
                 )
             ) {
                 val reused = persisted.toFundInfo()
-                cache[fundCode] = CacheEntry(reused, System.currentTimeMillis())
+                cache.put(fundCode, reused)
                 AppLogger.d(
                     "复用持久化净值，零下载: $fundCode navDate=${persisted.navDate}",
                     TAG
@@ -364,7 +358,7 @@ object FundAPI {
                 )
             ) {
                 val throttled = persisted.toFundInfo().copy(isStale = true)
-                cache[fundCode] = CacheEntry(throttled, System.currentTimeMillis())
+                cache.put(fundCode, throttled)
                 AppLogger.d(
                     "下载节流生效，先给库内最近一次净值: $fundCode navDate=${persisted.navDate}",
                     TAG
@@ -376,7 +370,7 @@ object FundAPI {
             if (fundInfo != null) {
                 // 用写入时刻而不是请求开始时刻：天天基金的响应常在 0.5~2MB，
                 // 弱网下耗时可观，拿请求开始时刻会把 5 分钟 TTL 白白吃掉一段。
-                cache[fundCode] = CacheEntry(fundInfo, System.currentTimeMillis())
+                cache.put(fundCode, fundInfo)
                 persistNav(fundCode, fundInfo, persisted)
                 AppLogger.d("获取基金数据成功: ${fundInfo.name}", TAG)
                 Result.success(fundInfo)
@@ -384,7 +378,7 @@ object FundAPI {
                 // 刷新失败时宁可给上一轮的旧净值，也不要返回失败：
                 // 一次网络抖动就让持仓显示"未找到基金数据"，还会被计成同步失败。
                 // 回退顺序：内存旧值 → 库里旧值 → 才认失败。
-                val stale = cachedEntry?.data ?: persisted?.toFundInfo()
+                val stale = cachedEntry?.value ?: persisted?.toFundInfo()
                 if (stale != null) {
                     AppLogger.w(
                         FailureLogFormat.failureLine(
@@ -449,12 +443,12 @@ object FundAPI {
      * 不塞进 [clearCache] 是因为后者非 suspend，被
      * [UnifiedPriceService.clearCache] 直接调用；在里面切线程 / 开事务会改变
      * 调用方的线程语义。清空落盘数据是 IO，只能由 suspend 的调用方来做。
-     * DAO 未注入时静默空操作。
+     * 端口未注入时静默空操作。
      */
     suspend fun clearPersistentCache() {
-        val dao = navCacheDao ?: return
+        val store = navCacheStore ?: return
         try {
-            dao.clear()
+            store.clear()
             AppLogger.d("持久化净值缓存已清空", TAG)
         } catch (e: CancellationException) {
             throw e
@@ -504,7 +498,7 @@ object FundAPI {
      * @param previous 本次流程里已经读过的旧行（可能为空），用来省一次查询
      */
     private suspend fun persistNav(code: String, info: FundInfo, previous: FundNavCache?) {
-        val dao = navCacheDao ?: return
+        val store = navCacheStore ?: return
         val navDate = info.date?.trim().orEmpty()
         if (navDate.isEmpty()) {
             AppLogger.w("净值日期为空，不写持久化缓存（否则无法判断新旧）: $code", TAG)
@@ -532,7 +526,7 @@ object FundAPI {
             fetchedAt = System.currentTimeMillis()
         )
         try {
-            dao.upsert(row)
+            store.upsert(row)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {

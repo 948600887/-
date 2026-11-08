@@ -58,8 +58,6 @@ fun HistoryScreen(
     val viewModel: HistoryViewModel = viewModel(factory = HistoryViewModel.factory(container))
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val preferences by viewModel.preferences.collectAsStateWithLifecycle()
-    // 进入本页时重读偏好，让「设置 → 自定义仪表盘」里改的开关立即生效
-    LaunchedEffect(Unit) { viewModel.reloadPreferences() }
 
     // 提示宿主在导航层（见 GoldVaultNavHost）：本页只发消息，不持有 SnackbarHostState
     val appSnackbar = LocalAppSnackbar.current

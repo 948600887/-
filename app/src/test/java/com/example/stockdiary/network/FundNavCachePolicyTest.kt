@@ -333,13 +333,46 @@ class FundNavCachePolicyTest {
         )
     }
 
-    // ==================== 未注入 DAO 时的降级 ====================
+    // ==================== 未注入端口时的降级 ====================
 
     @Test
-    fun `未注入 DAO 时持久化缓存整体降级为空_不会 NPE`() {
-        // 单测不调 FundAPI.init（没有 Context），整个持久化层应当静默失效，
-        // FundAPI 退回纯内存缓存 —— 拿不到 DAO 绝不能让同步链路抛异常。
+    fun `未注入端口时持久化缓存整体降级为空_不会 NPE`() {
+        // 单测不调 FundAPI.init（没有端口实现），整个持久化层应当静默失效，
+        // FundAPI 退回纯内存缓存 —— 拿不到存储绝不能让同步链路抛异常。
+        FundAPI.init(null)
         assertFalse(FundAPI.hasPersistentNavCache())
         assertNull(runBlocking { FundAPI.readPersistentNav("000306") })
+    }
+
+    @Test
+    fun `注入端口后_FundAPI 通过端口读写_不再直接依赖 DAO`() = runBlocking {
+        val row = FundNavCache(
+            code = "000306",
+            name = "天弘中证银行ETF联接A",
+            nav = 1.2345,
+            navDate = "2026-10-14"
+        )
+        val store = FakeNavStore(row)
+        try {
+            FundAPI.init(store)
+
+            assertTrue(FundAPI.hasPersistentNavCache())
+            assertEquals(row, FundAPI.readPersistentNav("000306"))
+
+            FundAPI.clearPersistentCache()
+            assertTrue("清缓存必须转发到端口实现", store.cleared)
+        } finally {
+            FundAPI.init(null)
+        }
+    }
+
+    /** 端口假实现：证明 FundAPI 只认接口，替换存储实现不需要碰网络层 */
+    private class FakeNavStore(private val row: FundNavCache?) : FundNavCacheStore {
+        var cleared = false
+        override suspend fun get(code: String): FundNavCache? = row
+        override suspend fun upsert(row: FundNavCache) = Unit
+        override suspend fun clear() {
+            cleared = true
+        }
     }
 }

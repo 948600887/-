@@ -162,27 +162,15 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), DashboardUiState())
 
-    private val _preferences = MutableStateFlow(preferencesManager.loadPreferences())
-    val preferences: StateFlow<com.example.stockdiary.data.prefs.DashboardPreferences> = _preferences.asStateFlow()
+    /**
+     * 用户偏好。直接复用 [com.example.stockdiary.data.prefs.DashboardPreferencesManager.preferences]
+     * 这份**全应用唯一**的流：设置页 / 日历页的任何写入都会立即推送到这里，
+     * 本 VM 不再持有副本，也不需要回前台 reload。
+     */
+    val preferences: StateFlow<DashboardPreferences> = preferencesManager.preferences
 
     private val _existingAccounts = MutableStateFlow<List<String>>(emptyList())
     val existingAccounts: StateFlow<List<String>> = _existingAccounts.asStateFlow()
-
-    /**
-     * 从磁盘重新加载偏好并推送到 [_preferences]。
-     *
-     * 偏好只在构造期加载一次（见 [_preferences]），但用户在「设置 → 自定义仪表盘」
-     * 改完开关后，`SettingsViewModel` 写入的是 SharedPreferences，本 VM 的内存副本仍是旧值，
-     * 导致回到仪表盘界面不刷新、且收入算完用旧值整体回写会把新开关覆盖掉（P0-3）。
-     * 仪表盘每次回前台（ON_RESUME）调一次本方法即可与磁盘同步。
-     */
-    fun reloadPreferences() {
-        // 一次要读 20 个 SharedPreferences 键（含 getStringSet），SP 首次访问还要等 XML 载入；
-        // 它由 ON_RESUME 触发，放主线程会让「回到仪表盘」那一帧卡一下 → 切 IO 线程读
-        viewModelScope.launch(Dispatchers.IO) {
-            _preferences.value = preferencesManager.loadPreferences()
-        }
-    }
 
     private var hasLoadedIncome = false
 
@@ -244,7 +232,7 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
 
         val symbols = assetsOnly.mapNotNull { it.symbol }.toSet()
         val fingerprint = dividendInputFingerprint(assetsOnly)
-        val cached = _preferences.value
+        val cached = preferences.value
         // 只有缓存就是「这一批资产」算出来的才敢当全量展示（见上方 KDoc）。
         // 指纹含数量与利率：加仓 / 改存款余额同样会让旧值作废，不能只看代码集合。
         val hasCached = symbols.isNotEmpty() && cached.annualDividendFingerprint == fingerprint
@@ -298,14 +286,14 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
                 // 存下来：下次进场先摆这个值，不用等这一轮算完。
                 // 走 Manager 的原子「读-改-写」：只覆盖两个缓存字段，其余（含用户在设置页
                 // 刚改的开关、日历改的月度生活费等）原样保留，杜绝用陈旧副本整体回写覆盖。
-                val updated = preferencesManager.updatePreferences { prefs ->
+                // 写盘后 Manager 的唯一偏好流已同步更新，本 VM 无需再改本地副本。
+                preferencesManager.updatePreferences { prefs ->
                     prefs.copy(
                         annualDividendCache = result.totalAnnualIncome,
                         annualDividendSymbols = symbols,
                         annualDividendFingerprint = fingerprint
                     )
                 }
-                _preferences.value = updated
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {

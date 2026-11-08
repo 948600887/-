@@ -67,7 +67,7 @@ import com.example.stockdiary.ui.theme.AppTheme
 import com.example.stockdiary.ui.viewmodels.CalendarViewModel
 import com.example.stockdiary.ui.viewmodels.aggregateAssetsBySymbol
 import com.example.stockdiary.utils.format
-import com.example.stockdiary.utils.profitColor
+import com.example.stockdiary.ui.theme.profitColor
 import java.time.LocalDate
 import java.time.format.TextStyle
 import java.util.Locale

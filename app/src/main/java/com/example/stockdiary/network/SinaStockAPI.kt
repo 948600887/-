@@ -3,6 +3,7 @@ package com.example.stockdiary.network
 import android.content.Context
 import com.example.stockdiary.utils.AppLogger
 import com.example.stockdiary.utils.FailureLogFormat
+import com.example.stockdiary.data.price.BoundedTtlCache
 import com.example.stockdiary.data.price.RoundSourceFailureScope
 import com.example.stockdiary.data.price.SourceIds
 import com.example.stockdiary.common.Result
@@ -35,9 +36,16 @@ object SinaStockAPI : StockAPI {
     private const val BASE_URL_REALTIME = APIEndpoints.Sina.HQ_API + "/list="
     private const val BASE_URL_HISTORY = APIEndpoints.Sina.HISTORY_API
 
-    private val stockDataCache = ConcurrentHashMap<String, Pair<Long, SinaStockData>>()
     private const val CACHE_DURATION = CacheConfig.PORTFOLIO_CACHE_MS
     private const val MAX_CACHE_SIZE = 200
+
+    /**
+     * 新浪内存价缓存。统一实现见 [com.example.stockdiary.data.price.BoundedTtlCache]；
+     * 这里保留自己的 **5 分钟扁平 TTL**（与 [PriceCacheManager] 的交易时段动态口径不同：
+     * 本层是「本轮批量/逐只结果的短期复用」，不能因为合并实现改成动态 TTL）。
+     */
+    private val stockDataCache =
+        BoundedTtlCache<String, SinaStockData>(MAX_CACHE_SIZE)
     private const val MAX_RETRY_COUNT = RequestLimits.MAX_RETRY
     
     private val pendingRequests = ConcurrentHashMap<String, kotlinx.coroutines.CompletableDeferred<Result<SinaStockData>>>()
@@ -161,7 +169,7 @@ object SinaStockAPI : StockAPI {
                         val cached = PriceCacheManager.getCachedPrice(code)
                         if (cached != null) {
                             cachedResults[code] = cached
-                            stockDataCache[code] = Pair(System.currentTimeMillis(), cached)
+                            stockDataCache.put(code, cached)
                         } else {
                             val oldCached = getCachedData(code)
                             if (oldCached != null) {
@@ -640,18 +648,16 @@ object SinaStockAPI : StockAPI {
     
     private fun cacheData(code: String, data: SinaStockData) {
         synchronized(requestLock) {
-            if (stockDataCache.size >= MAX_CACHE_SIZE) {
-                val oldestKey = stockDataCache.minByOrNull { it.value.first }?.key
-                oldestKey?.let { stockDataCache.remove(it) }
-            }
-            stockDataCache[code] = Pair(System.currentTimeMillis(), data)
+            stockDataCache.put(code, data)
+            // 与旧行为一致：只在超上限时淘汰最旧，不按 5 分钟 TTL 预清
+            stockDataCache.trim(Long.MIN_VALUE)
         }
     }
     
     private fun getCachedData(code: String): SinaStockData? {
-        val cached = stockDataCache[code]
-        return if (cached != null && System.currentTimeMillis() - cached.first < CACHE_DURATION) {
-            cached.second
+        val cached = stockDataCache.get(code)
+        return if (cached != null && System.currentTimeMillis() - cached.timestamp < CACHE_DURATION) {
+            cached.value
         } else {
             stockDataCache.remove(code)
             null
@@ -675,12 +681,13 @@ object SinaStockAPI : StockAPI {
     
     fun getCacheStats(): CacheStats {
         val cacheStats = PriceCacheManager.getCacheStats()
-        val memoryStats = stockDataCache.map { 
-            System.currentTimeMillis() - it.value.first < CACHE_DURATION 
-        }.count { it }
-        
+        val now = System.currentTimeMillis()
+        val memoryStats = stockDataCache.snapshot().values.count {
+            now - it.timestamp < CACHE_DURATION
+        }
+
         return CacheStats(
-            memoryCount = stockDataCache.size,
+            memoryCount = stockDataCache.size(),
             diskCount = cacheStats.totalCount,
             validCount = memoryStats + cacheStats.validCount,
             nextRefreshIn = 0L

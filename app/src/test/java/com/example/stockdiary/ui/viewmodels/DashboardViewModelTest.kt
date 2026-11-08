@@ -19,6 +19,7 @@ import io.mockk.mockkObject
 import io.mockk.unmockkAll
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.async
@@ -69,6 +70,9 @@ class DashboardViewModelTest {
     private val useCase = mockk<DividendIncomeUseCase>(relaxed = true)
     private val container = mockk<AppContainer>(relaxed = true)
 
+    /** Manager 持有的全应用唯一偏好流；VM 直接订阅它，不再自建副本 */
+    private lateinit var prefsFlow: MutableStateFlow<DashboardPreferences>
+
     private val stockAsset = Asset(
         name = "长江电力", type = AssetType.STOCK, symbol = "600900",
         account = "默认", balance = 1000.0
@@ -92,15 +96,18 @@ class DashboardViewModelTest {
         every { container.dividendIncomeUseCase } returns useCase
         every { container.dashboardPreferencesManager } returns prefsMgr
         every { container.applicationContext } returns mockk(relaxed = true)
+        val initialPrefs = DashboardPreferences()
+        prefsFlow = MutableStateFlow(initialPrefs)
         // 非挂起函数用 every / 挂起函数用 coEvery
-        every { prefsMgr.loadPreferences() } returns DashboardPreferences()
-        // 模拟 Manager 的真实契约：拉磁盘最新值 → 套用 mutate → 存盘 → 返回合并结果。
-        // prefsMgr 是 mock，其 updatePreferences 是桩、真实方法体不会执行，缺省返回值会是
-        // MockK 造的假对象，导致 _preferences 被污染。
+        every { prefsMgr.loadPreferences() } returns initialPrefs
+        every { prefsMgr.preferences } returns prefsFlow
+        // 模拟 Manager 的真实契约：拉磁盘最新值 → 套用 mutate → 存盘 → 同步唯一流 → 返回合并结果。
+        // prefsMgr 是 mock，其 updatePreferences 是桩、真实方法体不会执行，唯一流不会自己更新；
+        // 缺省返回值还会是 MockK 造的假对象。
         every { prefsMgr.updatePreferences(any()) } answers {
             val mutate = firstArg<(DashboardPreferences) -> DashboardPreferences>()
-            val updated = mutate(prefsMgr.loadPreferences())
-            prefsMgr.savePreferences(updated)
+            val updated = mutate(prefsFlow.value)
+            prefsFlow.value = updated
             updated
         }
         every { assetRepo.getAllAssets() } returns flowOf(initialAssets)

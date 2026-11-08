@@ -11,7 +11,7 @@ import com.example.stockdiary.data.repository.AssetRepository
 import com.example.stockdiary.data.prefs.DashboardPreferences
 import com.example.stockdiary.data.prefs.DashboardPreferencesManager
 import com.example.stockdiary.data.export.DataExporter
-import com.example.stockdiary.data.price.StockDataManager
+import com.example.stockdiary.data.price.PriceCacheMaintenance
 import com.example.stockdiary.data.sync.PriceSyncPreferencesManager
 import com.example.stockdiary.data.sync.PriceSyncScheduler
 import com.example.stockdiary.data.sync.SnapshotScheduler
@@ -20,9 +20,6 @@ import com.example.stockdiary.database.AssetSnapshot
 import com.example.stockdiary.data.repository.DividendRepository
 import com.example.stockdiary.data.repository.TransactionRepository
 import com.example.stockdiary.database.Transaction
-import com.example.stockdiary.network.FundAPI
-import com.example.stockdiary.network.SinaStockAPI
-import com.example.stockdiary.network.UnifiedPriceService
 import com.example.stockdiary.utils.AppLogger
 import com.example.stockdiary.utils.DataSourceHealth
 import com.example.stockdiary.utils.DataSourceHealthChecker
@@ -50,7 +47,8 @@ class SettingsViewModel(
     private val dataExporter: DataExporter,
     private val dashboardPreferencesManager: DashboardPreferencesManager,
     private val dataSourceHealthChecker: DataSourceHealthChecker,
-    private val priceSyncPreferencesManager: PriceSyncPreferencesManager
+    private val priceSyncPreferencesManager: PriceSyncPreferencesManager,
+    private val priceCacheMaintenance: PriceCacheMaintenance
 ) : ViewModel() {
 
 
@@ -70,11 +68,11 @@ class SettingsViewModel(
     val uiState: StateFlow<SettingsUiState> = _uiState.asStateFlow()
 
     /**
-     * 自定义仪表盘偏好。保留独立流的理由见 [SettingsUiState] KDoc：跨页面共享的整块偏好，
-     * 写入路径与 SettingsUiState 其余字段不同。
+     * 自定义仪表盘偏好。直接复用 Manager 的全应用唯一偏好流：本页写入后 Manager 同步更新流，
+     * 设置页 / 仪表盘 / 持仓页 / 历史页看到的是同一份值，不需要各持副本再回前台重读。
      */
-    private val _dashboardPreferences = MutableStateFlow(dashboardPreferencesManager.loadPreferences())
-    val dashboardPreferences: StateFlow<DashboardPreferences> = _dashboardPreferences.asStateFlow()
+    val dashboardPreferences: StateFlow<DashboardPreferences> =
+        dashboardPreferencesManager.preferences
 
     fun setReminderEnabled(enabled: Boolean) {
         viewModelScope.launch {
@@ -324,19 +322,15 @@ class SettingsViewModel(
                 runCatching { LogDiagnostics.clear(appContext) }
                 // 派生缓存也要清：Room/SharedPreferences 清掉不代表内存与磁盘缓存清掉。
                 // 否则用户清库后重新添加同一代码，旧行情、旧分红、旧基金净值会原样回来。
-                runCatching { StockDataManager.getInstance(appContext).clearCache() }
-                runCatching { SinaStockAPI.invalidateCache() }
-                runCatching { UnifiedPriceService.clearCache() }
+                // 统一走数据层门面：设置页不再直接认识各个数据源单例。
+                priceCacheMaintenance.clearDerivedCaches()
                 runCatching { dividendRepository.clearCache() }
-                // FundAPI 的持久化净值表已被 assetRepository.deleteAllData() 清空，
-                // 这里再清一次内存/落盘入口，保证“清除所有数据”语义完整。
-                FundAPI.clearPersistentCache()
                 // 汇率单例还持有内存里的旧汇率与刷新时间（磁盘偏好已清），
                 // 不同步复位的话设置页会一直显示清除前的值，直到重启进程
                 ExchangeRateManager.resetToDefaultRates()
-                // 磁盘已清，本 VM 内存里的偏好副本也要立刻回默认：
-                // 否则设置页仍按旧副本渲染，再拨任何一个开关就会把「已清除的旧偏好」写回磁盘。
-                _dashboardPreferences.value = DashboardPreferences()
+                // 磁盘已清，Manager 的唯一偏好流复位成默认值：
+                // 否则各页面仍按旧值渲染，再拨任何一个开关就会把「已清除的旧偏好」写回磁盘。
+                dashboardPreferencesManager.resetToDefaults()
                 refreshPriceSyncState()
                 _uiState.update { state -> state.copy(isDeleting = false, deleteResult = Result.success(Unit)) }
             } catch (e: CancellationException) {
@@ -454,7 +448,7 @@ class SettingsViewModel(
      * ## 铁律：必须走原子「读-改-写」，禁止整块回写
      *
      * 原先直接 `savePreferences(preferences)` 把 sheet 累积的完整副本整块落盘。
-     * 该副本的初值取自本 VM **构造期**加载的 [_dashboardPreferences]——用户在设置页
+     * 该副本的初值取自本 VM **构造期**加载的偏好快照——用户在设置页
      * 停留期间，日历页可能改了月度生活费、仪表盘/持仓刷新可能更新年度分红缓存，
      * 整块回写会把这些字段冲回旧值（MEMORY.md 记录过同类事故：持仓页用陈旧副本
      * 整体回写踩掉日历的月度生活费）。因此改走 Manager 的
@@ -465,7 +459,7 @@ class SettingsViewModel(
     fun saveDashboardPreferences(preferences: DashboardPreferences) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                val updated = dashboardPreferencesManager.updatePreferences { fresh ->
+                dashboardPreferencesManager.updatePreferences { fresh ->
                     fresh.copy(
                         showTotalAssets = preferences.showTotalAssets,
                         showNetAssets = preferences.showNetAssets,
@@ -488,7 +482,6 @@ class SettingsViewModel(
                         defaultPeriod = preferences.defaultPeriod
                     )
                 }
-                _dashboardPreferences.value = updated
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -592,16 +585,14 @@ class SettingsViewModel(
     }
 
     /**
-     * 进入页面时一次性重读所有「磁盘镜像」：价格同步/提醒 + 仪表盘偏好 + 汇率。
+     * 进入页面时一次性重读「磁盘镜像」：价格同步/提醒 + 汇率。
      *
-     * 原先分成 refreshPriceSyncState + reloadDashboardPreferences 两次 launch、两次 IO、
-     * 两次 update ⇒ 设置页要重组两遍。这里合并成一次 IO、两次写入（SettingsUiState 与偏好流各一次，
-     * 两个流本来就分属不同消费方）。
+     * 偏好本身不再需要重读：全应用唯一偏好流在任一页面写入时就同步更新了，
+     * 本页订阅的 [dashboardPreferences] 自然已是最新值。
      */
     fun refreshOnEnter() {
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                _dashboardPreferences.value = dashboardPreferencesManager.loadPreferences()
                 readSettingsSnapshot()
             } catch (e: CancellationException) {
                 throw e

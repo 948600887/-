@@ -6,6 +6,7 @@ import com.example.stockdiary.data.prefs.DashboardPreferences
 import com.example.stockdiary.data.prefs.DashboardPreferencesManager
 import com.example.stockdiary.data.prefs.SortOrder
 import com.example.stockdiary.data.repository.AssetRepository
+import com.example.stockdiary.data.price.PriceCacheMaintenance
 import com.example.stockdiary.data.sync.PriceSyncPreferencesManager
 import com.example.stockdiary.data.sync.PriceSyncScheduler
 import com.example.stockdiary.data.sync.SnapshotScheduler
@@ -27,6 +28,7 @@ import io.mockk.mockkObject
 import io.mockk.verify
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
@@ -78,6 +80,10 @@ class SettingsViewModelTest {
     private val dashboardPreferencesManager = mockk<DashboardPreferencesManager>(relaxed = true)
     private val dataSourceHealthChecker = mockk<DataSourceHealthChecker>(relaxed = true)
     private val priceSyncPreferencesManager = mockk<PriceSyncPreferencesManager>(relaxed = true)
+    private val priceCacheMaintenance = mockk<PriceCacheMaintenance>(relaxed = true)
+
+    /** Manager 持有的全应用唯一偏好流；VM 直接暴露它，不再自建副本 */
+    private lateinit var prefsFlow: MutableStateFlow<DashboardPreferences>
 
     private lateinit var vm: SettingsViewModel
 
@@ -108,6 +114,9 @@ class SettingsViewModelTest {
         every { dividendRepository.getAllDividendsFlow() } returns flowOf(emptyList())
         coEvery { dividendRepository.getAllDividendsSync() } returns emptyList()
 
+        prefsFlow = MutableStateFlow(DashboardPreferences())
+        every { dashboardPreferencesManager.preferences } returns prefsFlow
+
         vm = SettingsViewModel(
             appContext = appContext,
             assetRepository = assetRepository,
@@ -116,7 +125,8 @@ class SettingsViewModelTest {
             dataExporter = dataExporter,
             dashboardPreferencesManager = dashboardPreferencesManager,
             dataSourceHealthChecker = dataSourceHealthChecker,
-            priceSyncPreferencesManager = priceSyncPreferencesManager
+            priceSyncPreferencesManager = priceSyncPreferencesManager,
+            priceCacheMaintenance = priceCacheMaintenance
         )
     }
 
@@ -169,6 +179,8 @@ class SettingsViewModelTest {
 
         // 数据库层必须被清
         coVerify { assetRepository.deleteAllData() }
+        // 派生缓存必须走数据层门面清理（设置页不再直接认识各数据源单例）
+        coVerify { priceCacheMaintenance.clearDerivedCaches() }
         // 三个后台任务必须被取消（这是此前漏掉的快照取消 + 价格同步 + 提醒）
         verify { PriceSyncScheduler.cancelDailySync(any()) }
         verify { SnapshotScheduler.cancelDailySnapshot(any()) }
@@ -296,23 +308,21 @@ class SettingsViewModelTest {
 
     /**
      * 给 [DashboardPreferencesManager] 装上假引擎，模拟 Manager 的真实契约：
-     * 拉磁盘最新值 → 套用 mutate → 记录落盘对象 → 返回合并结果。
+     * 拉磁盘最新值 → 套用 mutate → 记录落盘对象 → 同步唯一偏好流 → 返回合并结果。
      *
      * 必须这么打桩：prefsMgr 是 relaxed mock，其 `updatePreferences` 是桩、真实方法体不会执行，
-     * 内部的 load/save 都不会发生，缺省返回值还是 MockK 造的假对象。不打桩的话
-     * 「断言落盘对象」这类断言全部读到假数据，护栏等于没写。
-     *
-     * 刻意**不**在 answer 里调 `savePreferences`：[persistedHits] 就是落盘流水，
-     * 这样 [saveDashboardPreferences 走 updatePreferences 原子入口而不是整块回写]
-     * 才能干净地断言 `savePreferences` 一次都没被调到。
+     * 内部的 load/save 与唯一流更新都不会发生，缺省返回值还是 MockK 造的假对象。
+     * 不打桩的话「断言落盘对象 / 对外流」这类断言全部读到假数据，护栏等于没写。
      */
     private fun installFakeUpdateEngine(disk: DashboardPreferences) {
         every { dashboardPreferencesManager.loadPreferences() } returns disk
+        prefsFlow.value = disk
         every { dashboardPreferencesManager.updatePreferences(any()) } answers {
             val mutate = firstArg<(DashboardPreferences) -> DashboardPreferences>()
             val merged = mutate(dashboardPreferencesManager.loadPreferences())
             persistedHits.add(merged)
             mergeCount.incrementAndGet()
+            prefsFlow.value = merged
             merged
         }
     }
@@ -321,12 +331,12 @@ class SettingsViewModelTest {
      * 在上面这层记账之后**重新构造**一个 VM。
      *
      * 必须重新构造：[dashboardPreferencesManager] 的 `loadPreferences()` 要在 VM 构造前
-     * 打桩，VM 字段初始化时读到的才是指定的磁盘值——`@Before` 里那个 [vm] 是在打桩之前
-     * 构造的，`_dashboardPreferences` 初值是 MockK 的缺省返回值，拿它当「合并前基线」
-     * 断言会误判（第一轮跑就是这样栽的）。只关心「落盘了什么」的用例用 [vm] 即可。
+     * 打桩，并把唯一偏好流置成指定的磁盘值，VM 暴露的 `dashboardPreferences` 才以它为准。
+     * 只关心「落盘了什么」的用例用 [vm] 即可。
      */
     private fun buildVmWithPrefs(disk: DashboardPreferences): SettingsViewModel {
         every { dashboardPreferencesManager.loadPreferences() } returns disk
+        prefsFlow.value = disk
         return SettingsViewModel(
             appContext = appContext,
             assetRepository = assetRepository,
@@ -335,7 +345,8 @@ class SettingsViewModelTest {
             dataExporter = dataExporter,
             dashboardPreferencesManager = dashboardPreferencesManager,
             dataSourceHealthChecker = dataSourceHealthChecker,
-            priceSyncPreferencesManager = priceSyncPreferencesManager
+            priceSyncPreferencesManager = priceSyncPreferencesManager,
+            priceCacheMaintenance = priceCacheMaintenance
         )
     }
 
@@ -428,8 +439,7 @@ class SettingsViewModelTest {
         waitUntil { mergeCount.get() > 0 }
 
         verify(exactly = 1) { dashboardPreferencesManager.updatePreferences(any()) }
-        // 一旦有人改回 `savePreferences(preferences)` 整块回写，这条立刻变红
-        verify(exactly = 0) { dashboardPreferencesManager.savePreferences(any()) }
+        // 整块回写入口 savePreferences 已在生产代码私有化，再用陈旧副本回写在编译期就不成立
     }
 
     @Test

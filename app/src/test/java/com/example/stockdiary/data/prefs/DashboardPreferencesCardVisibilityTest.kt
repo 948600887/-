@@ -17,7 +17,7 @@ import org.junit.Test
  *
  * 注意：早期的 `DashboardComponent` 枚举 + `updateComponentVisibility` / `isComponentVisible` /
  * `getVisibleComponents` 已被确认是**死代码**（生产零消费），相关用例已随死代码一并删除。
- * 本文件只钉住真正生效的 [DashboardPreferences] 数据类 + `savePreferences` / `loadPreferences`
+ * 本文件只钉住真正生效的 [DashboardPreferences] 数据类 + `updatePreferences` / `loadPreferences`
  * 往返契约，避免误删对真实持久化逻辑的保护。
  *
  * 钉住四件事：
@@ -31,6 +31,16 @@ import org.junit.Test
  * 内存版 SharedPreferences：不引入 Robolectric，又能驱动真实的 Manager 逻辑。
  */
 class DashboardPreferencesCardVisibilityTest {
+
+    /**
+     * 整块替换偏好的测试入口。
+     *
+     * 生产的 `savePreferences` 已私有化（业务写入口只剩 `updatePreferences`），
+     * 这里用「忽略磁盘现状、返回给定对象」的 mutate 达到同样的整块写入语义。
+     */
+    private fun DashboardPreferencesManager.replaceForTest(preferences: DashboardPreferences) {
+        updatePreferences { preferences }
+    }
 
     /** 全类型内存版 SharedPreferences：apply 立即生效，行为贴近真机 */
     private class FakePrefs : SharedPreferences {
@@ -148,11 +158,11 @@ class DashboardPreferencesCardVisibilityTest {
         val prefs = FakePrefs()
         val manager = managerWith(prefs)
 
-        manager.savePreferences(DashboardPreferences(showAssetGrowth = false))
+        manager.replaceForTest(DashboardPreferences(showAssetGrowth = false))
         assertFalse("关掉后重新读取必须仍是 false", manager.loadPreferences().showAssetGrowth)
 
         // 反向：再打开也要能存住
-        manager.savePreferences(DashboardPreferences(showAssetGrowth = true))
+        manager.replaceForTest(DashboardPreferences(showAssetGrowth = true))
         assertTrue(manager.loadPreferences().showAssetGrowth)
     }
 
@@ -161,7 +171,7 @@ class DashboardPreferencesCardVisibilityTest {
         val prefs = FakePrefs()
         val manager = managerWith(prefs)
 
-        manager.savePreferences(
+        manager.replaceForTest(
             DashboardPreferences(
                 showTotalAssets = true,
                 showNetAssets = false,
@@ -200,7 +210,7 @@ class DashboardPreferencesCardVisibilityTest {
     fun `四个新卡片开关_save 再 load 往返保真_不被默认值吃掉`() {
         val manager = managerWith(FakePrefs())
 
-        manager.savePreferences(
+        manager.replaceForTest(
             DashboardPreferences(
                 showAssetGrowth = false,
                 showDividendProgress = false,
@@ -214,11 +224,35 @@ class DashboardPreferencesCardVisibilityTest {
         assertFalse(allOff.showNextPayout)
         assertFalse(allOff.showMonthlyCashFlow)
 
-        manager.savePreferences(DashboardPreferences())
+        manager.replaceForTest(DashboardPreferences())
         val allOn = manager.loadPreferences()
         assertTrue(allOn.showAssetGrowth)
         assertTrue(allOn.showDividendProgress)
         assertTrue(allOn.showNextPayout)
         assertTrue(allOn.showMonthlyCashFlow)
+    }
+
+    @Test
+    fun `唯一偏好流_写入后立即反映最新值`() {
+        val manager = managerWith(FakePrefs())
+        assertTrue(manager.preferences.value.showAssetGrowth)
+
+        manager.updatePreferences { it.copy(showAssetGrowth = false) }
+
+        // 各页面直接订阅这份流，写入必须同步可见（跨页面即时生效）
+        assertEquals(false, manager.preferences.value.showAssetGrowth)
+        assertEquals(manager.loadPreferences(), manager.preferences.value)
+    }
+
+    @Test
+    fun `唯一偏好流_恢复默认后同步回到默认值`() {
+        val manager = managerWith(FakePrefs())
+        manager.updatePreferences { it.copy(showAssetGrowth = false) }
+        assertFalse(manager.preferences.value.showAssetGrowth)
+
+        manager.resetToDefaults()
+
+        assertTrue(manager.preferences.value.showAssetGrowth)
+        assertEquals(DashboardPreferences(), manager.preferences.value)
     }
 }

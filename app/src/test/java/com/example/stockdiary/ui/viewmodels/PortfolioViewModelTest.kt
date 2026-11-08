@@ -16,11 +16,11 @@ import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.mockkObject
-import io.mockk.slot
 import io.mockk.unmockkAll
 import io.mockk.verify
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.async
@@ -67,6 +67,12 @@ class PortfolioViewModelTest {
     private val useCase = mockk<DividendIncomeUseCase>(relaxed = true)
     private val container = mockk<AppContainer>(relaxed = true)
 
+    /**
+     * 模拟 Manager 持有的**全应用唯一**偏好流。
+     * VM 直接暴露这份流，不再自建副本，因此测试里改它等同「别的页面写入偏好」。
+     */
+    private lateinit var prefsFlow: MutableStateFlow<DashboardPreferences>
+
     private val stockAsset = Asset(
         name = "长江电力", type = AssetType.STOCK, symbol = "600900",
         account = "默认", balance = 1000.0
@@ -93,15 +99,17 @@ class PortfolioViewModelTest {
         every { container.dividendIncomeUseCase } returns useCase
         every { container.dashboardPreferencesManager } returns prefsMgr
         every { container.applicationContext } returns mockk(relaxed = true)
+        prefsFlow = MutableStateFlow(initialPrefs)
         every { prefsMgr.loadPreferences() } returns initialPrefs
-        // 模拟 Manager 的真实契约：拉磁盘最新值 → 套用 mutate → 存盘 → 返回合并结果。
+        every { prefsMgr.preferences } returns prefsFlow
+        // 模拟 Manager 的真实契约：拉磁盘最新值 → 套用 mutate → 存盘 → 同步唯一流 → 返回合并结果。
         // 必须这么打桩：prefsMgr 是 mock，其 updatePreferences 是桩、真实方法体不会执行，
-        // 于是内部的 load/save 都不会发生；且缺省返回值是 MockK 造的假对象，
-        // 会让 vm.preferences 被赋成假对象（表现为「SortOrder 是个陌生实例」）。
+        // 内部唯一的偏好流也不会自己更新；且缺省返回值是 MockK 造的假对象，
+        // 会让 vm.preferences 被读成假值（表现为「SortOrder 是个陌生实例」）。
         every { prefsMgr.updatePreferences(any()) } answers {
             val mutate = firstArg<(DashboardPreferences) -> DashboardPreferences>()
-            val updated = mutate(prefsMgr.loadPreferences())
-            prefsMgr.savePreferences(updated)
+            val updated = mutate(prefsFlow.value)
+            prefsFlow.value = updated
             updated
         }
         every { assetRepo.getAllAssets() } returns flowOf(initialAssets)
@@ -143,18 +151,25 @@ class PortfolioViewModelTest {
         assertTrue(vm.preferences.value.showBankDeposits)
         assertTrue(vm.preferences.value.showStocks)
         assertTrue(vm.preferences.value.showFunds)
-        // savePreferences 非挂起 → verify
-        verify { prefsMgr.savePreferences(any()) }
+        verify { prefsMgr.updatePreferences(any()) }
+    }
+
+    @Test
+    fun `偏好由 Manager 唯一流驱动_其他页面写入立即可见`() {
+        val vm = buildVm()
+        // 模拟设置页 / 日历页写入：改动直接落到同一份流上
+        prefsFlow.value = prefsFlow.value.copy(showLiabilities = false, sortOrder = SortOrder.BY_VALUE_ASC)
+
+        assertFalse("其他页面的写入必须立即反映到本页", vm.preferences.value.showLiabilities)
+        assertEquals(SortOrder.BY_VALUE_ASC, vm.preferences.value.sortOrder)
     }
 
     @Test
     fun `updateSortOrder 更新排序偏好并持久化对应值`() = runBlocking {
-        val slot = slot<DashboardPreferences>()
-        every { prefsMgr.savePreferences(capture(slot)) } returns Unit
         val vm = buildVm()
         vm.updateSortOrder(SortOrder.BY_NAME)
         assertEquals(SortOrder.BY_NAME, vm.preferences.value.sortOrder)
-        assertEquals(SortOrder.BY_NAME, slot.captured.sortOrder)
+        assertEquals(SortOrder.BY_NAME, prefsFlow.value.sortOrder)
     }
 
     @Test

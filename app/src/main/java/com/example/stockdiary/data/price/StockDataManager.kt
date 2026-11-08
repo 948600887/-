@@ -198,23 +198,20 @@ class StockDataManager(
      */
     private fun isValidPrice(price: Double): Boolean = price.isFinite() && price > 0.0
     
-    // 数据缓存（内存缓存）
-    private val cache = ConcurrentHashMap<String, CacheItem>()
-
     /** 内存缓存上限：与 PriceCacheManager.MAX_MEMORY_CACHE_SIZE / SinaStockAPI.MAX_CACHE_SIZE 同量级（~200），避免长会话无限增长 */
     private val MAX_MEMORY_CACHE_ENTRIES = 200
-    
+
+    // 数据缓存（内存缓存）。统一实现见 [BoundedTtlCache]；这里**不设自己的 TTL**，
+    // 新鲜度仍完全委托 [PriceCacheManager.isCacheValid]（动态交易时段口径），
+    // 以免合并缓存实现时改掉取价新鲜度。
+    private val cache = BoundedTtlCache<String, StockData>(MAX_MEMORY_CACHE_ENTRIES)
+
     // 数据源实例缓存
     private val dataSourceCache = ConcurrentHashMap<String, StockDataSource>()
 
     init {
         PriceCacheManager.init(context)
     }
-    
-    data class CacheItem(
-        val data: StockData,
-        val timestamp: Long
-    )
     
     companion object {
         private const val TAG = "StockDataManager"
@@ -293,10 +290,10 @@ class StockDataManager(
         // 1. 检查是否需要强制刷新
         if (!forceRefresh) {
             // 2. 检查内存缓存
-            val cached = cache[symbol]
+            val cached = cache.get(symbol)
             if (cached != null && PriceCacheManager.isCacheValid(symbol)) {
                 AppLogger.d("使用内存缓存数据: $symbol", TAG)
-                return Result.success(cached.data)
+                return Result.success(cached.value)
             }
             
             // 3. 检查 PriceCacheManager 持久化缓存。
@@ -328,7 +325,7 @@ class StockDataManager(
                     yesterdayClose = persistedCache.prevClose,
                     timestamp = System.currentTimeMillis()
                 )
-                cache[symbol] = CacheItem(stockData, System.currentTimeMillis())
+                cache.put(symbol, stockData)
                 AppLogger.d("使用持久化缓存数据: $symbol", TAG)
                 return Result.success(stockData)
             }
@@ -339,13 +336,13 @@ class StockDataManager(
         if (!netAvailable) {
             val noNetLine = FailureLogFormat.failureLine(roundId, symbol, "网络", "网络连接不可用")
             AppLogger.w(noNetLine, TAG)
-            val oldCache = cache[symbol]
+            val oldCache = cache.get(symbol)
             if (oldCache != null) {
                 if (PriceCacheManager.isCacheValid(symbol)) {
                     // 仍在 TTL 内（盘后/周末复用收盘价是刻意设计）：保持原语义复用旧价，
                     // 不清空旧价、不写 0，也不改 PriceCacheManager 的 TTL 口径。
                     AppLogger.d("网络不可用，复用仍在 TTL 内的缓存价: $symbol", TAG)
-                    return Result.success(oldCache.data)
+                    return Result.success(oldCache.value)
                 }
                 // 缓存真的过期了：不能再以 success 身份把旧价送回 syncSingleAsset。
                 // 那会走 priceWriter → AssetDao.updatePriceBySymbol，把该行 lastSyncTime
@@ -401,7 +398,7 @@ class StockDataManager(
                 // 并视作该数据源失败（继续找下一个源），而不是把它当成成功。
                 if (stockData != null && isValidPrice(stockData.price)) {
                     // 成功：更新所有缓存
-                    cache[symbol] = CacheItem(stockData, System.currentTimeMillis())
+                    cache.put(symbol, stockData)
                     trimCacheIfNeeded()
                     
                     // 同时更新PriceCacheManager持久化缓存
@@ -603,7 +600,7 @@ class StockDataManager(
             val now = System.currentTimeMillis()
             sinaMap.mapValues { (code, sina) ->
                 val unified = sina.toUnifiedStockData()
-                cache[code] = CacheItem(unified, System.currentTimeMillis())
+                cache.put(code, unified)
                 PriceCacheManager.cachePrice(code, sina, SourceIds.SINA)
                 // G5 血缘：批量回填是**本次实时**新浪请求的结果，origin=IN_MEMORY；
                 // 轮次 ID 取本轮上下文，不能固定 0。
@@ -725,7 +722,7 @@ class StockDataManager(
         data: StockData,
         timestamp: Long = System.currentTimeMillis()
     ) {
-        cache[symbol] = CacheItem(data, timestamp)
+        cache.put(symbol, data, timestamp)
     }
 
     /** 测试专用读数：指定数据源当前相位，供三态迁移断言 */
@@ -750,7 +747,7 @@ class StockDataManager(
     fun getCacheStats(): Map<String, Any> {
         val priceStats = PriceCacheManager.getCacheStats()
         return mapOf(
-            "memoryCacheSize" to cache.size,
+            "memoryCacheSize" to cache.size(),
             "persistedCacheTotal" to priceStats.totalCount,
             "persistedCacheValid" to priceStats.validCount,
             "persistedCacheExpired" to priceStats.expiredCount
@@ -761,7 +758,7 @@ class StockDataManager(
      * 获取缓存大小
      */
     fun getCacheSize(): Int {
-        return cache.size
+        return cache.size()
     }
 
     /**
@@ -769,10 +766,8 @@ class StockDataManager(
      * 刚写入的（本次同步窗口内）时间戳最新，不会被误删。
      */
     private fun trimCacheIfNeeded() {
-        if (cache.size <= MAX_MEMORY_CACHE_ENTRIES) return
-        val entries = cache.entries.sortedBy { it.value.timestamp }
-        val removeCount = cache.size - MAX_MEMORY_CACHE_ENTRIES
-        entries.take(removeCount).forEach { cache.remove(it.key) }
+        // 原行为：只在超上限时淘汰最旧，不按 TTL 预清（新鲜度完全由 PriceCacheManager 判定）
+        cache.trim(Long.MIN_VALUE)
     }
 }
 

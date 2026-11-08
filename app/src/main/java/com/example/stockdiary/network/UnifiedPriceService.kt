@@ -79,7 +79,8 @@ object UnifiedPriceService {
         val asOf: Long
     )
 
-    private val priceCache = ConcurrentHashMap<String, CacheEntry>()
+    private val priceCache =
+        com.example.stockdiary.data.price.BoundedTtlCache<String, CacheEntry>(PRICE_CACHE_MAX_ENTRIES)
     private val pendingRequests = ConcurrentHashMap<String, CompletableDeferred<Result<AssetPrice>>>()
 
     /**
@@ -137,24 +138,17 @@ object UnifiedPriceService {
     internal fun cryptoSourceStatsSnapshot(roundId: Int): List<SourceStats> =
         if (cryptoStats.hasActivity(roundId)) listOf(cryptoStats.snapshot(roundId)) else emptyList()
 
-    private fun isFresh(entry: CacheEntry): Boolean =
+    private fun isFresh(entry: com.example.stockdiary.data.price.BoundedTtlCache.Entry<CacheEntry>): Boolean =
         System.currentTimeMillis() - entry.timestamp < PRICE_CACHE_TTL_MS
 
     /**
      * 价格缓存超过上限时淘汰最旧条目，防止进程内无限增长。
      * 先清一遍已过 TTL 的条目（新鲜度优先），还不够再按写入时间淘汰最旧的——
      * 刷新窗口内刚写入的条目时间戳最新，不会被误删（不会在同步进行中丢热点键）。
+     * 淘汰算法本身在 [com.example.stockdiary.data.price.BoundedTtlCache.trim]，与其它链路共用。
      */
     private fun trimPriceCacheIfNeeded() {
-        if (priceCache.size <= PRICE_CACHE_MAX_ENTRIES) return
-        val expireThreshold = System.currentTimeMillis() - PRICE_CACHE_TTL_MS
-        val expired = priceCache.filter { it.value.timestamp < expireThreshold }.keys
-        expired.forEach { priceCache.remove(it) }
-        if (priceCache.size > PRICE_CACHE_MAX_ENTRIES) {
-            val sorted = priceCache.entries.sortedBy { it.value.timestamp }
-            val removeCount = priceCache.size - PRICE_CACHE_MAX_ENTRIES
-            sorted.take(removeCount).forEach { priceCache.remove(it.key) }
-        }
+        priceCache.trim(System.currentTimeMillis() - PRICE_CACHE_TTL_MS)
     }
 
     suspend fun getPrice(
@@ -183,9 +177,9 @@ object UnifiedPriceService {
         if (batchResult != null) return@withContext Result.success(batchResult)
 
         if (!forceRefresh) {
-            val cached = priceCache[cacheKey]
+            val cached = priceCache.get(cacheKey)
             if (cached != null && isFresh(cached)) {
-                return@withContext Result.success(cached.price)
+                return@withContext Result.success(cached.value.price)
             }
         }
 
@@ -216,11 +210,15 @@ object UnifiedPriceService {
                     AssetType.CRYPTO -> SourceIds.BINANCE
                     else -> SourceIds.SINA
                 }
-                priceCache[cacheKey] = CacheEntry(
-                    price = price,
-                    timestamp = entryTimestamp,
-                    sourceId = sourceId,
-                    asOf = entryTimestamp
+                priceCache.put(
+                    cacheKey,
+                    CacheEntry(
+                        price = price,
+                        timestamp = entryTimestamp,
+                        sourceId = sourceId,
+                        asOf = entryTimestamp
+                    ),
+                    entryTimestamp
                 )
                 trimPriceCacheIfNeeded()
                 // G5 血缘：仅 FUND/CRYPTO 在此上报（STOCK 已在 StockDataManager 落 PriceCacheManager
@@ -319,11 +317,15 @@ object UnifiedPriceService {
                 // 写门面 60s 缓存：即便 batchResult 短路没兜住，逐标的 getPrice 也能命中这里
                 priceMap.forEach { (code, price) ->
                     val entryTimestamp = System.currentTimeMillis()
-                    priceCache["${AssetType.STOCK.name}_$code"] = CacheEntry(
-                        price = price,
-                        timestamp = entryTimestamp,
-                        sourceId = SourceIds.SINA,
-                        asOf = entryTimestamp
+                    priceCache.put(
+                        "${AssetType.STOCK.name}_$code",
+                        CacheEntry(
+                            price = price,
+                            timestamp = entryTimestamp,
+                            sourceId = SourceIds.SINA,
+                            asOf = entryTimestamp
+                        ),
+                        entryTimestamp
                     )
                 }
                 Result.success(priceMap)
@@ -476,7 +478,7 @@ object UnifiedPriceService {
             // 非强制刷新时跳过门面 60s 缓存里仍新鲜的标的：它们本就会命中缓存，
             // 预取纯属浪费请求（这批不进 map，逐标的 getPrice 走缓存返回同一个价）。
             if (!forceRefresh) {
-                val cached = priceCache["${AssetType.CRYPTO.name}_$code"]
+                val cached = priceCache.get("${AssetType.CRYPTO.name}_$code")
                 if (cached != null && isFresh(cached)) continue
             }
             codeToPair[code] = pricedPair
@@ -673,11 +675,15 @@ object UnifiedPriceService {
         if (priceMap.isEmpty()) return
         priceMap.forEach { (code, price) ->
             val entryTimestamp = System.currentTimeMillis()
-            priceCache["${AssetType.CRYPTO.name}_$code"] = CacheEntry(
-                price = price,
-                timestamp = entryTimestamp,
-                sourceId = SourceIds.BINANCE,
-                asOf = entryTimestamp
+            priceCache.put(
+                "${AssetType.CRYPTO.name}_$code",
+                CacheEntry(
+                    price = price,
+                    timestamp = entryTimestamp,
+                    sourceId = SourceIds.BINANCE,
+                    asOf = entryTimestamp
+                ),
+                entryTimestamp
             )
         }
         trimPriceCacheIfNeeded()
@@ -1137,7 +1143,7 @@ object UnifiedPriceService {
     }
 
     fun clearCache() {
-        val sizeBefore = priceCache.size
+        val sizeBefore = priceCache.size()
         priceCache.clear()
         pendingRequests.clear()
         CacheManager.invalidateAll()

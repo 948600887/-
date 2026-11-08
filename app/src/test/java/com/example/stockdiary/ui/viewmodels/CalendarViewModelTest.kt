@@ -14,7 +14,7 @@ import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
-import io.mockk.slot
+import io.mockk.every
 import io.mockk.verify
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -73,6 +73,9 @@ class CalendarViewModelTest {
     private val assetRepo = mockk<AssetRepository>(relaxed = true)
     private val divRepo = mockk<DividendRepository>(relaxed = true)
     private val prefsMgr = mockk<DashboardPreferencesManager>(relaxed = true)
+
+    /** 模拟 Manager 落盘后的完整偏好（updatePreferences 的返回/写入结果） */
+    private var lastWrittenPrefs: DashboardPreferences? = null
     // DividendIncomeUseCase 本身用挂起 lambda 注入，直接用真实对象做桩。
     // 刻意**不加**延后：这样 loadDividendIncome 会先于 generateCalendarData 完成写入，
     // 正好是原先会把 realAnnualIncome 覆盖掉的顺序 —— 用例仍通过即证明 uiState 的
@@ -119,12 +122,12 @@ class CalendarViewModelTest {
     ): CalendarViewModel {
         every { prefsMgr.loadPreferences() } returns DashboardPreferences()
         // 模拟 Manager 的真实契约：拉磁盘最新值 → 套用 mutate → 存盘 → 返回合并结果。
-        // 必须这么打桩：prefsMgr 是 mock，其 updatePreferences 是桩、真实方法体不会执行，
-        // 于是内部的 load/save 都不会发生；且缺省返回值是 MockK 造的假对象。
+        // prefsMgr 是 mock，其 updatePreferences 是桩、真实方法体不会执行；这里把合并结果
+        // 记到 lastWrittenPrefs，供「只改该字段不覆盖其他偏好」的断言使用。
         every { prefsMgr.updatePreferences(any()) } answers {
             val mutate = firstArg<(DashboardPreferences) -> DashboardPreferences>()
             val updated = mutate(prefsMgr.loadPreferences())
-            prefsMgr.savePreferences(updated)
+            lastWrittenPrefs = updated
             updated
         }
         every { assetRepo.getAllAssets() } answers {
@@ -219,11 +222,8 @@ class CalendarViewModelTest {
         waitUntil { vm.uiState.value.assets.isNotEmpty() }
         vm.updateMonthlyExpense("8000")
         assertEquals("8000", vm.uiState.value.monthlyExpense)
-        // savePreferences 是非挂起函数，用 verify（不是 coVerify）
-        waitUntil(timeoutMs = 2000) {
-            runCatching { verify { prefsMgr.savePreferences(any()) } }.isSuccess
-        }
-        verify { prefsMgr.savePreferences(any()) }
+        waitUntil(timeoutMs = 2000) { lastWrittenPrefs?.monthlyExpense == "8000" }
+        assertEquals("8000", lastWrittenPrefs?.monthlyExpense)
     }
 
     @Test
@@ -238,16 +238,14 @@ class CalendarViewModelTest {
             showTotalAssets = true,   // 非默认：设置页开过「显示总资产」
             defaultPeriod = "3M"      // 非默认：历史页选过「3月」
         )
-        val slot = slot<DashboardPreferences>()
-        every { prefsMgr.savePreferences(capture(slot)) } returns Unit
-
         vm.updateMonthlyExpense("9999")
 
-        waitUntil(timeoutMs = 2000) { slot.isCaptured }
-        assertEquals("9999", slot.captured.monthlyExpense)
+        waitUntil(timeoutMs = 2000) { lastWrittenPrefs?.monthlyExpense == "9999" }
+        val written = lastWrittenPrefs!!
+        assertEquals("9999", written.monthlyExpense)
         // 其余字段必须原样保留——这正是「共享整块偏好互相踩踏」要锁的契约
-        assertTrue(slot.captured.showTotalAssets)
-        assertEquals("3M", slot.captured.defaultPeriod)
+        assertTrue(written.showTotalAssets)
+        assertEquals("3M", written.defaultPeriod)
     }
 
     @Test

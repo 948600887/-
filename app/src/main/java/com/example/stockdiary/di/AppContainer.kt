@@ -18,7 +18,12 @@ import com.example.stockdiary.data.importer.HoldingSnapshotService
 import com.example.stockdiary.data.importer.ImageTextRecognizer
 import com.example.stockdiary.data.importer.OcrStatementService
 import com.example.stockdiary.data.sync.PriceSyncPreferencesManager
+import com.example.stockdiary.data.fund.FundNavCacheStoreImpl
+import com.example.stockdiary.data.price.DefaultPriceCacheMaintenance
+import com.example.stockdiary.data.price.PriceCacheMaintenance
 import com.example.stockdiary.database.StockDatabase
+import com.example.stockdiary.network.FundNavCacheStore
+import com.example.stockdiary.utils.AppLogger
 import com.example.stockdiary.utils.CrashRecoveryManager
 
 /**
@@ -53,7 +58,23 @@ class AppContainer(private val context: Context) {
     }
     val dashboardPreferencesManager: DashboardPreferencesManager by lazy { DashboardPreferencesManager.getInstance(context) }
     val priceSyncPreferencesManager: PriceSyncPreferencesManager by lazy { PriceSyncPreferencesManager.getInstance(context) }
+    /** 派生缓存清理门面：设置页只认它，不直接调各数据源单例的清除方法 */
+    val priceCacheMaintenance: PriceCacheMaintenance by lazy {
+        DefaultPriceCacheMaintenance(applicationContext)
+    }
     val database: StockDatabase by lazy { StockDatabase.getInstance(context) }
+    /**
+     * 基金净值持久化端口。DAO 在这里构造、异常在这里兜住（与旧 FundAPI.init 的降级语义一致）：
+     * 构造失败返回 null，FundAPI 自动退回纯内存缓存，不打断取价链路。
+     */
+    val fundNavCacheStore: FundNavCacheStore? by lazy {
+        try {
+            FundNavCacheStoreImpl(database.fundNavCacheDao())
+        } catch (e: Exception) {
+            AppLogger.w("基金净值持久化缓存未启用（DAO 注入失败）: ${e.message}", "AppContainer")
+            null
+        }
+    }
     val dataExporter: DataExporter by lazy { DataExporter.getInstance(context) }
     val brokerageImportService: BrokerageImportService by lazy { BrokerageImportService.getInstance(context) }
     val ocrStatementService: OcrStatementService by lazy { OcrStatementService.getInstance(context) }

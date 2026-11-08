@@ -2,8 +2,10 @@ package com.example.stockdiary.data.prefs
 
 import android.content.Context
 import android.content.SharedPreferences
-import androidx.annotation.VisibleForTesting
 import com.example.stockdiary.utils.AppLogger
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 
 /**
  * 月度生活费的默认值（人民币字符串）。**单一来源**：[DashboardPreferences.monthlyExpense]
@@ -94,6 +96,18 @@ fun DashboardPreferences.lowValueThreshold(): Double =
 class DashboardPreferencesManager(context: Context) {
     
     private val prefs: SharedPreferences = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+
+    /**
+     * 全应用**唯一**的偏好内存副本。
+     *
+     * 此前 Dashboard / Portfolio / History / Settings 四个 ViewModel 各自持有一份
+     * `MutableStateFlow(loadPreferences())`，再靠「回前台 reloadPreferences」补丁同步磁盘，
+     * 于是同一份偏好出现 4 个副本、谁先写谁后写全靠时序。现在只有这里一份：
+     * 写入统一走 [updatePreferences]（写盘后同步更新本流），各页面直接订阅本流，
+     * 任一页面的修改立即对所有页面生效，不再需要 reload 补丁。
+     */
+    private val _preferences = MutableStateFlow(loadPreferences())
+    val preferences: StateFlow<DashboardPreferences> = _preferences.asStateFlow()
     
     companion object {
         private const val PREFS_NAME = "dashboard_prefs"
@@ -188,15 +202,13 @@ class DashboardPreferencesManager(context: Context) {
     }
     
     /**
-     * 直接把一份完整偏好副本整块落盘。
+     * 直接把一份完整偏好副本整块落盘。**仅供本类内部使用**，业务代码一律走 [updatePreferences]。
      *
-     * **业务代码一律走 [updatePreferences]**：它会先 `loadPreferences()` 拉磁盘最新值、
-     * 再只套用 mutate 改动的字段，避免用构造期的过期副本把别的页面刚写的值覆盖掉。
-     * 本方法刻意保持 public：约 8 处单测直接调用它构造初始状态，故不改 private、
-     * 也不加 @Deprecated；[VisibleForTesting] 只标明它的定位，**仅供单测构造初始状态**。
+     * [updatePreferences] 会先 `loadPreferences()` 拉磁盘最新值、再只套用 mutate 改动的字段，
+     * 避免用过期副本把别的页面刚写的值覆盖掉。把本方法收成 private，是为了从编译期杜绝
+     * 「拿构造期的陈旧副本整块回写」这类踩踏（历史事故：日历改的月度生活费被持仓页冲回旧值）。
      */
-    @VisibleForTesting
-    fun savePreferences(preferences: DashboardPreferences) {
+    private fun savePreferences(preferences: DashboardPreferences) {
         prefs.edit().apply {
             putBoolean(KEY_SHOW_TOTAL_ASSETS, preferences.showTotalAssets)
             putBoolean(KEY_SHOW_NET_ASSETS, preferences.showNetAssets)
@@ -231,6 +243,8 @@ class DashboardPreferencesManager(context: Context) {
     
     fun resetToDefaults() {
         prefs.edit().clear().apply()
+        // 磁盘已清空，唯一副本也要立刻回到默认值，否则各页面仍按旧副本渲染
+        _preferences.value = loadPreferences()
     }
 
     /**
@@ -249,6 +263,8 @@ class DashboardPreferencesManager(context: Context) {
         val fresh = loadPreferences()
         val updated = mutate(fresh)
         savePreferences(updated)
+        // 写盘成功后同步唯一副本：订阅本流的各页面立即看到新值，无需回前台 reload
+        _preferences.value = updated
         return updated
     }
 }

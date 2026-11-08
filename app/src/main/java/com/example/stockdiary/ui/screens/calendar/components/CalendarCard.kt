@@ -41,7 +41,7 @@ import androidx.compose.ui.unit.sp
 import com.example.stockdiary.ui.theme.AppTheme
 import com.example.stockdiary.utils.compactFormat
 import com.example.stockdiary.utils.format
-import com.example.stockdiary.utils.profitColor
+import com.example.stockdiary.ui.theme.profitColor
 import java.time.LocalDate
 import java.time.YearMonth
 import java.time.format.DateTimeFormatter

@@ -18,12 +18,15 @@ object PriceCacheManager {
     private const val AFTER_4PM_TTL = Long.MAX_VALUE
     private const val WEEKEND_TTL = Long.MAX_VALUE
 
-    private val memoryCache = java.util.concurrent.ConcurrentHashMap<String, CachedPriceData>()
+    private const val MAX_MEMORY_CACHE_SIZE = 200
+
+    // 统一的有界缓存实现（见 BoundedTtlCache）：结构/淘汰/快照与其他取价链路共用一份，
+    // 这里的动态 TTL 口径与磁盘持久层仍由本对象独占，不随合并改变。
+    private val memoryCache = BoundedTtlCache<String, CachedPriceData>(MAX_MEMORY_CACHE_SIZE)
     private var cacheFile: File? = null
     @Volatile
     private var lastSaveTime = 0L
     private val diskLock = Any()
-    private const val MAX_MEMORY_CACHE_SIZE = 200
 
     // ===== 磁盘缓存的惰性加载 =====
     // init() 从前在调用线程（StockDiaryApplication.onCreate → 主线程）上同步
@@ -148,7 +151,7 @@ object PriceCacheManager {
     }
 
     fun shouldRefreshAt4PM(code: String): Boolean {
-        val cached = memoryCache[code] ?: return true
+        val cached = memoryCache.get(code) ?: return true
 
         val cachedDate = java.time.ZonedDateTime.ofInstant(
             java.time.Instant.ofEpochMilli(cached.timestamp),
@@ -167,7 +170,7 @@ object PriceCacheManager {
 
     fun isCacheValid(code: String): Boolean {
         awaitDiskLoaded()
-        val cached = memoryCache[code] ?: return false
+        val cached = memoryCache.get(code) ?: return false
 
         if (shouldRefreshAt4PM(code)) {
             return false
@@ -184,7 +187,7 @@ object PriceCacheManager {
     fun getCachedPrice(code: String): SinaStockData? {
         awaitDiskLoaded()
         return if (isCacheValid(code)) {
-            memoryCache[code]?.data
+            memoryCache.getValue(code)?.data
         } else {
             memoryCache.remove(code)
             null
@@ -192,16 +195,17 @@ object PriceCacheManager {
     }
 
     fun cachePrice(code: String, data: SinaStockData, source: String) {
-        memoryCache[code] = CachedPriceData(data, System.currentTimeMillis(), source)
+        memoryCache.put(code, CachedPriceData(data, System.currentTimeMillis(), source))
         trimMemoryCacheIfNeeded()
         maybeSaveToDisk()
     }
 
     fun cachePrices(prices: Map<String, SinaStockData>, source: String) {
         val now = System.currentTimeMillis()
-        prices.forEach { (code, data) ->
-            memoryCache[code] = CachedPriceData(data, now, source)
-        }
+        memoryCache.putAll(
+            prices.mapValues { (_, data) -> CachedPriceData(data, now, source) },
+            now
+        )
         trimMemoryCacheIfNeeded()
         maybeSaveToDisk()
     }
@@ -212,7 +216,7 @@ object PriceCacheManager {
             lastSaveTime = now
             // 快照是纯内存拷贝，微秒级，留在调用线程拿；
             // 真正慢的 JSON 序列化 + writeText 丢给 diskWriter，调用方零阻塞
-            val snapshot = memoryCache.toMap()
+            val snapshot = memoryCache.snapshot()
             if (snapshot.isEmpty()) return
             try {
                 diskWriter.execute { writeSnapshotToDisk(snapshot) }
@@ -225,32 +229,12 @@ object PriceCacheManager {
     }
 
     /**
-     * 内存缓存淘汰。
-     *
-     * 整段加锁：这是一个「先读 size 决定淘汰多少、再按时间戳排序淘汰」的非原子序列。
-     * [cachePrice] / [cachePrices] 会被刷新链路与各数据源成功回调并发调用，
-     * 两个线程同时看到 size > 上限时，各自算出的 removeCount 都基于自己那一刻的 size，
-     * 可能把刚写进去的新价一起淘汰掉（用户可见：刚刷新的价格显示不出来，要点第二次）。
-     * ConcurrentHashMap 只保证单次操作原子，不保证这个组合原子。
+     * 内存缓存淘汰：先清过期（这里固定用交易时段 5 分钟作为过期阈值，是原有口径），
+     * 仍超上限再按写入时间从旧到新淘汰。具体淘汰算法在 [BoundedTtlCache.trim]，
+     * 与其它取价链路共用一份实现。
      */
-    private val trimLock = Any()
-
     private fun trimMemoryCacheIfNeeded() {
-        if (memoryCache.size <= MAX_MEMORY_CACHE_SIZE) return
-
-        synchronized(trimLock) {
-            val expireThreshold = System.currentTimeMillis() - TRADING_HOUR_TTL
-            val expiredKeys = memoryCache.filter { it.value.timestamp < expireThreshold }.keys
-            if (expiredKeys.isNotEmpty()) {
-                expiredKeys.forEach { memoryCache.remove(it) }
-            }
-
-            if (memoryCache.size > MAX_MEMORY_CACHE_SIZE) {
-                val sorted = memoryCache.entries.sortedBy { it.value.timestamp }
-                val removeCount = memoryCache.size - MAX_MEMORY_CACHE_SIZE
-                sorted.take(removeCount).forEach { memoryCache.remove(it.key) }
-            }
-        }
+        memoryCache.trim(System.currentTimeMillis() - TRADING_HOUR_TTL)
     }
 
     fun invalidateCache(code: String) {
@@ -270,14 +254,15 @@ object PriceCacheManager {
         }
     }
 
-    private fun writeSnapshotToDisk(snapshot: Map<String, CachedPriceData>) {
+    private fun writeSnapshotToDisk(snapshot: Map<String, BoundedTtlCache.Entry<CachedPriceData>>) {
         val file = cacheFile ?: return
 
         synchronized(diskLock) {
             try {
                 val jsonArray = JSONArray()
 
-                snapshot.forEach { (code, cached) ->
+                snapshot.forEach { (code, entry) ->
+                    val cached = entry.value
                     val jsonObject = JSONObject()
                     jsonObject.put("code", code)
                     jsonObject.put("timestamp", cached.timestamp)
@@ -370,11 +355,15 @@ object PriceCacheManager {
                     //（加载还没跑完时，一次刷新已经写进了新价），
                     // 用磁盘上的旧值盖掉刚抓到的新价，会让它因时间戳旧而被判过期、
                     // 下一轮又重抓一遍。putIfAbsent 保证磁盘只做「冷启动兜底」。
-                    memoryCache.putIfAbsent(code, CachedPriceData(data, timestamp, source))
+                    memoryCache.putIfAbsent(
+                        code,
+                        CachedPriceData(data, timestamp, source),
+                        timestamp
+                    )
                 }
 
                 AppLogger.d(
-                    "从磁盘加载缓存: ${memoryCache.size} 条" +
+                    "从磁盘加载缓存: ${memoryCache.size()} 条" +
                         if (skipped > 0) "（跳过 $skipped 条坏数据）" else "",
                     TAG
                 )
@@ -394,11 +383,13 @@ object PriceCacheManager {
     fun getCacheStats(): CacheStats {
         awaitDiskLoaded()
         val now = System.currentTimeMillis()
-        val valid = memoryCache.count { now - it.value.timestamp < calculateTTL() }
+        val ttl = calculateTTL()
+        val entries = memoryCache.snapshot().values
+        val valid = entries.count { now - it.timestamp < ttl }
         return CacheStats(
-            totalCount = memoryCache.size,
+            totalCount = entries.size,
             validCount = valid,
-            expiredCount = memoryCache.size - valid
+            expiredCount = entries.size - valid
         )
     }
 

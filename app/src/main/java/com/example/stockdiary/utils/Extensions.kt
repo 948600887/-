@@ -2,11 +2,8 @@ package com.example.stockdiary.utils
 
 import com.example.stockdiary.common.DateFormats
 import com.example.stockdiary.data.dividend.DividendData
-import androidx.compose.runtime.Composable
-import androidx.compose.ui.graphics.Color
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
-import com.example.stockdiary.ui.theme.AppTheme
 import java.math.RoundingMode
 import java.text.DecimalFormat
 import java.text.DecimalFormatSymbols
@@ -245,14 +242,6 @@ fun Double.toCurrencyString(symbol: String = "¥") = "$symbol${this.format(2)}"
 
 fun Double.toProfitDisplay(currency: String = "¥"): String =
     "${if (this >= 0) "+" else ""}$currency${this.format(2)}"
-
-/**
- * 盈亏色（红涨绿跌，A 股惯例）：>=0 红、<0 绿。
- * 主题感知：随 AppTheme.colors 切换深浅两套；调用点均位于 @Composable 内。
- */
-@Composable
-fun Double.profitColor(): Color =
-    if (this >= 0) AppTheme.colors.lossRed else AppTheme.colors.profitGreen
 
 /**
  * 日期 pattern 缓存已统一收到 [DateFormats]（common 包）：那里是全 App 口径源，

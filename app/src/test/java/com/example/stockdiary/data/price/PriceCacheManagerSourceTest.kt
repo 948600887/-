@@ -2,7 +2,6 @@ package com.example.stockdiary.data.price
 
 import java.io.File
 import java.nio.file.Files
-import java.util.concurrent.ConcurrentHashMap
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
@@ -22,6 +21,7 @@ import org.junit.Test
  * 直接用反射驱动 `loadFromDisk`（不依赖单例 init 状态 / 后台线程），并在 finally 里
  * 还原 `cacheFile` 字段、清理注入的缓存条目，避免污染同 JVM 内的其它用例。
  */
+@Suppress("UNCHECKED_CAST")
 class PriceCacheManagerSourceTest {
 
     @Test
@@ -30,7 +30,7 @@ class PriceCacheManagerSourceTest {
         val cacheFileField = mgrClass.getDeclaredField("cacheFile").apply { isAccessible = true }
         val memoryCacheField = mgrClass.getDeclaredField("memoryCache").apply { isAccessible = true }
         val memoryCache =
-            memoryCacheField.get(PriceCacheManager) as ConcurrentHashMap<String, Any>
+            memoryCacheField.get(PriceCacheManager) as BoundedTtlCache<String, PriceCacheManager.CachedPriceData>
 
         val originalCacheFile = cacheFileField.get(PriceCacheManager) as? File
 
@@ -69,7 +69,7 @@ class PriceCacheManagerSourceTest {
             mgrClass.getDeclaredMethod("loadFromDisk").apply { isAccessible = true }
                 .invoke(PriceCacheManager)
 
-            val entry = memoryCache["sh600519"]
+            val entry = memoryCache.getValue("sh600519")
                 ?: error("loadFromDisk 后内存缓存应含 sh600519")
             val rawSource =
                 entry.javaClass.getDeclaredField("source").apply { isAccessible = true }

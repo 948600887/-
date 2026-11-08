@@ -15,9 +15,6 @@ import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
-import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.stockdiary.utils.AppLogger
 import androidx.compose.ui.Alignment
@@ -213,22 +210,8 @@ fun PortfolioScreen(
     // 否则切 Tab 时页面移出组合，刚弹出的提示会立刻被取消。
     val appSnackbar = LocalAppSnackbar.current
 
-    // 与首页（DashboardScreen）同一处修复：本页 VM 挂在 Activity 作用域、跨标签页长期存活，
-    // 偏好只在构造期加载一次。从「设置 → 自定义仪表盘」改完开关回本页时，内存副本仍是旧值，
-    // 表现为「设置改了没反应」（负债照旧显示、隐藏低价值开关改不动），
-    // 而首页有 ON_RESUME reload 却是正常的。这里同样在回前台时重新拉一次磁盘偏好。
-    val portfolioLifecycleOwner = LocalLifecycleOwner.current
-    DisposableEffect(portfolioLifecycleOwner) {
-        val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) viewModel.reloadPreferences()
-        }
-        portfolioLifecycleOwner.lifecycle.addObserver(observer)
-        onDispose { portfolioLifecycleOwner.lifecycle.removeObserver(observer) }
-    }
-
-    // 底栏切 Tab 不触发 ON_RESUME：从设置页改完开关直接切回来时再补一次磁盘重读，
-    // 否则内存副本仍是构造期的旧值，表现为「设置改了没反应」。
-    LaunchedEffect(Unit) { viewModel.reloadPreferences() }
+    // 偏好已收口到 Manager 的唯一流（见 PortfolioViewModel.preferences）：
+    // 设置页改完开关会直接推送到这里，回前台 / 切 Tab 都不再需要手动重读磁盘。
 
     // 资产列表已从资产页并入这里：股票/基金/虚拟货币/银行存款 + 负债，一页看全。
     // 显示开关沿用「设置 → 仪表盘显示」，关掉某类就整类不出现。

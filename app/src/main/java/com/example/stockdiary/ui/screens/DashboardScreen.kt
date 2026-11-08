@@ -9,9 +9,6 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.ui.platform.LocalLifecycleOwner
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -128,23 +125,8 @@ fun DashboardScreen(
         viewModel.loadDividendIncome(assetsOnly)
     }
 
-    // P0-3 修复：仪表盘回前台（如从「设置 → 自定义仪表盘」返回）时重新加载偏好，
-    // 让刚改的开关立即生效，避免界面停留在构造期陈旧的旧值。
-    // 配合 DashboardViewModel.reloadPreferences() + 存缓存前先拉最新偏好，
-    // 杜绝「改了没反应」与「过一会儿被收入计算回滚」两条故障链。
-    val dashboardLifecycleOwner = LocalLifecycleOwner.current
-    DisposableEffect(dashboardLifecycleOwner) {
-        val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) viewModel.reloadPreferences()
-        }
-        dashboardLifecycleOwner.lifecycle.addObserver(observer)
-        onDispose { dashboardLifecycleOwner.lifecycle.removeObserver(observer) }
-    }
-
-    // 底栏切 Tab 不会触发 Activity 的 ON_RESUME，只靠上面的 DisposableEffect 会漏掉
-    // 「设置页改完开关直接切回首页」这条路径（内存副本还是构造期那份）。
-    // 这里在每次进入该页面（重新组合）时再拉一次磁盘偏好。
-    LaunchedEffect(Unit) { viewModel.reloadPreferences() }
+    // 偏好已收口到 Manager 的唯一流（见 DashboardViewModel.preferences）：
+    // 设置页改完开关会直接推送到这里，回前台 / 切 Tab 都不再需要手动重读磁盘。
 
     // 刷新结果放在 UiState 里：切走 Tab 不会丢（SharedFlow replay=0 会丢），
     // 消费后立刻清掉也不会在回到首页时重复弹（replay=1 会重复）。

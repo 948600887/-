@@ -40,7 +40,7 @@ import com.example.stockdiary.ui.theme.AppTheme
 import com.example.stockdiary.utils.format
 import com.example.stockdiary.utils.formatDateLabel
 import com.example.stockdiary.utils.formatYAxisLabel
-import com.example.stockdiary.utils.profitColor
+import com.example.stockdiary.ui.theme.profitColor
 import com.example.stockdiary.utils.toLocalDate
 import com.example.stockdiary.utils.toProfitDisplay
 import java.time.temporal.ChronoUnit

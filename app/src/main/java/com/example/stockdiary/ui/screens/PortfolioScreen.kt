@@ -249,21 +249,23 @@ fun PortfolioScreen(
             preferences.hideUnknownPriceCrypto
         )
     }
-    val assetsOnly = remember(displayAssets) { displayAssets.filter { !it.type.isLiability } }
-    val liabilities = remember(displayAssets) { displayAssets.filter { it.type.isLiability } }
+    // 负债口径统一为 Asset.isDebt（含余额为负的借币负债），与快照/首页一致；
+    // 只按 type.isLiability 分的话，负余额借币会留在资产列表里显示成负资产、负债区看不到。
+    val assetsOnly = remember(displayAssets) { displayAssets.excludingDebts() }
+    val liabilities = remember(displayAssets) { displayAssets.debts() }
 
     // 总资产 / 负债 / 净资产一律按**全部资产**算，与资产页、每日快照同源。
     // 从前这里用按显示开关过滤后的可见资产，于是用户在设置里关掉某一类（比如虚拟货币）
     // 后，持仓页「总资产」少一块、资产页不变 —— 同一个名字两个数字，用户不知道信哪个。
     // 显示开关的语义是「列表里看不看」，不是「算不算进我的家底」
-    val allAssetsOnly = remember(assets) { assets.filter { !it.type.isLiability } }
-    val allLiabilities = remember(assets) { assets.filter { it.type.isLiability } }
+    val allAssetsOnly = remember(assets) { assets.excludingDebts() }
+    val allLiabilities = remember(assets) { assets.debts() }
     // 卡片上如实标注列表少显示了多少项，免得用户拿列表逐项加总对不上顶部数字
     val hiddenAssetCount = remember(displayAssets, assets) { assets.size - displayAssets.size }
 
     // 同 DashboardScreen：借款从资产端挪到负债端，净资产数值不变。
-    val totalAssets = remember(allAssetsOnly) { allAssetsOnly.excludingDebts().sumTotalValueCny() }
-    val totalLiabilities = remember(assets) { assets.debts().sumDebtValueCny() }
+    val totalAssets = remember(allAssetsOnly) { allAssetsOnly.sumTotalValueCny() }
+    val totalLiabilities = remember(allLiabilities) { allLiabilities.sumDebtValueCny() }
     val netAssets = totalAssets - totalLiabilities
 
     val sortedAssets = remember(assetsOnly, preferences.sortOrder) {
@@ -331,7 +333,7 @@ fun PortfolioScreen(
                     PortfolioRow.MarketHeader(
                         market = HoldingsMarket.OTHER,
                         assetCount = liabilities.size,
-                        totalValue = liabilities.sumOf { it.totalValueCny },
+                        totalValue = liabilities.sumDebtValueCny(),
                         expandKey = LIABILITY_GROUP_KEY,
                         displayLabel = "负债"
                     )

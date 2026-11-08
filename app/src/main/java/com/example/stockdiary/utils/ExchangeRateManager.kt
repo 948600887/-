@@ -159,6 +159,14 @@ object ExchangeRateManager {
         }
     }
 
+    /**
+     * 该币种当前是否有可用汇率（含静态默认表）。
+     *
+     * [getRate] 对未知币种会按 1:1 静默折算，只在日志里告警一次；需要「明确告诉用户
+     * 这笔钱算不准」的写路径（如保存快照）用这个函数先拦住，而不是把错误固化进历史。
+     */
+    fun isKnownCurrency(currency: String): Boolean = liveRates.containsKey(currency.uppercase())
+
     fun toCny(amount: Double, currency: String): Double = amount * getRate(currency)
 
     fun fromCny(amountCny: Double, currency: String): Double {

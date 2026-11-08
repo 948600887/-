@@ -157,13 +157,21 @@ fun LazyListScope.historyTrendChart(
 
 fun LazyListScope.historyPeriodReturnCard(
     earliest: AssetSnapshot,
-    latest: AssetSnapshot
+    latest: AssetSnapshot,
+    snapshotCount: Int
 ) {
+    // 只有一份快照时没有「期间」可言：显示 ¥0.00 / +0.00% 会被读成「这段时间没涨」，
+    // 与「数据不足」的真实情况矛盾，统一显示「—」
+    val hasPeriod = snapshotCount >= 2
     val periodChange = latest.netAssets - earliest.netAssets
     // 基期净资产 ≤ 0（期间从「一无所有」或脏数据开始）时增幅数学上无定义：
     // 显示 "+0.00%" 会误导——看着像零增长，实际可能是一整段新增。与本月/今年
     // 新增的「—」口径保持一致
-    val periodYield = if (earliest.netAssets > 0) (periodChange / earliest.netAssets) * 100 else null
+    val periodYield = if (hasPeriod && earliest.netAssets > 0) {
+        (periodChange / earliest.netAssets) * 100
+    } else {
+        null
+    }
 
     item {
         // LazyListScope 构建期只登记 item；日期格式化在真正组合该 item 时执行并缓存。
@@ -180,9 +188,9 @@ fun LazyListScope.historyPeriodReturnCard(
             ) {
                 Column {
                     Text(
-                        text = periodChange.toProfitDisplay("¥"),
+                        text = if (hasPeriod) periodChange.toProfitDisplay("¥") else "—",
                         fontSize = 24.sp, fontWeight = FontWeight.Bold,
-                        color = periodChange.profitColor()
+                        color = if (hasPeriod) periodChange.profitColor() else AppTheme.colors.onSurfaceVariant
                     )
                     Text("净资产增加", fontSize = 11.sp, color = AppTheme.colors.onSurfaceVariant)
                 }
@@ -271,13 +279,34 @@ fun LazyListScope.historyRiskCard(stats: SnapshotStats?) {
 }
 
 fun LazyListScope.historyMonthlyReturnChart(monthlyReturns: List<MonthlyReturn>) {
-    if (monthlyReturns.isEmpty()) return
     item {
         SectionCard(title = "月度增值") {
-            MonthlyReturnChart(
-                monthlyReturns = monthlyReturns,
-                modifier = Modifier.fillMaxWidth().height(160.dp)
-            )
+            if (monthlyReturns.isEmpty()) {
+                // 不足两个月不是「没有这个功能」：保留卡片并说明还差多少数据，
+                // 否则用户会以为月度收益丢了。与风险卡的「数据不足」处理一致。
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text(
+                        text = "—",
+                        fontSize = 28.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = AppTheme.colors.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "数据不足，需至少两个月",
+                        fontSize = 12.sp,
+                        color = AppTheme.colors.onSurfaceVariant
+                    )
+                }
+            } else {
+                MonthlyReturnChart(
+                    monthlyReturns = monthlyReturns,
+                    modifier = Modifier.fillMaxWidth().height(160.dp)
+                )
+            }
         }
     }
 }

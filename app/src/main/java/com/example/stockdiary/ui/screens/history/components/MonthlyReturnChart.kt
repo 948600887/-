@@ -198,10 +198,13 @@ private fun MonthlySelectionDetail(
     val selected = selectedIndex.value
     val detailText = if (selected != null && selected in monthlyReturns.indices) {
         val monthlyReturn = monthlyReturns[selected]
-        val sign = if (monthlyReturn.returnRate >= 0) "+" else ""
+        // 基期净资产 ≤0 时收益率为 null：显示「—」，不能用 +0.00% 伪装零增长
+        val rateText = monthlyReturn.returnRate?.let { rate ->
+            "${if (rate >= 0) "+" else ""}${rate.format(2)}%"
+        } ?: "—"
         buildString {
             append("${monthlyReturn.month.year}年${monthlyReturn.month.monthValue}月")
-            append(" · 收益率 $sign${monthlyReturn.returnRate.format(2)}%")
+            append(" · 收益率 $rateText")
             append(" · 金额 ${monthlyReturn.returnAmount.toProfitDisplay("¥")}")
             if (monthlyReturn.monthsSpanned > 1) append("（含 ${monthlyReturn.monthsSpanned} 个月）")
         }

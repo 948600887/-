@@ -273,6 +273,35 @@ class StockDataManager(
     }
     
     /**
+     * 缓存命中分支的血缘上报。来源优先取缓存条目里记录的原始源（已归一化），
+     * 取不到才落到 [SourceIds.MEMORY_CACHE]——绝不把缓存价错标成某个实时行情源。
+     * asOf 用条目写入时刻（而非本次读缓存的 now），这样诊断里能看出价有多旧。
+     */
+    private fun reportCacheLineage(
+        symbol: String,
+        data: StockData,
+        origin: LineageOrigin,
+        roundId: Int
+    ) {
+        val source = PriceCacheManager.getCachedSource(symbol)
+            ?.let { SourceIds.normalizeLegacySource(it) }
+            ?: SourceIds.MEMORY_CACHE
+        val asOf = PriceCacheManager.getCachedTimestamp(symbol) ?: data.timestamp
+        PriceLineageRecorder.report(
+            symbol,
+            PriceLineage(
+                code = symbol,
+                sourceId = source,
+                origin = origin,
+                asOf = asOf,
+                fetchedAt = System.currentTimeMillis(),
+                roundId = roundId,
+                trigger = "缓存命中"
+            )
+        )
+    }
+
+    /**
      * 获取股票数据（带容错机制）
      *
      * @param forceRefresh 跳过内存/持久化缓存强制重抓
@@ -293,6 +322,9 @@ class StockDataManager(
             val cached = cache.get(symbol)
             if (cached != null && PriceCacheManager.isCacheValid(symbol)) {
                 AppLogger.d("使用内存缓存数据: $symbol", TAG)
+                // 缓存命中同样要有血缘：否则诊断里这只票「查无来源」，
+                // 分不清是漏上报还是没取价。口径是 IN_MEMORY，源沿用磁盘条目记录的原始源。
+                reportCacheLineage(symbol, cached.value, LineageOrigin.IN_MEMORY, roundId)
                 return Result.success(cached.value)
             }
             
@@ -327,6 +359,8 @@ class StockDataManager(
                 )
                 cache.put(symbol, stockData)
                 AppLogger.d("使用持久化缓存数据: $symbol", TAG)
+                // 这是真正命中磁盘旧价的分支：必须标 FILE_CACHE，不能错标成实时源
+                reportCacheLineage(symbol, stockData, LineageOrigin.FILE_CACHE, roundId)
                 return Result.success(stockData)
             }
         }
@@ -342,6 +376,7 @@ class StockDataManager(
                     // 仍在 TTL 内（盘后/周末复用收盘价是刻意设计）：保持原语义复用旧价，
                     // 不清空旧价、不写 0，也不改 PriceCacheManager 的 TTL 口径。
                     AppLogger.d("网络不可用，复用仍在 TTL 内的缓存价: $symbol", TAG)
+                    reportCacheLineage(symbol, oldCache.value, LineageOrigin.IN_MEMORY, roundId)
                     return Result.success(oldCache.value)
                 }
                 // 缓存真的过期了：不能再以 success 身份把旧价送回 syncSingleAsset。
@@ -436,7 +471,9 @@ class StockDataManager(
                             origin = LineageOrigin.IN_MEMORY,
                             asOf = fetchedAtStock,
                             fetchedAt = fetchedAtStock,
-                            roundId = currentCoroutineContext()[RoundSourceFailureScope.Key]?.roundId ?: 0
+                            // 透传本方法开头取到的本轮 roundId：不再二次从上下文猜测，
+                            // 也绝不硬编码 0（前台单标的查价才会自然取到 0）
+                            roundId = roundId
                         )
                     )
 

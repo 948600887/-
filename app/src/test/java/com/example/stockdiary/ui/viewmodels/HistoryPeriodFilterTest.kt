@@ -155,6 +155,32 @@ class HistoryPeriodFilterTest {
     }
 
     @Test
+    fun `未来日期快照不进统计_全部周期也一样`() {
+        // 设备时钟回拨/导入脏数据可能写出「明天」「后天」的快照；
+        // 它们不属于历史，不能进图表、统计与月度收益
+        val snapshots = listOf(
+            aligned("2026-10-24"),
+            aligned("2026-10-25"),
+            aligned("2026-10-26")
+        )
+
+        val filtered = filterSnapshots(snapshots, "ALL", today)
+
+        assertEquals(listOf("2026-10-24"), dates(filtered))
+    }
+
+    @Test
+    fun `未来timestamp的date脏数据也不纳入`() {
+        val futureDirty = AssetSnapshot(
+            date = "坏数据",
+            timestamp = today.plusDays(2).toString().toTimestamp(),
+            totalAssets = 100.0, totalLiabilities = 0.0, netAssets = 100.0
+        )
+        val filtered = filterSnapshots(listOf(futureDirty), "ALL", today)
+        assertEquals(0, filtered.size)
+    }
+
+    @Test
     fun `空输入返回空`() {
         assertEquals(emptyList<AssetSnapshot>(), filterSnapshots(emptyList(), "1W", today))
     }

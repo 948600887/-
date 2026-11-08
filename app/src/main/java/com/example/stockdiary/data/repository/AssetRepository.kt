@@ -3,6 +3,7 @@ package com.example.stockdiary.data.repository
 import android.annotation.SuppressLint
 import android.content.Context
 import com.example.stockdiary.utils.AppLogger
+import com.example.stockdiary.utils.ExchangeRateManager
 import com.example.stockdiary.utils.StockCodeManager
 import androidx.room.withTransaction
 import com.example.stockdiary.database.Asset
@@ -60,13 +61,38 @@ class AssetRepository private constructor(
     }
 
     suspend fun insertAsset(asset: Asset): Long {
-        return try {
+        val id = try {
             assetDao.insertAsset(asset.sanitizeForWrite())
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             AppLogger.e("Failed to insert asset: ${e.message}", e)
             throw e
+        }
+        refreshTodaySnapshotAfterAssetChange()
+        return id
+    }
+
+    /**
+     * 手动新增/编辑/删除资产成功后，刷新「今天」这一条快照。
+     *
+     * 历史页只读快照，资产变更不会自动改动「今天」那个点：用户改完持仓回历史页，
+     * 今日点仍是旧值，与首页数字对不上（本次审计的缺陷 #1）。
+     * 只在「今天已有快照」时覆盖刷新；没保存过快照的日子不擅自新建（自动快照另有
+     * 新鲜度门槛，见 SnapshotWorker）。createSnapshot 对空组合返回 null 且不删旧行，
+     * 因此清空最后一笔资产不会抹掉已有快照。
+     *
+     * 快照是附属动作：刷新失败只记日志，不能把资产保存/删除本身打成失败。
+     */
+    private suspend fun refreshTodaySnapshotAfterAssetChange() {
+        try {
+            val today = LocalDate.now().toString()
+            if (snapshotDao.getSnapshotByDate(today) == null) return
+            createSnapshot(today)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            AppLogger.e("刷新当日快照失败（不影响资产变更）: ${e.message}", e, "AssetRepository")
         }
     }
 
@@ -82,7 +108,7 @@ class AssetRepository private constructor(
      */
     suspend fun upsertCryptoAsset(asset: Asset): Long {
         val normalizedSymbol = StockCodeManager.normalizeSymbolForType(AssetType.CRYPTO, asset.symbol ?: "")
-        return StockDatabase.getInstance(context).withTransaction {
+        val id = StockDatabase.getInstance(context).withTransaction {
             val now = System.currentTimeMillis()
             val existing = if (normalizedSymbol.isNotBlank()) {
                 assetDao.getAssetBySymbolAndAccount(normalizedSymbol, asset.account)
@@ -120,6 +146,8 @@ class AssetRepository private constructor(
                 assetDao.insertAsset(newAsset.sanitizeForWrite())
             }
         }
+        refreshTodaySnapshotAfterAssetChange()
+        return id
     }
     
     suspend fun insertAssets(assets: List<Asset>) = assetDao.insertAssets(assets.map { it.sanitizeForWrite() })
@@ -135,7 +163,10 @@ class AssetRepository private constructor(
     suspend fun <T> inTransaction(block: suspend () -> T): T =
         StockDatabase.getInstance(context).withTransaction(block)
     
-    suspend fun updateAsset(asset: Asset) = assetDao.updateAsset(asset)
+    suspend fun updateAsset(asset: Asset) {
+        assetDao.updateAsset(asset)
+        refreshTodaySnapshotAfterAssetChange()
+    }
     
     /**
      * 更新现价。拒绝写入非正价格：行情/净值解析失败时常返回 0.0，
@@ -214,13 +245,23 @@ class AssetRepository private constructor(
     suspend fun updateEarnLocked(id: Long, locked: Boolean) =
         assetDao.updateEarnLocked(id, locked, System.currentTimeMillis())
     
-    suspend fun deleteAsset(asset: Asset) = assetDao.deleteAsset(asset)
+    suspend fun deleteAsset(asset: Asset) {
+        assetDao.deleteAsset(asset)
+        refreshTodaySnapshotAfterAssetChange()
+    }
     
-    suspend fun deleteAssetById(id: Long) = assetDao.deleteAssetById(id)
-    
+    suspend fun deleteAssetById(id: Long) {
+        assetDao.deleteAssetById(id)
+        refreshTodaySnapshotAfterAssetChange()
+    }
+
     suspend fun deleteAllAssets() = assetDao.deleteAllAssets()
 
-    suspend fun deleteAssetsByIds(ids: Set<Long>) = assetDao.deleteAssetsByIds(ids)
+    suspend fun deleteAssetsByIds(ids: Set<Long>) {
+        assetDao.deleteAssetsByIds(ids)
+        // 批量删除同样是用户在资产页发起的删除，和单删一样要把今天的快照跟上
+        refreshTodaySnapshotAfterAssetChange()
+    }
 
     suspend fun updateAccountForAssets(ids: Set<Long>, account: String) =
         assetDao.updateAccountForAssets(ids, account, System.currentTimeMillis())
@@ -488,6 +529,19 @@ class AssetRepository private constructor(
                     AppLogger.i("无持仓，跳过创建快照（不删当天已有行）: $date", "AssetRepository")
                     return@withTransaction null
                 }
+                // 未知币种一旦落库，历史里就会固化一份按 1:1 猜出来的假账。
+                // 保存前整体拒绝（手动保存会把这个异常原文弹给用户；自动快照只记日志），
+                // 绝不按 1:1 估算后写入。
+                val unknownCurrencies = assets
+                    .map { it.currency.uppercase() }
+                    .filterNot { ExchangeRateManager.isKnownCurrency(it) }
+                    .distinct()
+                if (unknownCurrencies.isNotEmpty()) {
+                    throw IllegalStateException(
+                        "币种 ${unknownCurrencies.joinToString("、")} 没有可用汇率，" +
+                            "请先在设置中确认币种或改为人民币"
+                    )
+                }
                 snapshotDao.deleteSnapshotsByDate(date)
                 val previousSnapshot = snapshotDao.getLatestSnapshot()
                 val snapshot = AssetSnapshot.fromAssets(assets, date, previousSnapshot)
@@ -498,8 +552,11 @@ class AssetRepository private constructor(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
+            // 真正的失败必须抛出去，不能吞成 null：调用方把 null 解释为「当天没有持仓」，
+            // 磁盘满/DB 锁等异常会被误报成「没有持仓，未保存快照」，用户按提示反复重试也没用。
+            // null 的语义从此只有一个：确实没有可计入的持仓，主动跳过。
             AppLogger.e("Failed to create snapshot: ${e.message}", e)
-            null
+            throw e
         }
     }
 
@@ -569,7 +626,28 @@ class AssetRepository private constructor(
     suspend fun getSnapshotByDate(date: String): AssetSnapshot? = snapshotDao.getSnapshotByDate(date)
 
     fun getAllSnapshots(): Flow<List<AssetSnapshot>> = snapshotDao.getAllSnapshots()
-    
+
+    /** 历史页按所选周期查询窗口内的快照（date 范围，含今天） */
+    fun getSnapshotsInDateRange(startDate: String, endDate: String): Flow<List<AssetSnapshot>> =
+        snapshotDao.getSnapshotsInDateRange(startDate, endDate)
+
+    /** 周期窗口前最近的一条基准点 */
+    fun getSnapshotBeforeDate(startDate: String): Flow<AssetSnapshot?> =
+        snapshotDao.getSnapshotBeforeDate(startDate)
+
+    /** date 非法的历史脏行，供窗口过滤时按 timestamp 兜底 */
+    fun getInvalidDateSnapshots(): Flow<List<AssetSnapshot>> =
+        snapshotDao.getInvalidDateSnapshots()
+
+    /** 「全部」周期分页读取的失效信号 */
+    fun getSnapshotCountFlow(): Flow<Int> = snapshotDao.getSnapshotCountFlow()
+
+    fun getSnapshotMaxTimestampFlow(): Flow<Long?> = snapshotDao.getSnapshotMaxTimestampFlow()
+
+    /** 「全部」周期分批读取的一页（按 timestamp 升序） */
+    suspend fun getSnapshotsPage(limit: Int, offset: Int): List<AssetSnapshot> =
+        snapshotDao.getSnapshotsPaged(offset = offset, limit = limit)
+
     fun getSnapshotsSince(startTime: Long): Flow<List<AssetSnapshot>> = 
         snapshotDao.getSnapshotsSince(startTime)
 
@@ -584,6 +662,9 @@ class AssetRepository private constructor(
         snapshotDao.getRecentSnapshots(limit)
     
     suspend fun deleteSnapshot(snapshot: AssetSnapshot) = snapshotDao.deleteSnapshot(snapshot)
+
+    /** 快照管理用：删掉某一天的全部快照行（同日多行一并清掉） */
+    suspend fun deleteSnapshotsByDate(date: String) = snapshotDao.deleteSnapshotsByDate(date)
     
     /**
      * 添加或合并股票/基金资产（替代旧 Portfolio 逻辑）
@@ -619,7 +700,7 @@ class AssetRepository private constructor(
         // 同一标的被建成两条，或分红按另一种形态去查而永远抓不到（与 fund_ 前缀那次同源）。
         val normalizedSymbol = StockCodeManager.normalizeSymbol(symbol)
 
-        return StockDatabase.getInstance(context).withTransaction {
+        val result = StockDatabase.getInstance(context).withTransaction {
             // 按 symbol + account 查找：不同账户的同名持仓独立核算，不跨账户合并
             val existingAsset = assetDao.getAssetBySymbolAndAccount(normalizedSymbol, account)
 
@@ -670,6 +751,8 @@ class AssetRepository private constructor(
             }
             resultAsset
         }
+        refreshTodaySnapshotAfterAssetChange()
+        return result
     }
 
     /**
@@ -680,7 +763,7 @@ class AssetRepository private constructor(
     suspend fun sellStockAsset(asset: Asset, quantity: Double, fee: Double = 0.0): Asset? {
         val now = System.currentTimeMillis()
 
-        return StockDatabase.getInstance(context).withTransaction {
+        val result = StockDatabase.getInstance(context).withTransaction {
             if (quantity >= asset.balance) {
                 assetDao.deleteAsset(asset)
                 recordTransactionInternal(
@@ -706,6 +789,8 @@ class AssetRepository private constructor(
                 asset.copy(balance = newBalance, lastUpdateTime = now)
             }
         }
+        refreshTodaySnapshotAfterAssetChange()
+        return result
     }
 
     /**
@@ -714,6 +799,7 @@ class AssetRepository private constructor(
     suspend fun updateAssetPosition(asset: Asset, newBalance: Double, newPurchasePrice: Double) {
         val now = System.currentTimeMillis()
         assetDao.updateBalanceAndPrice(asset.id, newBalance, newPurchasePrice, now)
+        refreshTodaySnapshotAfterAssetChange()
     }
 
     /**

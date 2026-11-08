@@ -204,4 +204,36 @@ class DataExporterCsvTest {
     fun `文本报告包含账户信息`() {
         assertTrue(CsvContent.textReport(listOf(stock)).contains("账户: 默认"))
     }
+
+    @Test
+    fun `快照导出口径与历史页一致_同日去重且剔除前导空快照`() {
+        // 同日两条（旧版回填遗物）+ 开头一条零资产空快照 + 一条正常数据
+        val empty = AssetSnapshot(
+            date = "2026-10-20", timestamp = 1L,
+            totalAssets = 0.0, totalLiabilities = 0.0, netAssets = 0.0
+        )
+        val duplicateOld = AssetSnapshot(
+            date = "2026-10-27", timestamp = 2L,
+            totalAssets = 100.0, totalLiabilities = 0.0, netAssets = 100.0
+        )
+        val duplicateNew = AssetSnapshot(
+            date = "2026-10-27", timestamp = 3L,
+            totalAssets = 200.0, totalLiabilities = 0.0, netAssets = 200.0
+        )
+        val latest = AssetSnapshot(
+            date = "2026-10-28", timestamp = 4L,
+            totalAssets = 300.0, totalLiabilities = 0.0, netAssets = 300.0
+        )
+
+        val rows = dataSection(
+            CsvContent.snapshots(listOf(empty, duplicateOld, duplicateNew, latest))
+        ).drop(1)
+
+        // 与历史页所见一致：10/20 空快照被剔除、10/27 只保留 timestamp 最新的一条
+        assertEquals(2, rows.size)
+        val first = parseRow(rows[0])
+        assertEquals("2026-10-27", first[0])
+        assertEquals(200.0, first[3].toDouble(), 1e-9)
+        assertEquals("2026-10-28", parseRow(rows[1])[0])
+    }
 }

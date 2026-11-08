@@ -6,6 +6,7 @@ import android.content.Context
 import android.net.Uri
 import androidx.core.content.FileProvider
 import com.example.stockdiary.common.Result
+import com.example.stockdiary.data.calculator.SnapshotAnalyzer
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetSnapshot
 import com.example.stockdiary.database.AssetType
@@ -368,7 +369,10 @@ internal object CsvContent {
     fun snapshots(snapshots: List<AssetSnapshot>): String {
         val sb = StringBuilder()
         sb.appendLine(csvRow(*SNAPSHOT_HEADER.toTypedArray()))
-        snapshots.sortedBy { it.date }.forEach { s ->
+        // 与历史页共用同一套「展示口径」：同日去重（保留最新）+ 丢前导空快照。
+        // 导出是对用户的历史对账，不能出现页面看不到的重复行/空行；
+        // 原始存档（同日多行等脏数据）另有修复任务负责清理，不在导出里复现。
+        SnapshotAnalyzer.normalizeForDisplay(snapshots).forEach { s ->
             sb.appendLine(
                 csvRow(
                     s.date,
@@ -584,7 +588,8 @@ internal object CsvContent {
             )
         }
 
-        snapshots.sortedBy { it.date }.forEach { snapshot ->
+        // 同「快照 CSV」：与历史页同一展示口径（同日去重 + 丢前导空快照）
+        SnapshotAnalyzer.normalizeForDisplay(snapshots).forEach { snapshot ->
             // 每个快照拆成 7 行（一行一个指标），保持与其余区块同一套列
             SNAPSHOT_METRICS.forEach { (label, metric) ->
                 sb.appendLine(

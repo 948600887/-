@@ -71,7 +71,11 @@ data class SnapshotStats(
 data class MonthlyReturn(
     val month: YearMonth,
     val returnAmount: Double,
-    val returnRate: Double,
+    /**
+     * 环比收益率（百分比）。基期净资产 ≤ 0 时无数学意义，为 null（界面显示「—」）——
+     * 曾经给 0.0，界面显示 +0.00%，看起来像「零增长」，与实际可能是一整段新增相矛盾。
+     */
+    val returnRate: Double?,
     val monthsSpanned: Int
 )
 
@@ -186,6 +190,23 @@ object SnapshotAnalyzer {
     }
 
     /**
+     * 快照的「展示口径」归一化：同日去重（保留创建时刻最新的一条）→ 按日期升序 →
+     * 丢掉开头零资产空快照。
+     *
+     * 历史页、导出必须共用这一套，否则同一份库会导出与页面不同的行集：
+     * 同日多行是旧版回填/只删一条的遗物，前导空快照是无资产时自动补的假点，
+     * 两者都不该出现在用户对账的文件里。
+     *
+     * 去重与排序口径与 [com.example.stockdiary.ui.viewmodels.filterSnapshots] 完全一致。
+     */
+    fun normalizeForDisplay(snapshots: List<AssetSnapshot>): List<AssetSnapshot> =
+        snapshots
+            .sortedByDescending { it.timestamp }
+            .distinctBy { it.date }
+            .sortedWith(SNAPSHOT_ORDER)
+            .let { dropLeadingEmptySnapshots(it) }
+
+    /**
      * 按「每月最后一条快照」算环比收益。
      *
      * 缺月时（如 3 月无快照）4 月那一根跨了 2 个月，用 [MonthlyReturn.monthsSpanned]
@@ -206,7 +227,9 @@ object SnapshotAnalyzer {
             val prev = entries[i - 1].value
             val curr = entries[i].value
             val returnAmount = curr.netAssets - prev.netAssets
-            val returnRate = if (prev.netAssets > 0) (returnAmount / prev.netAssets) * 100 else 0.0
+            // 基期 ≤ 0 时收益率无定义：给 null 让界面显示「—」，
+            // 不要用 0.0 伪装成「零增长」（与日均复合增长/期间增值卡同一口径）
+            val returnRate = if (prev.netAssets > 0) (returnAmount / prev.netAssets) * 100 else null
             // 手算年月差：连续月 = 1，缺一个月 = 2。不用 ChronoUnit.MONTHS.between 的
             // 原因是设计里的 "+1" 口径会让连续月算出 2，与「1 表示就是一个月」矛盾，
             // 手算没有歧义，也不用赌 YearMonth 上 MONTHS 单位的行为。

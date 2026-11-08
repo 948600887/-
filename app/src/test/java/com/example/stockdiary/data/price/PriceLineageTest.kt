@@ -141,12 +141,55 @@ class PriceLineageTest {
     }
 
     @Test
-    fun `recorder_beginRound清掉上一轮残留`() {
+    fun `recorder_beginRound不清空_避免并发轮次互相抹掉血缘`() {
         PriceLineageRecorder.report(
             "a",
-            PriceLineage("a", SourceIds.SINA, LineageOrigin.FILE_CACHE, NOW, NOW, 0)
+            PriceLineage("a", SourceIds.SINA, LineageOrigin.FILE_CACHE, NOW, NOW, 3)
         )
-        PriceLineageRecorder.beginRound(1, "后台周期同步")
-        assertTrue(PriceLineageRecorder.snapshot().isEmpty())
+        // 并发的另一轮开始，不得把 #3 尚未汇总的记录清掉
+        PriceLineageRecorder.beginRound(4, "手动刷新")
+        val snap = PriceLineageRecorder.snapshot()
+        assertEquals(1, snap.size)
+        assertEquals(3, snap["a"]?.roundId)
+    }
+
+    @Test
+    fun `recorder_endRound只清理本轮_不碰其它轮`() {
+        PriceLineageRecorder.report(
+            "a", PriceLineage("a", SourceIds.SINA, LineageOrigin.FILE_CACHE, NOW, NOW, 3)
+        )
+        PriceLineageRecorder.report(
+            "b", PriceLineage("b", SourceIds.TENCENT, LineageOrigin.IN_MEMORY, NOW, NOW, 4)
+        )
+
+        PriceLineageRecorder.endRound(3)
+
+        val snap = PriceLineageRecorder.snapshot()
+        assertEquals(1, snap.size)
+        assertEquals(4, snap["b"]?.roundId)
+    }
+
+    @Test
+    fun `summary只统计本轮并汇总来源与口径`() {
+        PriceLineageRecorder.clear()
+        PriceLineageRecorder.report(
+            "a", PriceLineage("a", SourceIds.SINA, LineageOrigin.IN_MEMORY, NOW, NOW, 3)
+        )
+        PriceLineageRecorder.report(
+            "b", PriceLineage("b", SourceIds.TENCENT, LineageOrigin.FILE_CACHE, NOW - DAY, NOW, 3)
+        )
+        // 上一轮的记录（roundId=2）不得混进本轮摘要
+        PriceLineageRecorder.report(
+            "c", PriceLineage("c", SourceIds.SINA, LineageOrigin.IN_MEMORY, NOW, NOW, 2)
+        )
+
+        val summary = PriceLineageRecorder.summary(3)
+
+        assertTrue(summary.contains("2 条"))
+        assertTrue(summary.contains("新浪财经 1"))
+        assertTrue(summary.contains("腾讯财经 1"))
+        assertTrue(summary.contains("IN_MEMORY 1"))
+        assertTrue(summary.contains("FILE_CACHE 1"))
+        assertFalse(summary.contains("#2"))
     }
 }

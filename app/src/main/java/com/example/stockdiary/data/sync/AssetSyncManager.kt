@@ -889,9 +889,15 @@ object AssetSyncManager {
             "资产 $total：成功 $success / 失败 $failed / 跳过 $skipped（$skipText） | " +
             "数据源：$sourceText | " +
             "超时截断=$truncated · 总耗时 ${elapsedMs / 1000.0}s"
+        // 血缘摘要与轮次汇总一起落地：日志能回答「这个价来自哪个源、哪一轮、什么时间」，
+        // 诊断导出头部也带上这段。只统计内存里的血缘记录，不影响任何取价/缓存/落库结果。
+        val lineageSummary = PriceLineageRecorder.summary(roundId)
         // 存一份给诊断报告头部用，再照常打日志
-        lastRoundSummary = summary
+        lastRoundSummary = "$summary\n$lineageSummary"
         AppLogger.i(summary, TAG)
+        AppLogger.i(lineageSummary, TAG)
+        // 本轮已汇总完，清掉进程内本轮血缘（只删 roundId 匹配的，不碰并发中的其它轮）
+        PriceLineageRecorder.endRound(roundId)
 
         // 每源一行：逐标的行给细节，这一行回答「这个源这轮到底怎样」（跳过/失败的数量与原因分布）
         sourceStats.forEach { s ->

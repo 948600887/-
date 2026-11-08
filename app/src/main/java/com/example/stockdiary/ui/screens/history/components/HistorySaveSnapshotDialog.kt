@@ -15,7 +15,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.ui.theme.AppTheme
+import com.example.stockdiary.utils.debts
+import com.example.stockdiary.utils.excludingDebts
 import com.example.stockdiary.utils.format
+import com.example.stockdiary.utils.sumDebtValueCny
 import com.example.stockdiary.utils.totalValueCny
 
 @Composable
@@ -25,12 +28,15 @@ fun HistorySaveSnapshotDialog(
     onDismiss: () -> Unit,
     onConfirm: () -> Unit
 ) {
-    val assetsOnly = assets.filter { !it.type.isLiability }
-    val liabilities = assets.filter { it.type.isLiability }
+    // 负债口径统一为 Asset.isDebt（含余额为负的借币负债），与 AssetSnapshot.fromAssets
+    // 的 excludingDebts/debts 一致；否则一笔负余额借币会被算进「总资产」而不是「负债」，
+    // 弹窗分项与保存后的快照对不上。净资产不变，只修总资产/负债分项。
+    val assetsOnly = assets.excludingDebts()
+    val liabilities = assets.debts()
     // 一律折算成人民币：多币种资产的原币金额不能直接相加，
     // 否则「净资产 = 总资产 - 总负债」是拿美元减日元。
     val totalValue = assetsOnly.sumOf { it.totalValueCny }
-    val totalLiabilities = liabilities.sumOf { it.totalValueCny }
+    val totalLiabilities = liabilities.sumDebtValueCny()
     val netAssets = totalValue - totalLiabilities
 
     AlertDialog(

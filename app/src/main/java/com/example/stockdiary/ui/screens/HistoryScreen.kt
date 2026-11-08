@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.automirrored.filled.ShowChart
 import androidx.compose.material3.CircularProgressIndicator
@@ -23,8 +24,10 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
@@ -33,13 +36,17 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.stockdiary.di.LocalAppContainer
 import com.example.stockdiary.ui.components.LocalAppSnackbar
 import com.example.stockdiary.ui.screens.history.components.HistorySaveSnapshotDialog
 import com.example.stockdiary.ui.screens.history.components.HistoryPeriodSelector
+import com.example.stockdiary.ui.screens.history.components.SnapshotManagerDialog
 import com.example.stockdiary.ui.screens.history.components.historyAssetDistribution
 import com.example.stockdiary.ui.screens.history.components.historyMonthlyReturnChart
 import com.example.stockdiary.ui.screens.history.components.historyOverviewCard
@@ -62,10 +69,28 @@ fun HistoryScreen(
     // 提示宿主在导航层（见 GoldVaultNavHost）：本页只发消息，不持有 SnackbarHostState
     val appSnackbar = LocalAppSnackbar.current
     var showSaveDialog by remember { mutableStateOf(false) }
+    var showSnapshotManager by remember { mutableStateOf(false) }
+    val managerSnapshots by viewModel.managerSnapshots.collectAsStateWithLifecycle()
+
+    // 快照管理列表只在其打开时订阅全表，关闭即停
+    LaunchedEffect(showSnapshotManager) {
+        viewModel.setSnapshotManagerVisible(showSnapshotManager)
+    }
 
     // 每次进入历史页重读「默认历史周期」：VM 常驻、默认周期只在构造时读一次，
     // 设置页改完不重进应用的话本页永远用旧周期。
     LaunchedEffect(Unit) { viewModel.reloadDefaultPeriod() }
+
+    // 回前台补一次「今天」重算：进程被冻结后午夜协程可能被推迟，
+    // 否则零点后回到本页，「今日快照已保存」标记与周期窗口还停在昨天。
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) viewModel.onScreenResumed()
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     // 先清状态再展示（理由同 DashboardScreen）：切页时状态已清，回来不会重弹。
     LaunchedEffect(uiState.errorMessage) {
@@ -101,10 +126,18 @@ fun HistoryScreen(
                 actions = {
                     if (uiState.hasTodaySnapshot) {
                         Text(
-                            text = "今日已保存",
+                            text = "今日快照已保存",
                             style = MaterialTheme.typography.labelSmall,
                             color = AppTheme.colors.onSurfaceVariant,
                             modifier = Modifier.padding(end = 8.dp)
+                        )
+                    }
+                    // 快照管理入口：列表式按日期删除/重存，趋势图不承担编辑入口
+                    IconButton(onClick = { showSnapshotManager = true }) {
+                        Icon(
+                            Icons.AutoMirrored.Filled.List,
+                            contentDescription = "快照管理",
+                            tint = AppTheme.colors.onSurfaceVariant
                         )
                     }
                     IconButton(
@@ -132,37 +165,55 @@ fun HistoryScreen(
                 selectedPeriod = uiState.selectedPeriod,
                 onPeriodSelected = { viewModel.selectPeriod(it) }
             )
-            if (uiState.filteredSnapshots.isEmpty()) {
-                EmptyHistoryContent(
-                    hasAnySnapshot = uiState.snapshots.isNotEmpty(),
+            val loadError = uiState.loadError
+            when {
+                // 冷启动 Room 首帧未到：显示加载态，别先闪一屏「暂无历史数据」
+                uiState.isLoading || !uiState.snapshotsFrameReady -> HistoryLoadingContent(
                     modifier = Modifier.fillMaxSize()
                 )
-            } else {
-                val latest = uiState.filteredSnapshots.last()
-                val earliest = uiState.filteredSnapshots.first()
+                // 读取流自身失败（磁盘/DB）：页面级错误 + 重试，不能一直空着
+                loadError != null -> HistoryLoadErrorContent(
+                    message = loadError,
+                    onRetry = viewModel::refresh,
+                    modifier = Modifier.fillMaxSize()
+                )
+                uiState.filteredSnapshots.isEmpty() -> EmptyHistoryContent(
+                    // 按全库计数判断，不能用当前周期的 filteredSnapshots：
+                    // 「1周内没有」不等于「一条快照都没有」，否则会误报「暂无历史数据」
+                    hasAnySnapshot = uiState.hasAnySnapshot,
+                    modifier = Modifier.fillMaxSize()
+                )
+                else -> {
+                    val latest = uiState.filteredSnapshots.last()
+                    val earliest = uiState.filteredSnapshots.first()
 
-                BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
-                    val trendChartHeight = maxOf(maxHeight * 0.3f, 180.dp)
-                    LazyColumn(
-                        modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(bottom = 24.dp)
-                    ) {
-                        historyOverviewCard(latest = latest)
-                        historyTrendChart(
-                            snapshots = uiState.filteredSnapshots,
-                            selectedPeriod = uiState.selectedPeriod,
-                            height = trendChartHeight
-                        )
-                        historyPeriodReturnCard(earliest = earliest, latest = latest)
+                    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+                        val trendChartHeight = maxOf(maxHeight * 0.3f, 180.dp)
+                        LazyColumn(
+                            modifier = Modifier.fillMaxSize(),
+                            contentPadding = PaddingValues(bottom = 24.dp)
+                        ) {
+                            historyOverviewCard(latest = latest)
+                            historyTrendChart(
+                                snapshots = uiState.filteredSnapshots,
+                                selectedPeriod = uiState.selectedPeriod,
+                                height = trendChartHeight
+                            )
+                            historyPeriodReturnCard(
+                                earliest = earliest,
+                                latest = latest,
+                                snapshotCount = uiState.filteredSnapshots.size
+                            )
 
-                        // 快照不足（<2 份）时 statistics 为 null，风险卡片仍保留并提示「至少需要
-                        // 2 份历史快照」而非整块消失——否则用户会以为功能丢了。
-                        historyRiskCard(stats = uiState.statistics)
+                            // 快照不足（<2 份）时 statistics 为 null，风险卡片仍保留并提示「至少需要
+                            // 2 份历史快照」而非整块消失——否则用户会以为功能丢了。
+                            historyRiskCard(stats = uiState.statistics)
 
-                        if (preferences.showHistoryMonthlyGrowth) {
-                            historyMonthlyReturnChart(monthlyReturns = uiState.monthlyReturns)
+                            if (preferences.showHistoryMonthlyGrowth) {
+                                historyMonthlyReturnChart(monthlyReturns = uiState.monthlyReturns)
+                            }
+                            historyAssetDistribution(latest = latest)
                         }
-                        historyAssetDistribution(latest = latest)
                     }
                 }
             }
@@ -176,6 +227,45 @@ fun HistoryScreen(
             onDismiss = { showSaveDialog = false },
             onConfirm = { viewModel.saveSnapshot() }
         )
+    }
+
+    if (showSnapshotManager) {
+        SnapshotManagerDialog(
+            snapshots = managerSnapshots,
+            onDelete = viewModel::deleteManagedSnapshot,
+            onResave = viewModel::resaveManagedSnapshot,
+            onDismiss = { showSnapshotManager = false }
+        )
+    }
+}
+
+@Composable
+private fun HistoryLoadingContent(modifier: Modifier = Modifier) {
+    Box(modifier = modifier, contentAlignment = Alignment.Center) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            CircularProgressIndicator()
+            Spacer(modifier = Modifier.height(12.dp))
+            Text(
+                "正在读取历史数据…",
+                style = MaterialTheme.typography.bodyMedium,
+                color = AppTheme.colors.onSurfaceVariant
+            )
+        }
+    }
+}
+
+@Composable
+private fun HistoryLoadErrorContent(
+    message: String,
+    onRetry: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Box(modifier = modifier, contentAlignment = Alignment.Center) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(message, style = MaterialTheme.typography.titleMedium)
+            Spacer(modifier = Modifier.height(8.dp))
+            TextButton(onClick = onRetry) { Text("重试") }
+        }
     }
 }
 

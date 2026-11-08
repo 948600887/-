@@ -11,6 +11,32 @@ interface SnapshotDao {
     @Query("SELECT * FROM asset_snapshots WHERE timestamp >= :startTime ORDER BY timestamp ASC")
     fun getSnapshotsSince(startTime: Long): Flow<List<AssetSnapshot>>
 
+    /**
+     * 历史页按所选周期查询：date 是 ISO 字符串（yyyy-MM-dd），可直接做字典序范围比较。
+     * 上界传「今天」，未来日期的脏数据不进统计。
+     */
+    @Query("SELECT * FROM asset_snapshots WHERE date >= :startDate AND date <= :endDate ORDER BY date ASC, timestamp ASC")
+    fun getSnapshotsInDateRange(startDate: String, endDate: String): Flow<List<AssetSnapshot>>
+
+    /** 周期窗口前最近的一条基准点，用于期间增值/月度环比的基期 */
+    @Query("SELECT * FROM asset_snapshots WHERE date < :startDate ORDER BY date DESC, timestamp DESC LIMIT 1")
+    fun getSnapshotBeforeDate(startDate: String): Flow<AssetSnapshot?>
+
+    /**
+     * date 无法解析成 yyyy-MM-dd 的历史脏行。按周期查询用 date 做范围，脏行会被范围条件
+     * 漏掉；单独取出来在内存里按 timestamp 兜底纳入（不静默丢数据）。
+     */
+    @Query("SELECT * FROM asset_snapshots WHERE date NOT GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]' ORDER BY timestamp ASC")
+    fun getInvalidDateSnapshots(): Flow<List<AssetSnapshot>>
+
+    /** 「全部」周期分页读取的失效信号：新增/删除会改变行数 */
+    @Query("SELECT COUNT(*) FROM asset_snapshots")
+    fun getSnapshotCountFlow(): Flow<Int>
+
+    /** 「全部」周期分页读取的失效信号：同日覆盖写会改变最大创建时刻 */
+    @Query("SELECT MAX(timestamp) FROM asset_snapshots")
+    fun getSnapshotMaxTimestampFlow(): Flow<Long?>
+
     // 同步版：日历按"显示月"查询用。只拉当月起（含当月）的快照，而不是把整张
     // asset_snapshots 表都 load 进内存再按月筛——老用户积攒几百天每日快照时整表读取纯属浪费。
     @Query("SELECT * FROM asset_snapshots WHERE timestamp >= :startTime ORDER BY timestamp ASC")

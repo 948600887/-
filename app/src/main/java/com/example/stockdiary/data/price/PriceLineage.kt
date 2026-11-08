@@ -92,12 +92,13 @@ object PriceLineageRecorder {
     /**
      * 标记一轮同步开始。
      *
-     * 语义上应丢掉上一轮的残留血缘（避免跨轮串味）。G3 不接入同步流，此处先按
-     * 「开新轮即清旧」实现，留待 G4 接入时按需扩展（如记轮次元信息）。
+     * **不在这里清空表**：手动同步与后台 Worker 可能并发轮次，开新轮就 clear 会把
+     * 另一轮尚未汇总的血缘抹掉，导致先结束那一轮的摘要变成「无记录」。
+     * 跨轮隔离本来就由 [PriceLineage.roundId] 保证（[summary] 只统计本轮），
+     * 表又按 code 去重，不会无限增长；本轮结束后由 [endRound] 主动清理。
      */
-    fun beginRound(roundId: Int, trigger: String) {
-        store.clear()
-    }
+    @Suppress("UNUSED_PARAMETER")
+    fun beginRound(roundId: Int, trigger: String) = Unit
 
     /** 记录 / 覆盖某代码的血缘 */
     fun report(code: String, lineage: PriceLineage) {
@@ -106,6 +107,33 @@ object PriceLineageRecorder {
 
     /** 当前全部血缘快照（不可变拷贝，防止外部改到内部表） */
     fun snapshot(): Map<String, PriceLineage> = store.toMap()
+
+    /**
+     * 本轮血缘摘要：轮次结束时写日志、并拼进诊断导出，回答
+     * 「这个价来自哪个源、哪一轮、什么时间」。只做统计，不影响取价/缓存/落库。
+     */
+    fun summary(roundId: Int): String {
+        val records = store.values.filter { it.roundId == roundId }
+        if (records.isEmpty()) return "价格血缘 #$roundId：无记录（本轮未取价或未上报）"
+        val sources = records.groupingBy { it.displayName }.eachCount().entries
+            .sortedByDescending { it.value }
+            .joinToString("、") { "${it.key} ${it.value}" }
+        val origins = records.groupingBy { it.origin }.eachCount().entries
+            .sortedByDescending { it.value }
+            .joinToString("、") { "${it.key} ${it.value}" }
+        val oldest = records.minOf { it.asOf }
+        val newest = records.maxOf { it.asOf }
+        return "价格血缘 #$roundId：${records.size} 条 | 来源：$sources | 口径：$origins | " +
+            "数据年龄 ${priceAgeLabel(oldest)} ~ ${priceAgeLabel(newest)}"
+    }
+
+    /**
+     * 轮次结束：清掉本轮已汇总的血缘，避免旧轮记录长期占据进程内表。
+     * 只删本轮（按 roundId 精确匹配），并发期间别的轮次记录不受影响。
+     */
+    fun endRound(roundId: Int) {
+        store.entries.removeAll { it.value.roundId == roundId }
+    }
 
     /** 清空全部血缘（调用方显式废弃） */
     fun clear() {

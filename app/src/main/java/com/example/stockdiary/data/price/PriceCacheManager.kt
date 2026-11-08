@@ -194,6 +194,18 @@ object PriceCacheManager {
         }
     }
 
+    /** 缓存条目原始来源（用于价格血缘；没有条目时返回 null） */
+    fun getCachedSource(code: String): String? {
+        awaitDiskLoaded()
+        return memoryCache.getValue(code)?.source
+    }
+
+    /** 缓存条目写入时刻（用于价格血缘的 asOf/fetchedAt） */
+    fun getCachedTimestamp(code: String): Long? {
+        awaitDiskLoaded()
+        return memoryCache.getValue(code)?.timestamp
+    }
+
     fun cachePrice(code: String, data: SinaStockData, source: String) {
         memoryCache.put(code, CachedPriceData(data, System.currentTimeMillis(), source))
         trimMemoryCacheIfNeeded()

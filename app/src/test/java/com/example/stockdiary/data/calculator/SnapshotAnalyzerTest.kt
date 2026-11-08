@@ -317,8 +317,23 @@ class SnapshotAnalyzerTest {
         val apr = returns[1]
         assertEquals(YearMonth.of(2024, 4), apr.month)
         assertEquals(11.0, apr.returnAmount, 1e-6)
-        assertEquals(10.0, apr.returnRate, 1e-6)  // 11 / 110
+        assertEquals(10.0, apr.returnRate!!, 1e-6)  // 11 / 110
         assertEquals(2, apr.monthsSpanned)
+    }
+
+    @Test
+    fun `月度收益基期净资产非正时收益率为null而不是0`() {
+        // 1 月净资产为 0（例如刚清仓/导入前），2 月从 0 变成 50：
+        // 收益率无定义，必须是 null（界面显示「—」），不能是 0.0（界面会显示 +0.00%）
+        val snapshots = listOf(
+            snapshot("2024-01-31", 0.0),
+            snapshot("2024-02-29", 50.0)
+        )
+        val returns = SnapshotAnalyzer.calculateMonthlyReturns(snapshots)
+
+        assertEquals(1, returns.size)
+        assertEquals(50.0, returns[0].returnAmount, 1e-6)
+        assertNull(returns[0].returnRate)
     }
 
     @Test

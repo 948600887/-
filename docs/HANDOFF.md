@@ -83,3 +83,17 @@ CODE_ARCHITECTURE.md 部分过时），一律以实际代码 + git log 为准。
   ⚠️ 本次 `git pull --rebase` 连续两次被代理 502 / TLS 瞬断挡住，所以**拉不到远端可能的新提交**；
   这个包基于本地 `b8c532d`。你那边若已推过新改动，装机前先确认基线，别拿这个包验收你的改动。
 
+### 2026-11-09 18:40 · 小伍 (`workbuddy@local`)
+
+- **做了什么**：修复首页「预计每日收入 / 年化收入率」**点刷新后大幅跳动**（用户真机诊断 11-09 16:55），R1~R6 全套落地，13 个源码/测试文件。
+  根因：`AssetSyncManager.kt:581` 刷新时 `forceRefresh=true` 强制重抓分红，「HTML 有表头但解析 0 条」被当成「确实无分红」→ 删库 + 7 天负缓存 → 每轮分红集合洗牌 → 分子 `realAnnualIncome` 每轮不同；分母两轮只差 0.0089 元。
+- **六项内容**：R1 分红页三态判定（`classifyFundDividendPage`）+ 删库保护；R2 一次刷新只写一次（epoch 版本号 + 迟到结果丢弃）；R3 刷新期冻结收入率分母；R4 缓存分片 `@Synchronized` + 单飞 freshness 守卫；R5 三处指纹加按日汇率版本 + mci 日志；R6 日志打印 `I / D / N / dataHash / scopeKey`。
+- **验证**：`check_gate.sh` **9 步全绿，1589 例 / 0 失败 / 0 错误 / 0 跳过**（基线 1582，新增 7 例），146 个 XML 均本轮新生成。
+- **本轮两处额外修复（断线遗留）**：① 工程师 agent 因网络 502 中断，代码已落盘但留了个语法错误（测试函数名以数字开头 `41KB大页面...`，Kotlin 不允许），已改名；② 审查发现 R2 的「刷新后 30s 丢弃迟到重算」会误伤手动改分红（清指纹后切回首页不更新），已改为**只有缓存仍有效才跳过**。
+- **给对方**：
+  - ⚠️ 这批改动**改了分红抓取与收入计算链**，你若也在动 `FundDividendApiService.kt` / `DividendRepository.kt` / `DividendIncome*`，先看本次提交再动手。
+  - `classifyFundDividendPage` 新增第四态 `SUSPICIOUS_EMPTY_PARSE` → 返回 `Result.failure` → 走「全源未应答保留旧值」。**别把它改回 `success(emptyList)`**，否则跳动 bug 复活。
+  - R5 的 `exchangeRateVersion()` 返回**当天日期**而非真汇率版本号：只把陈旧窗口从跨年缩到跨日，日内 10 次汇率刷新不会触发重算（影响 ≤0.07%，刻意取舍）。别误以为「汇率漏项已彻底修好」。
+  - 日志现在会打 `I=...`，**下一份真机诊断可直接读出刷新前后数值**，此前 279 条「预计收入」全是文案无数字。
+  - 真机必验：点一次刷新，看 D/Y 是否还大幅来回跳、`SUSPICIOUS_EMPTY_PARSE` WARN 后 DB 分红记录是否保留。
+

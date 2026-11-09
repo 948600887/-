@@ -23,6 +23,7 @@ import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.di.AppContainer
 import com.example.stockdiary.utils.AppLogger
 import com.example.stockdiary.utils.isDisplayEquivalentTo
+import com.example.stockdiary.utils.totalValueCny
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -174,6 +175,21 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
 
     private var hasLoadedIncome = false
 
+    /**
+     * 收入写入版本号（R2）：每次刷新 phase-2 成功写入 [DashboardUiState.realAnnualIncome]
+     * 时自增。[loadDividendIncome] 记下发起时的版本，写值前若版本已变就丢弃本次结果，
+     * 避免「刷新刚开始时发起的进场重算」在同步结束后迟到、覆盖刷新算出的新值。
+     *
+     * 版本号放在 VM 层而不是 [com.example.stockdiary.data.dividend.DividendIncomeCache] 的
+     * SP 序列化里：后者同时被 R4 加锁改造，改 JSON 结构会扩大影响面且与锁冲突
+     * （按任务约定「若加锁与 R2 的 revision 机制冲突，以 R2 为准」）。
+     */
+    private val incomeWriteEpoch = java.util.concurrent.atomic.AtomicLong(0)
+
+    /** 最近一次由刷新写入收入的时间，用于丢弃刷新结束后短时间内迟到的进场重算。 */
+    @Volatile
+    private var lastIncomeWriteAt: Long = 0L
+
     init {
         viewModelScope.launch {
             try {
@@ -230,9 +246,31 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
             return
         }
 
+        // R2：一次刷新只算一次。刷新期间进场/重组触发的重算全部挂起，
+        // phase-2 是本轮唯一的 realAnnualIncome 写入点。
+        if (uiState.value.isRefreshing) {
+            AppLogger.d("刷新进行中，挂起进场收入重算（由刷新 phase-2 统一写入）", "DashboardVM")
+            return
+        }
+        // 刷新结束后 30s 内、且已经有值可显示时，丢弃迟到的进场重算。
+        // 真机日志：同步结束后 +11.4s / +19.4s 还会来一次「冷启动零请求重算并落盘」，
+        // 它用 DB 记录再算一遍，与 phase-2 的抓取口径不同，会造成第二次数字跳动。
+        //
+        // 但「缓存已被主动作废」时必须放行：持仓页手动增删改分红会清
+        // annualDividendFingerprint，加仓/改利率会改 fingerprint，这两种情况
+        // 都需要立刻重算，否则用户在刷新后 30s 内改分红切回首页会看到旧收入。
         val symbols = assetsOnly.mapNotNull { it.symbol }.toSet()
         val fingerprint = dividendInputFingerprint(assetsOnly)
         val cached = preferences.value
+        val cacheStillValid = symbols.isNotEmpty() && cached.annualDividendFingerprint == fingerprint
+        if (hasLoadedIncome && cacheStillValid &&
+            System.currentTimeMillis() - lastIncomeWriteAt < INCOME_COALESCE_WINDOW_MS
+        ) {
+            AppLogger.d("刚由刷新写入年化收入且缓存仍有效，跳过迟到的进场重算", "DashboardVM")
+            return
+        }
+        val epochAtStart = incomeWriteEpoch.get()
+
         // 只有缓存就是「这一批资产」算出来的才敢当全量展示（见上方 KDoc）。
         // 指纹含数量与利率：加仓 / 改存款余额同样会让旧值作废，不能只看代码集合。
         val hasCached = symbols.isNotEmpty() && cached.annualDividendFingerprint == fingerprint
@@ -264,6 +302,12 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
                     tag = "DashboardVM",
                     cacheOnly = true
                 )
+                // 版本已变 = 刷新 phase-2 在我们计算期间写入了更新的收入，丢弃本次迟到结果。
+                // return@launch 仍会走 finally 复位 dividendLoading，不会留下转圈。
+                if (incomeWriteEpoch.get() != epochAtStart) {
+                    AppLogger.d("丢弃进场重算结果：刷新已写入更新的年化收入（epoch 已变）", "DashboardVM")
+                    return@launch
+                }
                 _uiState.update { state ->
                     state.copy(
                         realAnnualIncome = result.totalAnnualIncome,
@@ -417,6 +461,16 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
                 // 用户刚刷新过行情，需要的是最新分红，不是缓存里的旧值。
                 // 传 assetsOnly（含银行存款）而不是 priceAssets，否则漏掉利息收入。
                 val result = incomeUseCase.load(assetsOnly, forceRefresh = false, tag = "DashboardVM")
+                // R2：本轮刷新唯一的收入写入点。版本号自增会让仍在途的进场重算结果被丢弃。
+                incomeWriteEpoch.incrementAndGet()
+                lastIncomeWriteAt = System.currentTimeMillis()
+                // R6：把分子/每日预估/分母打到同一行，下一份真机日志能直接读出刷新前后的数值。
+                AppLogger.i(
+                    "刷新 phase-2 写入年化收入: I=${result.totalAnnualIncome}, " +
+                        "D=${result.totalAnnualIncome / daysInCurrentYear().toDouble()}, " +
+                        "N=${computeNetAssetsForLog(currentAssets)}",
+                    "DashboardVM"
+                )
                 _uiState.update { state ->
                     state.copy(
                         realAnnualIncome = result.totalAnnualIncome,
@@ -485,6 +539,13 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
         _uiState.update { it.copy(dividendWarning = null) }
     }
 
+    /** 仅用于诊断日志：与 [com.example.stockdiary.ui.screens.DashboardScreen] 同口径的净资产。 */
+    private fun computeNetAssetsForLog(assets: List<Asset>): Double {
+        val nonDebt = assets.filter { !it.isDebt }
+        val debts = assets.filter { it.isDebt }
+        return nonDebt.sumOf { it.totalValueCny } - debts.sumOf { kotlin.math.abs(it.totalValueCny) }
+    }
+
     suspend fun addAsset(asset: Asset) {
         if ((asset.type == AssetType.STOCK || asset.type == AssetType.FUND) && asset.symbol != null) {
             repository.addOrUpdateStockAsset(
@@ -511,6 +572,12 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
     }
 
     companion object {
+        /**
+         * 刷新写值后的合并窗口（R2）。真机日志里第二次重算落在同步结束后 +11.4s / +19.4s，
+         * 取 30s 覆盖；窗口过后进场仍可正常重算，不会永久阻塞收入更新。
+         */
+        private const val INCOME_COALESCE_WINDOW_MS = 30_000L
+
         /**
          * 工厂统一用 lifecycle 的 viewModelFactory DSL：initializer 按请求的 modelClass 自动匹配，
          * 免去手写 create(modelClass) 逐个 cast 的样板（原 9 个 VM 各一份，漏改一个就是运行期 ClassCastException）。

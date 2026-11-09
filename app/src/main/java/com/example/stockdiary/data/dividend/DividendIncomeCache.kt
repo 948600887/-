@@ -45,6 +45,12 @@ class DividendIncomeCache(context: Context) {
          *
          * 分片后各口径各存一片、互不覆盖。上限取 6：三个固定页面 + 用户切换显示开关等
          * 引起的集合变化留些余量，超出就淘汰最久未用的。
+         *
+         * R4：上限保持 6 不放大（[DividendIncomeCacheVerifyTest] 钉死了「写 7 片只留 6 片」
+         * 的 LRU 契约，且分片越多 SP 体积越大）；真正的并发问题是 [loadCached] / [save]
+         * 末尾的 [touchScope] 对共享 [KEY_SCOPES] 做无锁 read-modify-write，两个 VM 并发时
+         * 会互相覆盖索引、甚至把对方刚写的分片淘汰掉。三个方法统一加 @Synchronized
+         * （JVM 内置锁可重入，save→touchScope 不会自锁）即可让 LRU 在并发下精确。
          */
         private const val MAX_SCOPES = 6
 
@@ -83,6 +89,7 @@ class DividendIncomeCache(context: Context) {
      *
      * @param scopeKey 口径标识（参与本次计算的标的集合指纹），见 [MAX_SCOPES] 的说明
      */
+    @Synchronized
     fun loadCached(scopeKey: String = DEFAULT_SCOPE): CachedIncome? {
         val raw = runCatching { prefs.getString(cacheKey(scopeKey), null) }.getOrNull() ?: return null
         return runCatching {
@@ -117,6 +124,7 @@ class DividendIncomeCache(context: Context) {
      * @param dataHash 本次底层 records 的稳定哈希（见 [CachedIncome.dataHash]）
      * @param date 计算当天 yyyy-MM-dd
      */
+    @Synchronized
     fun save(
         result: DividendIncomeLoader.IncomeResult,
         dataHash: String,
@@ -151,6 +159,7 @@ class DividendIncomeCache(context: Context) {
      * 必须淘汰：显示开关切换、加减仓都会产生新的集合指纹，不设上限的话
      * SharedPreferences 里的分片会无限堆积，老分片再也读不到却一直占位。
      */
+    @Synchronized
     private fun touchScope(scopeKey: String) {
         runCatching {
             val raw = prefs.getString(KEY_SCOPES, null) ?: ""

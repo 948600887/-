@@ -232,6 +232,12 @@ class AssetRepository private constructor(
                     )
                     return@forEach
                 }
+                write.millionCopiesIncome?.let { mci ->
+                    // R5：万份收益是货基年化收入的直接输入，且在 dividendInputFingerprint 里。
+                    // 真机日志此前「万份收益」0 命中，无法区分「mci 变了导致重算」
+                    // 与「分红集合变了导致重算」；落价时补一行便于下一轮诊断。
+                    AppLogger.d("同步写入万份收益: ${write.symbol} mci=$mci", "AssetRepository")
+                }
                 assetDao.updatePriceBySymbol(
                     write.symbol,
                     write.price,

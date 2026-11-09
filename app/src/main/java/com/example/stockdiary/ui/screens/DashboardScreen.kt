@@ -89,6 +89,17 @@ fun DashboardScreen(
     val totalLiabilities = remember(assets) { assets.debts().sumDebtValueCny() }
     val netAssets = totalAssets - totalLiabilities
 
+    // R3：刷新期间冻结「年化收入率」用的分母。价格同步一轮 5~19s，Room 每批落价
+    // 都会重发 assetsFlow（isDisplayEquivalentTo 含 currentPrice / millionCopiesIncome），
+    // netAssets 被反复重算；而分子 realAnnualIncome 要等刷新 phase-2 才写入，
+    // 两者不原子 → realYield 在同步过程中随进度条抖。冻结后刷新结束一次性更新。
+    // 顶部「净资产」大数字仍走实时 netAssets，不受影响。
+    var frozenYieldNetAssets by remember { mutableStateOf<Double?>(null) }
+    LaunchedEffect(isRefreshing) {
+        if (isRefreshing) frozenYieldNetAssets = netAssets else frozenYieldNetAssets = null
+    }
+    val yieldNetAssets = frozenYieldNetAssets ?: netAssets
+
     val snapshots = uiState.snapshots
     // 基准日 = 今天：跨零点/跨年后 today 变化，必须进 remember key 让增长重算，
     // 否则基准日滞留旧日期、跨天不更新（净值曲线/涨跌幅显示过期）。
@@ -267,6 +278,7 @@ fun DashboardScreen(
                             totalAssets = totalAssets,
                             totalLiabilities = totalLiabilities,
                             netAssets = netAssets,
+                            yieldNetAssets = yieldNetAssets,
                             realAnnualIncome = realAnnualIncome,
                             estimatedDailyDividend = uiState.estimatedDailyDividend,
                             dividendLoading = dividendLoading,

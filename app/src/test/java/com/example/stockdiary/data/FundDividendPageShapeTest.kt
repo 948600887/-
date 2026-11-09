@@ -1,6 +1,9 @@
 package com.example.stockdiary.data
 
+import com.example.stockdiary.network.FundDividendPageVerdict
+import com.example.stockdiary.network.classifyFundDividendPage
 import com.example.stockdiary.network.isRealDividendPage
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -77,5 +80,66 @@ class FundDividendPageShapeTest {
         // 首页/公告页里到处都有「分红」二字。只用「分红」当判据会把它们全认成真页面，
         // 于是反爬页只要含「分红」就永不重试 —— 静默丢数据
         assertFalse(isRealDividendPage("<div>本基金的分红政策详见招募说明书</div>"))
+    }
+
+    // ---------- R1 三态：把「解析可疑的 0 条」从「确实无分红」里摘出来 ----------
+
+    /** 真机日志里的形态：HTTP 200 / ~41KB / 含分红表头，却一行都没解析出来 */
+    private val pageWithHeaderButNoRows = """
+        <table class='w782 comm cfxq'>
+        <tr><th>年份</th><th>权益登记日</th><th>除息日</th><th>每10份分红</th><th>分红发放日</th></tr>
+        </table>
+    """.trimIndent()
+
+    @Test
+    fun 有数据行判HAS_RECORDS() {
+        assertEquals(
+            FundDividendPageVerdict.HAS_RECORDS,
+            classifyFundDividendPage(pageWithDividends, 1)
+        )
+    }
+
+    @Test
+    fun 有表头但解析0条判解析可疑_绝不再当成成功的空列表() {
+        val verdict = classifyFundDividendPage(pageWithHeaderButNoRows, 0)
+        assertEquals(FundDividendPageVerdict.SUSPICIOUS_EMPTY_PARSE, verdict)
+        // 治本断言：解析可疑既不是「确实无分红」，也不是「有记录」——
+        // 只有后两者才允许 Result.success(records)，可疑态必须走失败保留旧记录
+        assertTrue(verdict != FundDividendPageVerdict.NO_DIVIDEND_DECLARED)
+        assertTrue(verdict != FundDividendPageVerdict.HAS_RECORDS)
+    }
+
+    @Test
+    fun 页面明确写暂无分红信息_空列表才是真实答案() {
+        assertEquals(
+            FundDividendPageVerdict.NO_DIVIDEND_DECLARED,
+            classifyFundDividendPage(pageWithoutDividends, 0)
+        )
+        assertEquals(
+            FundDividendPageVerdict.NO_DIVIDEND_DECLARED,
+            classifyFundDividendPage("<td colspan=\"5\">暂无分红信息!</td>", 0)
+        )
+    }
+
+    @Test
+    fun 反爬页或空页_NOT_A_DIVIDEND_PAGE() {
+        assertEquals(
+            FundDividendPageVerdict.NOT_A_DIVIDEND_PAGE,
+            classifyFundDividendPage("<html><body>访问过于频繁，请稍后再试</body></html>", 0)
+        )
+        assertEquals(FundDividendPageVerdict.NOT_A_DIVIDEND_PAGE, classifyFundDividendPage("", 0))
+        assertEquals(
+            FundDividendPageVerdict.NOT_A_DIVIDEND_PAGE,
+            classifyFundDividendPage("<html><body></body></html>", 0)
+        )
+    }
+
+    @Test
+    fun 大页面41KB有表头但解析0条仍判可疑_与页面长度无关() {
+        val bigPage = pageWithHeaderButNoRows + " ".repeat(41_000)
+        assertEquals(
+            FundDividendPageVerdict.SUSPICIOUS_EMPTY_PARSE,
+            classifyFundDividendPage(bigPage, 0)
+        )
     }
 }

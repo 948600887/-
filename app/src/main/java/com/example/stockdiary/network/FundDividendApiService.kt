@@ -267,9 +267,11 @@ class FundDividendApiService {
      * 真实抓取逻辑（OkHttp + Jsoup 兜底），不含顶部短路与并发闸门（由 [getFundDividendHistory] 负责）。
      *
      * 整源熔断记账在此按返回路径精确落位：
-     * - 成功页（isRealDividendPage）或有数据的 Jsoup 结果 → [fhspOnSuccess] 自愈；
-     * - 特定短退避（514/429、DNS）由各自窗口处理、不计入本熔断（直接失败、不调 [fhspOnFailure]）；
-     * - 其余通用失败（5xx 落到反爬页、超时、解析全空等）→ 累计触发整源熔断。
+     * - HAS_RECORDS / NO_DIVIDEND_DECLARED → [fhspOnSuccess] 自愈；
+     * - SUSPICIOUS_EMPTY_PARSE（有表头但 0 条）→ 直接失败且**不计入**整源熔断
+     *   （解析问题不是源健康问题，否则一轮几十个空页面会把整源静默屏蔽）；
+     * - 特定短退避（514/429、DNS）由各自窗口处理、不计入本熔断；
+     * - 其余通用失败（5xx 落到反爬页、超时、非分红页）→ 累计触发整源熔断。
      */
     private suspend fun fetchFundDividendInner(fundCode: String): Result<List<DividendRecord>> {
         val url = FHSP_URL.replace("{code}", fundCode)
@@ -292,23 +294,40 @@ class FundDividendApiService {
                     val records = parseDividendHtml(html, fundCode)
                     AppLogger.d("OkHttp 解析到 ${records.size} 条基金分红记录", TAG)
 
-                    // **请求成功就是拿到答案了，哪怕解析出 0 条。**
+                    // **请求成功就是拿到答案了** —— 但「0 条」不再一律等于「确实没有分红」。
                     //
                     // 以前这里写成「解析到非空才返回」，于是「这只基金确实没有分红」
                     // 被当成失败，掉到下面用 Jsoup 把**同一个 URL** 再抓一遍。
                     // 实测：一次全量抓取里 525 次抓回 0 条、只有 77 次有数据（87% 是空的），
                     // 而这些空页面上明写着「暂无分红信息!」—— 第二遍必然也是 0。
-                    // 等于每个空标的付双倍流量、多解析一遍 40KB 的 DOM，
-                    // 而且 Jsoup 那条路遇到非 2xx 会抛 HttpStatusException，
-                    // 诊断报告里那 106 次 HTTP 514（反爬限流）就是这么撞出来的。
                     //
-                    // 唯一还值得换 Jsoup 重试的情况是**拿到的根本不是分红页**
-                    // （反爬页 / 错误页），判据见 [isRealDividendPage]。
-                    if (isRealDividendPage(html)) {
-                        fhspOnSuccess()
-                        return Result.success(records)
+                    // 真机诊断又暴露了反向问题：HTML 200 / 41KB / 含「每10份分红」表头，
+                    // 却解析出 0 条（表头索引失败、日期/金额校验失败、页面改版）。
+                    // 旧逻辑只要 [isRealDividendPage] 为真就把空列表当成功返回，
+                    // Repository 随即写 7 天负缓存并删掉库里旧分红记录 ——
+                    // 用户点一次刷新，年化收入当场缩水，下次抓全了又涨回来。
+                    // 现在由 [classifyFundDividendPage] 三态区分，判据见其 KDoc。
+                    when (classifyFundDividendPage(html, records.size)) {
+                        FundDividendPageVerdict.HAS_RECORDS,
+                        FundDividendPageVerdict.NO_DIVIDEND_DECLARED -> {
+                            fhspOnSuccess()
+                            return Result.success(records)
+                        }
+                        FundDividendPageVerdict.SUSPICIOUS_EMPTY_PARSE -> {
+                            AppLogger.w(
+                                "分红页有表头但解析到 0 条，按解析可疑处理（保留旧分红记录）: " +
+                                    "fundCode=$fundCode, html长度=${html.length}",
+                                TAG
+                            )
+                            // 不计入整源熔断：这是解析问题，不是源健康问题。
+                            // Result.failure 会让 Repository 走「源未应答」路径，保留旧记录。
+                            return Result.failure(Exception("分红页解析可疑[$fundCode]：有表头但 0 条记录"))
+                        }
+                        FundDividendPageVerdict.NOT_A_DIVIDEND_PAGE -> {
+                            // 唯一还值得换 Jsoup 重试的情况：拿到的根本不是分红页（反爬页/错误页）
+                            AppLogger.w("天天基金返回的页面不像分红页（可能是反爬页），换 Jsoup 重试", TAG)
+                        }
                     }
-                    AppLogger.w("天天基金返回的页面不像分红页（可能是反爬页），换 Jsoup 重试", TAG)
                 } else {
                     AppLogger.w("OkHttp HTTP 请求失败: ${response.code}", TAG)
                     // 404 = 该基金代码在天天基金没有 fhsp 页（确定性结论，非源健康度问题）：
@@ -354,12 +373,24 @@ class FundDividendApiService {
             AppLogger.d("Jsoup HTML长度: ${html.length}, 是否包含分红表格: ${html.contains("每10份分红") || html.contains("每份分红")}", TAG)
             val records = parseDividendHtml(html, fundCode)
             AppLogger.d("Jsoup 解析到 ${records.size} 条基金分红记录", TAG)
-            // 与 OkHttp 路径对齐：用 isRealDividendPage 判成功（0 条记录的真页面也算成功）。
-            // 否则「确实没分红」的基金一旦降级走 Jsoup 就会被 isNotEmpty() 判成失败，
-            // 一轮里凑满阈值即触发整源熔断，静默屏蔽全部场外基金分红抓取。
-            if (isRealDividendPage(html)) {
-                fhspOnSuccess()
-                return Result.success(records)
+            // 与 OkHttp 路径完全同一套三态判定：只有「有记录」或「页面明确声明暂无分红」
+            // 才算成功答案。降级到 Jsoup 后仍解析出 0 条且没有空态提示，同样按解析可疑
+            // 返回失败（保留旧记录），绝不能把空列表固化成「确实无分红」。
+            when (classifyFundDividendPage(html, records.size)) {
+                FundDividendPageVerdict.HAS_RECORDS,
+                FundDividendPageVerdict.NO_DIVIDEND_DECLARED -> {
+                    fhspOnSuccess()
+                    return Result.success(records)
+                }
+                FundDividendPageVerdict.SUSPICIOUS_EMPTY_PARSE -> {
+                    AppLogger.w(
+                        "Jsoup 分红页有表头但解析到 0 条，按解析可疑处理（保留旧分红记录）: " +
+                            "fundCode=$fundCode, html长度=${html.length}",
+                        TAG
+                    )
+                    return Result.failure(Exception("分红页解析可疑[$fundCode]：Jsoup 有表头但 0 条记录"))
+                }
+                FundDividendPageVerdict.NOT_A_DIVIDEND_PAGE -> Unit
             }
         } catch (e: CancellationException) {
             throw e
@@ -596,6 +627,43 @@ class FundDividendApiService {
  */
 internal fun isRealDividendPage(html: String): Boolean =
     html.contains("权益登记日") || html.contains("暂无分红信息")
+
+/**
+ * 分红页 + 解析结果的三态判定（R1：区分「确实无分红」与「解析可疑的 0 条」）。
+ *
+ * [isRealDividendPage] 只回答「拿到的页面对不对」，语义保持不变（现有回归单测依赖它）。
+ * 但「页面是对的」不等于「0 条就是答案」：真机诊断里一轮刷新出现 79 次
+ * 「HTTP 200 / HTML ~41KB / 含『每10份分红』表头 / 解析到 0 条」，
+ * 成因可能是表头索引失败、[DividendDateValidator] 日期校验丢弃、金额解析失败或页面改版。
+ * 旧逻辑一律 `Result.success(emptyList())`，[DividendRepository] 随即删旧记录并写 7 天
+ * 负缓存，年化收入在点刷新后当场缩水，下次抓全又涨回来 —— 正是用户报告的「跳动巨大」。
+ *
+ * 取舍：只有页面明确写着「暂无分红信息」才认空结论；解析可疑按失败处理（源未应答、
+ * 保留旧记录、不计入整源熔断）。代价是真正停止分红但页面没写空态提示的标的会
+ * 多保留一段旧值，本轮以「宁可保守、不可误删」为准，KDoc 明示、不实现完整 TTL 机制。
+ *
+ * 与 [isRealDividendPage] 一样放文件级，便于 JVM 单测直接覆盖四类 HTML。
+ */
+internal enum class FundDividendPageVerdict {
+    /** 解析到至少一条记录，正常返回。 */
+    HAS_RECORDS,
+
+    /** 页面明确声明「暂无分红信息」，空列表是真实答案，可以写负缓存。 */
+    NO_DIVIDEND_DECLARED,
+
+    /** 真分红页有表头，但一条都没解析出来且没有空态提示 —— 解析可疑，必须保留旧记录。 */
+    SUSPICIOUS_EMPTY_PARSE,
+
+    /** 根本不是分红页（反爬/错误页），值得换条路重试。 */
+    NOT_A_DIVIDEND_PAGE
+}
+
+internal fun classifyFundDividendPage(html: String, recordCount: Int): FundDividendPageVerdict {
+    if (!isRealDividendPage(html)) return FundDividendPageVerdict.NOT_A_DIVIDEND_PAGE
+    if (recordCount > 0) return FundDividendPageVerdict.HAS_RECORDS
+    if (html.contains("暂无分红信息")) return FundDividendPageVerdict.NO_DIVIDEND_DECLARED
+    return FundDividendPageVerdict.SUSPICIOUS_EMPTY_PARSE
+}
 
 /**
  * 判断异常是不是「主机不可达」（DNS 解析失败）。

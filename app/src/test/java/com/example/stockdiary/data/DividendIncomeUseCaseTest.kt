@@ -125,6 +125,36 @@ class DividendIncomeUseCaseTest {
     }
 
     @Test
+    fun `cacheOnly退出签名后_刷新不复用冷启动旧值但冷启动可复用刷新新值`() = runBlocking {
+        // R4：requestKey 去掉 cacheOnly 维度后，必须用 freshness 守卫保证
+        // 「刷新(cacheOnly=false) 绝不复用冷启动(cacheOnly=true) 的旧结果」，
+        // 否则刷新会拿到进场零请求算出的旧收入，正是用户报告的抖动来源之一。
+        var call = 0
+        val useCase = DividendIncomeUseCase { _, _, _, _ ->
+            call += 1
+            DividendIncomeLoader.IncomeResult(
+                dividendsBySymbol = emptyMap(),
+                recordsBySymbol = emptyMap(),
+                totalAnnualIncome = call.toDouble(),
+                hasDividendData = true
+            )
+        }
+        val assets = listOf(asset("600900"))
+
+        val cold = useCase.load(assets, forceRefresh = false, cacheOnly = true)
+        assertEquals(1.0, cold.totalAnnualIncome, 0.0)
+
+        // 紧接着刷新：必须重新算，不能复用冷启动的 1.0
+        val refreshed = useCase.load(assets, forceRefresh = false, cacheOnly = false)
+        assertEquals(2.0, refreshed.totalAnnualIncome, 0.0)
+
+        // 刷新后短时间内冷启动：可以复用刚算出的新值 2.0（短 TTL 结果复用）
+        val coldAgain = useCase.load(assets, forceRefresh = false, cacheOnly = true)
+        assertEquals(2.0, coldAgain.totalAnnualIncome, 0.0)
+        assertEquals("刷新新增一次抓取，随后冷启动复用其结果", 2, call)
+    }
+
+    @Test
     fun `串行调用返回一致结果`() = runBlocking {
         val counter = AtomicInteger(0)
         val useCase = DividendIncomeUseCase(countingLoader(counter))

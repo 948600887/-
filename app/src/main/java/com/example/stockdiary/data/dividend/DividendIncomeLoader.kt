@@ -95,7 +95,12 @@ class DividendIncomeLoader(
                 val cached = incomeCache?.loadCached(scopeKey(assets))
                 // 同日 + 底层数据未变 → 直接复用缓存的 IncomeResult，彻底消掉同日抖动
                 if (cached != null && cached.dataHash == currentHash && cached.date == today) {
-                    AppLogger.d("同日且底层分红数据未变，复用缓存的预计收入（不重算）", tag)
+                    AppLogger.d(
+                        "同日且底层分红数据未变，复用缓存的预计收入（不重算）" +
+                            "（tag=$tag, cacheOnly=$cacheOnly, scopeKey=${scopeKey(assets)}, " +
+                            "dataHash=$currentHash, I=${cached.totalAnnualIncome}）",
+                        tag
+                    )
                     return@withContext IncomeResult(
                         dividendsBySymbol = cached.dividendsBySymbol,
                         // 用刚读到的缓存 records 回填，保证收息进度/日历拿到的仍是当前记录
@@ -172,11 +177,21 @@ class DividendIncomeLoader(
 
         // 落盘：仅当注入了缓存层。date=今天、dataHash=本次 records + 持仓的哈希，
         // 下次同日且底层输入（分红记录/持仓）不变时即可短路复用，杀掉同日抖动
+        val savedHash = computeDataHash(recordsBySymbol, assets)
+        val savedScope = scopeKey(assets)
         incomeCache?.save(
             result,
-            computeDataHash(recordsBySymbol, assets),
+            savedHash,
             LocalDate.now().format(DATE_FORMATTER),
-            scopeKey(assets)
+            savedScope
+        )
+        // R6：把「本次落盘的分子」与指纹打到同一行，下一份真机日志可直接比对
+        // 刷新前后 I 是否变化，不必再靠代码推断。
+        AppLogger.d(
+            "预计收入已落盘: tag=$tag, cacheOnly=$cacheOnly, scopeKey=$savedScope, " +
+                "dataHash=$savedHash, I=${result.totalAnnualIncome}, " +
+                "records=${recordsBySymbol.values.sumOf { it.size }}",
+            tag
         )
 
         result
@@ -197,7 +212,11 @@ class DividendIncomeLoader(
     ): IncomeResult {
         val result = buildResult(assets, recordsBySymbol)
         incomeCache?.save(result, dataHash, date, scopeKey(assets))
-        AppLogger.d("冷启动零请求重算预计收入并落盘（date=$date）", tag)
+        AppLogger.d(
+            "冷启动零请求重算预计收入并落盘（date=$date, tag=$tag, " +
+                "scopeKey=${scopeKey(assets)}, dataHash=$dataHash, I=${result.totalAnnualIncome}）",
+            tag
+        )
         return result
     }
 
@@ -269,6 +288,10 @@ class DividendIncomeLoader(
         assets: List<Asset>
     ): String {
         val sb = StringBuilder()
+
+        // 0) 汇率版本（按日，R5）：toCny 是分子的真实输入，汇率变了就该重算。
+        //    按日而非按每次刷新，避免一天十次汇率刷新把缓存打散（见 exchangeRateVersion KDoc）。
+        sb.append("R:").append(exchangeRateVersion()).append('\n')
 
         // 1) 分红记录部分：按 symbol 排序，每只再按（除息日, 每股分红）排序，与抓取/序列化顺序无关
         recordsBySymbol.keys.sorted().forEach { symbol ->

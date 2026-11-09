@@ -43,14 +43,24 @@ fun TotalAssetCard(
     realAnnualIncome: Double,
     estimatedDailyDividend: Double,
     dividendLoading: Boolean,
-    incomeCalculationStatus: String? = null
+    incomeCalculationStatus: String? = null,
+    /**
+     * R3：刷新期间冻结的净资产，仅供年化收入率计算用；null 表示用实时 [netAssets]。
+     * 带默认值保证其它调用方零改动，顶部「净资产」大数字仍显示实时值。
+     */
+    yieldNetAssets: Double? = null
 ) {
     // 分母用**净资产**，与 FIRE 计算器的「年化收入率」同义：
     // 有负债时用总资产会让同一份收入算出两个百分比；净资产 ≤ 0 时不显示收益率（返回 NaN，
     // UI 走「—」分支，而不是显示一个误导性的 0.00%）。
     // 收入非 finite（可能来自万份收益/利率的脏数据）同样不显示。
-    val realYield = if (netAssets > 0 && realAnnualIncome.isFinite()) {
-        (realAnnualIncome / netAssets) * 100
+    //
+    // R3：刷新期间价格同步一轮 5~19s，Room 每批落价都让 netAssets 重算，
+    // 而 realAnnualIncome 要等 phase-2 才写入 —— 分子分母不原子，比率会随进度条抖。
+    // 用冻结值算 realYield，刷新结束后一次性回到实时净资产。
+    val yieldBase = yieldNetAssets ?: netAssets
+    val realYield = if (yieldBase > 0 && realAnnualIncome.isFinite()) {
+        (realAnnualIncome / yieldBase) * 100
     } else {
         Double.NaN
     }

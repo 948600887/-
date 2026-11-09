@@ -695,10 +695,29 @@ class DividendRepository private constructor(
             if (data.isNotEmpty()) {
                 saveDividendsToDb(normalizedSymbol, data, isIncremental)
             } else if (!isIncremental) {
-                // 全量刷新且数据源应答了空（确实没分红 / 这次没返回）：清掉旧自动分红记录，
-                // 否则库里陈旧自动分红会被读回并固化 TTL，用户点"刷新"却看到旧数据。
-                // 增量刷新不在此清，避免源临时缺数据误删历史自动分红；手动记录始终保留。
-                dividendDao.deleteNonManualBySymbol(normalizedSymbol)
+                // 全量刷新拿到空结果：清库前先看库里有没有旧自动记录。
+                //
+                // 真机诊断：刷新时 forceRefresh=true 走全量路径，一批基金页面「有表头但解析 0 条」
+                // 曾被当成「确实无分红」，这里 deleteNonManualBySymbol 把旧记录删光并写 7 天负缓存，
+                // 年化收入当场缩水；另一批标的撞 514 限流又保留旧值，于是每轮分红集合都在洗牌。
+                // 上游已把「解析可疑的 0 条」改成失败（不走到这里），此处再兜一道：
+                // 库里只要还有自动记录，就不因一次空结论清空，mergedData 会读回旧记录。
+                //
+                // 取舍（R1）：真正停止分红的标的会多留一段旧值，等 7 天负缓存过期或手动
+                // 修复；本轮不实现「连续 N 次可信空结论」计数，避免过度设计。手动记录始终保留。
+                val existingAutoCount = dividendDao.getBySymbol(normalizedSymbol).count { !it.isManual }
+                if (existingAutoCount > 0) {
+                    AppLogger.w(
+                        "空结果但库里仍有 $existingAutoCount 条自动分红记录，保留旧值不清库: $normalizedSymbol",
+                        "DividendRepository"
+                    )
+                } else {
+                    AppLogger.w(
+                        "空结果清理非手动分红记录: $normalizedSymbol，删除 0 条（库里本就无自动记录）",
+                        "DividendRepository"
+                    )
+                    dividendDao.deleteNonManualBySymbol(normalizedSymbol)
+                }
             }
 
             val mergedData = if (isIncremental && existingEntry != null) {

@@ -135,6 +135,36 @@ class FundDividendApiServiceTest {
         assertEquals("2023-06-06", result.getOrNull()!![0].exDividendDate)
     }
 
+    @Test
+    fun `getFundDividendHistory 有表头但解析0条时按解析可疑失败_不产生success空列表`() = runBlocking {
+        // R1 端到端回归：真机日志里 79 次「HTTP 200 / 41KB / 含分红表格 / 解析 0 条」。
+        // 旧逻辑把它当「确实无分红」返回 success(emptyList())，Repository 随即删旧记录 +
+        // 写 7 天负缓存，年化收入在点刷新后当场缩水。现在必须失败，让上层保留旧记录。
+        val headerOnly = """
+            <table>
+              <tr><th>年份</th><th>权益登记日</th><th>除息日</th><th>每10份分红</th><th>分红发放日</th></tr>
+            </table>
+        """.trimIndent()
+        val resp = Response.Builder()
+            .request(Request.Builder().url("https://example.com/fhsp_110011.html").build())
+            .protocol(Protocol.HTTP_1_1)
+            .code(200)
+            .message("OK")
+            .body(ResponseBody.create("text/html; charset=utf-8".toMediaTypeOrNull(), headerOnly))
+            .build()
+        val call = mockk<Call>()
+        every { call.execute() } returns resp
+        val client = mockk<OkHttpClient>(relaxed = true)
+        every { client.newCall(any()) } returns call
+        service.client = client
+
+        val result = service.getFundDividendHistory("110011")
+
+        assertTrue("有表头但 0 条必须失败（保留旧分红记录），不能是 success(emptyList)", result.isFailure)
+        // 解析可疑不计入整源熔断：一轮几十个空页面不该把整源静默屏蔽
+        assertFalse(FundDividendApiService.fhspIsOpenForTesting())
+    }
+
     // ---------- 限流退避（514/429）电路熔断 ----------
 
     /**

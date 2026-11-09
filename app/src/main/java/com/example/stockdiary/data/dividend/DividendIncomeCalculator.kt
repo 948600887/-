@@ -25,6 +25,23 @@ fun daysInYear(date: LocalDate): Int = Year.of(date.year).length()
 fun daysInCurrentYear(): Int = daysInYear(LocalDate.now())
 
 /**
+ * 分红/利息收入所依赖的**汇率版本**（R5）。
+ *
+ * [ExchangeRateManager.toCny] 把所有分红与存款利息折成人民币，汇率变了分子就变，
+ * 但 [dividendInputFingerprint] / [DividendIncomeLoader.computeDataHash] /
+ * [DividendIncomeUseCase.requestKey] 原先都不含汇率 —— 界面会一直摆旧收入，
+ * 直到跨日或分红记录变化才一次性跳到新值。
+ *
+ * **按日、不按每次刷新**：汇率一天刷新 10 次（实测 USD 6.6699→6.6745，+0.07%），
+ * 若把瞬时 rate 或刷新次数计入指纹，一天要失效十次，重开「重新抓到不同 records」的抖动窗口。
+ * 按日只需每天首帧重算一次，既修陈旧值又不放大抖动。年份已隐含在日期串里。
+ *
+ * 刻意**不含** price / currentPrice / lastSyncTime：现价不参与收入计算，加进去会让每次
+ * 行情同步都触发重算（见 [DividendIncomeLoader.computeDataHash] 的口径说明）。
+ */
+fun exchangeRateVersion(): String = LocalDate.now().toString()
+
+/**
  * 分红/利息收入的**输入指纹**：代码（存款无代码时用 id）+ 持仓数量 + 存款利率 +
  * 货币基金万份收益 + 币种 + **当前年份**。
  *
@@ -41,9 +58,10 @@ fun daysInCurrentYear(): Int = daysInYear(LocalDate.now())
  */
 fun dividendInputFingerprint(assets: List<Asset>): String {
     val year = LocalDate.now().year
+    val rateVersion = exchangeRateVersion()
     return assets.map { asset ->
         "${asset.symbol ?: "id:${asset.id}"}|${asset.balance}|${asset.interestRate ?: 0.0}|" +
-            "${asset.millionCopiesIncome ?: 0.0}|${asset.currency}|$year"
+            "${asset.millionCopiesIncome ?: 0.0}|${asset.currency}|$year|$rateVersion"
     }.sorted().joinToString(",")
 }
 

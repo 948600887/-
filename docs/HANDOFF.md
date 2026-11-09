@@ -108,3 +108,39 @@ CODE_ARCHITECTURE.md 部分过时），一律以实际代码 + git log 为准。
 - **给对方**：`releases/` 现在**只有 `53390f9` 这一个包**，你出包时别删它。
   这个包**是修复版**，装机点一次刷新即可验收「预计每日收入 / 年化收入率」是否还大幅来回跳；
   日志现在会打 `I=...` / `分红页有表头但解析到 0 条，按解析可疑处理`，可直接抓诊断报告比对。
+
+### 2026-11-10 全面只读体检（团队 software-audit-goldvault-full）
+
+- 用户要求「全面检查一遍 app」。按部分工作流建 3 人团队（工程师=代码质量/回归、QA=独立门禁+边界、架构师=数据流/并发/状态分层），lead 自己跑门禁+真机日志+不变量。**全程只读，0 行代码改动**。
+- 仓库：HEAD `f195a39`（本地领先远端 1 笔未推，代理 502/Empty reply 多次失败）；`releases/` 仅 `53390f9` 包；根目录 0 日志；干净门禁 **9/9 绿、1589 例 0 失败**（146 XML 本轮新生成，非假绿）。
+
+#### 最终分级（lead 拍板）：3 阻断 / 8 重要·高 / 9 观察
+> 53390f9（R1~R6）未引入新坑，但留有 3 条阻断级**残留路径**，恰恰对应「刷新后跳动」的同类症状。
+
+- **阻断① A1（含 A1a=I5 跨页两个数 + A1b=B2 30s 窗口误伤）**：根因 = 单一共享 SP 槽位 + `dividendInputFingerprint` 不含分红记录版本 + 写入点散落（首页进场 `DashboardViewModel.kt:334-340`、持仓进场 `:270-276`、持仓刷新 `:370-377` 写，**首页刷新 phase-2 `:459-488` 不写**）。后果：刷新后首页停在旧值、持仓页长期旧值、重进「新→旧→新」闪跳；手动改分红切回首页 30s 内 stale。
+- **阻断② A16（=B3）**：R1 只保护「空结果」分支，`data.isNotEmpty()` 时 `DividendRepository.kt:1244-1248` 全量刷新无条件 `deleteNonManualBySymbol` 再只插回本次 `validRecords`；`classifyFundDividendPage:661-665` 对 recordCount>0 一律 HAS_RECORDS、无完整性校验 → **残缺解析洗库**，经 `:740 markFetched`(24h) + `DividendIncomeLoader.kt:97` 同日短路，偏小 I 复用一整天。**用户原始「刷新跳动」症状的残留根因**。
+- **阻断③ A19（=B1）**：场内基金（ETF/REIT/LOF）东财批量 `eastmoneyAnswered` 预置 `answered=true`，天天基金 SUSPICIOUS failure 被吞后无法翻转 → `:740 markFetched` + `:742 clearFailure` 把「解析可疑」误记为「源已应答无分红」，库里无旧自动记录时固化 7 天负缓存。R1 核心保证对整类资产被绕过（既有缺陷，53390f9 未改 `:950`）。
+
+- **重要·高**：A2（R3 冻结分母在 Composable `DashboardScreen.kt:97` 旋屏二次冻结，仅刷新中 5~19s 且恰旋屏）、A3（同屏净资产 vs 冻结分母口径）、A4（三处签名字段集不一致、均缺 records 摘要）、A5（三 VM 三套 scopeKey）、A7/A18（freshness 契约只约束 UseCase 层，Loader `:97` 不看 cacheOnly，刷新可被 SP 缓存短路成零请求；并发写同一 SP 分片无版本保护）、A8（`AssetSyncManager.kt:581` forceRefresh 根因触发点未移除）、A9（净资产 4 套公式/日志口径重复）。
+- **观察**：A6（UseCase `:138-148` finally 取消路径不可靠，`Mutex.lock` tryLock 清洁路径争用时跳过清理；`:102/:141` 注释缺陷）、A10~A15、A17（`FundDividendApiService.kt:105-108` 引用不存在的 `FUND_MAX_CONCURRENT_SYNC`）、`DividendRepository.kt:1169 saveDividends()` public 默认 destructive 但零调用方（未来接线风险）。
+
+#### A1 分级分歧裁决（lead）
+工程师按「可见影响+可自愈」判重要（冷启动重算写盘纠正，约 30s+一次重算）；架构师按「单一来源/状态所有权」判阻断（本轮唯一结构性破坏单一数据源）。**lead 裁决：维持阻断**——匹配用户需求书第 1 优先级「realAnnualIncome 是否真同源」，且 A1 是 A1/B2/A4「一根多症」的根，统一修法（唯一 `IncomeInputSignature` 含分红记录版本 + 唯一写入点 + `invalidateIncome()` 门面）一处可同时关闭三条、缓解 A7/A18。
+
+#### 下一版验收断言规格（本轮均未落地，符合只读）
+- **A** `DashboardViewModelTest` 复用 `:289` 夹具，刷新写 200.0 后 `coVerify(exactly=1){prefsMgr.updatePreferences(any())}`（当前 0 次，钉死 A1a）+ 再 `loadDividendIncome` 采 uiState 序列断言 `realAnnualIncome` 不回落到 100.0。
+- **B** 两个子用例必选——① 有争用清理跳过：`inFlight`/`inFlightKey` 最终置空 + `lastSuccess` 不被污染；② 无争用取消发起方：不产生第二次 loader 调用 + `lastSuccess` 不被污染（现状基线断言；若修法下沉写入则改「首个结果被写入且值正确」，二选一写死）。可选 2b 取消纯复用方：重复抓取但 `lastSuccess` 仍写入。
+- **C**（对应 A16）：「首次 10 条 / 二次仅 2 条」两次 `forceRefresh=true` 全量刷新，断言 DB 仍保留 10 条、`totalAnnualIncome` 不掉。
+
+#### 真机必验清单（装机 53390f9 包）
+1. 点一次刷新，首页「预计每日收入/年化收入率」是否仍大幅来回跳（重点看 A16 残缺洗库 / A19 场内基金）。
+2. 逐标的对比刷新前后 `records=` 合计与 `dataHash`（`DividendIncomeLoader.kt:190-195` 已打，无需埋点），抽查单只 `recordsBySymbol[symbol].size` 是否异常下降。
+3. 手动改一只分红后切回首页，收入是否在 30s 内 stale（A1b/B2）。
+4. 持仓页 vs 首页「年度分红/预计每日收入」是否一致（A1a/I5）。
+5. R6 日志 `I / D / N` 数值 vs 屏上显示是否对应。
+
+#### 已知坑核对
+未复燃：OkHttp 手动 Accept-Encoding、日期脏数据双层防御、DashboardPreferences 整块回写、两 451 口径、收息进度按除息日/日历按发放日、隐藏低价值币只影响列表、DB v18 迁移、`--rerun` 假绿。部分复燃：AI_GUIDE §7-7「源未应答不写负缓存」（A19）。注释失真：`FundDividendApiService.kt:105-108`。
+
+#### 结论
+上轮出的 `53390f9` 包**未完全修复**用户原始「刷新后跳动」——A16/A19 是同一症状的两类残留路径，A1/B2 是跨页一致性缺陷；门禁全绿不覆盖这些运行时/数据流路径（0 覆盖）。建议下一轮按「一根多症」统一修 A1/A16/A19 三条阻断 + A4/A7/A18，并补 A/B/C 回归测试。本轮只读未提交任何代码改动；`f195a39` 文档提交仍待网络恢复补推。

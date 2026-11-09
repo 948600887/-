@@ -307,7 +307,7 @@ class FundDividendApiService {
                     // Repository 随即写 7 天负缓存并删掉库里旧分红记录 ——
                     // 用户点一次刷新，年化收入当场缩水，下次抓全了又涨回来。
                     // 现在由 [classifyFundDividendPage] 三态区分，判据见其 KDoc。
-                    when (classifyFundDividendPage(html, records.size)) {
+                    when (classifyFundDividendPage(html, records.size, countDividendDataRows(html))) {
                         FundDividendPageVerdict.HAS_RECORDS,
                         FundDividendPageVerdict.NO_DIVIDEND_DECLARED -> {
                             fhspOnSuccess()
@@ -376,7 +376,7 @@ class FundDividendApiService {
             // 与 OkHttp 路径完全同一套三态判定：只有「有记录」或「页面明确声明暂无分红」
             // 才算成功答案。降级到 Jsoup 后仍解析出 0 条且没有空态提示，同样按解析可疑
             // 返回失败（保留旧记录），绝不能把空列表固化成「确实无分红」。
-            when (classifyFundDividendPage(html, records.size)) {
+            when (classifyFundDividendPage(html, records.size, countDividendDataRows(html))) {
                 FundDividendPageVerdict.HAS_RECORDS,
                 FundDividendPageVerdict.NO_DIVIDEND_DECLARED -> {
                     fhspOnSuccess()
@@ -658,11 +658,46 @@ internal enum class FundDividendPageVerdict {
     NOT_A_DIVIDEND_PAGE
 }
 
-internal fun classifyFundDividendPage(html: String, recordCount: Int): FundDividendPageVerdict {
+internal fun classifyFundDividendPage(html: String, recordCount: Int, expectedRowCount: Int = 0): FundDividendPageVerdict {
     if (!isRealDividendPage(html)) return FundDividendPageVerdict.NOT_A_DIVIDEND_PAGE
-    if (recordCount > 0) return FundDividendPageVerdict.HAS_RECORDS
+    if (recordCount > 0) {
+        // A16（阻断）残缺解析判定：页面分红表实际有 `expectedRowCount` 个数据行，却只解析出
+        // 远少于它的 `recordCount`（不到一半），说明这次解析大概率不完整（表头索引失败 /
+        // 日期或金额校验批量丢弃 / 页面改版），绝不能当成「确实有记录」就放行去洗库 ——
+        // 必须按解析可疑处理，让上层走失败、保留旧记录。
+        // 阈值取「小于一半」：正常完整页即便 countDividendDataRows 多算一两行（汇总行等）
+        // 也不会误伤；真正残缺（10 行只解出 2 行）必然命中。默认 expectedRowCount=0 时
+        // 不触发，行为退化为从前（既有的纯函数单测不传该参数，完全不受影响）。
+        if (expectedRowCount > recordCount * 2) {
+            return FundDividendPageVerdict.SUSPICIOUS_EMPTY_PARSE
+        }
+        return FundDividendPageVerdict.HAS_RECORDS
+    }
     if (html.contains("暂无分红信息")) return FundDividendPageVerdict.NO_DIVIDEND_DECLARED
     return FundDividendPageVerdict.SUSPICIOUS_EMPTY_PARSE
+}
+
+/**
+ * 统计分红表里「数据行」的数量（不含表头），供 [classifyFundDividendPage] 的 A16 残缺解析判定使用。
+ *
+ * 只数含 `<td>` 且含 4 位年份的 `<tr>`，过滤掉「共 1 页」这类汇总行与 `<th>` 表头行——
+ * 否则会把汇总行也算进去，导致完整页被误判成残缺。解析异常时返回 0（保守：不算残缺）。
+ */
+internal fun countDividendDataRows(html: String): Int {
+    return try {
+        val doc = Jsoup.parse(html)
+        var count = 0
+        for (table in doc.select("table")) {
+            val text = table.text()
+            if (!text.contains("权益登记日") && !text.contains("除息日") && !text.contains("分红")) continue
+            for (row in table.select("tr")) {
+                val cells = row.select("td")
+                if (cells.isEmpty()) continue
+                if (cells.any { it.text().contains(Regex("\\d{4}")) }) count++
+            }
+        }
+        count
+    } catch (e: Exception) { 0 }
 }
 
 /**

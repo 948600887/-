@@ -947,7 +947,15 @@ class DividendRepository private constructor(
 
         // 「本轮有没有任何一个数据源应答过」。只要有一个应答，空结果就是有效结论
         // （该写负缓存）；一个都没应答说明是网络/限流问题，上抛让调用方什么都不写
-        val answered = AtomicBoolean(eastmoneyAnswered)
+        //
+        // A19 修复（阻断）：东财批量只覆盖股票/场外基金的分红报告，场内基金（ETF/REIT/LOF）
+        // 的分红**不在**东财股票分红报告里（AI_GUIDE 第 6 条）。因此标的「在批量里且返回空」
+        // 对场内基金**不代表**它没分红——批量预取本来就不问它的基金源。
+        // 旧实现把 eastmoneyAnswered 直接灌进 answered 初值，导致「天天基金 SUSPICIOUS 失败」
+        // 仍被当成「源已应答、无分红」，库里无旧自动记录时固化 7 天负缓存，整类资产被绕过 R1 保证。
+        // 现在：只有「东财确实是该标的的权威来源（股票）且批量已应答」才预置 answered=true；
+        // 场内基金一律留空，交由天天基金真正抓取后再定（成功才置位，失败则上抛保留旧记录）。
+        val answered = AtomicBoolean(eastmoneyAnswered && !isExchangeFund)
 
         var data: List<DividendRecord> = when {
             isOTCFund -> fetchSource("天天基金", stockCode, answered) { fetchFromFundApi(stockCode) }
@@ -1243,8 +1251,24 @@ class DividendRepository private constructor(
 
         StockDatabase.getInstance(context).withTransaction {
             if (!isIncremental) {
-                // 全量更新：只删除自动抓取的记录，保留用户手动修正的记录(isManual=1)
-                dividendDao.deleteNonManualBySymbol(symbol)
+                // 全量更新：先核对「本次解析是否完整」，不完整则**不能**删库。
+                // A16（阻断）：R1 只护住空结果分支；这里补全「残缺解析」分支——
+                // 一次全量刷新如果解析到的有效记录数少于库里已有的自动记录数，说明解析
+                // 大概率不完整（HTML 200、表头在、但只解析出一小部分行），此时若照旧
+                // 无条件 deleteNonManualBySymbol 再只插回残缺集合，就会把其余记录洗掉，
+                // 年化收入当场缩水（用户原始「刷新跳动」残留根因）。
+                // 不完整时跳过删库，只做下方 upsert（按 symbol+date 跳过已存在），保留旧值。
+                val existingAutoCount = dividendDao.getBySymbol(symbol).count { !it.isManual && it.amount > 0 }
+                if (shouldReplaceRecordsOnFullRefresh(existingAutoCount, validRecords.size)) {
+                    // 完整或更多：只删除自动抓取的记录，保留用户手动修正的记录(isManual=1)
+                    dividendDao.deleteNonManualBySymbol(symbol)
+                } else {
+                    AppLogger.w(
+                        "全量刷新解析到的有效记录(${validRecords.size})少于库里已有自动记录($existingAutoCount)，" +
+                            "按残缺解析处理，跳过删库以保留旧分红记录: $symbol",
+                        "DividendRepository"
+                    )
+                }
             }
 
             // 增量与全量统一逻辑：跳过已存在记录（含手动记录），避免覆盖用户修正

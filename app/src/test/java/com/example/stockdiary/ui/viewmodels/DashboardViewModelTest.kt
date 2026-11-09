@@ -6,7 +6,10 @@ import com.example.stockdiary.data.prefs.DashboardPreferences
 import com.example.stockdiary.data.prefs.DashboardPreferencesManager
 import com.example.stockdiary.data.dividend.DividendIncomeLoader
 import com.example.stockdiary.data.dividend.DividendIncomeUseCase
+import com.example.stockdiary.data.dividend.DividendRecord
+import com.example.stockdiary.data.dividend.dividendInputFingerprint
 import com.example.stockdiary.data.dividend.daysInCurrentYear
+import com.example.stockdiary.data.dividend.recordsDigest
 import com.example.stockdiary.data.sync.SyncResult
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
@@ -14,6 +17,7 @@ import com.example.stockdiary.di.AppContainer
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
+import io.mockk.verify
 import io.mockk.mockk
 import io.mockk.mockkObject
 import io.mockk.unmockkAll
@@ -109,6 +113,29 @@ class DashboardViewModelTest {
             val updated = mutate(prefsFlow.value)
             prefsFlow.value = updated
             updated
+        }
+        // prefsMgr 是 relaxed mock：MockK 会把 persistAnnualDividendIncome / invalidateAnnualDividendIncome
+        // 也一起桩掉（直接返回默认对象、不会执行真实方法体），于是真实方法体里那次
+        // updatePreferences 调用根本不会发生、prefsFlow 也不会被更新。这里把这两个门面显式桩成
+        // 「经唯一入口 updatePreferences 套用同样的 copy」，既让 prefsFlow 真正反映落盘值，
+        // 也让 verify(exactly=1){updatePreferences} 这类断言能数到这次写入。
+        every { prefsMgr.persistAnnualDividendIncome(any(), any(), any()) } answers {
+            val assets = firstArg<List<Asset>>()
+            val recordsBySymbol = secondArg<Map<String, List<DividendRecord>>>()
+            val total = thirdArg<Double>()
+            prefsMgr.updatePreferences { prefs ->
+                prefs.copy(
+                    annualDividendCache = total,
+                    annualDividendSymbols = assets.mapNotNull { it.symbol }.toSet(),
+                    annualDividendFingerprint = dividendInputFingerprint(assets),
+                    annualDividendRecordsVersion = recordsDigest(recordsBySymbol)
+                )
+            }
+        }
+        every { prefsMgr.invalidateAnnualDividendIncome() } answers {
+            prefsMgr.updatePreferences { prefs ->
+                prefs.copy(annualDividendFingerprint = "", annualDividendRecordsVersion = "")
+            }
         }
         every { assetRepo.getAllAssets() } returns flowOf(initialAssets)
         every { assetRepo.getAllSnapshots() } returns flowOf(emptyList())
@@ -334,6 +361,55 @@ class DashboardViewModelTest {
                 val state = vm.uiState.first { it.errorMessage != null }
                 assertEquals("刷新失败：网络挂了", state.errorMessage)
                 assertEquals(null, state.pendingSyncResult)
+            } finally {
+                trackJob.cancel()
+            }
+        } finally {
+            unmockkAll()
+        }
+    }
+
+    @Test
+    fun `刷新算出的年度分红写入缓存_回首页重进不再回落到旧值`() = runBlocking {
+        // A1a（阻断）：刷新 phase-2 此前不写年度分红缓存，用户在首页点刷新算出新值后切走再回，
+        // 进场读到的还是旧的 annualDividendCache → 刷新后停在旧值。修复后刷新统一经唯一写入点
+        // [DashboardPreferencesManager.persistAnnualDividendIncome] 落盘（含记录版本摘要），
+        // 回首页进场命中新值。这里断言：刷新恰好落盘一次（修复前为 0），且落盘值就是刷新算出的
+        // 200.0；随后重进首页显示 200.0，不再回落到旧缓存 / 兜底值。
+        mockkObject(AssetSyncManager)
+        try {
+            coEvery {
+                AssetSyncManager.syncAllAssets(any(), any(), any(), any(), any(), any(), any(), any(), any())
+            } returns SyncResult(successCount = 1, failedCount = 0, truncatedByTimeLimit = false)
+
+            val vm = buildVm(initialAssets = listOf(stockAsset))
+            val (trackJob, latest) = vm.uiState.trackIn(this)
+            try {
+                waitUntil { latest().assetsFrameReady }
+
+                // 刷新 phase-2 用 200.0 算出的新收入必须落盘
+                coEvery { useCase.load(any(), any(), any(), any()) } returns DividendIncomeLoader.IncomeResult(
+                    dividendsBySymbol = emptyMap(),
+                    recordsBySymbol = emptyMap(),
+                    totalAnnualIncome = 200.0,
+                    hasDividendData = true
+                )
+                vm.refresh()
+                waitUntil { !latest().isRefreshing }
+
+                // 刷新必须恰好落盘一次（修复前刷新不写缓存 → 0 次）
+                verify(exactly = 1) { prefsMgr.updatePreferences(any()) }
+                // 落盘值就是刷新算出的 200.0（而非旧缓存 0.0 / 兜底 100.0）
+                assertEquals(200.0, prefsFlow.value.annualDividendCache, 0.001)
+                assertTrue(
+                    "记录版本摘要已写入，进场命中判据闭合（A1b：手动改分红后缓存立刻失效）",
+                    prefsFlow.value.annualDividendRecordsVersion.isNotEmpty()
+                )
+
+                // 回首页重进：进场命中所写缓存，显示刷新算出的 200.0，不再回落到旧/兜底值
+                vm.loadDividendIncome(listOf(stockAsset))
+                waitUntil { latest().realAnnualIncome == 200.0 }
+                assertEquals(200.0, latest().realAnnualIncome, 0.001)
             } finally {
                 trackJob.cancel()
             }

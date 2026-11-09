@@ -219,7 +219,9 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
      */
     fun refreshDividendIncomeAfterManualEdit(stockAssets: List<Asset>) {
         if (stockAssets.isEmpty()) return
-        persistPreferences { state -> state.copy(annualDividendFingerprint = "") }
+        // A1 / A4：手动增删改分红后，主动作废年度分红缓存（指纹 + 记录版本一并清掉），
+        // 让下方进场判据失效、立刻重算并看到新数字（旧实现只清指纹、漏记录版本，仍会 stale）。
+        container.dashboardPreferencesManager.invalidateAnnualDividendIncome()
         loadDividendIncome(stockAssets)
     }
 
@@ -233,7 +235,11 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
         // 缓存命中：直接用旧值，不抓。
         // 判据是指纹而不是代码集合：加仓 / 改存款利率时代码集合不变，但收入已变，
         // 只看集合会让界面一直显示旧收入。
-        if (fingerprint == cached.annualDividendFingerprint && fingerprint.isNotEmpty()) {
+        // A1 / A4：命中还要求记录版本非空——手动改分红后记录摘要变化或已被 invalidate，
+        // 命中即失效、必须重算（A1b：改完立刻看到新数字，而非停在旧值）。
+        if (fingerprint == cached.annualDividendFingerprint && fingerprint.isNotEmpty() &&
+            cached.annualDividendRecordsVersion.isNotEmpty()
+        ) {
             _uiState.update {
                 it.copy(
                     estimatedAnnualDividend = cached.annualDividendCache,
@@ -266,14 +272,14 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
                 }
                 hasLoadedDividend = true
 
-                // 抓到手就存缓存：下次进场同一批持仓直接命中
-                persistPreferences { state ->
-                    state.copy(
-                        annualDividendCache = result.totalAnnualIncome,
-                        annualDividendSymbols = symbols,
-                        annualDividendFingerprint = fingerprint
-                    )
-                }
+                // 抓到手就存缓存：下次进场同一批持仓直接命中。
+                // A1 统一收口：经 [DashboardPreferencesManager.persistAnnualDividendIncome] 唯一写入点，
+                // 与首页共用同一口径、同一组字段（含记录版本摘要），关闭跨页两个数。
+                container.dashboardPreferencesManager.persistAnnualDividendIncome(
+                    stockAssets,
+                    result.recordsBySymbol,
+                    result.totalAnnualIncome
+                )
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -366,15 +372,12 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
                 )
 
                 // 手动刷新说明用户想看最新数，抓到就更新缓存
-                val symbols = assetsOnly.mapNotNull { it.symbol }.toSet()
-                val fingerprint = dividendInputFingerprint(assetsOnly)
-                persistPreferences { state ->
-                    state.copy(
-                        annualDividendCache = result.totalAnnualIncome,
-                        annualDividendSymbols = symbols,
-                        annualDividendFingerprint = fingerprint
-                    )
-                }
+                // A1 统一收口：与首页、持仓进场共用 [persistAnnualDividendIncome] 唯一写入点。
+                container.dashboardPreferencesManager.persistAnnualDividendIncome(
+                    assetsOnly,
+                    result.recordsBySymbol,
+                    result.totalAnnualIncome
+                )
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {

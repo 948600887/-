@@ -1,6 +1,9 @@
 package com.example.stockdiary.data
 
 import com.example.stockdiary.network.FundDividendApiService
+import com.example.stockdiary.network.FundDividendPageVerdict
+import com.example.stockdiary.network.classifyFundDividendPage
+import com.example.stockdiary.network.countDividendDataRows
 import com.example.stockdiary.network.isRealDividendPage
 import io.mockk.every
 import io.mockk.mockk
@@ -224,6 +227,63 @@ class FundDividendApiServiceTest {
 
         val second = service.getFundDividendHistory("110011")
         assertTrue("退避期间应被短路直接失败", second.isFailure)
+    }
+
+    // ---------- A16 残缺解析判定（countDividendDataRows + classifyFundDividendPage） ----------
+
+    @Test
+    fun `classifyFundDividendPage 记录数远少于实际数据行_判解析可疑`() {
+        // 分红表实际有 10 个数据行，却只解析出 2 条（模拟残缺解析）：必须 SUSPICIOUS_EMPTY_PARSE
+        // （保留旧记录），绝不能当 HAS_RECORDS 放行去洗库 —— 否则「首次 10 条 / 二次仅 2 条」
+        // 会把另外 8 条分红记录删掉，年化收入当场缩水。
+        val html = """
+            <table>
+              <tr><th>年份</th><th>权益登记日</th><th>除息日</th><th>每10份分红</th><th>分红发放日</th></tr>
+              <tr><td>2015</td><td>2015-06-01</td><td>2015-06-02</td><td>1.00</td><td>2015-06-05</td></tr>
+              <tr><td>2016</td><td>2016-06-01</td><td>2016-06-02</td><td>1.10</td><td>2016-06-05</td></tr>
+              <tr><td>2017</td><td>2017-06-01</td><td>2017-06-02</td><td>1.20</td><td>2017-06-05</td></tr>
+              <tr><td>2018</td><td>2018-06-01</td><td>2018-06-02</td><td>1.30</td><td>2018-06-05</td></tr>
+              <tr><td>2019</td><td>2019-06-01</td><td>2019-06-02</td><td>1.40</td><td>2019-06-05</td></tr>
+              <tr><td>2020</td><td>2020-06-01</td><td>2020-06-02</td><td>1.50</td><td>2020-06-05</td></tr>
+              <tr><td>2021</td><td>2021-06-01</td><td>2021-06-02</td><td>1.60</td><td>2021-06-05</td></tr>
+              <tr><td>2022</td><td>2022-06-01</td><td>2022-06-02</td><td>1.70</td><td>2022-06-05</td></tr>
+              <tr><td>2023</td><td>2023-06-01</td><td>2023-06-02</td><td>1.80</td><td>2023-06-05</td></tr>
+              <tr><td>2024</td><td>2024-06-01</td><td>2024-06-02</td><td>1.90</td><td>2024-06-05</td></tr>
+            </table>
+        """.trimIndent()
+        // 解析只解出 2 条（残缺），但 countDividendDataRows 数出 10 行 → 2 远小于 10 → 触发可疑
+        assertEquals(
+            FundDividendPageVerdict.SUSPICIOUS_EMPTY_PARSE,
+            classifyFundDividendPage(html, recordCount = 2, expectedRowCount = countDividendDataRows(html))
+        )
+    }
+
+    @Test
+    fun `classifyFundDividendPage 解析完整_记录数接近实际行数_判有记录`() {
+        // 解析出的记录数与实际数据行数接近（完整页），必须 HAS_RECORDS，正常落库。
+        val html = """
+            <table>
+              <tr><th>年份</th><th>权益登记日</th><th>除息日</th><th>每10份分红</th><th>分红发放日</th></tr>
+              <tr><td>2023</td><td>2023-06-05</td><td>2023-06-06</td><td>1.20</td><td>2023-06-09</td></tr>
+            </table>
+        """.trimIndent()
+        assertEquals(
+            FundDividendPageVerdict.HAS_RECORDS,
+            classifyFundDividendPage(html, recordCount = 1, expectedRowCount = countDividendDataRows(html))
+        )
+    }
+
+    @Test
+    fun `countDividendDataRows 只数数据行不含表头与汇总行`() {
+        val html = """
+            <table>
+              <tr><th>年份</th><th>权益登记日</th><th>除息日</th><th>每10份分红</th><th>分红发放日</th></tr>
+              <tr><td>2023</td><td>2023-06-05</td><td>2023-06-06</td><td>1.20</td><td>2023-06-09</td></tr>
+              <tr><td>2024</td><td>2024-06-05</td><td>2024-06-06</td><td>1.30</td><td>2024-06-09</td></tr>
+              <tr><td>共 1 页</td></tr>
+            </table>
+        """.trimIndent()
+        assertEquals(2, countDividendDataRows(html))
     }
 
     @After

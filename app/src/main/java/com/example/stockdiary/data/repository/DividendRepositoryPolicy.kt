@@ -97,6 +97,39 @@ internal fun shouldSkipAfterFailure(lastFailedAt: Long?, now: Long, ttl: Long): 
     // 宁可多等一窗不重打，也不要把请求量放大回去
     return now - failed < ttl
 }
+
+/**
+ * 全量刷新（`forceRefresh=true`）时，是否允许「先删掉该标的全部自动记录、再插回本次解析到的记录」。
+ *
+ * **纯函数**，不碰 Context / Room / 网络，便于单测（见 A16 回归）。
+ *
+ * **A16 修复（阻断）—— 残缺解析洗库**：R1 只护住了「空结果」分支（[DividendRepository]
+ * 拿到空结果时先看库里有没有旧自动记录，有就保留）。但 `classifyFundDividendPage` 对
+ * `recordCount > 0` 一律认成 `HAS_RECORDS`，全量刷新路径就**无条件** `deleteNonManualBySymbol`
+ * 再只插回本次 `validRecords` —— 一旦某次解析残缺（HTML 200、表头在、但只解析出一小部分行：
+ * 页面改版 / 表头索引失败 / 日期或金额校验批量丢弃），就会把「首次 10 条、二次仅 2 条」里的
+ * 另外 8 条洗掉，年化收入当场缩水，下次抓全了又涨回来 —— 正是用户原始「刷新跳动」的残留根因。
+ *
+ * 判定规则：本次解析到的有效记录数**不少于**库里已有的自动记录数，才认为是「完整或更多」的刷新、
+ * 可以安全替换；否则（解析到的比库里已有的少）说明这次解析大概率不完整，**绝不**删库，
+ * 只做 upsert（按 symbol+date 跳过已存在），从而保留旧记录、不丢数据。
+ * 首抓（库里 0 条）解析到 N>0 条 → `N >= 0` 成立 → 正常插入。
+ *
+ * 这是 R1「宁保守、不可误删」原则的延伸：真正停止分红的标的会多留一段旧值，等下次完整抓取纠正，
+ * 代价远小于把真有分红的标的洗成少一截。
+ *
+ * @param existingAutoRecordCount 库里该标的**当前**的自动记录数（不含手动记录、amount>0）
+ * @param incomingValidRecordCount 本次解析并通过过滤的有效记录数
+ */
+internal fun shouldReplaceRecordsOnFullRefresh(
+    existingAutoRecordCount: Int,
+    incomingValidRecordCount: Int
+): Boolean {
+    // 负数无意义（调用方传错），按「不准替换」处理，避免误删
+    if (existingAutoRecordCount < 0 || incomingValidRecordCount < 0) return false
+    // 解析到的有效记录不少于库里已有的，说明这次是「完整或更多」的刷新，可以安全替换
+    return incomingValidRecordCount >= existingAutoRecordCount
+}
 /**
  * 单个批量请求最多带多少个 SECURITY_CODE。
  *

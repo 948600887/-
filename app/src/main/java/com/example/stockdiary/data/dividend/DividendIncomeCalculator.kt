@@ -66,6 +66,30 @@ fun dividendInputFingerprint(assets: List<Asset>): String {
 }
 
 /**
+ * 分红记录的**内容摘要**（A1 / A4）：把「symbol → 分红记录列表」算成稳定字符串，
+ * 作为年度分红缓存的「记录版本」。
+ *
+ * 与 [DividendIncomeLoader.computeDataHash] 的分红记录部分**同一口径**：按 symbol 排序，
+ * 每只再按（除息日, 每股分红）排序，与抓取 / 序列化顺序无关。用户手动增删改一条分红后，
+ * 摘要必然变化 → 年度分红缓存失效、下次进场立刻重算，关闭 A1b「手动改分红切回首页 30s 内 stale」。
+ *
+ * 数组排序后再拼接，保证同一批记录无论顺序如何都得到同一个摘要。
+ */
+fun recordsDigest(recordsBySymbol: Map<String, List<DividendRecord>>): String {
+    val sb = StringBuilder()
+    recordsBySymbol.keys.sorted().forEach { symbol ->
+        sb.append(symbol).append('|')
+        recordsBySymbol[symbol]
+            ?.sortedWith(compareBy({ it.exDividendDate }, { it.dividendPerShare }))
+            ?.forEach { record ->
+                sb.append(record.exDividendDate).append('=').append(record.dividendPerShare).append(';')
+            }
+        sb.append('\n')
+    }
+    return sb.toString().hashCode().toString()
+}
+
+/**
  * 股息收益计算器
  * 类似"收息佬"的核心功能：计算持仓股息收入、FIRE覆盖率等
  */

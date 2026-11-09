@@ -262,7 +262,11 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
         val symbols = assetsOnly.mapNotNull { it.symbol }.toSet()
         val fingerprint = dividendInputFingerprint(assetsOnly)
         val cached = preferences.value
-        val cacheStillValid = symbols.isNotEmpty() && cached.annualDividendFingerprint == fingerprint
+        // A1 / A4：缓存命中判据在「指纹匹配」之外还要求记录版本非空——记录一变（手动改分红）
+        // 摘要就变或已被 invalidate，命中即失效、必须重算，关闭 A1b「30s 内 stale」。
+        val cacheStillValid =
+            symbols.isNotEmpty() && cached.annualDividendFingerprint == fingerprint &&
+                cached.annualDividendRecordsVersion.isNotEmpty()
         if (hasLoadedIncome && cacheStillValid &&
             System.currentTimeMillis() - lastIncomeWriteAt < INCOME_COALESCE_WINDOW_MS
         ) {
@@ -273,7 +277,8 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
 
         // 只有缓存就是「这一批资产」算出来的才敢当全量展示（见上方 KDoc）。
         // 指纹含数量与利率：加仓 / 改存款余额同样会让旧值作废，不能只看代码集合。
-        val hasCached = symbols.isNotEmpty() && cached.annualDividendFingerprint == fingerprint
+        val hasCached = symbols.isNotEmpty() && cached.annualDividendFingerprint == fingerprint &&
+            cached.annualDividendRecordsVersion.isNotEmpty()
         val lastValue = cached.annualDividendCache
 
         viewModelScope.launch {
@@ -328,16 +333,15 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
                 hasLoadedIncome = true
 
                 // 存下来：下次进场先摆这个值，不用等这一轮算完。
-                // 走 Manager 的原子「读-改-写」：只覆盖两个缓存字段，其余（含用户在设置页
-                // 刚改的开关、日历改的月度生活费等）原样保留，杜绝用陈旧副本整体回写覆盖。
-                // 写盘后 Manager 的唯一偏好流已同步更新，本 VM 无需再改本地副本。
-                preferencesManager.updatePreferences { prefs ->
-                    prefs.copy(
-                        annualDividendCache = result.totalAnnualIncome,
-                        annualDividendSymbols = symbols,
-                        annualDividendFingerprint = fingerprint
-                    )
-                }
+                // A1 统一收口：年度分红缓存的唯一写入点 [persistAnnualDividendIncome]，
+                // 三处（首页进场 / 首页刷新 phase-2 / 持仓页）共用同一方法、同一口径，
+                // 不再各自直写偏好，杜绝跨页两个数与「新→旧→新」闪跳。
+                // 同时写入记录版本摘要（A1b 修复：手动改分红后缓存立刻失效）。
+                preferencesManager.persistAnnualDividendIncome(
+                    assetsOnly,
+                    result.recordsBySymbol,
+                    result.totalAnnualIncome
+                )
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -486,6 +490,14 @@ class DashboardViewModel(private val container: AppContainer) : ViewModel() {
                         incomeCalculationStatus = if (result.totalAnnualIncome == 0.0) "暂无分红/利息数据" else null
                     )
                 }
+                // A1a（阻断）：刷新 phase-2 此前**不写**年度分红缓存——用户在首页点刷新算出了新值，
+                // 切走再回首页时进场读到的还是旧的 annualDividendCache，于是「刷新后停在旧值」。
+                // 现在统一经唯一写入点落盘（含记录版本摘要），回首页直接命中新值。
+                preferencesManager.persistAnnualDividendIncome(
+                    assetsOnly,
+                    result.recordsBySymbol,
+                    result.totalAnnualIncome
+                )
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {

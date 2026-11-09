@@ -68,7 +68,10 @@ class DividendIncomeLoader(
         // 哈希覆盖两路底层输入：分红记录（records 变了才重算）+ 持仓（当天加仓/调仓才重算）。
         // 仅当 records 真变、持仓真变或跨日（date != 今天）才重算 ——
         // 即「保留跨日 TTM 漂移 + 仅底层输入变化才重算」。
-        if (!forceRefresh) {
+        if (!forceRefresh && cacheOnly) {
+            // A7：同日短路只在「冷启动只读缓存」(cacheOnly=true) 时生效。
+            // 刷新(cacheOnly=false) 必须绕过它、走真实抓取——否则刷新会被 SP 缓存短路成
+            // 零请求，用户点刷新却拿到与缓存完全相同的结果，等于刷新无效。
             // 一次性批量取所有标的的缓存记录（内部一次 IN 查询 + 一次 SP getAll），
             // 取代逐标的的 2N 次 IO —— 240 个标的冷启动实测能省 3~4 秒。
             // 语义与逐标的 getCachedAllowingStale 逐分支一致，见该方法的 KDoc。

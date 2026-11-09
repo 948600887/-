@@ -197,13 +197,14 @@ class DividendIncomeLoaderTest {
         )
 
     /**
-     * 同日、非强制刷新、底层数据未变 → 第二次应**复用**缓存结果，不再进 prefetch / getDividendsBySymbol。
+     * 同日、冷启动（cacheOnly=true）、底层数据未变 → 第二次应**复用**缓存结果，不再进 prefetch / getDividendsBySymbol。
      *
      * 这是「杀掉同日抖动」的核心断言：第一次正常抓取落盘后，第二次（同一天、records 不变）
-     * 必须零网络直接返回旧值。
+     * 必须零网络直接返回旧值。（A7：同日短路只在冷启动 cacheOnly 时生效，刷新 cacheOnly=false
+     * 必须绕过它真实重抓，故这里用 cacheOnly=true 走冷启动复用路径。）
      */
     @Test
-    fun `同日非强制刷新复用缓存结果不重抓`() = runBlocking {
+    fun `同日冷启动复用缓存结果不重抓`() = runBlocking {
         val today = LocalDate.now().format(DateTimeFormatter.ISO_LOCAL_DATE)
         val assets = listOf(stock("sh600519"), stock("sh000001"))
         coEvery { repository.getCachedAllowingStale("sh600519") } returns listOf(record(today, "5.0"))
@@ -220,23 +221,20 @@ class DividendIncomeLoaderTest {
             savedHashes.add(arg(1) as String)
             savedDates.add(arg(2) as String)
         }
-        // 第一次无缓存 → 正常抓取落盘；第二次返回第一次落盘的内容（哈希/日期一致）→ 复用
-        var loadCount = 0
+        // 第一次（cacheOnly=false）不走复用分支、不会读缓存；第二次（cacheOnly=true）读缓存时应已存在
+        // 第一次落盘的内容（哈希/日期一致），直接命中复用。这里永远返回那次落盘的值即可。
         every { cache.loadCached(any()) } answers {
-            when (loadCount++) {
-                0 -> null
-                else -> DividendIncomeCache.CachedIncome(
-                    date = savedDates[0],
-                    dataHash = savedHashes[0],
-                    dividendsBySymbol = savedResults[0].dividendsBySymbol,
-                    totalAnnualIncome = savedResults[0].totalAnnualIncome,
-                    hasDividendData = savedResults[0].hasDividendData
-                )
-            }
+            DividendIncomeCache.CachedIncome(
+                date = savedDates[0],
+                dataHash = savedHashes[0],
+                dividendsBySymbol = savedResults[0].dividendsBySymbol,
+                totalAnnualIncome = savedResults[0].totalAnnualIncome,
+                hasDividendData = savedResults[0].hasDividendData
+            )
         }
 
         val first = cachedLoader.loadIncome(assets)
-        val second = cachedLoader.loadIncome(assets)
+        val second = cachedLoader.loadIncome(assets, cacheOnly = true)
 
         // 两次结果一致（复用）
         assertEquals(first.totalAnnualIncome, second.totalAnnualIncome, 1e-9)
@@ -451,7 +449,10 @@ class DividendIncomeLoaderTest {
         }
 
         cachedLoader.loadIncome(assetsA)
-        cachedLoader.loadIncome(assetsB) // currency 变了 → 哈希不同 → 重算
+        // currency 变了 → 哈希不同 → 必须重算。A7：刷新（cacheOnly=false）必须走完整抓取，
+        // 不能走 cacheOnly=true 的冷启动复用/零请求重算分支（那个分支只从缓存记录零请求重算，
+        // 不会重新抓取，也就不会触发「哈希变」应有的完整重算语义）。
+        cachedLoader.loadIncome(assetsB)
 
         coVerify(exactly = 2) { repository.prefetchDividendsBatch(any(), any()) }
         coVerify(exactly = 2) { repository.getDividendsBySymbol("sh600519", false, any()) }
@@ -471,23 +472,22 @@ class DividendIncomeLoaderTest {
         coEvery { repository.getDividendsBySymbol("sh600519", false, any()) } returns listOf(record(today, "5.0"))
 
         val (_, hashes, _) = captureSave()
-        var loadCount = 0
+        // 第一次（cacheOnly=false）不走复用分支、不会读缓存；第二次（cacheOnly=true）读缓存时
+        // 应已存在第一次落盘的内容（哈希/日期一致），直接命中复用。全不变 → 第二次哈希与首次一致、
+        // 缓存 date 也是今天 → 复用，原样返回 777。
         every { cache.loadCached(any()) } answers {
-            when (loadCount++) {
-                0 -> null
-                // 全不变 → 第二次哈希与首次一致，缓存 date 也是今天 → 复用
-                else -> DividendIncomeCache.CachedIncome(
-                    date = today,
-                    dataHash = hashes[0],
-                    dividendsBySymbol = mapOf("sh600519" to 5.0),
-                    totalAnnualIncome = 777.0, // 与重算值 50 不同：复用就必须原样返回 777
-                    hasDividendData = true
-                )
-            }
+            DividendIncomeCache.CachedIncome(
+                date = today,
+                dataHash = hashes[0],
+                dividendsBySymbol = mapOf("sh600519" to 5.0),
+                totalAnnualIncome = 777.0, // 与重算值 50 不同：复用就必须原样返回 777
+                hasDividendData = true
+            )
         }
 
         cachedLoader.loadIncome(assets)
-        val reused = cachedLoader.loadIncome(assets)
+        // 第二次走冷启动 cacheOnly=true 才命中同日复用（A7：刷新 cacheOnly=false 必须绕过复用真实重抓）
+        val reused = cachedLoader.loadIncome(assets, cacheOnly = true)
 
         assertEquals(777.0, reused.totalAnnualIncome, 1e-6)
         // 两次调用总共只抓取过一次

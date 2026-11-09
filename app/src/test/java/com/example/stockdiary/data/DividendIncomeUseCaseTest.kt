@@ -5,11 +5,27 @@ import com.example.stockdiary.data.dividend.DividendIncomeUseCase
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
 import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.util.concurrent.atomic.AtomicInteger
+
+/**
+ * 读取 Kotlin `private var` 的底层字段（[DividendIncomeUseCase] 的在飞 / 上次成功等内部状态）。
+ * 单测不依赖 Android Context，JVM 直接跑，字段名未被混淆，可经反射拿到，用于断言单飞收尾的
+ * 内部不变量（inFlight / inFlightKey 是否清理、lastSuccess 是否被污染）。
+ */
+@Suppress("UNCHECKED_CAST")
+private fun <T> readPrivate(instance: Any, fieldName: String): T {
+    val field = instance.javaClass.getDeclaredField(fieldName)
+    field.isAccessible = true
+    return field.get(instance) as T
+}
 
 class DividendIncomeUseCaseTest {
 
@@ -208,5 +224,60 @@ class DividendIncomeUseCaseTest {
 
         val recovered = useCase.load(assets, forceRefresh = false, tag = "test")
         assertEquals("失败后应重新抓取，而不是复用失败的 deferred", 7.0, recovered.totalAnnualIncome, 0.0)
+    }
+
+    @Test
+    fun `并发单飞结束后inFlight与inFlightKey清理干净且lastSuccess只由发起方写入`() = runBlocking {
+        // 回归单飞收尾：多个并发调用共享同一次抓取后，无论调度如何交错，阶段2 发起方的 finally
+        // （=== 身份比较）必须把 inFlight / inFlightKey 清掉；复用方不得写入 lastSuccess，
+        // 否则会覆盖发起方算出的正确结果（「lastSuccess 被污染」）。
+        val counter = AtomicInteger(0)
+        val useCase = DividendIncomeUseCase(countingLoader(counter))
+        val assets = listOf(asset("600900"), asset("000001"))
+
+        val results = (1..10).map {
+            async { useCase.load(assets, forceRefresh = false, tag = "t") }
+        }.map { it.await() }
+
+        assertEquals("并发只真正抓取一次", 1, counter.get())
+        results.forEach { assertEquals(2.0, it.totalAnnualIncome, 0.0) }
+        // 收尾清理：在飞引用必须清空，否则后续调用无法重新走缓存 / 抓取
+        assertNull(readPrivate<Any?>(useCase, "inFlight"))
+        assertNull(readPrivate<String?>(useCase, "inFlightKey"))
+        // lastSuccess 只由发起方写入一次，且等于唯一正确结果（复用方未污染）
+        val last = readPrivate<DividendIncomeLoader.IncomeResult?>(useCase, "lastSuccess")
+        assertNotNull(last)
+        assertEquals(2.0, last!!.totalAnnualIncome, 0.0)
+    }
+
+    @Test
+    fun `发起方await被取消后单飞状态清理且后续调用只触发一次新抓取`() = runBlocking {
+        // 进程级 scope 上的在飞任务在调用方取消自己 await 时不会被取消；finally 的 === 清理仍须把
+        // inFlight / inFlightKey 清掉，否则会卡死后续刷新；且这次失败 / 取消的调用绝不能污染 lastSuccess。
+        val counter = AtomicInteger(0)
+        val useCase = DividendIncomeUseCase { _, _, _, _ ->
+            counter.incrementAndGet()
+            delay(500) // 持续挂起，给调用方留出取消窗口
+            DividendIncomeLoader.IncomeResult(emptyMap(), emptyMap(), 5.0, true)
+        }
+        val assets = listOf(asset("600900"))
+
+        // 发起一次，但立刻取消这次 await（不取消底层在飞任务）
+        val job = launch { useCase.load(assets, forceRefresh = false, tag = "t") }
+        while (counter.get() == 0) delay(5) // 等 loader 真正登记
+        job.cancel()
+        delay(50) // 等 finally 跑完
+
+        // 取消后 inFlight / inFlightKey 必须被清理（=== 身份比较命中），不残留卡死后续刷新
+        assertNull(readPrivate<Any?>(useCase, "inFlight"))
+        assertNull(readPrivate<String?>(useCase, "inFlightKey"))
+        // 这次失败 / 取消的调用不应污染 lastSuccess
+        assertNull(readPrivate<DividendIncomeLoader.IncomeResult?>(useCase, "lastSuccess"))
+
+        // 后续一次全新调用：取消清理后必须只触发一次新抓取（不重复、不遗漏），且拿到正确值
+        val result = useCase.load(assets, forceRefresh = false, tag = "t")
+        assertEquals("取消清理后后续调用只多触发一次抓取（无残留重复）", 2, counter.get())
+        assertEquals(5.0, result.totalAnnualIncome, 0.0)
+        assertNotNull(readPrivate<DividendIncomeLoader.IncomeResult?>(useCase, "lastSuccess"))
     }
 }

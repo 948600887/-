@@ -2,6 +2,10 @@ package com.example.stockdiary.data.prefs
 
 import android.content.Context
 import android.content.SharedPreferences
+import com.example.stockdiary.data.dividend.DividendRecord
+import com.example.stockdiary.data.dividend.dividendInputFingerprint
+import com.example.stockdiary.data.dividend.recordsDigest
+import com.example.stockdiary.database.Asset
 import com.example.stockdiary.utils.AppLogger
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -79,7 +83,17 @@ data class DashboardPreferences(
      * 只比对 [annualDividendSymbols] 会漏掉「加仓」和「改存款余额/利率」：代码集合没变，
      * 但年化收入已经变了，缓存却被当成仍然有效。空串表示旧版本写入的数据，一律视为失效。
      */
-    val annualDividendFingerprint: String = ""
+    val annualDividendFingerprint: String = "",
+    /**
+     * 算这个缓存时的**分红记录版本摘要**（见
+     * [com.example.stockdiary.data.dividend.recordsDigest]）。
+     *
+     * A1 / A4：原 [annualDividendFingerprint] 只含持仓、不含分红记录本身，于是用户在持仓页
+     * 手动增删改一条分红后指纹不变 → 命中旧缓存返回旧值 → 顶部「年度分红」一直停在旧数字，
+     * 直到手动全量刷新才纠正（A1b）。补上记录摘要后，记录一变摘要就变、缓存立刻失效。
+     * 空串表示旧版本 / 已被 [invalidateAnnualDividendIncome] 主动作废，进场必须重算。
+     */
+    val annualDividendRecordsVersion: String = ""
 )
 
 enum class SortOrder {
@@ -138,6 +152,7 @@ class DashboardPreferencesManager(context: Context) {
         private const val KEY_ANNUAL_DIVIDEND_CACHE_V2 = "annual_dividend_cache_v2"
         private const val KEY_ANNUAL_DIVIDEND_SYMBOLS = "annual_dividend_symbols"
         private const val KEY_ANNUAL_DIVIDEND_FINGERPRINT = "annual_dividend_fingerprint"
+        private const val KEY_ANNUAL_DIVIDEND_RECORDS_VERSION = "annual_dividend_records_version"
         
         @Volatile
         private var instance: DashboardPreferencesManager? = null
@@ -197,7 +212,8 @@ class DashboardPreferencesManager(context: Context) {
                 ?: prefs.getFloat(KEY_ANNUAL_DIVIDEND_CACHE, 0f).toDouble(),
             annualDividendSymbols = prefs.getStringSet(KEY_ANNUAL_DIVIDEND_SYMBOLS, emptySet())?.toSet()
                 ?: emptySet(),
-            annualDividendFingerprint = prefs.getString(KEY_ANNUAL_DIVIDEND_FINGERPRINT, "") ?: ""
+            annualDividendFingerprint = prefs.getString(KEY_ANNUAL_DIVIDEND_FINGERPRINT, "") ?: "",
+            annualDividendRecordsVersion = prefs.getString(KEY_ANNUAL_DIVIDEND_RECORDS_VERSION, "") ?: ""
         )
     }
     
@@ -237,6 +253,7 @@ class DashboardPreferencesManager(context: Context) {
             putString(KEY_ANNUAL_DIVIDEND_CACHE_V2, preferences.annualDividendCache.toString())
             putStringSet(KEY_ANNUAL_DIVIDEND_SYMBOLS, preferences.annualDividendSymbols)
             putString(KEY_ANNUAL_DIVIDEND_FINGERPRINT, preferences.annualDividendFingerprint)
+            putString(KEY_ANNUAL_DIVIDEND_RECORDS_VERSION, preferences.annualDividendRecordsVersion)
             apply()
         }
     }
@@ -266,5 +283,47 @@ class DashboardPreferencesManager(context: Context) {
         // 写盘成功后同步唯一副本：订阅本流的各页面立即看到新值，无需回前台 reload
         _preferences.value = updated
         return updated
+    }
+
+    /**
+     * 年度分红缓存的**唯一写入点**（A1「一根多症」统一修复）。
+     *
+     * 此前年度分红缓存（`annualDividendCache` / `annualDividendSymbols` /
+     * `annualDividendFingerprint`）散落在 Dashboard / Portfolio 四个调用点各自 `updatePreferences`
+     * 直写，写入口径（资产范围）还不统一 → 跨页两个数、重进「新→旧→新」闪跳。
+     * 这里把「算完收入后回写缓存」收口到唯一方法：所有调用点（首页进场、首页刷新 phase-2、
+     * 持仓进场、持仓刷新）都经它落盘，写入字段与口径完全一致。
+     *
+     * 同时写入 [DashboardPreferences.annualDividendRecordsVersion]（分红记录摘要）：
+     * 原指纹只含持仓不含记录，手动改分红切回首页 30s 内仍 stale（A1b）——记录摘要让记录一变
+     * 缓存立刻失效。
+     *
+     * @param assets 本次计算年度分红所覆盖的资产（决定指纹与代码集合）
+     * @param recordsBySymbol 本次解析出的分红记录（决定记录摘要）
+     * @param totalAnnualIncome 算出的年度分红总额
+     */
+    fun persistAnnualDividendIncome(
+        assets: List<Asset>,
+        recordsBySymbol: Map<String, List<DividendRecord>>,
+        totalAnnualIncome: Double
+    ): DashboardPreferences = updatePreferences { prefs ->
+        prefs.copy(
+            annualDividendCache = totalAnnualIncome,
+            annualDividendSymbols = assets.mapNotNull { it.symbol }.toSet(),
+            annualDividendFingerprint = dividendInputFingerprint(assets),
+            annualDividendRecordsVersion = recordsDigest(recordsBySymbol)
+        )
+    }
+
+    /**
+     * 主动作废年度分红缓存（A1 / A4 的 `invalidateIncome()` 门面）：手动增删改分红、导入后调用，
+     * 强制下次进场重算并清掉旧指纹与记录摘要。
+     *
+     * 旧实现 [PortfolioViewModel.refreshDividendIncomeAfterManualEdit] 只清 `annualDividendFingerprint`，
+     * 漏了记录摘要，导致手动改分红后首页重进仍命中旧缓存（A1b）。这里一并清掉两份，
+     * 进场判据（指纹匹配 **且** 记录版本非空）随即失效、必走重算。
+     */
+    fun invalidateAnnualDividendIncome(): DashboardPreferences = updatePreferences { prefs ->
+        prefs.copy(annualDividendFingerprint = "", annualDividendRecordsVersion = "")
     }
 }

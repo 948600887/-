@@ -390,8 +390,8 @@ class DividendIncomeCacheVerifyTest {
 
         val (_, hashes, _) = captureSave()
         every { cache.loadCached(any()) } returns null
-        // 第一次（非强制）先抓一次并落盘，拿到与当前记录匹配的哈希
-        cachedLoader.loadIncome(assets)
+        // 第一次（冷启动 cacheOnly=true）先抓一次并落盘，拿到与当前记录匹配的哈希
+        cachedLoader.loadIncome(assets, cacheOnly = true)
         // 之后持久化缓存里是一份「今天 + 哈希一致 + total=999」的旧值
         every { cache.loadCached(any()) } returns DividendIncomeCache.CachedIncome(
             date = today,
@@ -421,7 +421,7 @@ class DividendIncomeCacheVerifyTest {
 
         val (_, hashes, _) = captureSave()
         every { cache.loadCached(any()) } returns null
-        cachedLoader.loadIncome(assets) // 第一次：落盘，哈希 = 当前记录的哈希
+        cachedLoader.loadIncome(assets) // 第一次（非强制，走抓取落盘）：哈希 = 当前记录的哈希
         every { cache.loadCached(any()) } returns DividendIncomeCache.CachedIncome(
             date = today,
             dataHash = hashes[0], // 同日 + 哈希一致
@@ -430,7 +430,8 @@ class DividendIncomeCacheVerifyTest {
             hasDividendData = true
         )
 
-        val reused = cachedLoader.loadIncome(assets)
+        // 第二次走冷启动 cacheOnly=true 才命中同日复用（A7：刷新 cacheOnly=false 必须绕过复用真实重抓）
+        val reused = cachedLoader.loadIncome(assets, cacheOnly = true)
 
         // 原样返回持久化的 777.0（证明是真复用，不是偷偷重算了一遍）
         assertEquals(777.0, reused.totalAnnualIncome, 1e-6)
@@ -458,7 +459,7 @@ class DividendIncomeCacheVerifyTest {
 
         val (_, hashes, _) = captureSave()
         every { cache.loadCached(any()) } returns null
-        cachedLoader.loadIncome(assets)
+        cachedLoader.loadIncome(assets) // 第一次（非强制，走抓取落盘）
         every { cache.loadCached(any()) } returns DividendIncomeCache.CachedIncome(
             date = today,
             dataHash = hashes[0],
@@ -467,7 +468,8 @@ class DividendIncomeCacheVerifyTest {
             hasDividendData = true
         )
 
-        val reused = cachedLoader.loadIncome(assets)
+        // 第二次走冷启动 cacheOnly=true 才命中同日复用（A7：刷新 cacheOnly=false 必须绕过复用真实重抓）
+        val reused = cachedLoader.loadIncome(assets, cacheOnly = true)
 
         // dividendsBySymbol / total 复用缓存；recordsBySymbol 必须是刚读到的当前库记录
         assertEquals(50.0, reused.totalAnnualIncome, 1e-6)

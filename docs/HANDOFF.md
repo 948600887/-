@@ -15,9 +15,13 @@
 |---|---|---|---|
 | _(空，无在途认领)_ | | | |
 
-## 当前状态快照（2026-11-09 14:21，以 `git log` 为准）
+## 当前状态快照（2026-11-09 15:12，以 `git log` 为准）
 
-- `HEAD` = `38d0777`，已推送到 `origin/main`，本地与远端同步。
+- `HEAD` = `b8c532d`（协作约定落地），已推送到 `origin/main`。
+- **最新 APK**：`releases/GoldVault-1.0.0-release-arm64-v8a-b8c532d.apk`（26MB，arm64-v8a，
+  debug keystore 签名，`apksigner verify` 通过）。基于本地 `b8c532d` 构建；
+  本次 `git pull` 被代理 502 挡住，若远端有更新的提交，此包不含那些改动。
+- 出包时已删旧包 `74ff03e`（11-08 23:32，明确早于本次），`releases/` 现只留上面一个。
 - 最近一笔：`fix(持仓): 消除编辑态底部操作栏与 TabBar 间的大块空白`
   —— 关掉 `PortfolioScreen.kt` 编辑态 `BottomAppBar` 的默认 `windowInsets`（双层 Scaffold 重复避让），
   设中性灰底作视觉锚点，三个启用态按钮文字色改 `AppTheme.colors.primary`。
@@ -66,4 +70,15 @@ CODE_ARCHITECTURE.md 部分过时），一律以实际代码 + git log 为准。
 - **给对方**：`tools/check_gate.sh` 现在是 **9 步**（含两个不变量检查 + 迁移三校验 + 三条 `--rerun` gradle 任务），
   别照旧文档里写的「6 步」理解；gradle 任务不加 `--rerun` 会 UP-TO-DATE 假绿。
   `releases/` 我出包时会清理只留最新一个，你出包前先看认领表，别互相删包。
+
+### 2026-11-09 15:12 · 小伍 (`workbuddy@local`)
+
+- **做了什么**：建立多 AI 协作约定（`AGENTS.md` / `docs/HANDOFF.md` / `AI_GUIDE.md` 顶部指针，commit `b8c532d`，已推）；
+  随后出了 release 包 `GoldVault-1.0.0-release-arm64-v8a-b8c532d.apk`。
+- **验证**：`assembleRelease -PabiFilter=arm64-v8a` BUILD SUCCESSFUL（6m43s）；签名 `sign`/`verify` 均 EXIT 0；
+  ABI 仅 `arm64-v8a`；26MB。出包前的 `check_gate.sh` 9 步全绿、1582 例 0 失败。
+- **给对方**：`releases/` 现在**只有 `b8c532d` 这一个包**，我删掉了旧的 `74ff03e`（时间明确更早）。
+  你出包时别删 `b8c532d`，清理只删明确早于你自己刚出包的旧包。
+  ⚠️ 本次 `git pull --rebase` 连续两次被代理 502 / TLS 瞬断挡住，所以**拉不到远端可能的新提交**；
+  这个包基于本地 `b8c532d`。你那边若已推过新改动，装机前先确认基线，别拿这个包验收你的改动。
 

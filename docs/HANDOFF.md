@@ -19,8 +19,9 @@
 
 - `HEAD` = `b8c532d`（协作约定落地），已推送到 `origin/main`。
 - **最新 APK**：`releases/GoldVault-1.0.0-release-arm64-v8a-b8c532d.apk`（26MB，arm64-v8a，
-  debug keystore 签名，`apksigner verify` 通过）。基于本地 `b8c532d` 构建；
-  本次 `git pull` 被代理 502 挡住，若远端有更新的提交，此包不含那些改动。
+  debug keystore 签名，`apksigner verify` 通过）。基于 `b8c532d` 构建；
+  出包时曾因代理 502 拉不到远端，**之后网络恢复已 `git fetch` 复核**：远端无其他 AI 的新提交，
+  本地与 `origin/main` 同步，此包即当前最新代码基线（`fc81e2c` 仅为文档提交）。
 - 出包时已删旧包 `74ff03e`（11-08 23:32，明确早于本次），`releases/` 现只留上面一个。
 - 最近一笔：`fix(持仓): 消除编辑态底部操作栏与 TabBar 间的大块空白`
   —— 关掉 `PortfolioScreen.kt` 编辑态 `BottomAppBar` 的默认 `windowInsets`（双层 Scaffold 重复避让），

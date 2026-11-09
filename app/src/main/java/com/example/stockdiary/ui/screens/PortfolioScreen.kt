@@ -671,19 +671,36 @@ fun PortfolioScreen(
         },
         bottomBar = {
             if (selectionMode) {
-                BottomAppBar {
+                // 外层 GoldVaultNavHost 的 NavigationBar + Modifier.padding(padding) 已完整处理
+                // 导航栏避让（两层 Scaffold 分工见 MainActivity.kt:47-53）。BottomAppBar 若用默认
+                // windowInsets 会二次避让 systemBars.bottom，撑出操作栏与 TabBar 间的大块空白；
+                // 横屏的水平避让已由外层 padding.start/end 承担，这里整体关闭以免重复计算。
+                // containerColor 取中性表面色做视觉锚点，把列表区与底部操作区明确分开。
+                BottomAppBar(
+                    containerColor = AppTheme.colors.surfaceContainerHighest,
+                    contentColor = AppTheme.colors.onSurface,
+                    tonalElevation = 3.dp,
+                    windowInsets = WindowInsets(0, 0, 0, 0)
+                ) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceEvenly,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         val selectedCount = selectedIds.size
+                        // 启用态文字显式取 AppTheme 主色（深色下已提亮），避免沿用
+                        // colorScheme.primary 的深绿落在操作栏灰底上对比度不足。
+                        // 只覆盖 contentColor，禁用态仍走 M3 默认 onSurface@0.38。
+                        val actionButtonColors = ButtonDefaults.textButtonColors(
+                            contentColor = AppTheme.colors.primary
+                        )
                         Text("已选 $selectedCount", style = MaterialTheme.typography.labelMedium, modifier = Modifier.padding(horizontal = 8.dp))
                         TextButton(
                             onClick = {
                                 if (selectedIds.isNotEmpty()) showMoveAccountDialog = true
                             },
-                            enabled = selectedIds.isNotEmpty()
+                            enabled = selectedIds.isNotEmpty(),
+                            colors = actionButtonColors
                         ) {
                             Icon(Icons.AutoMirrored.Filled.DriveFileMove, contentDescription = null, modifier = Modifier.size(18.dp))
                             Spacer(modifier = Modifier.width(4.dp))
@@ -696,7 +713,8 @@ fun PortfolioScreen(
                                     viewModel.batchSync(selectedAssets)
                                 }
                             },
-                            enabled = selectedIds.isNotEmpty() && !isRefreshing
+                            enabled = selectedIds.isNotEmpty() && !isRefreshing,
+                            colors = actionButtonColors
                         ) {
                             Icon(Icons.Filled.Sync, contentDescription = null, modifier = Modifier.size(18.dp))
                             Spacer(modifier = Modifier.width(4.dp))
@@ -704,7 +722,8 @@ fun PortfolioScreen(
                         }
                         TextButton(
                             onClick = { if (selectedIds.isNotEmpty()) showDeleteConfirmDialog = true },
-                            enabled = selectedIds.isNotEmpty()
+                            enabled = selectedIds.isNotEmpty(),
+                            colors = actionButtonColors
                         ) {
                             Icon(Icons.Filled.Delete, contentDescription = null, modifier = Modifier.size(18.dp))
                             Spacer(modifier = Modifier.width(4.dp))

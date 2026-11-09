@@ -1,6 +1,19 @@
 # 金库 GoldVault —— AI 协作操作手册
 
+> 🤝 **本仓库同时有两个 AI 在改进。动手前请先读根目录 [`AGENTS.md`](AGENTS.md) 与 [`docs/HANDOFF.md`](docs/HANDOFF.md)**
+> ——那里有「开工声明 / 收工交接 / 并发硬规则」，不读就动手容易互相覆盖文件或抢构建。
+> 本手册与 `docs/PROJECT_MEMORY.md` 都是**静态快照**，可能过时；冲突时以实际代码 + `git log` 为准。
+
 给需要接手本仓库的 AI（或人）的**操作 + 阅读指南**。先读 `README.md` 了解项目概况，再按本手册定位与动手。
+
+### 先读哪个（多 AI 协作时）
+
+| 顺序 | 文件 | 作用 |
+|---|---|---|
+| 1 | **`AGENTS.md`** | 协作约定：开工/收工三步、禁止抹掉对方工作区、并发构建与出包规则 |
+| 2 | **`docs/HANDOFF.md`** | 交流集：谁正在改哪些文件、当前状态快照、交接流水（append-only） |
+| 3 | `README.md` + 本手册 | 项目概况、目录地图、构建命令、已知坑 |
+| 4 | `docs/PROJECT_MEMORY.md` | 决策快照（**停在 2026-10-22**，只作背景，别当现状） |
 
 > ⚠️ **重要：`CODE_ARCHITECTURE.md` 部分内容已过时**，不要全信。已核实的过时点：
 > - 导航类实际是 `ui/navigation/GoldVaultNavHost.kt`，不是文档里写的 `StockDiaryNavHost.kt`；

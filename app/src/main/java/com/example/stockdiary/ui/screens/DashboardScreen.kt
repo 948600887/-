@@ -94,9 +94,15 @@ fun DashboardScreen(
     // netAssets 被反复重算；而分子 realAnnualIncome 要等刷新 phase-2 才写入，
     // 两者不原子 → realYield 在同步过程中随进度条抖。冻结后刷新结束一次性更新。
     // 顶部「净资产」大数字仍走实时 netAssets，不受影响。
-    var frozenYieldNetAssets by remember { mutableStateOf<Double?>(null) }
+    // A2 修复（重要）：冻结值的宿主从 remember 改为 rememberSaveable —— remember 不随配置变更
+    // （旋屏）存活，刷新途中旋屏会把冻结值重置为 null，分母瞬间从冻结值回退到实时 netAssets，
+    // 「年化收入率」随之跳一下。rememberSaveable 随 Activity 重建恢复冻结值，且 isRefreshing 在
+    // 旋屏后仍为 true（ViewModel 存活）→ LaunchedEffect 不重启动、冻结值保持，直到刷新结束才释放。
+    // 用 String 存值（Bundle 原生可序列化），Double 经字符串往返，避开各 Compose 版本 saver API 差异。
+    var frozenYieldNetAssetsStr by rememberSaveable { mutableStateOf<String?>(null) }
+    val frozenYieldNetAssets = frozenYieldNetAssetsStr?.toDoubleOrNull()
     LaunchedEffect(isRefreshing) {
-        if (isRefreshing) frozenYieldNetAssets = netAssets else frozenYieldNetAssets = null
+        frozenYieldNetAssetsStr = if (isRefreshing) netAssets.toString() else null
     }
     val yieldNetAssets = frozenYieldNetAssets ?: netAssets
 

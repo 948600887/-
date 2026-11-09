@@ -102,8 +102,10 @@ class FundDividendApiService {
         @Volatile
         internal var fhspBlockedUntil: Long = 0L
 
-        // 两档并发闸门：健康档 2 并发（与 AssetSyncManager.FUND_MAX_CONCURRENT_SYNC 对齐，不抢总闸）；
-        // 降级档串行（Mutex）——刚从熔断恢复或正处于退避时，把对 fhsp 的并发压到 1，给源喘息。
+        // 两档并发闸门：健康档 2 并发（刻意低于同步总闸 MAX_CONCURRENT_SYNC=6，避免 fhsp 自成一波
+        // 把总闸占满、饿死其它源）；降级档串行（Mutex）——刚从熔断恢复或正处于退避时，把对 fhsp
+        // 的并发压到 1，给源喘息。（旧注释引用的 AssetSyncManager.FUND_MAX_CONCURRENT_SYNC 常量已废弃，
+        // 现 fundmobapi 用轻量档 4 / pingzhongdata 用 legacy 档 2 分档，见 AssetSyncManager.kt。）
         private val fhspHealthySemaphore = Semaphore(2)
         private val fhspDegradedMutex = Mutex()
         /** 降级标记：熔断触发后置 true（并发档切到串行），真实取价成功自愈后置 false。 */

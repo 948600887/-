@@ -14,7 +14,7 @@
 | AI（git user.name） | 开始时间 | 正在改的文件 / 模块 | 备注 |
 |---|---|---|---|
 | _(空，无在途认领)_ | | | |
-| 小伍 (`workbuddy@local`) | 2026-11-09 20:37 | 分红链路一致性优化（多轮，见上方流水） | 按 2026-11-10 体检分级逐步全修；**Round1（阻断级）已完成并提交**，正在做 Round2（重要级 A2/A3/A5/A8/A9） |
+| 小伍 (`workbuddy@local`) | 2026-11-09 20:37 | 分红链路一致性优化（多轮，见上方流水） | 按 2026-11-10 体检分级逐步全修；**Round1（阻断级 A1/A16/A19+A4/A7/A18）已提交 433c145**；Round2 已修 A2/A17（编译过、待门禁），A3/A5/A8/A9 评估为设计取舍/已闭环/延后；Round3 观察项评估维持现状 |
 
 ## 当前状态快照（2026-11-09 15:12，以 `git log` 为准）
 
@@ -145,3 +145,23 @@ CODE_ARCHITECTURE.md 部分过时），一律以实际代码 + git log 为准。
 
 #### 结论
 上轮出的 `53390f9` 包**未完全修复**用户原始「刷新后跳动」——A16/A19 是同一症状的两类残留路径，A1/B2 是跨页一致性缺陷；门禁全绿不覆盖这些运行时/数据流路径（0 覆盖）。建议下一轮按「一根多症」统一修 A1/A16/A19 三条阻断 + A4/A7/A18，并补 A/B/C 回归测试。本轮只读未提交任何代码改动；`f195a39` 文档提交仍待网络恢复补推。
+
+### 2026-11-09 20:37 ~ 22:50 · 小伍 (`workbuddy@local`) —「按重要度逐步全部优化」实施
+
+- **做了什么**：按 2026-11-10 体检分级**逐优先级**实施。工程师子代理（software-engineer）先落地了 Round1 全部代码（被接口频率限制 429 在 91 分钟时中断，未提交），由主会话接手复核、编译、跑测、提交。
+- **Round1（3 阻断 + A4/A7/A18）—— 已完成并提交 `433c145`**：
+  - A1：年度分红缓存收口到 `DashboardPreferencesManager.persistAnnualDividendIncome` **唯一写入点**（首页进场/首页刷新 phase-2/持仓页三处共用同一口径）；新增 `annualDividendRecordsVersion` 记录摘要 + `invalidateAnnualDividendIncome` 门面，缓存命中判据改为「指纹匹配 且 记录版本非空」——关闭跨页两个数、重进闪跳、手动改分红 30s 内 stale（A1a/A1b）。
+  - A16：① `classifyFundDividendPage(html, recordCount, countDividendDataRows(html))` 新增残缺判定（页面数据行 > 解析条数×2 → `SUSPICIOUS_EMPTY_PARSE`）；② 全量刷新删除改走纯函数 `shouldReplaceRecordsOnFullRefresh`（解析数>=库里自动记录数才删插），残缺/可疑一律保留旧值。两道防护。
+  - A19：`answered` 初值改为 `eastmoneyAnswered && !isExchangeFund`，场内基金(ETF/REIT/LOF)不再被东财批量空结果预置，交由天天基金真抓后才定。
+  - A4/A7/A18 随 A1 一并收口。新增 A/B/C 回归（A=刷新落盘且不回落、B=单飞清理、C=残缺刷新不洗库）。
+  - 验证：`bash tools/check_gate.sh` 全绿；全量单测 **1600 例 0 失败 0 错误**（基线 1589 + 新增 11）；androidTest 编译通过。
+- **Round2（重要级）—— 部分完成**：
+  - **A2（已修、编译通过，待门禁）**：`DashboardScreen.kt:97` 冻结分母的宿主从 `remember` 改为 `rememberSaveable(String 存值)`，刷新途中旋屏不再丢失冻结值导致「年化收入率」跳一下。
+  - **A17（已修）**：`FundDividendApiService.kt:105` 过时注释引用已废弃常量 `AssetSyncManager.FUND_MAX_CONCURRENT_SYNC`，改为描述实际两档闸门（健康 2 / 降级串行）与现分档（轻量 4 / legacy 2）。
+  - **A3**：判为**设计取舍**——同屏实时净资产（顶部大数字）vs 冻结分母（年化率用）本是 R3 故意为之（避免进度条抖动），非 bug，不改。
+  - **A5**：经核查 `scopeKey` 已是 `DividendIncomeLoader.kt:281` **单一函数**，三 VM 经 `useCase.load` 统一走它，无「三套」问题，无需改。
+  - **A8**：`AssetSyncManager.kt:581` 的 `forceRefresh=true` 触发点是手动刷新**确实重抓**所必需的；原始「洗库」已由 A16/A19 守卫缓解，硬删会破坏手动刷新取新分红，故保留（已被 A16/A19 闭环）。
+  - **A9**：净资产在两处写法等价（`DashboardScreen` 的 `totalAssets-totalLiabilities` 与 `DashboardViewModel.computeNetAssetsForLog` 的 `sumOf{totalValueCny}-sumOf{abs}`），属装饰性重复；统一有回归风险，延后（如需统一再开一笔）。
+- **Round3（观察项）—— 评估**：A6（UseCase 取消清理）已由本轮 B 回归测试覆盖、确认可靠；A10~A15 / `saveDividends()` 默认 destructive 零调用方 均属低优先观察，未改动，保持现状。
+- **给对方**：本轮提交 `433c145` 已本地落盘，`git push` 因代理 502 / schannel 中断**暂未推**（网络恢复即补推）；`releases/` 仍只留 `53390f9`，本次未出包（用户未要求）；A2 是 Composable 改动、0 单测覆盖，需真机验证「刷新中旋屏年化率不跳」。
+- **下一步**：A2/A17 走完门禁即可提交；A3/A5/A8/A9 及 Round3 观察项按上述评估维持现状（除非用户要求硬统一/硬删）。

@@ -193,3 +193,15 @@ CODE_ARCHITECTURE.md 部分过时），一律以实际代码 + git log 为准。
   - 🟢① `AssetSyncManager` 单文件 ~91KB：大重构，无功能收益、回归风险高，维持现状（除非用户明确要拆）。A10~A15 / `saveDividends()` 默认 destructive 零调用方：低优先观察、未展开定义，维持。
 - **实质产出**：本轮 **0 行代码改动**——这是审慎结论，避免为「全部」而改引入回归。可安全优化的高/中优先级项已于前两轮做完（1600 例门禁全绿、0 失败）。
 - **待补推**：本地领先 4c29d44(收工) / 8f97fa6(AssetCards) / 54880b2(补充检查登记) + 本笔，网络恢复即补推。
+
+### 2026-11-10 18:31 · 小伍 (`workbuddy@local`) — 全面深入检查（带运行时验证）
+
+- **背景**：前序已有两轮只读体检（分红链路 + 非分红模块）。本轮用户要求「全面深入的检查一遍」，在静态走查基础上增加**运行时验证**与**关键层面的深度交叉确认**。
+- **运行时验证**：`check_gate.sh` 全绿（5m22s），147 个 XML、**1600 例单测 0 失败 0 错误 0 跳过**（确认非假绿），当前 HEAD 无回归。
+- **三层关键架构深度确认（此前未如此细）**：
+  1. **网络层**：`NetworkClient` 单例 `baseClient` + `newBuilder()` 派生（共享连接池/Dispatcher）；`callTimeout` 全局兜住「54 分钟挂死」、`Dispatcher.maxRequestsPerHost=16` 修「刷新卡死二号根因」；拦截器仅日志+脱敏且不吞结果；**全仓零手动 `Accept-Encoding`**（grep 命中全是「绝不能加」警告注释），唯一 `addHeader("Accept",text/html...)` 是天天基金 fhsp 内容协商、不涉及压缩，安全。
+  2. **同步层**：并发总闸 `MAX_CONCURRENT_SYNC` + 基金分档 `LIGHTWEIGHT=4`/`LEGACY=2`；`forceRefresh` 仍在 `AssetSyncManager.kt:581` 作手动刷新重抓触发点（A8 保留有理）；`syncSingleAsset` 取消守卫保留（1054-1056 `failureRecorded` 语义 + 批次7 的 `isActive` 物理守卫），退后台/看门狗截断不再误标「上次更新失败」。
+  3. **数据库**：`@Database(version=18)`，迁移链 1→18 全在、`fallbackToDestructiveMigration` 未启用；`MIGRATION_16_17` 故意用 `ABORT`（非 `OR IGNORE`）防静默丢数据（注释论证 + QA 实测构造脏行验证）；`MIGRATION_17_18` 安全 `ADD COLUMN isEarnLocked`；`MigrationTest`(androidTest 唯一文件) 端到端校验。
+- **测试覆盖盲区量化（真实风险地图）**：核心类基本覆盖（AssetSyncManager/FundDividendApiService/BinanceAccountAPI/UnifiedPriceService/BinanceHostGate/SourceCircuitBreaker/DividendIncome*/PortfolioVM/DashboardVM/SettingsVM 均有单测）；**弱点**：`DividendRepository` 无完整单测（仅 cache policy 纯函数测试）、`SinaStockAPI` 无单测；**整个 Compose UI 层零自动化测试**（androidTest 仅 MigrationTest 1 个）——UI 行为（刷新跳动、旋屏冻结、布局）只能靠真机验证，是明确风险但非代码 bug。
+- **整体结论**：代码健康度高；网络/同步/数据库三大「数据安全 + 静默失效」层面经深度核查均专业可靠。唯一实质性风险是 **UI 层零自动化测试**（已知盲区）。本轮 0 行代码改动。
+- **待补推**：无（本地与 origin/main 同步，1a6404a 已推）。

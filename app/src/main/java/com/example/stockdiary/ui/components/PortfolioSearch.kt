@@ -17,6 +17,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import com.example.stockdiary.database.Asset
+import com.example.stockdiary.database.AssetType
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -30,10 +31,7 @@ fun PortfolioSearchDialog(
     var searchQuery by remember { mutableStateOf("") }
 
     val filteredAssets by remember(assets, searchQuery) {
-        derivedStateOf {
-            if (searchQuery.isBlank()) assets
-            else assets.filter { it.name.contains(searchQuery, ignoreCase = true) || (it.symbol?.contains(searchQuery, ignoreCase = true) == true) }
-        }
+        derivedStateOf { assets.filter { matchesSearchQuery(it, searchQuery) } }
     }
 
     AlertDialog(
@@ -46,7 +44,7 @@ fun PortfolioSearchDialog(
                     value = searchQuery,
                     onValueChange = { searchQuery = it },
                     modifier = Modifier.fillMaxWidth(),
-                    placeholder = { Text("输入名称或代码") },
+                    placeholder = { Text("输入名称、代码或账户") },
                     // 结果是边打边筛的，搜索键的作用就是把键盘收起来让结果露出来
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                     keyboardActions = KeyboardActions(onSearch = { focusManager.clearFocus() }),
@@ -98,4 +96,27 @@ fun SearchAssetItem(asset: Asset, onClick: () -> Unit, onDividendClick: () -> Un
         onClick = { onClick() },
         onDividendClick = { onDividendClick() }
     )
+}
+
+/**
+ * 持仓搜索的匹配判定，抽成纯函数便于单测。
+ *
+ * 匹配范围（子串 + 大小写不敏感）：
+ * - [Asset.name] 名称；
+ * - [Asset.symbol] 代码（可为 null，跳过）；
+ * - [Asset.account] 账户/平台；
+ * - [Asset.notes] 备注（可为 null，跳过）；
+ * - [AssetType.displayName] 类别中文名（如「基金」「虚拟货币」）。
+ *
+ * 入参先 [String.trim]，避免用户手滑带的首尾空格导致"明明有却搜不到"。
+ * 空查询（trim 后空白）视为匹配全部，等价于搜索框为空时展示完整列表。
+ */
+internal fun matchesSearchQuery(asset: Asset, rawQuery: String): Boolean {
+    val q = rawQuery.trim()
+    if (q.isBlank()) return true
+    return asset.name.contains(q, ignoreCase = true)
+        || (asset.symbol?.contains(q, ignoreCase = true) == true)
+        || asset.account.contains(q, ignoreCase = true)
+        || (asset.notes?.contains(q, ignoreCase = true) == true)
+        || asset.type.displayName.contains(q, ignoreCase = true)
 }

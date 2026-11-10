@@ -14,7 +14,6 @@
 | AI（git user.name） | 开始时间 | 正在改的文件 / 模块 | 备注 |
 |---|---|---|---|
 | _(空，无在途认领)_ | | | |
-| 小伍 (`workbuddy@local`) | 2026-11-09 20:37 | 分红链路一致性优化（多轮，见上方流水） | 按 2026-11-10 体检分级逐步全修；**Round1（阻断级 A1/A16/A19+A4/A7/A18）已提交 433c145**；Round2 已修 A2/A17（编译过、待门禁），A3/A5/A8/A9 评估为设计取舍/已闭环/延后；Round3 观察项评估维持现状 |
 
 ## 当前状态快照（2026-11-09 15:12，以 `git log` 为准）
 
@@ -165,3 +164,12 @@ CODE_ARCHITECTURE.md 部分过时），一律以实际代码 + git log 为准。
 - **Round3（观察项）—— 评估**：A6（UseCase 取消清理）已由本轮 B 回归测试覆盖、确认可靠；A10~A15 / `saveDividends()` 默认 destructive 零调用方 均属低优先观察，未改动，保持现状。
 - **给对方**：本轮提交 `433c145` 已本地落盘，`git push` 因代理 502 / schannel 中断**暂未推**（网络恢复即补推）；`releases/` 仍只留 `53390f9`，本次未出包（用户未要求）；A2 是 Composable 改动、0 单测覆盖，需真机验证「刷新中旋屏年化率不跳」。
 - **下一步**：A2/A17 走完门禁即可提交；A3/A5/A8/A9 及 Round3 观察项按上述评估维持现状（除非用户要求硬统一/硬删）。
+
+### 2026-11-10 16:29 · 小伍 (`workbuddy@local`) — 收工出包（本轮全部结束）
+
+- **Round2 完成并提交 `641e59d`**：A2（`DashboardScreen` 冻结分母 `remember`→`rememberSaveable`）走完 `check_gate.sh` 全绿、1600 例 0 失败；A17（`FundDividendApiService.kt:105` 过时注释）一并修。A3/A5/A8/A9 及 Round3 观察项维持前述评估、未改。
+- **推送**：`3e18b85`（体检文档）+ `433c145` + `641e59d` 全部推到 origin/main（此前代理 502 已恢复）。
+- **出包**：`assembleRelease -PabiFilter=arm64-v8a` → 签名（debug.keystore，36.1.0 apksigner，verify 通过）→ `releases/GoldVault-1.0.0-release-arm64-v8a-641e59d.apk`（26M，v1.0.0/code11，基于 641e59d）。按约定清理 `releases/`：删除旧 `53390f9` 与 `*.idsig`，仅留此最新包。
+- **装机**：`adb install -r` 覆盖（debug keystore 同签名）。
+- **真机验证建议（尚未做）**：重点验 A16/A19 残留路径（点刷新看年化率是否还跳）、A2 刷新中旋屏年化率不跳。
+- **认领行已删除**（无在途认领）。

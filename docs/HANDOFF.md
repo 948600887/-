@@ -173,3 +173,11 @@ CODE_ARCHITECTURE.md 部分过时），一律以实际代码 + git log 为准。
 - **装机**：`adb install -r` 覆盖（debug keystore 同签名）。
 - **真机验证建议（尚未做）**：重点验 A16/A19 残留路径（点刷新看年化率是否还跳）、A2 刷新中旋屏年化率不跳。
 - **认领行已删除**（无在途认领）。
+
+### 2026-11-10 17:42 · 小伍 (`workbuddy@local`) — 补充全面检查（非分红模块）
+
+- **重跑门禁**：`check_gate.sh` 全绿（4m18s），确认 Round1/Round2 修复无回归。
+- **补充审查范围**：上一轮只读体检聚焦分红链路，本轮对未覆盖模块做只读审查：①资产同步链路 ②网络层 ③数据库 ④其他 UI·ViewModel ⑤协程与内存。
+- **结论**：整体健康度高。🔴 崩溃/数据损坏风险 **0 项**；🟡 仅 1 项——`AssetCards.kt:356` 用 `collectAsState()` 而非全仓统一的 `collectAsStateWithLifecycle()`（后台 onStop 后仍在订阅、徒增 CPU/内存、违反约定）；🟢 代码异味 3 项（`AssetSyncManager.kt` 单文件 ~91KB 职责过重、`FundDividendApiService.kt:222`+`EastmoneyDividendApiService.kt:25` 的 `client` 暴露为 `internal var`、`SettingsViewModel.kt:77-124` 4 条 Room 计数流可合并为 `combine`）。
+- **修复**：`AssetCards.kt:356` 改 `collectAsStateWithLifecycle()`，已提交 `8f97fa6`，门禁全绿（4m6s）。🟢 三项非紧急，维持现状（除非用户要求）。
+- **推送**：`4c29d44`(HANDOFF收工) + `8f97fa6`(AssetCards) 本地领先，因代理 502/schannel 间歇未推，网络恢复即补推。

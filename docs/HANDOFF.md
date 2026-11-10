@@ -181,3 +181,15 @@ CODE_ARCHITECTURE.md 部分过时），一律以实际代码 + git log 为准。
 - **结论**：整体健康度高。🔴 崩溃/数据损坏风险 **0 项**；🟡 仅 1 项——`AssetCards.kt:356` 用 `collectAsState()` 而非全仓统一的 `collectAsStateWithLifecycle()`（后台 onStop 后仍在订阅、徒增 CPU/内存、违反约定）；🟢 代码异味 3 项（`AssetSyncManager.kt` 单文件 ~91KB 职责过重、`FundDividendApiService.kt:222`+`EastmoneyDividendApiService.kt:25` 的 `client` 暴露为 `internal var`、`SettingsViewModel.kt:77-124` 4 条 Room 计数流可合并为 `combine`）。
 - **修复**：`AssetCards.kt:356` 改 `collectAsStateWithLifecycle()`，已提交 `8f97fa6`，门禁全绿（4m6s）。🟢 三项非紧急，维持现状（除非用户要求）。
 - **推送**：`4c29d44`(HANDOFF收工) + `8f97fa6`(AssetCards) 本地领先，因代理 502/schannel 间歇未推，网络恢复即补推。
+
+### 2026-11-10 18:15 · 小伍 (`workbuddy@local`) —「全部优化」收尾复核
+
+- **背景**：前序「按重要度逐步全部优化」已完成 Round1（3 阻断+A4/A7/A18，433c145）、Round2（A2/A17，641e59d）、补充检查（AssetCards 8f97fa6）。本轮用户要求「全部优化」，对剩余「维持/延后/观察」项做最终复核，确认是否还有可安全收尾的。
+- **复核结论：剩余项经二次核查，均不应改动（含两处更正此前乐观评估）**：
+  - 🟢② `client` 暴露为 `internal var`：**不应封装为 private val**。全仓 8 个测试文件（DividendServiceTest / DividendOtcRateLimitTest / EastmoneyDividendApiServiceTest / DividendServiceGzipDecompressionTest）直接 `service.client = ...` 注入替换 client，是既有测试注入点。改 private val 会破坏全部相关单测。维持。
+  - 🟢③ `SettingsViewModel` 4 条计数流：**不应合并为 combine**。注释明确是刻意的容错隔离（"Room 在数据库异常时会向收集者抛错，不兜住会让 viewModelScope 崩溃；只收集计数"），4 个独立流各自 try-catch 保证单表异常不拖垮其他三个计数。combine 任一子流抛错会整体取消，引入回归。维持。
+  - A3：同屏实时净资产 vs 冻结分母是 R3 故意为之（防进度条抖），维持。A5：scopeKey 已是 Loader 单一函数，前轮已澄清，维持。A8：forceRefresh 是手动刷新重抓必需、洗库已被 A16/A19 守卫缓解，维持。
+  - A9：净资产两处写法（`DashboardScreen` 的 `totalAssets-totalLiabilities` 与 VM 日志的 `sumOf{totalValueCny}-sumOf{abs}`）看似可统一但口径可能不完全一致（负债项一个用 `sumDebtValueCny()`、一个用 `abs(totalValueCny)`），改错口径会引入真 bug；统一收益极低。维持（如需统一须先核对 `excludingDebts/debts/sumTotalValueCny/sumDebtValueCny` 四大扩展函数口径，并加单测钉死）。
+  - 🟢① `AssetSyncManager` 单文件 ~91KB：大重构，无功能收益、回归风险高，维持现状（除非用户明确要拆）。A10~A15 / `saveDividends()` 默认 destructive 零调用方：低优先观察、未展开定义，维持。
+- **实质产出**：本轮 **0 行代码改动**——这是审慎结论，避免为「全部」而改引入回归。可安全优化的高/中优先级项已于前两轮做完（1600 例门禁全绿、0 失败）。
+- **待补推**：本地领先 4c29d44(收工) / 8f97fa6(AssetCards) / 54880b2(补充检查登记) + 本笔，网络恢复即补推。

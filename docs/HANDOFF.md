@@ -205,3 +205,23 @@ CODE_ARCHITECTURE.md 部分过时），一律以实际代码 + git log 为准。
 - **测试覆盖盲区量化（真实风险地图）**：核心类基本覆盖（AssetSyncManager/FundDividendApiService/BinanceAccountAPI/UnifiedPriceService/BinanceHostGate/SourceCircuitBreaker/DividendIncome*/PortfolioVM/DashboardVM/SettingsVM 均有单测）；**弱点**：`DividendRepository` 无完整单测（仅 cache policy 纯函数测试）、`SinaStockAPI` 无单测；**整个 Compose UI 层零自动化测试**（androidTest 仅 MigrationTest 1 个）——UI 行为（刷新跳动、旋屏冻结、布局）只能靠真机验证，是明确风险但非代码 bug。
 - **整体结论**：代码健康度高；网络/同步/数据库三大「数据安全 + 静默失效」层面经深度核查均专业可靠。唯一实质性风险是 **UI 层零自动化测试**（已知盲区）。本轮 0 行代码改动。
 - **待补推**：无（本地与 origin/main 同步，1a6404a 已推）。
+
+### 2026-11-10 18:55 · 小伍 (`workbuddy@local`) — 修复导入向导「账户/平台」选择
+
+- **用户反馈**：导入资产时选择账户/平台的功能有问题（导入向导核对页的「导入到账户」）。
+- **定位**：`ui/components/import/ImportAccountField.kt` 的候选账户 chip 有两个缺陷：
+  1. `knownAccounts.take(4)` **只展示库里前 4 个账户**，第 5 个起无任何入口、只能手敲精确名字——账户多时选不到想要的；
+  2. `HoldingSnapshotViewModel.init` 预填第一个账户后，点「已选中」的那个 chip 值不变、**无视觉反馈**，造成「选了没反应」的错觉。
+- **修复（提交 `ced0848`）**：去掉 `take(4)`，改用 `FlowRow` 展示**全部**已知账户并自动换行（账户多也能点选）；用 `FilterChip` 替换 `SuggestionChip` 并加 `selected` 高亮（带勾选），当前选中项清晰可见。
+- **波及**：持仓导入（`HoldingSnapshotDialog`）与币安导入（`BinanceImportDialog`）共用 `ImportAccountField`，两处同时受益。
+- **验证**：`check_gate.sh` 全绿（4m10s），全量单测 1600 例 0 失败 0 错误 0 跳过。
+
+### 2026-11-10 19:20 · 小伍 (`workbuddy@local`) — 持仓搜索优化（扩字段 + trim）
+
+- **用户问询**：搜索持仓功能有没有可优化点。审计 `PortfolioSearchDialog` 后落地其中一项（用户勾选「输入 trim + 扩字段」）。
+- **改动（提交 `4097566`）**：`ui/components/PortfolioSearch.kt`
+  1. 匹配范围从 `name / symbol` 扩展到 `account`(账户/平台)、`notes`(备注)、`type.displayName`(类别中文名)——与持仓页「按账户分组」习惯对齐；
+  2. 入参先 `trim()`，修「首尾空格导致明明有却搜不到」的隐性漏匹配；
+  3. 匹配逻辑抽纯函数 `matchesSearchQuery`（null 安全、大小写不敏感），组件委托调用；placeholder 改「名称、代码或账户」。
+- **测试**：新增 `PortfolioSearchTest.kt`（trim / 多字段 / null 安全 / 大小写不敏感），`testDebugUnitTest` 全量 0 失败。
+- **未做（用户未选）**：搜索范围与主列表隐藏规则统一、结果计数+相关度排序、拼音/首字母搜索——均为可选增强，按需再开。

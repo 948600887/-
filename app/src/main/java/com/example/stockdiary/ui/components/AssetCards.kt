@@ -3,6 +3,7 @@ package com.example.stockdiary.ui.components
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.stockdiary.ui.theme.*
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -353,7 +354,7 @@ fun StockAssetItem(
             // 读 StateFlow 而不是读 Asset 字段：该状态是轻量持久层（见 AssetSyncFailureStore），
             // 不占 Room 列、不需要迁移；收藏集变化会精确触发本卡片重组。
             val lastSyncFailed = asset.id in
-                LocalAppContainer.current.assetSyncFailureStore.failedAssetIds.collectAsState().value
+                LocalAppContainer.current.assetSyncFailureStore.failedAssetIds.collectAsStateWithLifecycle().value
             val priceText = when {
                 isLiability -> "待偿还"
                 // 价格是原币口径（与 totalValue 同币种），而同行市值是折算后人民币。

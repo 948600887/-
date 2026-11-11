@@ -515,6 +515,11 @@ class BrokerageImportService internal constructor(private val context: Context) 
         // 「上次已经导入过」的行，挡不住本批次内部的重复。这里维护已见集合，
         // 避免同一行被回放两次导致持仓翻倍。账户参与键：不同账户的同价同量同日
         // 真实成交不应被合并。
+        //
+        // 已知残余限制：库内去重键不含账户（transactions 表无 account 列，加列需升
+        // Room v19 并改 A7 锁，本轮按约定不动）。因此「跨文件」的两笔完全同价同量同日、
+        // 但属于不同账户的真实成交，仍会被库内去重跳过；同一文件内的这类成交已由下面
+        // 的 seenInFile 正常入账。
         val seenInFile = HashSet<String>()
 
         for (t in valid) {

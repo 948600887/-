@@ -225,3 +225,15 @@ CODE_ARCHITECTURE.md 部分过时），一律以实际代码 + git log 为准。
   3. 匹配逻辑抽纯函数 `matchesSearchQuery`（null 安全、大小写不敏感），组件委托调用；placeholder 改「名称、代码或账户」。
 - **测试**：新增 `PortfolioSearchTest.kt`（trim / 多字段 / null 安全 / 大小写不敏感），`testDebugUnitTest` 全量 0 失败。
 - **未做（用户未选）**：搜索范围与主列表隐藏规则统一、结果计数+相关度排序、拼音/首字母搜索——均为可选增强，按需再开。
+
+### 2026-11-11 · 小伍 (`workbuddy@local`) —「数据链路审查 P2 ①②③④」实施
+
+只读全链路审查后，按用户选定范围只改四处，其余保持现状。**未动数据库/迁移（仍 v18，A7 锁未改）、未动取价/缓存 isStale 契约、未改日志脱敏、未改快照新建语义。**
+
+- **① 交割单导入重复行**（`data/importer/BrokerageImportService.kt`）：`commit` 内按 `日期|标的|方向|数量|价格|手续费|账户` 维护本批次 `seenInFile`，同文件完全重复的两行只回放一次，第二行计入 `skippedDuplicate`（此前两行都回放，拼接导出会让持仓翻倍）。
+  - **已知残余限制（用户确认接受）**：库内去重键仍不含账户（`transactions` 无 account 列，加列需升 Room v19 并改 A7 锁）。因此「跨文件」的两笔同价同量同日、不同账户真实成交，仍会被库内去重跳过；同一文件内的这类成交已正常入账。
+- **② 交割单导入后刷新当日快照**（`ui/viewmodels/ImportBrokerageViewModel.kt`）：提交成功（`successCount > 0`）后调用 `refreshTodaySnapshotAfterImport`，与持仓截图/币安导入一致，消除「首页净资产已变、历史页今天还是旧值」。
+- **③ 货基万份收益守卫**（`database/AssetDao.kt` + `data/repository/AssetRepository.kt`）：`updatePriceBySymbol` 的 mci 改 `COALESCE(:mci, millionCopiesIncome)`，Kotlin 侧 `millionCopiesIncomeToPersist` 只放行「有限且 > 0」；某天 0 值或解析降级成 null 不再覆盖上一次有效值，年化收入不再掉到 0。
+- **④ 导出精度可反算**（`data/export/DataExporter.kt`）：列结构/顺序不变，只提高「数量/单价」列精度（股票数量 4 位、股票单价 4 位、基金/ETF 单价 6 位，加密货币沿用 10 位），并去掉尾随 0；非 0 值被舍成 0 时退回原值。目的：`数量 × 单价 ≈ 总价值` 在导出表内可直接复算（分数股 0.4 此前导成 0）。
+- **测试**：新增 `MillionCopiesIncomeTest`、`ImportBrokerageSnapshotRefreshTest`，扩充 `BrokerageImportServiceTest`（同文件重复 / 跨账户同价同量）、`DataExporterCsvTest`（分数股反算 / 基金净值与低价股 4~6 位 / 微小数量不归零）。
+

@@ -516,10 +516,14 @@ class BrokerageImportService internal constructor(private val context: Context) 
         // 避免同一行被回放两次导致持仓翻倍。账户参与键：不同账户的同价同量同日
         // 真实成交不应被合并。
         //
-        // 已知残余限制：库内去重键不含账户（transactions 表无 account 列，加列需升
-        // Room v19 并改 A7 锁，本轮按约定不动）。因此「跨文件」的两笔完全同价同量同日、
-        // 但属于不同账户的真实成交，仍会被库内去重跳过；同一文件内的这类成交已由下面
-        // 的 seenInFile 正常入账。
+        // 已知残余限制（2026-11-11 勘误，勿再写「同文件内已正常入账」）：
+        // TransactionDao.findDuplicate 只比 symbol|type|quantity|price|date 五字段，
+        // 不含 account / fee（transactions 表无 account 列，加列需升 Room v19 并改 A7 锁，
+        // 本轮按约定不动）。seenInFile 的键虽含 fee/account，但它只挡「同一文件内完全重复
+        // 的行」；一旦两笔同日同价同量、仅账户或手续费不同的合法成交被 seenInFile 判为不同
+        // key 放行，第一笔落库后第二笔仍会在 commitTransaction 的库内 findDuplicate 命中，
+        // 被当成重复跳过。因此这类成交**无论同文件还是跨文件，都会被库内去重跳过**。
+        // ba2e195 / HANDOFF:234 原先写的「同一文件内的这类成交已正常入账」与实现不符。
         val seenInFile = HashSet<String>()
 
         for (t in valid) {

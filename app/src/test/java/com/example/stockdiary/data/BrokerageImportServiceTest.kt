@@ -304,8 +304,16 @@ class BrokerageImportServiceTest {
     // commit 端到端：按日期升序回放 + 计数器
     // ============================================================
 
+    /**
+     * 安装一组「状态化」DAO 桩：持仓余额随写入累积，交易流水记进一个内部集合。
+     *
+     * `findDuplicate` 不再恒返回 null（旧桩是假绿来源）：按 [TransactionDao] 的真实 SQL
+     * 只比 symbol|type|quantity|price|date 五字段，从本测试已插入的流水里查命中。
+     * 这样「同文件内不同账户 / 不同手续费的第二笔」会如实复现库内去重跳过，而不是被桩放过。
+     */
     private fun installStatefulAsset(): AtomicReference<Asset?> {
         val current = AtomicReference<Asset?>(null)
+        val stored = mutableListOf<Transaction>()
         coEvery { assetDao.getAssetBySymbolAndAccount(any(), any()) } coAnswers { current.get() }
         coEvery { assetDao.insertAsset(any()) } coAnswers {
             val a = firstArg<Asset>()
@@ -321,8 +329,23 @@ class BrokerageImportServiceTest {
             Unit
         }
         coEvery { assetDao.deleteAsset(any()) } coAnswers { current.set(null) }
-        coEvery { txDao.insert(any()) } returns 1L
-        coEvery { txDao.findDuplicate(any(), any(), any(), any(), any()) } returns null
+        coEvery { txDao.insert(any()) } coAnswers {
+            stored.add(firstArg<Transaction>())
+            1L
+        }
+        coEvery { txDao.findDuplicate(any(), any(), any(), any(), any()) } coAnswers {
+            val args = invocation.args
+            val symbol = args[0] as String
+            val type = args[1] as String
+            val quantity = args[2] as Double
+            val price = args[3] as Double
+            val date = args[4] as String
+            // 对齐 TransactionDao.kt:74 的 SQL：五字段，无 account / fee / name。
+            stored.firstOrNull {
+                it.symbol == symbol && it.type == type &&
+                    it.quantity == quantity && it.price == price && it.date == date
+            }
+        }
         return current
     }
 
@@ -380,7 +403,7 @@ class BrokerageImportServiceTest {
     }
 
     @Test
-    fun `commit 不同账户的同价同量同日买入都会回放`() = runBlocking {
+    fun `commit 当前限制_不同账户同价同量同日第二笔被库内去重跳过`() = runBlocking {
         val current = installStatefulAsset()
 
         val accountA = tx(date = "2024-01-01", quantity = 100.0, price = 10.0, account = "账户A", rowNumber = 1)
@@ -388,9 +411,11 @@ class BrokerageImportServiceTest {
 
         val result = service.commit(listOf(accountA, accountB))
 
-        // 账户参与文件内去重键：两笔真实成交都应入账，不能被误合并
-        assertEquals(2, result.successCount)
-        assertEquals(0, result.skippedDuplicate)
-        assertEquals(200.0, current.get()!!.balance, 1e-9)
+        // 当前限制（不升 Room v19、不给 transactions 加 account 列）：seenInFile 的 7 字段键
+        // 放行两笔，但 commitTransaction 的库内 findDuplicate 只比 5 字段（无 account/fee），
+        // 第一笔落库后第二笔被误判为重复。状态化桩如实复现真实 Room 行为，不再是假绿。
+        assertEquals(1, result.successCount)
+        assertEquals(1, result.skippedDuplicate)
+        assertEquals(100.0, current.get()!!.balance, 1e-9)
     }
 }

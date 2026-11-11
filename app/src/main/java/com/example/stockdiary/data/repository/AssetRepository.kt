@@ -200,7 +200,7 @@ class AssetRepository private constructor(
             AppLogger.w("拒绝写入非正价格: $symbol = $price（可能为解析失败）", "AssetRepository")
             return
         }
-        assetDao.updatePriceBySymbol(symbol, price, System.currentTimeMillis(), millionCopiesIncome)
+        assetDao.updatePriceBySymbol(symbol, price, System.currentTimeMillis(), millionCopiesIncomeToPersist(millionCopiesIncome))
     }
 
     /**
@@ -232,7 +232,8 @@ class AssetRepository private constructor(
                     )
                     return@forEach
                 }
-                write.millionCopiesIncome?.let { mci ->
+                val mci = millionCopiesIncomeToPersist(write.millionCopiesIncome)
+                if (mci != null) {
                     // R5：万份收益是货基年化收入的直接输入，且在 dividendInputFingerprint 里。
                     // 真机日志此前「万份收益」0 命中，无法区分「mci 变了导致重算」
                     // 与「分红集合变了导致重算」；落价时补一行便于下一轮诊断。
@@ -242,7 +243,7 @@ class AssetRepository private constructor(
                     write.symbol,
                     write.price,
                     System.currentTimeMillis(),
-                    write.millionCopiesIncome
+                    mci
                 )
             }
         }
@@ -968,3 +969,13 @@ class AssetRepository private constructor(
         }
     }
 }
+
+/**
+ * 落库前决定「万份收益」是否可写。
+ *
+ * 货基万份收益是年化收入的直接输入；某天接口返回 0（新基金首日/数据未更新）或解析降级成
+ * null 时，若照写会覆盖上一次有效值，导致该货基年化收入一直显示 0，直到下次成功解析。
+ * 因此只有「有限且大于 0」才算有效，其余返回 null —— DAO 侧用 COALESCE 保留旧值。
+ */
+internal fun millionCopiesIncomeToPersist(incoming: Double?): Double? =
+    incoming?.takeIf { it.isFinite() && it > 0.0 }

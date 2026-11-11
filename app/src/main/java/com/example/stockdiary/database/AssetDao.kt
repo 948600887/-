@@ -49,7 +49,7 @@ interface AssetDao {
     @Update
     suspend fun updateAsset(asset: Asset)
     
-    @Query("UPDATE assets SET currentPrice = :price, millionCopiesIncome = :millionCopiesIncome, lastSyncTime = :syncTime WHERE symbol = :symbol")
+    @Query("UPDATE assets SET currentPrice = :price, millionCopiesIncome = COALESCE(:millionCopiesIncome, millionCopiesIncome), lastSyncTime = :syncTime WHERE symbol = :symbol")
     suspend fun updatePriceBySymbol(symbol: String, price: Double, syncTime: Long, millionCopiesIncome: Double? = null)
     
     @Query("UPDATE assets SET currentPrice = :price, lastSyncTime = :syncTime WHERE id = :id")

@@ -9,6 +9,8 @@ import androidx.lifecycle.viewModelScope
 import com.example.stockdiary.data.importer.BrokerageImportService
 import com.example.stockdiary.data.importer.OcrStatementService
 import com.example.stockdiary.data.importer.SymbolResolver
+import com.example.stockdiary.data.repository.AssetRepository
+import com.example.stockdiary.data.sync.refreshTodaySnapshotAfterImport
 import com.example.stockdiary.di.AppContainer
 import com.example.stockdiary.utils.AppLogger
 import kotlinx.coroutines.CancellationException
@@ -28,7 +30,8 @@ import java.nio.charset.Charset
  */
 open class ImportBrokerageViewModel(
     private val service: BrokerageImportService,
-    private val ocrService: OcrStatementService
+    private val ocrService: OcrStatementService,
+    private val repository: AssetRepository
 ) : ImportWizardViewModel<ImportBrokerageViewModel.UiState>(ImportBrokerageViewModel.UiState()) {
 
     enum class Step { SELECT_FILE, MAPPING, PREVIEW, COMMITTING, RESULT }
@@ -84,7 +87,8 @@ open class ImportBrokerageViewModel(
             initializer {
                 ImportBrokerageViewModel(
                     container.brokerageImportService,
-                    container.ocrStatementService
+                    container.ocrStatementService,
+                    container.assetRepository
                 )
             }
         }
@@ -503,6 +507,9 @@ open class ImportBrokerageViewModel(
                     committing = false, commitResult = result, step = Step.RESULT
                 )
             }
+            // 与截图导入/币安导入一致：导入改变了持仓，若当天已有快照则就地刷新，
+            // 避免首页净资产已变、历史页「今天」还是导入前旧值。
+            refreshTodaySnapshotAfterImport(repository, result.successCount, "ImportBrokerageVM")
         }
     }
 

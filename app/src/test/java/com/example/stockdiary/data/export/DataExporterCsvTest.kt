@@ -115,6 +115,47 @@ class DataExporterCsvTest {
     }
 
     @Test
+    fun `分数股的数量与单价可在导出表内反算市值`() {
+        val fractional = Asset(
+            id = 11, name = "AAPL", type = AssetType.STOCK, symbol = "AAPL",
+            account = "美股", balance = 0.4, purchasePrice = 90.0, currentPrice = 100.0,
+            currency = "USD"
+        )
+        val cells = parseRow(CsvContent.assetRow(fractional))
+        // 数量按 0 位展示会被截成 0，导出必须保住分数股
+        assertEquals("0.4", cells[4])
+        assertEquals("100", cells[6])
+        assertEquals(40.0, cells[4].toDouble() * cells[6].toDouble(), 1e-9)
+        assertEquals(40.0, cells[7].toDouble(), 1e-9)
+    }
+
+    @Test
+    fun `基金净值与低价股单价不被 2 到 3 位截断`() {
+        val fund = Asset(
+            id = 12, name = "某基金", type = AssetType.FUND, symbol = "000001",
+            account = "默认", balance = 1234.56, purchasePrice = 1.0, currentPrice = 1.234567
+        )
+        assertEquals("1.234567", parseRow(CsvContent.assetRow(fund))[6])
+
+        val lowPriced = Asset(
+            id = 13, name = "低价股", type = AssetType.STOCK, symbol = "000002",
+            account = "默认", balance = 1000.0, purchasePrice = 3.0, currentPrice = 3.3333
+        )
+        assertEquals("3.3333", parseRow(CsvContent.assetRow(lowPriced))[6])
+    }
+
+    @Test
+    fun `非零数量不会被导出成 0`() {
+        val dust = Asset(
+            id = 14, name = "碎股", type = AssetType.STOCK, symbol = "AAPL",
+            account = "美股", balance = 0.00001, purchasePrice = 1.0, currentPrice = 100.0,
+            currency = "USD"
+        )
+        // 4 位小数会把它舍成 0：宁可多留有效位，也不能出现「数量 0、市值有钱」
+        assertEquals("0.00001", parseRow(CsvContent.assetRow(dust))[4])
+    }
+
+    @Test
     fun `加密货币交易不再被截断成 2 位精度`() {
         val cells = parseRow(CsvContent.transactionRow(btcTx, AssetLookup(listOf(btc))))
         assertEquals(12, cells.size)

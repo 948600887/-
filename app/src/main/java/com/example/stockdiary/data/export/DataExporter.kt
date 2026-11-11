@@ -30,6 +30,7 @@ import com.example.stockdiary.utils.totalValueCny
 import java.io.File
 import java.io.OutputStreamWriter
 import java.io.Writer
+import java.math.BigDecimal
 import java.nio.charset.StandardCharsets
 import java.time.LocalDateTime
 import java.util.Locale
@@ -183,6 +184,22 @@ internal fun csvNumber(value: Double, digits: Int): String =
     String.format(Locale.US, "%.${digits}f", value)
 
 /**
+ * 导出用的「可反算」数字：最多 [digits] 位小数、去掉尾随 0（例如 `100`、`0.4`、`12.3456`）。
+ *
+ * 与 [csvNumber] 的固定位数不同，这里不补零——列宽不重要，用户要拿数量 × 单价复算市值。
+ * 唯一例外：非 0 值被舍成 0 时退回原值（`0.00001` 不会写成 `0`），否则又会出现
+ * 「数量 0、市值有钱」的自相矛盾行。
+ */
+private fun csvExportNumber(value: Double, digits: Int): String {
+    val trimmed = String.format(Locale.US, "%.${digits}f", value).trimEnd('0').trimEnd('.')
+    if (trimmed == "-0" || trimmed.isEmpty()) return "0"
+    if (trimmed.toDoubleOrNull() == 0.0 && value != 0.0) {
+        return BigDecimal.valueOf(value).stripTrailingZeros().toPlainString()
+    }
+    return trimmed
+}
+
+/**
  * 把交易行关联回资产，供币种折算/数量精度/账户列使用。
  *
  * 旧实现 `assets.associateBy { it.symbol }` 有两个静默错误：
@@ -289,6 +306,18 @@ internal object CsvContent {
     /** 每10份派息率的导出精度：基金分红常见 4 位小数，不能按金额 2 位截断。 */
     private const val DIVIDEND_RATE_DIGITS = 4
 
+    /**
+     * 导出用的数量精度：股票最多 4 位小数。
+     *
+     * 展示层股票按整数（[quantityPrecisionFor] = 0），但美股等分数股 0.4 股导出成 `0` 后，
+     * 「数量 × 单价 = 市值」这一列就再也对不上了。导出是对账文件，精度必须够反算。
+     */
+    private const val EXPORT_STOCK_QUANTITY_DIGITS = 4
+
+    /** 导出用的单价精度：股票 4 位、基金/ETF 6 位（净值/低价股常见 4~6 位小数）。 */
+    private const val EXPORT_STOCK_PRICE_DIGITS = 4
+    private const val EXPORT_FUND_PRICE_DIGITS = 6
+
     private val DIVIDEND_HEADER = listOf(
         "代码", "名称", "每10份派息(元)", "当前持仓", "折算金额(原币)",
         "币种", "折算金额(人民币)", "除息日", "到账日", "是否手动添加"
@@ -346,12 +375,16 @@ internal object CsvContent {
             asset.type.displayName,
             asset.symbol ?: "",
             asset.account,
-            csvNumber(asset.balance, quantityPrecisionFor(asset.type, asset.symbol)),
+            // 数量/单价按导出精度（股票 4 位、基金单价 6 位）并去掉尾随 0，
+            // 保证「数量 × 单价 ≈ 总价值」能在表内直接反算；金额列仍固定 2 位。
+            csvExportNumber(asset.balance, exportQuantityDigits(asset.type, asset.symbol)),
             // 存款/负债没有行情：单价列留空，避免出现「数量 10 万、单价 0、总价值 10 万」的自相矛盾行
-            if (quoted) csvNumber(asset.purchasePrice, pricePrecisionFor(asset.type, asset.symbol)) else "",
-            if (quoted) csvNumber(
+            if (quoted) csvExportNumber(
+                asset.purchasePrice, exportPriceDigits(asset.type, asset.symbol)
+            ) else "",
+            if (quoted) csvExportNumber(
                 asset.currentPrice ?: asset.purchasePrice,
-                pricePrecisionFor(asset.type, asset.symbol)
+                exportPriceDigits(asset.type, asset.symbol)
             ) else "",
             csvNumber(asset.totalValue, MONEY_DIGITS),
             csvNumber(asset.totalValueCny, MONEY_DIGITS),
@@ -485,8 +518,9 @@ internal object CsvContent {
             tx.name,
             TransactionType.fromValue(tx.type)?.name ?: tx.type,
             // 精度跟资产类型走：旧实现硬编码 2/3 位，加密货币 0.00012345 会被导成 0.00
-            csvNumber(tx.quantity, quantityDigitsOf(resolved.asset)),
-            csvNumber(tx.price, priceDigitsOf(resolved.asset)),
+            // 去掉尾随 0 是为让「数量 × 价格 = 成交金额」能在表内直接复算
+            csvExportNumber(tx.quantity, quantityDigitsOf(resolved.asset)),
+            csvExportNumber(tx.price, priceDigitsOf(resolved.asset)),
             csvNumber(tx.fee, MONEY_DIGITS),
             csvNumber(amount, amountDigitsOf(resolved.asset)),
             resolved.currency ?: "",
@@ -551,10 +585,11 @@ internal object CsvContent {
                     asset.symbol ?: "",
                     asset.type.displayName,
                     asset.account,
-                    csvNumber(asset.balance, quantityPrecisionFor(asset.type, asset.symbol)),
-                    if (quoted) csvNumber(
+                    // 与资产 CSV 同一口径：数量/单价按导出精度并可反算市值
+                    csvExportNumber(asset.balance, exportQuantityDigits(asset.type, asset.symbol)),
+                    if (quoted) csvExportNumber(
                         asset.currentPrice ?: asset.purchasePrice,
-                        pricePrecisionFor(asset.type, asset.symbol)
+                        exportPriceDigits(asset.type, asset.symbol)
                     ) else "",
                     csvNumber(asset.totalValue, MONEY_DIGITS),
                     asset.currency,
@@ -577,8 +612,8 @@ internal object CsvContent {
                     tx.symbol,
                     TransactionType.fromValue(tx.type)?.name ?: tx.type,
                     resolved.account,
-                    csvNumber(tx.quantity, quantityDigitsOf(resolved.asset)),
-                    csvNumber(tx.price, priceDigitsOf(resolved.asset)),
+                    csvExportNumber(tx.quantity, quantityDigitsOf(resolved.asset)),
+                    csvExportNumber(tx.price, priceDigitsOf(resolved.asset)),
                     csvNumber(amount, amountDigitsOf(resolved.asset)),
                     resolved.currency ?: "",
                     resolved.currency?.let { csvNumber(ExchangeRateManager.getRate(it), 4) } ?: "",
@@ -750,10 +785,21 @@ internal object CsvContent {
     private fun isQuoted(type: AssetType): Boolean = !type.isLiability && type != AssetType.BANK_DEPOSIT
 
     private fun quantityDigitsOf(asset: Asset?): Int =
-        asset?.let { quantityPrecisionFor(it.type, it.symbol) } ?: UNKNOWN_ASSET_DIGITS
+        asset?.let { exportQuantityDigits(it.type, it.symbol) } ?: UNKNOWN_ASSET_DIGITS
 
     private fun priceDigitsOf(asset: Asset?): Int =
-        asset?.let { pricePrecisionFor(it.type, it.symbol) } ?: UNKNOWN_ASSET_DIGITS
+        asset?.let { exportPriceDigits(it.type, it.symbol) } ?: UNKNOWN_ASSET_DIGITS
+
+    /** 导出数量精度：只抬高股票的 0 位限制，其余沿用展示精度（加密货币 10 位等不被收窄）。 */
+    private fun exportQuantityDigits(type: AssetType, symbol: String?): Int =
+        if (type == AssetType.STOCK) EXPORT_STOCK_QUANTITY_DIGITS else quantityPrecisionFor(type, symbol)
+
+    /** 导出单价精度：股票 4 位、基金/ETF 6 位、加密货币沿用 [pricePrecisionFor]。 */
+    private fun exportPriceDigits(type: AssetType, symbol: String?): Int = when {
+        type == AssetType.CRYPTO -> pricePrecisionFor(type, symbol)
+        type == AssetType.FUND || StockCodeManager.isETF(symbol) -> EXPORT_FUND_PRICE_DIGITS
+        else -> EXPORT_STOCK_PRICE_DIGITS
+    }
 
     private fun amountDigitsOf(asset: Asset?): Int = when {
         asset == null -> UNKNOWN_ASSET_DIGITS

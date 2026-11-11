@@ -238,6 +238,16 @@ class AssetRepository private constructor(
                     // 真机日志此前「万份收益」0 命中，无法区分「mci 变了导致重算」
                     // 与「分红集合变了导致重算」；落价时补一行便于下一轮诊断。
                     AppLogger.d("同步写入万份收益: ${write.symbol} mci=$mci", "AssetRepository")
+                } else {
+                    // 0 / null / 负值 / NaN / Infinity 这些「被过滤」的情形恰恰最需要排障：
+                    // 以前只有有效值才打日志，日志里「万份收益」反而 0 命中，看不出是接口
+                    // 返回 0 还是解析降级。这里连同原始值与过滤原因一并输出（DAO 侧 COALESCE
+                    // 会保留上一次有效值）。不改放行判据、不改 DAO SQL。
+                    AppLogger.d(
+                        "万份收益被过滤、保留上一次有效值: ${write.symbol} " +
+                            "incoming=${write.millionCopiesIncome} 原因=仅放行有限且大于0的值",
+                        "AssetRepository"
+                    )
                 }
                 assetDao.updatePriceBySymbol(
                     write.symbol,
@@ -976,6 +986,11 @@ class AssetRepository private constructor(
  * 货基万份收益是年化收入的直接输入；某天接口返回 0（新基金首日/数据未更新）或解析降级成
  * null 时，若照写会覆盖上一次有效值，导致该货基年化收入一直显示 0，直到下次成功解析。
  * 因此只有「有限且大于 0」才算有效，其余返回 null —— DAO 侧用 COALESCE 保留旧值。
+ *
+ * **保守取舍（已知局限）**：这里没有时间戳，也不做「连续 N 次 0 才认定真的归零」的判定，
+ * 只要本轮取值无效就保留上一次有效值。若某货基万份收益**真的降为 0**（不再派息），
+ * 旧值会被一直沿用，年化收入可能虚高。宁可虚高也不静默掉到 0（后者会触发用户可见的
+ * 「分红跳动」），真要区分需引入带时间戳的连续性判定，本轮不动。
  */
 internal fun millionCopiesIncomeToPersist(incoming: Double?): Double? =
     incoming?.takeIf { it.isFinite() && it > 0.0 }

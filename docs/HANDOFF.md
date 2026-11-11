@@ -237,3 +237,47 @@ CODE_ARCHITECTURE.md 部分过时），一律以实际代码 + git log 为准。
 - **④ 导出精度可反算**（`data/export/DataExporter.kt`）：列结构/顺序不变，只提高「数量/单价」列精度（股票数量 4 位、股票单价 4 位、基金/ETF 单价 6 位，加密货币沿用 10 位），并去掉尾随 0；非 0 值被舍成 0 时退回原值。目的：`数量 × 单价 ≈ 总价值` 在导出表内可直接复算（分数股 0.4 此前导成 0）。
 - **测试**：新增 `MillionCopiesIncomeTest`、`ImportBrokerageSnapshotRefreshTest`，扩充 `BrokerageImportServiceTest`（同文件重复 / 跨账户同价同量）、`DataExporterCsvTest`（分数股反算 / 基金净值与低价股 4~6 位 / 微小数量不归零）。
 
+### 2026-11-11 · 寇豆码 (`software-engineer`) — 全面审查结论的全量修复（P0/P1/P2 + 文档勘误）
+
+- **背景**：基于 2026-11-11 架构师 + QA 双轮复核确认的问题清单实施，审查结论已定，不再重新论证问题是否存在。**本轮未 `git commit` / `git add` / `git push`**（主理人按逻辑分批提交）；**未跑全量门禁**（QA 负责 `tools/check_gate.sh`）。
+- **范围**：只改清单相关文件；DB 仍 v18、无迁移、无加列、A7 锁未动；未改构建脚本 / APK 产物命名；未动 OkHttp 头、`DashboardPreferences` 写回方式、并发常量（`MAX_CONCURRENT_SYNC=6` / 轻量 4 / legacy 2）、熔断阈值、导入 `commit()` 不自动同步净值等硬约定。
+
+**逐项改动**
+
+- **【P0·R1】交割单导入刷当日快照缺前置行情同步 —— 最小方案（回退，不补 sync）**
+  - `ui/viewmodels/ImportBrokerageViewModel.kt`：`commit()` 成功后**移除** `refreshTodaySnapshotAfterImport(repository, result.successCount, "ImportBrokerageVM")`；`941dbcb` 专为这次调用新增的 `repository: AssetRepository` 构造参数在 VM 内再无使用点，**一并回退**（含两行 import、factory 里的 `container.assetRepository` 实参），`ImportWizardCancellationTest` 的 `CancelableBrokerageVm` 构造同步改回两参。
+  - 理由：`SyncSnapshotPolicy.refreshTodaySnapshotAfterImport` 的契约是「导入落库 **+ 导入后行情同步** 之后才刷新」，参数名是 `syncedCount`；截图导入 `HoldingSnapshotViewModel.kt:335-358`、币安导入 `BinanceImportViewModel.kt:253-267` 都先跑 `PriceSyncCoordinator.sync` 再刷并传同步 `successCount`，唯独交割单入口没有。`BrokerageImportService.applyBuy` 新建 Asset 不设 `currentPrice` → `Asset.kt:73` 按成交价 `purchasePrice` 估值 → `AssetRepository.replaceSnapshotForDate` 删当日全部旧快照并不可逆清 `SnapshotManualAdjustmentStore`。**刻意不改为补前置 sync**（会引入网络调用、改变导入耗时与失败分支语义），回到「等后台 Worker / 用户手动刷新补快照」原状。
+  - `data/sync/SyncSnapshotPolicy.kt` KDoc 补**硬约束**（见下方勘误③）。
+  - `ImportBrokerageSnapshotRefreshTest.kt`：原 2 例「成功刷新 exactly=1 / successCount=0 不刷」改为护栏 —— 导入成功（successCount=2）后 `coVerify(exactly = 0)`，零成功用例保留；去掉 `runCatching { coVerify(...) }.isSuccess` 吞异常（R8），断言真实失败可见；用 `mockkStatic(SyncSnapshotPolicyKt)` 验证顶层函数 0 调用 + VM 两参构造，防止后人把调用加回来。
+- **【P1·R2】去重文档结论错误 + 假绿测试桩 —— 维持限制，只修文档与桩（不做真修复）**
+  - `BrokerageImportService.kt:519-522` 注释更正（见勘误②）；`BrokerageImportServiceTest.installStatefulAsset()` 的 `findDuplicate` 桩由恒 `returns null` 改成**状态化 `coAnswers`**（按本测试已插入的 Transaction 集合、只比 5 字段判定命中），复现真实 Room 行为；`:383-394` 用例改名为「当前限制：不同账户同价同量第二笔被库内去重跳过」，断言改为 `successCount=1 / skippedDuplicate=1 / balance=100`。其余既有用例（日期升序回放、异常/用户跳过计数、同文件完全重复行）在新桩下保持全绿。
+  - **评估结论：不做「不升 schema 的低成本真修复」**。理由：① `transactions` 表无 account 列（严禁加列 / 升 v19 / 改 A7 锁），`commitTransaction` 写流水也不带 account，同文件仅账户不同的两笔合法成交落库后是**完全相同的记录**，DB 层无法区分「合法两笔」与「重复导入一笔」；② 任何批次内放行方案（如把本批次已插入 key 集合传下去）只能修「首次导入」，但「部分失败重试」时库里已有上次批次插入的同 key 记录，无法区分是本批次还是上次批次 → 会出现「首次能进、重试进不了」的不一致语义，比稳定跳过更难排查；③ 需改 `commitTransaction` 签名 / 新增 DAO 查询，动摇「事务内二次确认去重」语义，影响约 20 个既有用例，改动不小。按判定标准「只要有一处不确定即维持限制」，维持现状并钉死文档与测试桩。
+- **【P2·R5】导出负微小值**：`data/export/DataExporter.kt` 的 `csvExportNumber` 旧判断 `trimmed == "-0"` 提前返回 `"0"`，使「非 0 值被舍成 0 时退回原值」对负数不可达且正负不对称。改为只有 `value == 0.0`（含 `-0.0`）或 `trimmed.isEmpty()` 才返回 `"0"`，`-0` 并入退回逻辑；`DataExporterCsvTest` 补 `-0.00001 → "-0.00001"`、`-0.4 → "-0.4"`、`0.0 → "0"`，保留原正数用例。
+- **【P2·R9】搜索 trim**：`ui/components/PortfolioSearch.kt` 把 trim 提到 `derivedStateOf` / filter 外只做一次，改用 `trim { it.isWhitespace() }` 覆盖全角空格 U+3000；抽 `matchesTrimmedQuery` 供列表复用，`matchesSearchQuery` 保留为纯函数单测入口；匹配字段、大小写不敏感、null 安全、空查询返回全部不变。`PortfolioSearchTest` 补「　茅台　」等全角空格用例。
+- **【P2·R7】mci 守卫诊断**：`data/repository/AssetRepository.kt` 给被过滤的无效 mci（0 / null / 负值 / NaN / Infinity）补诊断日志（含原始值与过滤原因），不再只有有效值才打；`millionCopiesIncomeToPersist` KDoc 声明保守取舍（真实 0 值会保留上一次有效值、可能使年化收入虚高、无时间戳/连续性判定）。**不改 DAO SQL、不改放行判据**。`AssetDao.kt:52` 的 `COALESCE` 语义见下方说明。
+- **【P2·R8】快照测试脆弱**：`ImportBrokerageSnapshotRefreshTest` 去掉 `runCatching` 吞异常；`ImportWizardCancellationTest` 的 `waitUntil` 本来就没有吞异常，保留轮询写法。项目 KDoc 明确「IO 在真实线程、虚拟时钟推不动」，**未套用 `runTest` + 虚拟时间**、也未换成 `UiStateCollectExt.trackIn`（该辅助针对 `StateFlow` 合流订阅，与本处「验证顶层函数未被调用」目标不同，强换风险高）。
+- **【P2·R6】导出容差与格式变更说明**：`DataExporterCsvTest` 补「数量 × 单价 与金额列（固定 2 位）误差 ≤ 0.005」断言，明确是**近似可反算**而非严格守恒；**不改导出逻辑**（NaN/Infinity 是既有行为，非本批引入）。格式变更见下方说明。
+- **【P2·R3】已证伪，不改生产代码**：QA 已证明 `DividendRepository.kt:744-749` 写入的是从 DB 读回的完整 `mergedData`，A16 仍有效，「缓存守卫使主链路失效」不成立。`data/repository/DividendRepositoryCachePolicyTest` 中测 `shouldUpdateDividendCache` 的两个用例改名/注释标为「防御性契约，非 A16 主链路验证」；`DividendRepository` 无完整单测（仅纯函数策略测试），补主链路 cache 断言需 mock 大量 DAO，非低成本，**不补**。注意 `data/DividendRepositoryCachePolicyTest.kt`（`shouldReuseEmptyResult` / `DividendFailureBackoffTest`）与本项无关，未动。
+- **【P2·R4】待真机，不改解析逻辑**：`network/FundDividendApiService.kt` 的 `parseDividendHtmlDetailed` KDoc 记录「分母改单表」的反向取舍与待验证项（多表拆分分红页首抓可能残缺放行并触发 `markFetched` 24h 停更），**不改解析器**。待真机/抓包确认真实多表页面是否存在。
+
+**三处勘误（append-only，不改写历史条目）**
+
+1. `641e59d` / HANDOFF:158、170（A2 冻结分母 `remember`→`rememberSaveable` 时期的论证）：当时「LaunchedEffect 不重启动」的论断**已被 `a077cdf`（`fix(首页): A2 旋屏重建后保持年化率冻结分母`）证伪** —— Composable 重建后 `LaunchedEffect` 会重启，不能靠「它不重启」来保住状态；`a077cdf` 改以「重建后保持冻结分母」收口并补 `DashboardYieldFreezeTest`。
+2. `ba2e195` / HANDOFF:234 的「同一文件内的这类成交已正常入账」**与 `TransactionDao.kt:74-75` 不符**：`findDuplicate` 只有 `symbol|type|quantity|price|date` 5 字段、无 account/fee；`seenInFile` 只挡同文件内**完全重复**的行。因此「同日同价同量、不同账户或不同手续费的合法成交」**无论同文件还是跨文件，都会被库内去重跳过**。
+3. `SyncSnapshotPolicy.refreshTodaySnapshotAfterImport` 的 `syncedCount` 契约**硬约束**：调用方必须先完成 `PriceSyncCoordinator.sync` 并把其 `successCount` 作为 `syncedCount` 传入；**未完成行情同步的导入入口不得调用本函数**。已在 KDoc 落地。
+
+**另需留意的语义 / 格式变化**
+
+- `AssetDao.kt:52` 的 `COALESCE(:millionCopiesIncome, millionCopiesIncome)` 使「不传 mci」的语义从「覆盖为 null」变为「**保留上一次旧值**」；配合 `millionCopiesIncomeToPersist` 的保守放行，真实 0 值不会被写入。
+- 导出列字符串由**固定小数位**改为**去尾零**（`100.00`→`100`、`0.40`→`0.4`），数值等价但**文本形态变化**，可能影响外部 CSV 消费方 / Excel 模板（按字符串比对或固定列宽解析的场景）。
+
+**已知未修 / 维持现状项**
+
+- 交割单去重「无 account 列」的残余限制（见 P1 评估），不升 schema、不加列、不改 A7 锁。
+- 交割单入口不补前置行情同步 → 当日快照由后台 Worker / 手动刷新补齐（P0 最小方案）。
+- `FundDividendApiService` 多表拆分分红页待真机确认（R4）；`DividendRepository` 主链路 cache 断言未补（R3）。
+- 快照/取消测试保留实时轮询（`Thread.sleep(5)`，4s 上限），仅去掉吞异常（R8）。
+- 导出 NaN/Infinity 行为为既有行为，未改。
+
+- **门禁结果**：2026-11-11 QA（`software-qa-engineer`）独立全量门禁 `bash tools/check_gate.sh` → **GATE PASSED**（EXIT=0，总耗时 245s / 4m05s）：8 个 run_step + 1 个 `verify_test_count` 共 **9/9 步 EXIT=0**，三条 gradle 任务均带 `--rerun`。结果 **151 个结果 XML / 1632 例 / 失败 0 / 错误 0 / 跳过 0**；STALE=0（全部 XML mtime 16:47:04，均属本轮），无 UP-TO-DATE/FROM-CACHE 假绿。较修复前基线（151 XML / 1627 例）为 **XML +0、用例 +5**（快照护栏 +1、导出 +2、搜索 +2），与 `git diff` 新增 5 个 `@Test`、删除 0 个一致。
+

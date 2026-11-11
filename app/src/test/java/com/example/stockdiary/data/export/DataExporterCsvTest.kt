@@ -277,4 +277,32 @@ class DataExporterCsvTest {
         assertEquals(200.0, first[3].toDouble(), 1e-9)
         assertEquals("2026-10-28", parseRow(rows[1])[0])
     }
+
+    @Test
+    fun `负微小值不被舍成0_与正数对称`() {
+        // 数量列走 csvExportNumber(STOCK, 4 位)：负微小值被舍成 "-0" 时不能提前返回 "0"，
+        // 必须退回原值；-0.4 正常保留；真正的 0 才是 "0"。
+        fun quantityCell(value: Double): String =
+            parseRow(CsvContent.assetRow(stock.copy(balance = value)))[4]
+        assertEquals("-0.00001", quantityCell(-0.00001))
+        assertEquals("-0.4", quantityCell(-0.4))
+        assertEquals("0", quantityCell(0.0))
+    }
+
+    @Test
+    fun `数量乘单价与金额列误差在容差内_近似而非严格守恒`() {
+        val tx = Transaction(
+            symbol = "600900", name = "长江电力", type = "BUY",
+            quantity = 123.456, price = 7.89, date = "2026-10-01", fee = 0.0
+        )
+        val cells = parseRow(CsvContent.transactionRow(tx, AssetLookup(listOf(stock))))
+        val product = cells[4].toDouble() * cells[5].toDouble()
+        val amount = cells[7].toDouble()
+        // 数量/单价列去尾零按导出精度写、金额列固定 2 位：两者是「近似可反算」，
+        // 不是严格守恒；误差上限取金额列半个最小单位 0.005。
+        assertTrue(
+            "|数量×单价 - 金额| 应 ≤ 0.005，实际 $product vs $amount",
+            kotlin.math.abs(product - amount) <= 0.005
+        )
+    }
 }

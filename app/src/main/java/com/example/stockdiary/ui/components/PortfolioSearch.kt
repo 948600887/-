@@ -31,7 +31,10 @@ fun PortfolioSearchDialog(
     var searchQuery by remember { mutableStateOf("") }
 
     val filteredAssets by remember(assets, searchQuery) {
-        derivedStateOf { assets.filter { matchesSearchQuery(it, searchQuery) } }
+        // trim 提到 filter / derivedStateOf 之外，只做一次（原来每个资产都 trim 一遍）；
+        // 用 isWhitespace 覆盖全角空格 U+3000 等 Unicode 空白，纯 String.trim() 只去 ≤ U+0020。
+        val normalizedQuery = searchQuery.trim { it.isWhitespace() }
+        derivedStateOf { assets.filter { matchesTrimmedQuery(it, normalizedQuery) } }
     }
 
     AlertDialog(
@@ -108,11 +111,22 @@ fun SearchAssetItem(asset: Asset, onClick: () -> Unit, onDividendClick: () -> Un
  * - [Asset.notes] 备注（可为 null，跳过）；
  * - [AssetType.displayName] 类别中文名（如「基金」「虚拟货币」）。
  *
- * 入参先 [String.trim]，避免用户手滑带的首尾空格导致"明明有却搜不到"。
- * 空查询（trim 后空白）视为匹配全部，等价于搜索框为空时展示完整列表。
+ * 入参先做一次 `trim { it.isWhitespace() }`：既去掉用户手滑带的首尾空格，也覆盖全角空格
+ * U+3000 等 Unicode 空白（默认 `trim()` 只去 ≤ U+0020）。空查询（trim 后空白）视为匹配全部，
+ * 等价于搜索框为空时展示完整列表。
+ *
+ * 列表场景请走 [matchesTrimmedQuery] 并复用同一份已 trim 的查询，避免逐资产重复 trim。
  */
-internal fun matchesSearchQuery(asset: Asset, rawQuery: String): Boolean {
-    val q = rawQuery.trim()
+internal fun matchesSearchQuery(asset: Asset, rawQuery: String): Boolean =
+    matchesTrimmedQuery(asset, rawQuery.trim { it.isWhitespace() })
+
+/**
+ * [matchesSearchQuery] 的免 trim 版本：入参 [q] 已由调用方统一 trim 过一次。
+ *
+ * [PortfolioSearchDialog] 在 `derivedStateOf` / filter 外算好 `normalizedQuery` 后传进来，
+ * 保持匹配字段、大小写不敏感、null 安全、空查询返回全部这些既有语义不变。
+ */
+internal fun matchesTrimmedQuery(asset: Asset, q: String): Boolean {
     if (q.isBlank()) return true
     return asset.name.contains(q, ignoreCase = true)
         || (asset.symbol?.contains(q, ignoreCase = true) == true)

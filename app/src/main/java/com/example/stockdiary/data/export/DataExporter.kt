@@ -187,12 +187,16 @@ internal fun csvNumber(value: Double, digits: Int): String =
  * 导出用的「可反算」数字：最多 [digits] 位小数、去掉尾随 0（例如 `100`、`0.4`、`12.3456`）。
  *
  * 与 [csvNumber] 的固定位数不同，这里不补零——列宽不重要，用户要拿数量 × 单价复算市值。
- * 唯一例外：非 0 值被舍成 0 时退回原值（`0.00001` 不会写成 `0`），否则又会出现
- * 「数量 0、市值有钱」的自相矛盾行。
+ * 唯一例外：**非 0 值被舍成 0 时退回原值**，正负一视同仁：
+ * `0.00001` 不会写成 `0`，`-0.00001` 也不会被写成 `0`（旧实现把 `-0` 直接并进「返回 0」，
+ * 负微小值被静默吞掉，与正数不对称、也与本 KDoc 矛盾）。否则又会出现
+ * 「数量 0、市值有钱」或「-0.00001 股凭空消失」的自相矛盾行。
  */
 private fun csvExportNumber(value: Double, digits: Int): String {
     val trimmed = String.format(Locale.US, "%.${digits}f", value).trimEnd('0').trimEnd('.')
-    if (trimmed == "-0" || trimmed.isEmpty()) return "0"
+    // 只有真正的 0（含 -0.0，IEEE 下 -0.0 == 0.0）或空串才写 "0"。
+    // 负数被舍成 "-0" 时必须继续往下走「退回原值」分支，不能提前吞成 "0"。
+    if (value == 0.0 || trimmed.isEmpty()) return "0"
     if (trimmed.toDoubleOrNull() == 0.0 && value != 0.0) {
         return BigDecimal.valueOf(value).stripTrailingZeros().toPlainString()
     }

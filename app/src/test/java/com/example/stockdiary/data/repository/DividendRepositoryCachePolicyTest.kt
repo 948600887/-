@@ -15,6 +15,14 @@ import org.junit.Test
  * 无条件 `deleteNonManualBySymbol` 再只插回本次 `validRecords` —— 一旦某次解析残缺
  * （首次 10 条、二次仅 2 条），就把另外 8 条洗掉，年化收入当场缩水，下次抓全了又涨回来，
  * 正是用户原始「刷新跳动」的残留根因。
+ *
+ * ## 关于 [shouldUpdateDividendCache] 两个用例（2026-11-11 勘误，R3）
+ *
+ * 它们是**纯函数层的防御性契约**，**不是 A16 主链路验证**：QA 已确认
+ * `DividendRepository.kt:744-749` 写进缓存的是从 DB 读回的完整 `mergedData`，
+ * 「缓存守卫使主链路失效」不成立，A16 仍有效。这里只钉住「缓存写入决策与删库决策同口径」，
+ * 防止将来改纯函数时把两者拆开。`DividendRepository` 目前无完整单测（仅策略纯函数），
+ * 主链路 cache 断言需 mock 大量 DAO，非低成本，本轮不补。
  */
 class DividendRepositoryCachePolicyTest {
 
@@ -52,9 +60,9 @@ class DividendRepositoryCachePolicyTest {
     }
 
     @Test
-    fun `残缺解析_DB保留旧记录_内存缓存也不覆盖`() {
-        // A16 第二半：DB 侧已判定禁止替换（残缺），缓存必须同口径不写入本次残缺集合，
-        // 否则 tryGetFromCache 会优先命中残缺数据、DB 与缓存不一致，年化收入照样缩水。
+    fun `防御性契约_残缺解析不覆盖缓存_非A16主链路验证`() {
+        // 纯函数防御性契约：全量刷新已判定禁止替换（残缺）时，缓存也不写本次残缺集合。
+        // 注意：这不是 A16 主链路验证 —— 主链路写的是从 DB 读回的完整 mergedData（见类 KDoc）。
         assertFalse(
             "全量刷新残缺（replaceAllowed=false）时不得覆盖内存缓存",
             shouldUpdateDividendCache(isIncremental = false, replaceAllowed = false)
@@ -62,7 +70,8 @@ class DividendRepositoryCachePolicyTest {
     }
 
     @Test
-    fun `完整解析或增量路径_正常更新缓存`() {
+    fun `防御性契约_完整或增量路径更新缓存_非A16主链路验证`() {
+        // 同上：纯函数契约，非主链路验证。
         assertTrue(shouldUpdateDividendCache(isIncremental = false, replaceAllowed = true))
         assertTrue(
             "增量路径不删库、只补新记录，缓存照常更新",

@@ -88,9 +88,8 @@ class ImportWizardCancellationTest {
 
     private class CancelableBrokerageVm(
         service: BrokerageImportService,
-        ocrService: OcrStatementService,
-        repository: AssetRepository
-    ) : ImportBrokerageViewModel(service, ocrService, repository) {
+        ocrService: OcrStatementService
+    ) : ImportBrokerageViewModel(service, ocrService) {
         fun cancelJobForTest() {
             activeJob?.cancel()
         }
@@ -189,8 +188,7 @@ class ImportWizardCancellationTest {
 
         val vm = CancelableBrokerageVm(
             service = mockk(relaxed = true),
-            ocrService = ocr,
-            repository = mockk(relaxed = true)
+            ocrService = ocr
         )
         vm.onImageSelected(mockk(relaxed = true))
 

@@ -9,8 +9,6 @@ import androidx.lifecycle.viewModelScope
 import com.example.stockdiary.data.importer.BrokerageImportService
 import com.example.stockdiary.data.importer.OcrStatementService
 import com.example.stockdiary.data.importer.SymbolResolver
-import com.example.stockdiary.data.repository.AssetRepository
-import com.example.stockdiary.data.sync.refreshTodaySnapshotAfterImport
 import com.example.stockdiary.di.AppContainer
 import com.example.stockdiary.utils.AppLogger
 import kotlinx.coroutines.CancellationException
@@ -30,8 +28,7 @@ import java.nio.charset.Charset
  */
 open class ImportBrokerageViewModel(
     private val service: BrokerageImportService,
-    private val ocrService: OcrStatementService,
-    private val repository: AssetRepository
+    private val ocrService: OcrStatementService
 ) : ImportWizardViewModel<ImportBrokerageViewModel.UiState>(ImportBrokerageViewModel.UiState()) {
 
     enum class Step { SELECT_FILE, MAPPING, PREVIEW, COMMITTING, RESULT }
@@ -87,8 +84,7 @@ open class ImportBrokerageViewModel(
             initializer {
                 ImportBrokerageViewModel(
                     container.brokerageImportService,
-                    container.ocrStatementService,
-                    container.assetRepository
+                    container.ocrStatementService
                 )
             }
         }
@@ -507,9 +503,15 @@ open class ImportBrokerageViewModel(
                     committing = false, commitResult = result, step = Step.RESULT
                 )
             }
-            // 与截图导入/币安导入一致：导入改变了持仓，若当天已有快照则就地刷新，
-            // 避免首页净资产已变、历史页「今天」还是导入前旧值。
-            refreshTodaySnapshotAfterImport(repository, result.successCount, "ImportBrokerageVM")
+            // 不在本入口刷新当日快照（2026-11-11 审查修复，最小方案）：
+            // SyncSnapshotPolicy.refreshTodaySnapshotAfterImport 的契约是「导入落库 + 导入后
+            // 行情同步之后才刷新」，参数 syncedCount 必须来自 PriceSyncCoordinator.sync 的
+            // successCount（截图导入 HoldingSnapshotVM、币安导入 BinanceImportVM 都先跑 sync 再刷）。
+            // 唯独交割单入口既不补前置行情同步，也不该把 commit 的 successCount 冒充 syncedCount：
+            // applyBuy 新建 Asset 不设 currentPrice，会按成交价 purchasePrice 估值，此时
+            // replaceSnapshotForDate 会删当日全部旧快照并不可逆清 SnapshotManualAdjustmentStore，
+            // 把未同步的价格固化进历史曲线。补前置 sync 会引入网络调用、改变导入耗时与失败分支
+            // 语义，故按约定回到原状：等后台 Worker / 用户手动刷新时补当日快照。
         }
     }
 

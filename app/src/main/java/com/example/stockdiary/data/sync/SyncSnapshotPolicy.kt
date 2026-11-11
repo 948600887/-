@@ -90,6 +90,16 @@ suspend fun saveTodaySnapshotIfEligible(
  * 与 [saveTodaySnapshotIfEligible] 的区别：那不是一轮完整同步（只同步了导入的标的），
  * 不能用 [SyncResult] 的截断口径判定；这里只以「同步确实有成功项」为门槛，
  * 同步失败则不动快照，避免把 0 价固化。
+ *
+ * ## 硬约束（调用方必须遵守）
+ *
+ * **调用方必须先完成 `PriceSyncCoordinator.sync`，并把该轮同步的 `successCount` 作为
+ * [syncedCount] 传入；未完成行情同步的导入入口不得调用本函数。** [syncedCount] 是「已同步
+ * 取价成功的标的数」，不是「导入落库的行数」。少一次前置同步就调本函数，会用未取价的
+ * 成交价（新建 Asset 无 `currentPrice` 时按 `purchasePrice` 估值）覆盖当日快照，且
+ * `replaceSnapshotForDate` 会删当日全部旧快照并不可逆清掉当日手动调整记录。
+ * 合规调用见 `HoldingSnapshotViewModel` / `BinanceImportViewModel`（都先 `sync` 再刷）；
+ * 交割单导入入口刻意不补前置同步，因此**不调用**本函数，快照交给后台 Worker / 手动刷新补。
  */
 suspend fun refreshTodaySnapshotAfterImport(
     repository: AssetRepository,

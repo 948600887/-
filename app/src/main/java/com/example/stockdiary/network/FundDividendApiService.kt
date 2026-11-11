@@ -270,7 +270,7 @@ class FundDividendApiService {
      *
      * 整源熔断记账在此按返回路径精确落位：
      * - HAS_RECORDS / NO_DIVIDEND_DECLARED → [fhspOnSuccess] 自愈；
-     * - SUSPICIOUS_EMPTY_PARSE（有表头但 0 条）→ 直接失败且**不计入**整源熔断
+     * - SUSPICIOUS_EMPTY_PARSE（有表头但解析结果残缺）→ 直接失败且**不计入**整源熔断
      *   （解析问题不是源健康问题，否则一轮几十个空页面会把整源静默屏蔽）；
      * - 特定短退避（514/429、DNS）由各自窗口处理、不计入本熔断；
      * - 其余通用失败（5xx 落到反爬页、超时、非分红页）→ 累计触发整源熔断。
@@ -293,7 +293,8 @@ class FundDividendApiService {
                 if (response.isSuccessful) {
                     val html = response.body?.string() ?: ""
                     AppLogger.d("天天基金HTML长度: ${html.length}, 是否包含分红表格: ${html.contains("每10份分红") || html.contains("每份分红")}", TAG)
-                    val records = parseDividendHtml(html, fundCode)
+                    val parsed = parseDividendHtmlDetailed(html, fundCode)
+                    val records = parsed.records
                     AppLogger.d("OkHttp 解析到 ${records.size} 条基金分红记录", TAG)
 
                     // **请求成功就是拿到答案了** —— 但「0 条」不再一律等于「确实没有分红」。
@@ -309,21 +310,23 @@ class FundDividendApiService {
                     // Repository 随即写 7 天负缓存并删掉库里旧分红记录 ——
                     // 用户点一次刷新，年化收入当场缩水，下次抓全了又涨回来。
                     // 现在由 [classifyFundDividendPage] 三态区分，判据见其 KDoc。
-                    when (classifyFundDividendPage(html, records.size, countDividendDataRows(html))) {
+                    when (classifyFundDividendPage(html, records.size, parsed.expectedRowCount)) {
                         FundDividendPageVerdict.HAS_RECORDS,
                         FundDividendPageVerdict.NO_DIVIDEND_DECLARED -> {
                             fhspOnSuccess()
                             return Result.success(records)
                         }
                         FundDividendPageVerdict.SUSPICIOUS_EMPTY_PARSE -> {
+                            val message = fundDividendSuspiciousMessage(
+                                fundCode, records.size, parsed.expectedRowCount
+                            )
                             AppLogger.w(
-                                "分红页有表头但解析到 0 条，按解析可疑处理（保留旧分红记录）: " +
-                                    "fundCode=$fundCode, html长度=${html.length}",
+                                "$message，按解析可疑处理（保留旧分红记录）: html长度=${html.length}",
                                 TAG
                             )
                             // 不计入整源熔断：这是解析问题，不是源健康问题。
                             // Result.failure 会让 Repository 走「源未应答」路径，保留旧记录。
-                            return Result.failure(Exception("分红页解析可疑[$fundCode]：有表头但 0 条记录"))
+                            return Result.failure(Exception(message))
                         }
                         FundDividendPageVerdict.NOT_A_DIVIDEND_PAGE -> {
                             // 唯一还值得换 Jsoup 重试的情况：拿到的根本不是分红页（反爬页/错误页）
@@ -373,24 +376,27 @@ class FundDividendApiService {
                 .get()
             val html = doc.html()
             AppLogger.d("Jsoup HTML长度: ${html.length}, 是否包含分红表格: ${html.contains("每10份分红") || html.contains("每份分红")}", TAG)
-            val records = parseDividendHtml(html, fundCode)
+            val parsed = parseDividendHtmlDetailed(html, fundCode)
+            val records = parsed.records
             AppLogger.d("Jsoup 解析到 ${records.size} 条基金分红记录", TAG)
             // 与 OkHttp 路径完全同一套三态判定：只有「有记录」或「页面明确声明暂无分红」
             // 才算成功答案。降级到 Jsoup 后仍解析出 0 条且没有空态提示，同样按解析可疑
             // 返回失败（保留旧记录），绝不能把空列表固化成「确实无分红」。
-            when (classifyFundDividendPage(html, records.size, countDividendDataRows(html))) {
+            when (classifyFundDividendPage(html, records.size, parsed.expectedRowCount)) {
                 FundDividendPageVerdict.HAS_RECORDS,
                 FundDividendPageVerdict.NO_DIVIDEND_DECLARED -> {
                     fhspOnSuccess()
                     return Result.success(records)
                 }
                 FundDividendPageVerdict.SUSPICIOUS_EMPTY_PARSE -> {
+                    val message = fundDividendSuspiciousMessage(
+                        fundCode, records.size, parsed.expectedRowCount, fromJsoup = true
+                    )
                     AppLogger.w(
-                        "Jsoup 分红页有表头但解析到 0 条，按解析可疑处理（保留旧分红记录）: " +
-                            "fundCode=$fundCode, html长度=${html.length}",
+                        "$message，按解析可疑处理（保留旧分红记录）: html长度=${html.length}",
                         TAG
                     )
-                    return Result.failure(Exception("分红页解析可疑[$fundCode]：Jsoup 有表头但 0 条记录"))
+                    return Result.failure(Exception(message))
                 }
                 FundDividendPageVerdict.NOT_A_DIVIDEND_PAGE -> Unit
             }
@@ -422,12 +428,26 @@ class FundDividendApiService {
         return Result.failure(Exception("无法获取天天基金分红数据"))
     }
 
+    /** 兼容入口：只要记录列表（既有单测与调用方继续用它）。 */
+    internal fun parseDividendHtml(html: String, fundCode: String): List<DividendRecord> =
+        parseDividendHtmlDetailed(html, fundCode).records
+
     /**
      * 解析天天基金分红配股HTML页面
      * 表头示例：年份 | 权益登记日 | 除息日 | 每10份分红 | 分红发放日
+     *
+     * 同时给出**解析器实际读取的那张表**的数据行数作为 A16 残缺判定的分母。
+     * 为什么不能按整页所有表统计：解析器遇到第一张能产出记录的表就 `break`（页面把分红
+     * 拆成多张表时，后面的表根本不读）。若分母按整页所有表求和，拆分表页面的分母会虚高，
+     * 完整解析也会被误判成「残缺」→ 反复失败 + 指数退避 → 基金分红长期停更。
      */
-    internal fun parseDividendHtml(html: String, @Suppress("UNUSED_PARAMETER") fundCode: String): List<DividendRecord> {
+    internal fun parseDividendHtmlDetailed(
+        html: String,
+        @Suppress("UNUSED_PARAMETER") fundCode: String
+    ): FundDividendParseResult {
         val records = mutableListOf<DividendRecord>()
+        // 解析器实际读取的那张表的数据行数；0 表示没走到表路径（或表路径没产出记录）
+        var expectedRowCount = 0
 
         try {
             val doc = Jsoup.parse(html)
@@ -486,7 +506,11 @@ class FundDividendApiService {
                     }
                 }
 
-                if (records.isNotEmpty()) break
+                if (records.isNotEmpty()) {
+                    // 分母只取这张表：与下面的 break 位置严格一致
+                    expectedRowCount = countDividendDataRows(table)
+                    break
+                }
             }
 
             // 兜底：按行查找包含"每10份派"或"每份派"的分红数据
@@ -537,7 +561,11 @@ class FundDividendApiService {
             AppLogger.e("HTML解析异常: ${e.message}", e, TAG)
         }
 
-        return records
+        // 兜底逐行扫产出记录时没有「表」可作分母：把预期至少记成已有条数，
+        // 避免把兜底解析成功的结果误判成残缺
+        if (expectedRowCount == 0 && records.isNotEmpty()) expectedRowCount = records.size
+
+        return FundDividendParseResult(records, expectedRowCount)
     }
 
     private data class FundDividendHeaderIndices(
@@ -615,6 +643,30 @@ class FundDividendApiService {
 }
 
 /**
+ * 分红页解析结果：记录列表 + [FundDividendApiService.parseDividendHtmlDetailed] 实际读取的
+ * 那张表的数据行数（A16 残缺判定的分母，口径与解析器的 `break` 位置严格一致）。
+ */
+internal data class FundDividendParseResult(
+    val records: List<DividendRecord>,
+    val expectedRowCount: Int
+)
+
+/**
+ * A16 解析可疑的统一文案：必须同时给出「实际解析 N 条」与「预期 M 条」，
+ * 不能笼统写成「0 条」——残缺解析常常是「解出 2 条、实际 10 行」，
+ * 旧文案会把排障方向直接带偏。
+ */
+internal fun fundDividendSuspiciousMessage(
+    fundCode: String,
+    actualRecordCount: Int,
+    expectedRowCount: Int,
+    fromJsoup: Boolean = false
+): String = buildString {
+    append("分红页解析可疑[$fundCode]：实际解析 $actualRecordCount 条 / 预期 $expectedRowCount 条")
+    if (fromJsoup) append("（Jsoup 兜底）")
+}
+
+/**
  * 判断这页是不是**真的分红页**（而不是反爬页 / 错误页）。
  *
  * 判据是「有没有分红表的表头」，**不是**「有没有数据行」：
@@ -680,23 +732,22 @@ internal fun classifyFundDividendPage(html: String, recordCount: Int, expectedRo
 }
 
 /**
- * 统计分红表里「数据行」的数量（不含表头），供 [classifyFundDividendPage] 的 A16 残缺解析判定使用。
+ * 统计**单张**分红表里「数据行」的数量（不含表头），供 [classifyFundDividendPage] 的
+ * A16 残缺解析判定使用。
  *
  * 只数含 `<td>` 且含 4 位年份的 `<tr>`，过滤掉「共 1 页」这类汇总行与 `<th>` 表头行——
  * 否则会把汇总行也算进去，导致完整页被误判成残缺。解析异常时返回 0（保守：不算残缺）。
+ *
+ * **必须传入解析器实际读取的那张 table**（见 [FundDividendApiService.parseDividendHtmlDetailed]）：
+ * 对整页多表求和会让「分红被拆成多张表」的页面分母虚高，把完整解析误判成残缺。
  */
-internal fun countDividendDataRows(html: String): Int {
+internal fun countDividendDataRows(table: org.jsoup.nodes.Element): Int {
     return try {
-        val doc = Jsoup.parse(html)
         var count = 0
-        for (table in doc.select("table")) {
-            val text = table.text()
-            if (!text.contains("权益登记日") && !text.contains("除息日") && !text.contains("分红")) continue
-            for (row in table.select("tr")) {
-                val cells = row.select("td")
-                if (cells.isEmpty()) continue
-                if (cells.any { it.text().contains(Regex("\\d{4}")) }) count++
-            }
+        for (row in table.select("tr")) {
+            val cells = row.select("td")
+            if (cells.isEmpty()) continue
+            if (cells.any { it.text().contains(Regex("\\d{4}")) }) count++
         }
         count
     } catch (e: Exception) { 0 }

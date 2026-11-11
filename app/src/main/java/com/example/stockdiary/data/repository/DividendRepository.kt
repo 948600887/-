@@ -1249,6 +1249,9 @@ class DividendRepository private constructor(
             return
         }
 
+        // 全量刷新时是否允许删旧插新；残缺解析下为 false（DB 保留旧记录）
+        var replaceAllowed = false
+
         StockDatabase.getInstance(context).withTransaction {
             if (!isIncremental) {
                 // 全量更新：先核对「本次解析是否完整」，不完整则**不能**删库。
@@ -1259,7 +1262,8 @@ class DividendRepository private constructor(
                 // 年化收入当场缩水（用户原始「刷新跳动」残留根因）。
                 // 不完整时跳过删库，只做下方 upsert（按 symbol+date 跳过已存在），保留旧值。
                 val existingAutoCount = dividendDao.getBySymbol(symbol).count { !it.isManual && it.amount > 0 }
-                if (shouldReplaceRecordsOnFullRefresh(existingAutoCount, validRecords.size)) {
+                replaceAllowed = shouldReplaceRecordsOnFullRefresh(existingAutoCount, validRecords.size)
+                if (replaceAllowed) {
                     // 完整或更多：只删除自动抓取的记录，保留用户手动修正的记录(isManual=1)
                     dividendDao.deleteNonManualBySymbol(symbol)
                 } else {
@@ -1292,8 +1296,13 @@ class DividendRepository private constructor(
                 dividendDao.insertAll(dividends)
             }
         }
-        cache[symbol] = CacheEntry(validRecords, System.currentTimeMillis())
-        trimCacheIfNeeded()
+        // A16：残缺解析时上面已跳过删库（DB 保留旧记录），内存缓存同样不能写入残缺集合 ——
+        // 否则 [tryGetFromCache] 会在 24h 内直接返回「只解析到一部分」的列表，DB 与缓存口径
+        // 不一致、年化收入缩水。此时保留旧缓存（若有）不覆盖。
+        if (shouldUpdateDividendCache(isIncremental, replaceAllowed)) {
+            cache[symbol] = CacheEntry(validRecords, System.currentTimeMillis())
+            trimCacheIfNeeded()
+        }
     }
     
 // ==========================================================================

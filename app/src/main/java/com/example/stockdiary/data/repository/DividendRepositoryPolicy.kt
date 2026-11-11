@@ -130,6 +130,23 @@ internal fun shouldReplaceRecordsOnFullRefresh(
     // 解析到的有效记录不少于库里已有的，说明这次是「完整或更多」的刷新，可以安全替换
     return incomingValidRecordCount >= existingAutoRecordCount
 }
+
+/**
+ * 落库后是否允许把本次解析结果写进内存缓存。
+ *
+ * **纯函数**，不碰 Context / Room / 网络，便于单测。
+ *
+ * A16 的第二半：残缺解析时 [shouldReplaceRecordsOnFullRefresh] 已让 DB 保留旧记录，
+ * 若内存缓存仍无条件写入本次的残缺集合，[DividendRepository] 的 `tryGetFromCache`
+ * 会在 24h 内优先命中这份残缺数据 —— DB 与缓存口径不一致，年化收入照样缩水。
+ * 因此全量刷新只有「允许替换」时才更新缓存；增量路径不删库、只补新记录，照常更新。
+ *
+ * @param isIncremental 是否为增量补抓（不删库）
+ * @param replaceAllowed 本次全量刷新是否通过 [shouldReplaceRecordsOnFullRefresh]
+ */
+internal fun shouldUpdateDividendCache(isIncremental: Boolean, replaceAllowed: Boolean): Boolean =
+    isIncremental || replaceAllowed
+
 /**
  * 单个批量请求最多带多少个 SECURITY_CODE。
  *

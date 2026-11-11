@@ -50,4 +50,23 @@ class DividendRepositoryCachePolicyTest {
         assertFalse(shouldReplaceRecordsOnFullRefresh(-1, 5))
         assertFalse(shouldReplaceRecordsOnFullRefresh(5, -1))
     }
+
+    @Test
+    fun `残缺解析_DB保留旧记录_内存缓存也不覆盖`() {
+        // A16 第二半：DB 侧已判定禁止替换（残缺），缓存必须同口径不写入本次残缺集合，
+        // 否则 tryGetFromCache 会优先命中残缺数据、DB 与缓存不一致，年化收入照样缩水。
+        assertFalse(
+            "全量刷新残缺（replaceAllowed=false）时不得覆盖内存缓存",
+            shouldUpdateDividendCache(isIncremental = false, replaceAllowed = false)
+        )
+    }
+
+    @Test
+    fun `完整解析或增量路径_正常更新缓存`() {
+        assertTrue(shouldUpdateDividendCache(isIncremental = false, replaceAllowed = true))
+        assertTrue(
+            "增量路径不删库、只补新记录，缓存照常更新",
+            shouldUpdateDividendCache(isIncremental = true, replaceAllowed = false)
+        )
+    }
 }

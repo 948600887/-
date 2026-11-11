@@ -4,6 +4,7 @@ import com.example.stockdiary.network.FundDividendApiService
 import com.example.stockdiary.network.FundDividendPageVerdict
 import com.example.stockdiary.network.classifyFundDividendPage
 import com.example.stockdiary.network.countDividendDataRows
+import com.example.stockdiary.network.fundDividendSuspiciousMessage
 import com.example.stockdiary.network.isRealDividendPage
 import io.mockk.every
 import io.mockk.mockk
@@ -32,6 +33,10 @@ import org.junit.Test
 class FundDividendApiServiceTest {
 
     private val service = FundDividendApiService()
+
+    /** 测试用：取页面第一张表的数据行数（生产侧分母只算解析器实际读取的那张表）。 */
+    private fun countFirstTableRows(html: String): Int =
+        countDividendDataRows(org.jsoup.Jsoup.parse(html).select("table").first()!!)
 
     private val fundHtml = """
         <table>
@@ -254,7 +259,7 @@ class FundDividendApiServiceTest {
         // 解析只解出 2 条（残缺），但 countDividendDataRows 数出 10 行 → 2 远小于 10 → 触发可疑
         assertEquals(
             FundDividendPageVerdict.SUSPICIOUS_EMPTY_PARSE,
-            classifyFundDividendPage(html, recordCount = 2, expectedRowCount = countDividendDataRows(html))
+            classifyFundDividendPage(html, recordCount = 2, expectedRowCount = countFirstTableRows(html))
         )
     }
 
@@ -269,7 +274,7 @@ class FundDividendApiServiceTest {
         """.trimIndent()
         assertEquals(
             FundDividendPageVerdict.HAS_RECORDS,
-            classifyFundDividendPage(html, recordCount = 1, expectedRowCount = countDividendDataRows(html))
+            classifyFundDividendPage(html, recordCount = 1, expectedRowCount = countFirstTableRows(html))
         )
     }
 
@@ -283,7 +288,46 @@ class FundDividendApiServiceTest {
               <tr><td>共 1 页</td></tr>
             </table>
         """.trimIndent()
-        assertEquals(2, countDividendDataRows(html))
+        assertEquals(2, countFirstTableRows(html))
+    }
+
+    @Test
+    fun `拆分表页面_分母只算解析器实际读取的表_不误判残缺`() {
+        // 分红被拆成两张表：解析器读到第一张表产出 1 条就 break（后面的表根本不读）。
+        // 若按整页所有表做分母（3 行），1 条会被误判成 SUSPICIOUS → 反复失败 + 指数退避
+        // → 基金分红长期停更。分母必须与 break 位置一致，只算第一张表。
+        val html = """
+            <table>
+              <tr><th>年份</th><th>权益登记日</th><th>除息日</th><th>每10份分红</th><th>分红发放日</th></tr>
+              <tr><td>2024</td><td>2024-06-05</td><td>2024-06-06</td><td>1.30</td><td>2024-06-09</td></tr>
+            </table>
+            <table>
+              <tr><th>年份</th><th>权益登记日</th><th>除息日</th><th>每10份分红</th><th>分红发放日</th></tr>
+              <tr><td>2023</td><td>2023-06-05</td><td>2023-06-06</td><td>1.20</td><td>2023-06-09</td></tr>
+              <tr><td>2022</td><td>2022-06-05</td><td>2022-06-06</td><td>1.10</td><td>2022-06-09</td></tr>
+            </table>
+        """.trimIndent()
+
+        val parsed = service.parseDividendHtmlDetailed(html, "110011")
+        assertEquals(1, parsed.records.size)
+        // 分母 = 解析器实际读取的第一张表（1 行），不是整页 3 行
+        assertEquals(1, parsed.expectedRowCount)
+        assertEquals(
+            FundDividendPageVerdict.HAS_RECORDS,
+            classifyFundDividendPage(html, parsed.records.size, parsed.expectedRowCount)
+        )
+    }
+
+    @Test
+    fun `可疑解析文案_同时给出实际条数与预期条数_不再笼统写0条`() {
+        val message = fundDividendSuspiciousMessage(
+            "110011",
+            actualRecordCount = 2,
+            expectedRowCount = 10
+        )
+        assertTrue("文案必须写明实际解析条数: $message", message.contains("实际解析 2 条"))
+        assertTrue("文案必须写明预期条数: $message", message.contains("预期 10 条"))
+        assertFalse("残缺场景不能笼统写成「解析到 0 条」: $message", message.contains("解析到 0 条"))
     }
 
     @After

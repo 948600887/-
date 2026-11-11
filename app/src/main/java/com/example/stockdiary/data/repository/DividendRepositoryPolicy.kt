@@ -221,3 +221,125 @@ internal fun chunkSecurityCodes(
     if (current.isNotEmpty()) chunks += current
     return chunks
 }
+
+// ==========================================================================
+// §10 分红预取轮次汇总文案（纯观测）
+//
+// 只把「本轮各计数器 + 未取到代码清单」拼成一行 INFO 文本，不碰 Context / Room /
+// 网络，也不参与任何抓取 / 缓存 / 退避决策。抽成文件级纯函数是为了能用 JVM 单测
+// 钉死计数口径与清单截断（见 DividendPrefetchSummaryTest），不需要 Robolectric。
+// ==========================================================================
+
+/**
+ * 汇总行里最多列出多少个「本轮未取到数」的标的代码。
+ *
+ * app.log 是环形缓冲（活跃文件 8MB 轮转、归档裁到最后 8 万行），一轮刷新里
+ * 逐标的的 WARN 本就会被冲掉大半。汇总行必须自带清单，但清单又不能无限长：
+ * 取 12 个，余下的用 `…+N` 交代数量，既够定位「大概是哪批标的」，又不撑爆单行。
+ */
+internal const val DIVIDEND_PREFETCH_MAX_CODES = 12
+
+/**
+ * 代码清单的字符上限（不含 `…+N` 尾巴）。
+ *
+ * 双保险：条数上限管不住「代码异常长」的情况（例如误把一段 URL 当代码传进来），
+ * 再加一道字符上限，保证这一行始终是个短行。
+ */
+internal const val DIVIDEND_PREFETCH_MAX_CODE_CHARS = 160
+
+/**
+ * 把「本轮未取到数」的标的代码清单拼成一行，规范化去重后排序、按上限截断。
+ *
+ * **纯函数**：调用方（[DividendRepository.prefetchDividends]）传入的已经是
+ * `StockCodeManager.normalizeSymbol` 规范化过的代码，这里再做一次 [distinct] 是
+ * 防御性的——并发收尾时万一同一代码被记了两次，也不该在清单里占两个位置。
+ * 排序是为了让日志输出稳定（并发完成顺序不确定），便于按代码 grep 与用例断言。
+ *
+ * 截断有两层，先撞哪层算哪层，被省略的**条数**统一由 `…+N` 交代：
+ * - 条数上限 [maxCodes]；
+ * - 字符上限 [maxChars]（第一条无条件纳入，避免单个长代码把清单变成空串）。
+ *
+ * @param codes 规范化后的标的代码（可含重复）
+ * @param maxCodes 最多列出的条数
+ * @param maxChars 清单的字符预算
+ * @return 逗号分隔的一行文本；空清单返回「无」；超限时以 `…+N` 结尾
+ */
+internal fun formatSkippedCodes(
+    codes: List<String>,
+    maxCodes: Int = DIVIDEND_PREFETCH_MAX_CODES,
+    maxChars: Int = DIVIDEND_PREFETCH_MAX_CODE_CHARS
+): String {
+    val distinct = codes.distinct().sorted()
+    if (distinct.isEmpty()) return "无"
+
+    val safeMaxCodes = maxCodes.coerceAtLeast(1)
+    val safeMaxChars = maxChars.coerceAtLeast(1)
+    val shown = ArrayList<String>(safeMaxCodes.coerceAtMost(distinct.size))
+    var usedChars = 0
+    for (code in distinct) {
+        if (shown.size >= safeMaxCodes) break
+        // 逗号只在第二项起才占字符；第一条无条件纳入，保证清单不为空
+        val cost = code.length + if (shown.isEmpty()) 0 else 1
+        if (shown.isNotEmpty() && usedChars + cost > safeMaxChars) break
+        shown.add(code)
+        usedChars += cost
+    }
+
+    val omitted = distinct.size - shown.size
+    return shown.joinToString(",") + if (omitted > 0) "…+$omitted" else ""
+}
+
+/**
+ * 组装分红预取阶段收尾的**一行** INFO 汇总文案。
+ *
+ * **纯函数**：只做计数与字符串拼接，不触发任何抓取 / 重试 / 退避 / 缓存写入。
+ * 口径说明（都与 [DividendRepository.prefetchDividends] 的观测簿记一一对应）：
+ * - `totalSymbols`：本轮参与标的数（规范化去重后）；
+ * - `attempted`：本轮发起逐条抓取的标的数（含被时间预算拦下的）；
+ * - `success`：本轮源应答并写下新结论的标的数（`markFetched` 时间戳 >= 轮次起点）；
+ * - `skippedCodes`：本轮未取到新数据的代码，`unavailable` 其中本轮新记
+ *   「数据源未应答（含 514/429 限流）」的条数（`markFailed` 时间戳 >= 轮次起点）：
+ *   真实 514/429 响应与 60s 退避窗口内短路都会抛 `DividendSourceUnavailableException`
+ *   并写本轮 `markFailed`，故都归这一档；
+ * - 未取到里剩下的 = 「退避/预算/缓存复用等」条数，即本轮未写 `markFailed` 的情形
+ *   （时间预算跳过、上一轮失败退避窗复用旧值、内部缓存 / DB 命中、普通异常兜底）；
+ * - 参与数减发起数 = 缓存或 TTL 有效、本轮无需重抓的标的数；
+ * - `rateLimitDelta`：本轮真实 514/429 **响应**次数（只增计数做差），不是受影响标的数 ——
+ *   退避窗口内被短路的标的不再推进信号，它们计入「数据源未应答」那一档。
+ *
+ * 「复用缓存 / 沿用旧值的精确数量」与「最大数据年龄」刻意**不在此汇总**：
+ * 前者散落在 `getDividendsBySymbol` 内部（内存缓存命中、失败兜底读库、TTL 分支），
+ * 后者在库记录里根本没有时间戳，要精确统计就得改缓存 / DAO / DB 结构，
+ * 与本轮「只加日志」的边界冲突，故省略，日志里只给出「无需重抓」这个无歧义的差值。
+ *
+ * @param roundId 本轮分红预取序号（进程内自增，仅用于日志归属）
+ * @return 单行中文文本，不含账户名 / 金额 / 密钥，可直接交给 `AppLogger.i`
+ */
+internal fun formatDividendPrefetchSummary(
+    roundId: Int,
+    totalSymbols: Int,
+    attempted: Int,
+    success: Int,
+    unavailable: Int,
+    rateLimitDelta: Int,
+    skippedCodes: List<String>,
+    maxCodes: Int = DIVIDEND_PREFETCH_MAX_CODES,
+    maxChars: Int = DIVIDEND_PREFETCH_MAX_CODE_CHARS
+): String {
+    val distinct = skippedCodes.distinct()
+    val unfetched = distinct.size
+    // 调用方计数错位时也钳到 [0, unfetched]：汇总行宁可少报，也不能出现
+    // 「未取到 1 只（未应答 99 只）」这种自相矛盾的数字
+    val reportedUnavailable = unavailable.coerceIn(0, unfetched)
+    val backoffOrSkipped = unfetched - reportedUnavailable
+    val reused = (totalSymbols - attempted).coerceAtLeast(0)
+    val rateLimited = rateLimitDelta.coerceAtLeast(0)
+    val codesText = formatSkippedCodes(skippedCodes, maxCodes, maxChars)
+
+    return "[分红预取轮次#$roundId] 汇总：参与 $totalSymbols 只，" +
+        "本轮发起抓取 $attempted 只，成功拿到新数据 $success 只，" +
+        "未取到 $unfetched 只（数据源未应答（含 514/429 限流） $reportedUnavailable / 退避/预算/缓存复用等 $backoffOrSkipped），" +
+        "本轮真实 514/429 响应 $rateLimited 次（退避窗口内被短路的标的计入上一档），" +
+        "缓存或TTL有效无需重抓 $reused 只 | " +
+        "未取到代码[$unfetched]：$codesText"
+}

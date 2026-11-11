@@ -23,6 +23,7 @@ import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import com.example.stockdiary.common.Result
@@ -544,6 +545,16 @@ class DividendRepository private constructor(
     companion object {
         /** 「上次抓取时间」存放的 preferences 名，见 [fetchState] 的说明 */
         private const val FETCH_STATE_PREFS = "dividend_fetch_state"
+
+        /**
+         * 分红预取轮次序号（进程内自增，仅供收尾汇总日志做归属）。
+         *
+         * [prefetchDividends] 不总在 [com.example.stockdiary.data.sync.AssetSyncManager]
+         * 的同步轮次里（日历页也会直接调它），所以自带一套轻量序号，不与价格同步的
+         * `syncRoundSeq` 强行对齐。纯观测：只给一行 INFO 用，不参与任何抓取 / 缓存 /
+         * 退避决策，也不影响 [FundDividendApiService.otcRateLimitSignal] 的只增语义。
+         */
+        private val prefetchRoundSeq = AtomicInteger(0)
 
         /**
          * 「抓过，且确实没有分红」这个结论的有效期。
@@ -1336,6 +1347,12 @@ class DividendRepository private constructor(
         timeBudgetMs: Long = 0L
     ) {
         withContext(Dispatchers.IO) {
+            // 本轮观测标识与起点：prefetchDividends 也会被日历页直接调用（不经价格同步
+            // 轮次），所以自带一个轻量序号；roundStartMs 用来判定 markFetched / markFailed
+            // 写下的时间戳是否属于本轮。两者只服务于收尾那一行 INFO，不参与任何决策。
+            val roundId = prefetchRoundSeq.incrementAndGet()
+            val roundStartMs = System.currentTimeMillis()
+
             // 本轮「天天基金限流」信号：只记开始值，**不清零**共享计数。
             // 资产页刷新与日历预取并发时，任何一方清零都会抹掉对方的信号；
             // 轮末用前后差值判断「这一轮」是否新增了限流。
@@ -1350,6 +1367,16 @@ class DividendRepository private constructor(
             val semaphore = Semaphore(maxConcurrentFetch)
             val checkedCount = AtomicInteger(0)
 
+            // 本轮收尾汇总所需的纯观测簿记。逐标的的 WARN 会被 app.log 的环形缓冲冲掉
+            // 大半，事后只能靠正则从几 MB 日志里捞；这里在并发子任务里只做内存计数，
+            // 最后统一打一行 INFO，不新增任何循环内日志、不改抓取 / 缓存 / 退避行为。
+            // - successCount：本轮源应答并写下新结论（markFetched）的标的数
+            // - unavailableCount：本轮新记「数据源全未应答」（markFailed）的标的数
+            // - skippedCodes：本轮未取到新数据的规范化代码（用于清单与截断）
+            val successCount = AtomicInteger(0)
+            val unavailableCount = AtomicInteger(0)
+            val skippedCodes = ConcurrentLinkedQueue<String>()
+
             // 心跳：这个阶段是刷新链路里第二长的静默期（批量之后是逐条级联），
             // 从前只有开始/结束各一行日志，卡住时完全看不出走到哪
             withHeartbeat(
@@ -1363,6 +1390,9 @@ class DividendRepository private constructor(
                         (leftSeconds?.let { "，预算剩余 ${it}s" } ?: "")
                 }
             ) {
+                // 本轮真正发起逐条抓取的标的数（含被时间预算拦下的）。normalizedSymbols.map
+                // 在当前协程里顺序执行，这里自增没有并发写；收尾汇总据此算「无需重抓数」。
+                var attempted = 0
                 coroutineScope {
                     normalizedSymbols.map { symbol ->
                         val entry = cache[symbol]
@@ -1380,6 +1410,7 @@ class DividendRepository private constructor(
                             forceRefresh || ttlExpired
                         }
                         if (shouldFetch) {
+                            attempted++
                             async {
                                 // 预算检查必须放在「拿到信号量之后」，不能放在 async 开头：
                                 // 上面 N 个 async 是**一次性全部 launch** 的，若在 withPermit 之前检查，
@@ -1395,10 +1426,34 @@ class DividendRepository private constructor(
                                             "分红预取达到时间预算，跳过 $symbol（留待按需抓取）",
                                             "DividendRepository"
                                         )
+                                        // 预算跳过的标的本轮同样没取到数，只记进汇总清单，
+                                        // 不额外打一行日志（原有 WARN 保持原样）。
+                                        skippedCodes.add(symbol)
                                         return@withPermit
                                     }
                                     checkedCount.incrementAndGet()
                                     getDividendsBySymbol(symbol, forceRefresh, batchResults)
+
+                                    // 纯观测分类：getDividendsBySymbol 内部把「源应答」
+                                    // 写进 fetchState（markFetched），把「全源未应答」
+                                    // 写进失败标记（markFailed），两者都在本类作用域可读。
+                                    // 只比时间戳，不改变任何返回语义、不触发重试 / 退避。
+                                    // 514/429 限流（真实响应 + 60s 退避窗口内短路）会抛
+                                    // DividendSourceUnavailableException 并写本轮 markFailed，
+                                    // 因此落入「数据源未应答（含 514/429 限流）」档；
+                                    // 「退避/预算/缓存复用等」档装的是时间预算跳过、上一轮失败
+                                    // 退避窗复用旧值、内部缓存 / DB 命中、普通异常兜底等
+                                    // 本轮未写 markFailed 的情形。
+                                    val fetchedAt = lastFetchedAt(symbol)
+                                    if (fetchedAt != null && fetchedAt >= roundStartMs) {
+                                        successCount.incrementAndGet()
+                                    } else {
+                                        skippedCodes.add(symbol)
+                                        val failedAt = lastFailedAt(symbol)
+                                        if (failedAt != null && failedAt >= roundStartMs) {
+                                            unavailableCount.incrementAndGet()
+                                        }
+                                    }
                                 }
                             }
                         } else null
@@ -1411,6 +1466,28 @@ class DividendRepository private constructor(
                 if (FundDividendApiService.otcRateLimitSignal > rateLimitSignalAtStart) {
                     _otcRateLimitedThisCycle = true
                 }
+
+                // ===== 分红预取阶段收尾：只打一行汇总 =====
+                // 逐标的的 WARN 时间戳全挤在同一毫秒、又会被 app.log 环形缓冲冲掉大半，
+                // 事后只能靠正则从几 MB 日志里捞，看不出「一轮多少只成功 / 多少只被限流
+                // 跳过 / 多少只未应答」。这里把本轮计数与去重后的代码清单收成一行 INFO，
+                // 与 AssetSyncManager 的「分红预取阶段结束」那行相邻，按 tag 就能过滤。
+                // 纯观测：不把 514 当错误处理、不触发任何重试 / 退避 / 缓存写入。
+                val rateLimitDelta =
+                    (FundDividendApiService.otcRateLimitSignal - rateLimitSignalAtStart)
+                        .coerceAtLeast(0L).toInt()
+                AppLogger.i(
+                    formatDividendPrefetchSummary(
+                        roundId = roundId,
+                        totalSymbols = normalizedSymbols.size,
+                        attempted = attempted,
+                        success = successCount.get(),
+                        unavailable = unavailableCount.get(),
+                        rateLimitDelta = rateLimitDelta,
+                        skippedCodes = skippedCodes.toList()
+                    ),
+                    "DividendRepository"
+                )
             }
         }
     }

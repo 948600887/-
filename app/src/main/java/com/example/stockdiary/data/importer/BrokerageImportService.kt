@@ -511,7 +511,18 @@ class BrokerageImportService internal constructor(private val context: Context) 
             .map { it.copy(symbol = normalizedSymbol(it.symbol)) }
             .sortedBy { it.date }
 
+        // 同一份文件里可能因重复导出/多段拼接出现完全相同的行；库内去重只能挡住
+        // 「上次已经导入过」的行，挡不住本批次内部的重复。这里维护已见集合，
+        // 避免同一行被回放两次导致持仓翻倍。账户参与键：不同账户的同价同量同日
+        // 真实成交不应被合并。
+        val seenInFile = HashSet<String>()
+
         for (t in valid) {
+            val fileKey = "${t.date}|${t.symbol}|${t.type}|${t.quantity}|${t.price}|${t.fee}|${t.account}"
+            if (!seenInFile.add(fileKey)) {
+                skippedDup++
+                continue
+            }
             try {
                 // 事务内处理单笔：先去重，再写持仓 + 写流水。
                 // 抽出 commitTransaction 仅为可单测；事务边界与原来完全一致。

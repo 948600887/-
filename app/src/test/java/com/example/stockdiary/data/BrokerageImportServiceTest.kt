@@ -363,4 +363,34 @@ class BrokerageImportServiceTest {
         assertEquals(1, result.skippedError)     // err 行带异常被自动跳过
         assertEquals(0, result.failedCount)
     }
+
+    @Test
+    fun `commit 同一文件内完全重复的两行只回放一次_持仓不翻倍`() = runBlocking {
+        val current = installStatefulAsset()
+
+        val first = tx(date = "2024-01-01", quantity = 100.0, price = 10.0, rowNumber = 1)
+        val second = tx(date = "2024-01-01", quantity = 100.0, price = 10.0, rowNumber = 2)
+
+        val result = service.commit(listOf(first, second))
+
+        assertEquals(1, result.successCount)
+        assertEquals(1, result.skippedDuplicate)
+        // 若两行都回放，这里会是 200（持仓翻倍）
+        assertEquals(100.0, current.get()!!.balance, 1e-9)
+    }
+
+    @Test
+    fun `commit 不同账户的同价同量同日买入都会回放`() = runBlocking {
+        val current = installStatefulAsset()
+
+        val accountA = tx(date = "2024-01-01", quantity = 100.0, price = 10.0, account = "账户A", rowNumber = 1)
+        val accountB = tx(date = "2024-01-01", quantity = 100.0, price = 10.0, account = "账户B", rowNumber = 2)
+
+        val result = service.commit(listOf(accountA, accountB))
+
+        // 账户参与文件内去重键：两笔真实成交都应入账，不能被误合并
+        assertEquals(2, result.successCount)
+        assertEquals(0, result.skippedDuplicate)
+        assertEquals(200.0, current.get()!!.balance, 1e-9)
+    }
 }

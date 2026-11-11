@@ -96,13 +96,16 @@ fun DashboardScreen(
     // 顶部「净资产」大数字仍走实时 netAssets，不受影响。
     // A2 修复（重要）：冻结值的宿主从 remember 改为 rememberSaveable —— remember 不随配置变更
     // （旋屏）存活，刷新途中旋屏会把冻结值重置为 null，分母瞬间从冻结值回退到实时 netAssets，
-    // 「年化收入率」随之跳一下。rememberSaveable 随 Activity 重建恢复冻结值，且 isRefreshing 在
-    // 旋屏后仍为 true（ViewModel 存活）→ LaunchedEffect 不重启动、冻结值保持，直到刷新结束才释放。
+    // 「年化收入率」随之跳一下。rememberSaveable 随 Activity 重建恢复冻结值。
+    // 注意：重建后 LaunchedEffect(isRefreshing) **会**重启（isRefreshing 仍为 true），所以
+    // 推进逻辑必须自己判「已有冻结值就保持」，否则会立刻用当前（已被同步改掉一半的）netAssets
+    // 覆盖恢复值（见 nextFrozenYieldNetAssets）。
     // 用 String 存值（Bundle 原生可序列化），Double 经字符串往返，避开各 Compose 版本 saver API 差异。
     var frozenYieldNetAssetsStr by rememberSaveable { mutableStateOf<String?>(null) }
     val frozenYieldNetAssets = frozenYieldNetAssetsStr?.toDoubleOrNull()
     LaunchedEffect(isRefreshing) {
-        frozenYieldNetAssetsStr = if (isRefreshing) netAssets.toString() else null
+        frozenYieldNetAssetsStr =
+            nextFrozenYieldNetAssets(frozenYieldNetAssetsStr, isRefreshing, netAssets)
     }
     val yieldNetAssets = frozenYieldNetAssets ?: netAssets
 
@@ -374,4 +377,22 @@ fun DashboardScreen(
             }
         )
     }
+}
+
+/**
+ * A2：刷新期间「年化收入率」分母冻结值的状态推进（纯函数，便于 JVM 单测）。
+ *
+ * - 刷新结束 → 释放冻结值（回到实时 netAssets）
+ * - 刷新中且已有冻结值（含旋屏/Activity 重建后由 rememberSaveable 恢复的值）→ **保持原值**，
+ *   不能被当前（已被同步改掉一半的）netAssets 顶掉
+ * - 刷新中且尚未冻结（进入刷新的那一刻）→ 记录当前 netAssets
+ */
+internal fun nextFrozenYieldNetAssets(
+    current: String?,
+    isRefreshing: Boolean,
+    netAssets: Double
+): String? = when {
+    !isRefreshing -> null
+    current != null -> current
+    else -> netAssets.toString()
 }

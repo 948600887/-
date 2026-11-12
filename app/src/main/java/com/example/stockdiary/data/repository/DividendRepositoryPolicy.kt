@@ -331,13 +331,16 @@ internal fun formatDividendPrefetchSummary(
     // 调用方计数错位时也钳到 [0, unfetched]：汇总行宁可少报，也不能出现
     // 「未取到 1 只（未应答 99 只）」这种自相矛盾的数字
     val reportedUnavailable = unavailable.coerceIn(0, unfetched)
+    // 并发两轮时同一标的有可能被两轮都记成功（markFetched 时间戳落在两轮起点之后），
+    // 使 success 超过本轮发起数；钳到 [0, attempted] 保证「成功 + 未取到 = 发起」不越界
+    val reportedSuccess = success.coerceIn(0, attempted)
     val backoffOrSkipped = unfetched - reportedUnavailable
     val reused = (totalSymbols - attempted).coerceAtLeast(0)
     val rateLimited = rateLimitDelta.coerceAtLeast(0)
     val codesText = formatSkippedCodes(skippedCodes, maxCodes, maxChars)
 
     return "[分红预取轮次#$roundId] 汇总：参与 $totalSymbols 只，" +
-        "本轮发起抓取 $attempted 只，成功拿到新数据 $success 只，" +
+        "本轮发起抓取 $attempted 只，源应答并写下结论 $reportedSuccess 只（含空结果），" +
         "未取到 $unfetched 只（数据源未应答（含 514/429 限流） $reportedUnavailable / 退避/预算/缓存复用等 $backoffOrSkipped），" +
         "本轮真实 514/429 响应 $rateLimited 次（退避窗口内被短路的标的计入上一档），" +
         "缓存或TTL有效无需重抓 $reused 只 | " +

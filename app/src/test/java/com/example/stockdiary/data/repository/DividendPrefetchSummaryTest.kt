@@ -4,6 +4,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.util.Locale
 
 /**
  * 分红预取收尾汇总的纯函数回归（[formatDividendPrefetchSummary] / [formatSkippedCodes]）。
@@ -80,7 +81,7 @@ class DividendPrefetchSummaryTest {
         // 示意：151 只参与 / 151 只发起 / 101 只拿到新数据 / 50 只未取到
         // （其中 40 只归入「数据源未应答（含 514/429 限流）」、10 只归入「退避/预算/缓存复用等」），
         // 本轮真实 514/429 响应 1 次。
-        val codes = (1..50).map { "fund_%06d".format(it) }
+        val codes = (1..50).map { "fund_%06d".format(Locale.US, it) }
         val line = formatDividendPrefetchSummary(
             roundId = 7,
             totalSymbols = 151,
@@ -92,7 +93,7 @@ class DividendPrefetchSummaryTest {
         )
 
         assertTrue(line.startsWith("[分红预取轮次#7] 汇总：参与 151 只，"))
-        assertTrue(line.contains("本轮发起抓取 151 只，成功拿到新数据 101 只"))
+        assertTrue(line.contains("本轮发起抓取 151 只，源应答并写下结论 101 只（含空结果）"))
         // 101 + 50 = 151：成功与未取到必须恰好覆盖本轮发起数
         assertTrue(line.contains("未取到 50 只（数据源未应答（含 514/429 限流） 40 / 退避/预算/缓存复用等 10）"))
         assertTrue(line.contains("本轮真实 514/429 响应 1 次（退避窗口内被短路的标的计入上一档）"))
@@ -122,6 +123,24 @@ class DividendPrefetchSummaryTest {
         assertTrue(line.contains("本轮真实 514/429 响应 0 次（退避窗口内被短路的标的计入上一档）"))
         assertTrue(line.contains("未取到代码[3]：fund_010001,sh600519,sz000001"))
         assertFalse("钳零后不得出现负数", line.contains("-3"))
+    }
+
+    @Test
+    fun `汇总_成功数超出发起数时钳制`() {
+        // 并发两轮时同一标的可能被两轮都记成功（markFetched 落在两轮起点之后），
+        // success 会超过本轮 attempted；钳制后不能让日志出现「发起 3 只、成功 7 只」
+        val line = formatDividendPrefetchSummary(
+            roundId = 12,
+            totalSymbols = 5,
+            attempted = 3,
+            success = 7,
+            unavailable = 1,
+            rateLimitDelta = 0,
+            skippedCodes = listOf("a", "b")
+        )
+
+        assertTrue(line.contains("本轮发起抓取 3 只，源应答并写下结论 3 只（含空结果）"))
+        assertFalse("成功数不得超出本轮发起数：$line", line.contains("结论 7 只"))
     }
 
     @Test

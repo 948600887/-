@@ -239,15 +239,17 @@ class AssetRepository private constructor(
                     // 与「分红集合变了导致重算」；落价时补一行便于下一轮诊断。
                     AppLogger.d("同步写入万份收益: ${write.symbol} mci=$mci", "AssetRepository")
                 } else {
-                    // 0 / null / 负值 / NaN / Infinity 这些「被过滤」的情形恰恰最需要排障：
+                    // 0 / 负值 / NaN / Infinity 这些「被过滤」的情形恰恰最需要排障：
                     // 以前只有有效值才打日志，日志里「万份收益」反而 0 命中，看不出是接口
                     // 返回 0 还是解析降级。这里连同原始值与过滤原因一并输出（DAO 侧 COALESCE
                     // 会保留上一次有效值）。不改放行判据、不改 DAO SQL。
-                    AppLogger.d(
-                        "万份收益被过滤、保留上一次有效值: ${write.symbol} " +
-                            "incoming=${write.millionCopiesIncome} 原因=仅放行有限且大于0的值",
-                        "AssetRepository"
-                    )
+                    //
+                    // incoming == null（该标的本就没有万份收益，股票/加密/退市股都是这样）
+                    // 不记日志：每只资产每轮各刷一行会挤占环形缓冲，反而冲掉真正要看的
+                    // WARN 与轮次汇总。
+                    filteredMciLogMessage(write.symbol, write.millionCopiesIncome)?.let {
+                        AppLogger.d(it, "AssetRepository")
+                    }
                 }
                 assetDao.updatePriceBySymbol(
                     write.symbol,
@@ -994,3 +996,17 @@ class AssetRepository private constructor(
  */
 internal fun millionCopiesIncomeToPersist(incoming: Double?): Double? =
     incoming?.takeIf { it.isFinite() && it > 0.0 }
+
+/**
+ * 「万份收益被过滤」的诊断日志文案；不需要打印时返回 null。
+ *
+ * 只有「本来就带了值、但被判无效」（0 / 负值 / NaN / Infinity）才值得记一行：
+ * `incoming == null` 表示该标的本就没有万份收益（股票、加密货币、退市股都由
+ * `PendingPriceWrite(symbol, price)` 不传 mci），每只资产每轮各打一行会挤占
+ * app.log 环形缓冲，反而冲掉真正要看的 WARN 与轮次汇总。
+ */
+internal fun filteredMciLogMessage(symbol: String, incoming: Double?): String? {
+    if (incoming == null) return null
+    if (millionCopiesIncomeToPersist(incoming) != null) return null
+    return "万份收益被过滤、保留上一次有效值: $symbol incoming=$incoming 原因=仅放行有限且大于0的值"
+}

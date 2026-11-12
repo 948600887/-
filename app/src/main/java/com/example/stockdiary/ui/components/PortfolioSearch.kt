@@ -116,6 +116,10 @@ fun SearchAssetItem(asset: Asset, onClick: () -> Unit, onDividendClick: () -> Un
  * 等价于搜索框为空时展示完整列表。
  *
  * 列表场景请走 [matchesTrimmedQuery] 并复用同一份已 trim 的查询，避免逐资产重复 trim。
+ *
+ * **当前仅作测试入口**：生产列表由 [matchesTrimmedQuery] 直连，本函数保留是为了让
+ * 「原始输入 → 匹配结果」这条完整语义能被纯函数单测钉住（见 PortfolioSearchTest）。
+ * 不要为了消除「未使用」警告而把生产调用改回这里——那会让每个资产重复 trim 一遍。
  */
 internal fun matchesSearchQuery(asset: Asset, rawQuery: String): Boolean =
     matchesTrimmedQuery(asset, rawQuery.trim { it.isWhitespace() })

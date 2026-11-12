@@ -335,6 +335,33 @@ class FundDividendApiServiceTest {
         // 防止退避窗口污染相邻用例
         FundDividendApiService.rateLimitedUntil = 0L
         FundDividendApiService.hostUnreachableUntil = 0L
+        FundDividendApiService.backoffStore = null
         FundDividendApiService.fhspResetForTesting()
+    }
+
+    /**
+     * 持久化退避窗口生效：模拟「进程重启后从 SP 读回的未来退避时间戳」——
+     * 内存 [FundDividendApiService.rateLimitedUntil] 为 0，但注入的 store 返回未来值，
+     * [getFundDividendHistory] 仍应在顶部短路、绝不发起网络。这钉死方案 B 的「合并内存与
+     * 持久化、取更晚者」逻辑，确保冷启动后仍能记得上一轮撞过的限流退避。
+     */
+    @Test
+    fun `getFundDividendHistory 持久化退避窗口生效_顶部短路不发起网络请求`() = runBlocking {
+        val store = object : com.example.stockdiary.network.OtcBackoffStore {
+            override fun get(key: String): Long = System.currentTimeMillis() + 60_000L
+            override fun set(key: String, value: Long) = Unit
+        }
+        FundDividendApiService.backoffStore = store
+        try {
+            val explodingClient = mockk<OkHttpClient>(relaxed = true)
+            every { explodingClient.newCall(any()) } throws AssertionError("持久化退避期间不应发起网络请求")
+            service.client = explodingClient
+
+            val result = service.getFundDividendHistory("110011")
+
+            assertTrue("持久化退避窗口应直接失败", result.isFailure)
+        } finally {
+            FundDividendApiService.backoffStore = null
+        }
     }
 }

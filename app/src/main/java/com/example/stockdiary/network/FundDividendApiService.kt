@@ -38,6 +38,42 @@ class FundDividendApiService {
         @Volatile
         internal var rateLimitedUntil: Long = 0L
 
+        /**
+         * 跨进程退避持久化后端（可选）。null 时退避仅存内存（测试与无 Context 场景）。
+         * 由持有 Context 的 [com.example.stockdiary.data.repository.DividendRepository]
+         * 在构造时注入一个 SharedPreferences 实现，使进程重启 / 冷启动后仍能记得上一轮
+         * 撞过的限流退避窗口，避免「进程被系统回收 → 内存退避全丢 → 冷启动又打一波 514」
+         * 的放大器（诊断报告反复出现的根因之一）。
+         */
+        internal var backoffStore: OtcBackoffStore? = null
+
+        private const val KEY_RATE_LIMITED = "rateLimitedUntil"
+        private const val KEY_HOST_UNREACHABLE = "hostUnreachableUntil"
+
+        /** 当前生效的限流退避截止时刻：内存与持久化取更晚者。 */
+        internal fun currentRateLimitedUntil(): Long {
+            val persisted = backoffStore?.get(KEY_RATE_LIMITED) ?: 0L
+            return if (rateLimitedUntil > persisted) rateLimitedUntil else persisted
+        }
+
+        /** 当前生效的主机不可达退避截止时刻：内存与持久化取更晚者。 */
+        internal fun currentHostUnreachableUntil(): Long {
+            val persisted = backoffStore?.get(KEY_HOST_UNREACHABLE) ?: 0L
+            return if (hostUnreachableUntil > persisted) hostUnreachableUntil else persisted
+        }
+
+        /** 写入限流退避截止时刻（内存 + 持久化，若已注入）。 */
+        internal fun storeRateLimitedUntil(v: Long) {
+            rateLimitedUntil = v
+            backoffStore?.set(KEY_RATE_LIMITED, v)
+        }
+
+        /** 写入主机不可达退避截止时刻（内存 + 持久化，若已注入）。 */
+        internal fun storeHostUnreachableUntil(v: Long) {
+            hostUnreachableUntil = v
+            backoffStore?.set(KEY_HOST_UNREACHABLE, v)
+        }
+
         /** 限流后强制退避时长（60 秒），覆盖绝大多数天天基金限流窗口。 */
         private const val RATE_LIMIT_BACKOFF_MS = 60_000L
 
@@ -237,13 +273,13 @@ class FundDividendApiService {
         val now = System.currentTimeMillis()
         // 进程级限流退避：一旦被天天基金 514/429 限流，整段时间内所有基金统一跳过，
         // 不再对同一个被限流的主机用 OkHttp 或 Jsoup 反复猛打（只会拉长封禁窗口）。
-        if (now < rateLimitedUntil) {
+        if (now < currentRateLimitedUntil()) {
             AppLogger.w("天天基金限流退避中，跳过 $fundCode 本次抓取", TAG)
             return@withContext Result.failure(Exception("天天基金限流退避中，跳过"))
         }
         // 主机不可达退避：DNS 都解析不了时，后续每只基金都会走同样的失败路径，
         // 不短路就是「标的数 × 2 个超时」的纯等待
-        if (now < hostUnreachableUntil) {
+        if (now < currentHostUnreachableUntil()) {
             AppLogger.w("天天基金主机不可达退避中，跳过 $fundCode 本次抓取", TAG)
             return@withContext Result.failure(Exception("天天基金主机不可达退避中，跳过"))
         }
@@ -259,6 +295,24 @@ class FundDividendApiService {
         val useDegraded = fhspDegraded
         if (useDegraded) fhspDegradedMutex.lock() else fhspHealthySemaphore.acquire()
         try {
+            // 内层闸门之后、真实发请求之前再确认一次退避窗口：已通过入口检查、但在
+            // fhspHealthySemaphore(2) 上排队等待的并发请求，若在排队期间被同批另一个请求
+            // 设置的退避窗口覆盖，此刻应短路而非补发 HTTP —— 否则「并发首发浪涌」无法被
+            // 退避真正拦住（实测 8 并发时一波就打出多个 514，根因在这里：入口检查只做一次，
+            // 排队请求拿到内层 permit 后不再复核就直接发）。三道窗口逐一复核。
+            val nowInner = System.currentTimeMillis()
+            if (nowInner < currentRateLimitedUntil()) {
+                AppLogger.w("天天基金限流退避中(内层复查)，跳过 $fundCode 本次抓取", TAG)
+                return@withContext Result.failure(Exception("天天基金限流退避中，跳过"))
+            }
+            if (nowInner < currentHostUnreachableUntil()) {
+                AppLogger.w("天天基金主机不可达退避中(内层复查)，跳过 $fundCode 本次抓取", TAG)
+                return@withContext Result.failure(Exception("天天基金主机不可达退避中，跳过"))
+            }
+            if (fhspIsBlocked(nowInner)) {
+                AppLogger.w("天天基金(fhsp)整源熔断冷却中(内层复查)，跳过 $fundCode 本次抓取", TAG)
+                return@withContext Result.failure(Exception("天天基金整源熔断冷却中，跳过"))
+            }
             return@withContext fetchFundDividendInner(fundCode)
         } finally {
             if (useDegraded) fhspDegradedMutex.unlock() else fhspHealthySemaphore.release()
@@ -345,7 +399,7 @@ class FundDividendApiService {
                     // 主机补刀——那只会让限流窗口更久。其它非 2xx 仍保留降级到 Jsoup 的机会。
                     // 注意：514/429 由 rateLimitedUntil 单独处理，**不计入整源熔断**（见 fhspOnFailure）。
                     if (response.code == 514 || response.code == 429) {
-                        rateLimitedUntil = System.currentTimeMillis() + RATE_LIMIT_BACKOFF_MS
+                        storeRateLimitedUntil(System.currentTimeMillis() + RATE_LIMIT_BACKOFF_MS)
                         markOtcRateLimitHit()
                         AppLogger.w("天天基金限流（${response.code}），本周期退避，不再用 Jsoup 兜底猛打", TAG)
                         return Result.failure(Exception("天天基金限流（${response.code}），本周期退避"))
@@ -360,7 +414,7 @@ class FundDividendApiService {
             // 再补一遍等于让每只基金都白等第二个超时。设退避窗口并直接失败。
             // DNS 由 hostUnreachableUntil 单独处理，**不计入整源熔断**。
             if (isHostUnreachable(e)) {
-                hostUnreachableUntil = System.currentTimeMillis() + HOST_UNREACHABLE_BACKOFF_MS
+                storeHostUnreachableUntil(System.currentTimeMillis() + HOST_UNREACHABLE_BACKOFF_MS)
                 AppLogger.w("天天基金主机不可达（DNS 解析失败），本轮退避 60s，不再用 Jsoup 兜底", TAG)
                 return Result.failure(e)
             }
@@ -412,7 +466,7 @@ class FundDividendApiService {
             // 或重复对限流主机发请求。其它 HttpStatusException（如 503）仍按普通异常处理。
             // 514/429 由 rateLimitedUntil 单独处理，**不计入整源熔断**。
             if (e.statusCode == 514 || e.statusCode == 429) {
-                rateLimitedUntil = System.currentTimeMillis() + RATE_LIMIT_BACKOFF_MS
+                storeRateLimitedUntil(System.currentTimeMillis() + RATE_LIMIT_BACKOFF_MS)
                 markOtcRateLimitHit()
                 AppLogger.w("天天基金限流（${e.statusCode}），本周期退避，不再用 Jsoup 兜底猛打", TAG)
                 return Result.failure(Exception("天天基金限流（${e.statusCode}），本周期退避"))
@@ -782,4 +836,22 @@ internal fun isHostUnreachable(e: Throwable): Boolean {
         depth++
     }
     return false
+}
+
+/**
+ * 场外基金退避窗口的持久化后端。只负责几个时间戳的读写，不碰业务。
+ *
+ * 由 data 层用 SharedPreferences 实现并注入 [FundDividendApiService.backoffStore]，
+ * 使限流(514/429)与主机不可达(DNS)两个**确定性短退避窗口**跨进程存活，
+ * 避免「进程被系统回收 → 内存退避全丢 → 冷启动 / 刚重启又打一波 514」的放大器。
+ * 整源熔断(fhsp)是动态状态机、已有自愈，不在此持久化（跨进程持久化反而可能误判已恢复的源）。
+ *
+ * 默认 null 时退避仅存内存，便于无 Context 的单元测试（既有测试直接读写内存字段，
+ * 完全不受此接口影响）。
+ */
+internal interface OtcBackoffStore {
+    /** 读取某窗口的截止时间戳（绝对毫秒）；不存在返回 0L。 */
+    fun get(key: String): Long
+    /** 写入某窗口的截止时间戳（绝对毫秒）。 */
+    fun set(key: String, value: Long)
 }

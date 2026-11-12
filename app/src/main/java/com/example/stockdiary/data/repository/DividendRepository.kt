@@ -6,6 +6,7 @@ import com.example.stockdiary.data.dividend.DividendRecord
 import com.example.stockdiary.data.dividend.DividendService
 import com.example.stockdiary.network.EastmoneyDividendApiService
 import com.example.stockdiary.network.FundDividendApiService
+import com.example.stockdiary.network.OtcBackoffStore
 import com.example.stockdiary.data.contract.withHeartbeat
 import com.example.stockdiary.data.dividend.isFetchedToday
 import com.example.stockdiary.data.dividend.shouldRefetchOtc
@@ -47,6 +48,13 @@ class DividendRepository private constructor(
     private val sinaService = DividendService()
     private val fundDividendApi = FundDividendApiService()
     private val dividendDao by lazy { StockDatabase.getInstance(context).dividendDao() }
+
+    init {
+        // 注入跨进程退避持久化：使天天基金限流(514/429)与主机不可达(DNS)退避窗口在冷启动后
+        // 仍能记得，避免「进程被系统回收 → 内存退避全丢 → 冷启动又打一波 514」的放大器。
+        // backoffStore 是进程级 companion 字段，所有 FundDividendApiService 实例共享同一份。
+        FundDividendApiService.backoffStore = SharedPreferencesOtcBackoffStore(context)
+    }
 
     /** 设置页计数/导出用：全部分红（流） */
     fun getAllDividendsFlow(): Flow<List<Dividend>> = dividendDao.getAllFlow()
@@ -522,8 +530,21 @@ class DividendRepository private constructor(
             .distinct()
     }
 
-    /** 预取分红时的并发上限：与 AssetSyncManager.MAX_CONCURRENT_SYNC 一致，别把接口打爆 */
-    private val maxConcurrentFetch = 8
+    /**
+     * 预取分红逐条抓取的并发上限。
+     *
+     * 从前是 8（注释「与 AssetSyncManager.MAX_CONCURRENT_SYNC 一致」），但在天天基金
+     * (fundf10.eastmoney.com，同属 eastmoney.com) 这一唯一场外基金主源上，8 并发首发会在一波内
+     * 打出多个 514：首个 514 回来设退避窗口前，8 个请求已通过入口检查、在内层
+     * fhspHealthySemaphore(2) 上排队，仍会补发 HTTP（退避检查只在入口做一次，排队请求不再复核）。
+     *
+     * 现降到 2，与基金源 fhsp 健康档(2) 对齐、刻意低于同步总闸(6)，根治 514 首发浪涌：
+     * - 首发浪涌从 8 压到 2，撞 514 设退避后，剩余在排队的请求由 FundDividendApiService
+     *   内层闸门后的复查短路，不再补发冗余 HTTP；
+     * - 真实 HTTP 并发本就被 fhspHealthySemaphore(2) 限制为 2，降外层只是少 launch 协程，
+     *   不拖慢已补抓路径（批量预取已覆盖东财标的，逐条只是 OTC / Sina 兜底等少量补充）。
+     */
+    private val maxConcurrentFetch = 2
     
     private val cacheHits = AtomicInteger(0)
     private val cacheMisses = AtomicInteger(0)
@@ -545,6 +566,9 @@ class DividendRepository private constructor(
     companion object {
         /** 「上次抓取时间」存放的 preferences 名，见 [fetchState] 的说明 */
         private const val FETCH_STATE_PREFS = "dividend_fetch_state"
+
+        /** 场外基金退避窗口持久化名（跨进程存活，见 [SharedPreferencesOtcBackoffStore]）。 */
+        private const val OTC_BACKOFF_PREFS = "otc_backoff_state"
 
         /**
          * 分红预取轮次序号（进程内自增，仅供收尾汇总日志做归属）。
@@ -627,6 +651,22 @@ class DividendRepository private constructor(
     
     fun close() {
         cache.clear()
+    }
+
+    /**
+     * 场外基金退避窗口的 SharedPreferences 持久化实现（跨进程存活）。
+     *
+     * 只存两个**确定性短退避窗口**（限流 514/429、主机不可达 DNS），不持久化 fhsp 整源熔断
+     * —— 后者是动态状态机、已有自愈机制，跨进程持久化反而可能误判「已恢复的源为熔断」。
+     * 存的是绝对截止时间戳，进程在窗口内重启仍读得到、照常短路，冷启动不再立即浪涌。
+     */
+    private class SharedPreferencesOtcBackoffStore(ctx: Context) : OtcBackoffStore {
+        private val prefs = ctx.getSharedPreferences(OTC_BACKOFF_PREFS, Context.MODE_PRIVATE)
+        override fun get(key: String): Long =
+            runCatching { prefs.getLong(key, 0L) }.getOrDefault(0L)
+        override fun set(key: String, value: Long) {
+            runCatching { prefs.edit().putLong(key, value).apply() }
+        }
     }
 
     /**

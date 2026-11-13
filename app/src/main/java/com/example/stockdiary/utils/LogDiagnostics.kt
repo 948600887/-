@@ -317,6 +317,14 @@ object LogDiagnostics {
             )
         }
         report.appLogPath?.let { appendLine("日志路径: $it") }
+        // 排障摘要放在设备状态快照之前：第一屏就给出「最近一轮发生了什么」，不必再从
+        // 几 MB 日志里 grep + 手工算分类计数。界面展示与分享出口都走 composeReport，自动生效。
+        val triageLog = report.logFiles.joinToString("\n") { it.content }
+            .ifEmpty { report.appLog.orEmpty() }
+        if (triageLog.isNotBlank()) {
+            appendLine(buildTriageSummary(triageLog))
+            appendLine()
+        }
         // 设备状态快照：排障第一秒就能看到「哪个源坏了、汇率多久没刷、最近一轮成了多少」，
         // 不必先去几百行日志里 grep（见 [collectDeviceState]）
         if (report.deviceState.isNotBlank()) {
@@ -454,6 +462,128 @@ object LogDiagnostics {
     }
 
     private val ROUND_ID_REGEX = Regex("\\[轮次#(\\d+)]")
+
+    // ======================================================================
+    // 排障摘要（2026-11-13）：把「每次都要 grep 几 MB 日志手工还原」的事实写进报告头部
+    // ======================================================================
+
+    /**
+     * 为什么需要这一段：真机诊断动辄 3~4MB / 3 万行，而判断一次刷新是否健康所需的
+     * 事实（真实 514 次数、未取到里混着退避短路/预算顺延、最近一次手动刷新时间、
+     * 哪些链路根本没被测到）全埋在逐标的 WARN 里，且这些 WARN 会被 app.log 轮转冲掉。
+     * 排查者只能靠正则捞 + 手工做加法还原（例如 6 次真 514 + 48 行退避短路 = 未取到 54），
+     * 既慢又容易把「未取到」误读成「修复变差」。
+     *
+     * 设计三条硬原则：
+     * 1. **准确值只取代码内计数**：分红预取/价格同步的汇总行是 Repository 用 AtomicInteger
+     *    计出来的，可信；逐标的 WARN 行数只作为「整份日志可见下界」单独标注，不冒充精确值。
+     * 2. **缺失 ≠ 0**：日志格式变更或本份日志不含刷新轮次时写「未解析到」，绝不写 0
+     *    —— 0 会被误读成「514 已归零、修复成功」，那是最危险的误判。
+     * 3. **纯函数**：不碰 Context / 磁盘 / 时钟，输入只有日志文本，可直接 JVM 单测。
+     *
+     * 报告头部已有 [environmentInfo] 给出版本/机型，这里补出「这轮数据来自哪次刷新」，
+     * 两者合起来才能判断「这份诊断是不是装了新包之后刷出来的」。
+     */
+    private val LOG_TS_REGEX = Regex("^\\[(\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}\\.\\d{3})]")
+    private const val MARK_PRICE_SUMMARY = "=== 同步轮次 "
+    private const val MARK_DIVIDEND_SUMMARY = "[分红预取轮次#"
+    private const val MARK_MANUAL_REFRESH = "价格同步开始 [轮次#"
+
+    /** 取一行日志的时间戳（ISO 形态，字典序即时间序）；非标准行返回 null。 */
+    private fun tsOf(line: String): String? = LOG_TS_REGEX.find(line)?.groupValues?.get(1)
+
+    /**
+     * 取含 [mark] 的**时间最新**一行。
+     *
+     * 不能直接 `last{}`：轮转日志 `logFiles` 是「新的文件在前」，但每个文件内部是时间
+     * 正序，简单拼接后「最后一行」未必最新。按时间戳比较才不受文件顺序影响。
+     * 同一时间戳取后出现者（`>=`），让汇总行盖过同毫秒的开始/结束行。
+     */
+    private fun latestLine(lines: List<String>, mark: String, require: String? = null): Pair<String, String>? {
+        var bestTs = ""
+        var bestLine: String? = null
+        for (line in lines) {
+            if (!line.contains(mark)) continue
+            if (require != null && !line.contains(require)) continue
+            val ts = tsOf(line) ?: continue
+            if (ts >= bestTs) {
+                bestTs = ts
+                bestLine = line
+            }
+        }
+        return bestLine?.let { bestTs to it }
+    }
+
+    /** 取数字指标。解析不到必须写「未解析到」——写 0 会被误读成「修复成功」。 */
+    private fun metric(line: String?, pattern: String, label: String): String {
+        val value = line?.let { Regex(pattern).find(it)?.groupValues?.get(1) }
+        return "$label=${value ?: "未解析到"}"
+    }
+
+    private fun countLines(lines: List<String>, vararg marks: String): Int =
+        lines.count { line -> marks.any { line.contains(it) } }
+
+    /** 生成排障摘要（纯函数，见上方设计说明）。空日志也给出明确说明，不给空页面。 */
+    internal fun buildTriageSummary(logText: String): String {
+        val lines = if (logText.isBlank()) emptyList() else logText.lineSequence().toList()
+        return buildString {
+            appendLine("--- 排障摘要（自动解析，供排查用；「未解析到」≠ 0）---")
+            if (lines.isEmpty()) {
+                appendLine("（app.log 为空或不存在，无法解析）")
+                return@buildString
+            }
+            val timestamps = lines.mapNotNull { tsOf(it) }
+            appendLine(
+                "日志覆盖: ${timestamps.minOrNull() ?: "未解析到"} ~ ${timestamps.maxOrNull() ?: "未解析到"}"
+            )
+            appendLine(
+                "最近一次手动刷新: ${latestLine(lines, MARK_MANUAL_REFRESH)?.first ?: "未解析到（本份日志可能不含手动刷新）"}"
+            )
+
+            val price = latestLine(lines, MARK_PRICE_SUMMARY)
+            appendLine(
+                "最近一轮价格同步 [${price?.first ?: "未解析到"}]: " + listOf(
+                    metric(price?.second, "资产 (\\d+)", "资产"),
+                    metric(price?.second, "成功 (\\d+)", "成功"),
+                    metric(price?.second, "失败 (\\d+)", "失败"),
+                    metric(price?.second, "跳过 (\\d+)", "跳过"),
+                    metric(price?.second, "总耗时 ([\\d.]+)s", "耗时_s")
+                ).joinToString(" ")
+            )
+
+            val dividend = latestLine(lines, MARK_DIVIDEND_SUMMARY, require = "汇总")
+            appendLine(
+                "最近一轮分红预取 [${dividend?.first ?: "未解析到"}]: " + listOf(
+                    metric(dividend?.second, "参与 (\\d+) 只", "参与"),
+                    metric(dividend?.second, "本轮发起抓取 (\\d+) 只", "发起"),
+                    metric(dividend?.second, "源应答并写下结论 (\\d+) 只", "源应答"),
+                    metric(dividend?.second, "未取到 (\\d+) 只", "未取到"),
+                    metric(dividend?.second, "缓存或TTL有效无需重抓 (\\d+) 只", "TTL豁免")
+                ).joinToString(" ")
+            )
+            val realRateLimit = dividend?.second
+                ?.let { Regex("本轮真实 514/429 响应 (\\d+) 次").find(it)?.groupValues?.get(1) }
+            appendLine(
+                "★ 本轮真实 514/429 响应: ${realRateLimit ?: "未解析到（不可当作 0）"} 次" +
+                    "  ← 判定 514 修复是否生效只看这一项；「未取到」含退避短路/预算顺延，不代表变差"
+            )
+            appendLine("口径: 上面各项来自代码内计数（准确）；下面逐标的 WARN 行数因 app.log 轮转只是下界。")
+            appendLine(
+                "日志可见计数（整份日志累计，下界）: 限流退避短路=" +
+                    countLines(lines, "天天基金限流退避中，跳过") +
+                    " / 514请求失败=" + countLines(lines, "OkHttp HTTP 请求失败: 514") +
+                    " / 预算顺延=" + countLines(lines, "分红预取达到时间预算")
+            )
+            val brokerage = countLines(lines, "ImportBrokerage", "交割单")
+            val binance = countLines(lines, "BinanceImport", "币安导入")
+            appendLine(
+                "链路覆盖: 交割单/ImportBrokerage=$brokerage 行" +
+                    (if (brokerage == 0) " ⚠️本次导出未覆盖" else "") +
+                    " / 币安导入=$binance 行" +
+                    (if (binance == 0) " ⚠️本次导出未覆盖" else "")
+            )
+        }.trimEnd()
+    }
 
     /**
      * 用 [String.lineCount] 先数再切：直接 `lines().takeLast` 会先把整段切成

@@ -91,10 +91,24 @@ class LogDiagnosticsTriageTest {
     fun 日志覆盖时间范围与逐标的下界计数() {
         val s = LogDiagnostics.buildTriageSummary(fullLog())
         assertTrue(s, s.contains("日志覆盖: 2026-11-12 19:57:05.100 ~ 2026-11-13 16:01:22.890"))
+        assertTrue(s, s.contains("本轮日志可见计数"))
         assertTrue(s, s.contains("限流退避短路=48"))
         assertTrue(s, s.contains("514请求失败=6"))
         assertTrue(s, s.contains("预算顺延=2"))
         assertTrue(s, s.contains("下界"))
+    }
+
+    @Test
+    fun 下界计数只算本轮_不把历史轮次的WARN混进来() {
+        // 真实诊断跨 8 天，整份日志有几百行退避 WARN；若混进来，
+        // 会与「本轮真实 514=6」并列成两个量级差很大的数字，反而看不懂
+        val oldWarns = (1..30).map {
+            line("2026-11-12 19:57:10.000", "[WARN/FundDividendApi] 天天基金限流退避中，跳过 000100 本次抓取")
+        }
+        val s = LogDiagnostics.buildTriageSummary(fullLog(oldRound + oldWarns + newRound + warnLines))
+        assertTrue(s, s.contains("限流退避短路=48"))
+        assertFalse("历史 30 行不能计入本轮", s.contains("限流退避短路=78"))
+        assertTrue(s, s.contains("514请求失败=6"))
     }
 
     @Test

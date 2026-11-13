@@ -520,8 +520,18 @@ object LogDiagnostics {
         return "$label=${value ?: "未解析到"}"
     }
 
-    private fun countLines(lines: List<String>, vararg marks: String): Int =
-        lines.count { line -> marks.any { line.contains(it) } }
+    /**
+     * 统计含任一 [marks] 的行数，可限定在 [since] 时间戳之后。
+     *
+     * 逐标的 WARN 若统计整份（可能跨 8 天、几百行）日志，会和「本轮真实 514 次数」
+     * 并列显示成两个量级差很大的数字，反而看不懂。限定到最近一次刷新之后，才能与
+     * 汇总行的「未取到」互相校验（真 514 + 退避短路 + 预算顺延 ≈ 未取到）。
+     */
+    private fun countLines(lines: List<String>, since: String?, vararg marks: String): Int =
+        lines.count { line ->
+            val t = tsOf(line)
+            (since == null || (t != null && t >= since)) && marks.any { line.contains(it) }
+        }
 
     /** 生成排障摘要（纯函数，见上方设计说明）。空日志也给出明确说明，不给空页面。 */
     internal fun buildTriageSummary(logText: String): String {
@@ -536,9 +546,8 @@ object LogDiagnostics {
             appendLine(
                 "日志覆盖: ${timestamps.minOrNull() ?: "未解析到"} ~ ${timestamps.maxOrNull() ?: "未解析到"}"
             )
-            appendLine(
-                "最近一次手动刷新: ${latestLine(lines, MARK_MANUAL_REFRESH)?.first ?: "未解析到（本份日志可能不含手动刷新）"}"
-            )
+            val refreshTs = latestLine(lines, MARK_MANUAL_REFRESH)?.first
+            appendLine("最近一次手动刷新: ${refreshTs ?: "未解析到（本份日志可能不含手动刷新）"}")
 
             val price = latestLine(lines, MARK_PRICE_SUMMARY)
             appendLine(
@@ -568,14 +577,16 @@ object LogDiagnostics {
                     "  ← 判定 514 修复是否生效只看这一项；「未取到」含退避短路/预算顺延，不代表变差"
             )
             appendLine("口径: 上面各项来自代码内计数（准确）；下面逐标的 WARN 行数因 app.log 轮转只是下界。")
+            val windowNote = if (refreshTs != null) "自最近一次手动刷新起" else "未找到刷新起点，统计整份日志"
             appendLine(
-                "日志可见计数（整份日志累计，下界）: 限流退避短路=" +
-                    countLines(lines, "天天基金限流退避中，跳过") +
-                    " / 514请求失败=" + countLines(lines, "OkHttp HTTP 请求失败: 514") +
-                    " / 预算顺延=" + countLines(lines, "分红预取达到时间预算")
+                "本轮日志可见计数（$windowNote；逐标的 WARN 因 app.log 轮转属下界）: 限流退避短路=" +
+                    countLines(lines, refreshTs, "天天基金限流退避中，跳过") +
+                    " / 514请求失败=" + countLines(lines, refreshTs, "OkHttp HTTP 请求失败: 514") +
+                    " / 预算顺延=" + countLines(lines, refreshTs, "分红预取达到时间预算")
             )
-            val brokerage = countLines(lines, "ImportBrokerage", "交割单")
-            val binance = countLines(lines, "BinanceImport", "币安导入")
+            // 链路覆盖看整份日志：几天前导入过也算「这份诊断里有迹可查」
+            val brokerage = countLines(lines, null, "ImportBrokerage", "交割单")
+            val binance = countLines(lines, null, "BinanceImport", "币安导入")
             appendLine(
                 "链路覆盖: 交割单/ImportBrokerage=$brokerage 行" +
                     (if (brokerage == 0) " ⚠️本次导出未覆盖" else "") +

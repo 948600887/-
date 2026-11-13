@@ -17,6 +17,45 @@ private const val FAILURE_BACKOFF_MAX_MS = 6L * 60 * 60 * 1000        // 封顶 
 private const val FAILURE_BACKOFF_BASE_MS_NEVER = 1L * 60 * 1000      // 从未成功：首档 1 分钟
 private const val FAILURE_BACKOFF_MAX_MS_NEVER = 1L * 60 * 60 * 1000   // 从未成功：封顶 1 小时
 // ==========================================================================
+// 逐条预取优先级（2026-11-13，配合 FundDividendApiService 的匀速闸门）
+// ==========================================================================
+
+/**
+ * 逐条分红预取的重排规则：把「最久没成功抓过」的标的排在最前面。
+ *
+ * 纯函数，不碰 Context / Room / 网络，便于 JVM 单测钉死顺序。
+ *
+ * 为什么需要：手动刷新 `forceRefresh=true` 会绕过失败退避窗，而场外基金没有批量
+ * 入口（天天基金每基金一个 HTML 页面）。2026-11-13 真机诊断里，一轮 110 只中有
+ * 80 只要逐条抓，前 26 只应答后撞 514，剩下 48 只在 60s 退避窗内被短路；这些
+ * 短路标的**不写 markFetched**（失败不能固化成「没有分红」），于是下次刷新又从
+ * 同一批开始、又撞限流 —— 队尾标的长期抓不到（饥饿）。
+ *
+ * 排序后，时间预算（手动/日历 28s、后台 Worker 子预算）每轮只跑得完前一批，
+ * 但「本轮刚成功」的标的会因 markFetched 时间戳排到队尾，上轮被短路的仍留在
+ * 队首，于是每轮推进的是**不同的一批**，几轮即可把全量补齐并固化 7 天负结果 TTL。
+ * 匀速闸门保证这批不会在毫秒级突发里再次撞 514。
+ *
+ * 刻意**只重排逐条阶段**，批量预取 `prefetchDividendsBatch` 仍用调用方原顺序，
+ * 避免影响东财合并请求的分块与既有测试。
+ *
+ * 时间戳相同时按 symbol 字典序兜底，保证排序稳定、可与旧行为对照。
+ *
+ * @param symbols 已规范化去重、且已判定本轮需要逐条抓取的标的（调用方只传待抓集合）
+ * @param lastFetchedAt 每个 symbol 上次成功抓取的时间戳（markFetched 写入）；
+ *        null / 0 表示从未成功抓过 → 排最前
+ */
+internal fun prioritizeDividendSymbols(
+    symbols: List<String>,
+    lastFetchedAt: Map<String, Long?>
+): List<String> = symbols.sortedWith { a, b ->
+    val timeA = lastFetchedAt[a] ?: 0L
+    val timeB = lastFetchedAt[b] ?: 0L
+    val byTime = timeA.compareTo(timeB)
+    if (byTime != 0) byTime else a.compareTo(b)
+}
+
+// ==========================================================================
 // §9 文件级私有辅助（纯函数，可直接 JVM 单测）
 // shouldReuseEmptyResult（空结果复用判定）/ isFailedWithin（失败退避窗）/ chunkSecurityCodes（东财合并请求的代码分块，按编码后长度估算成本）。
 // ==========================================================================

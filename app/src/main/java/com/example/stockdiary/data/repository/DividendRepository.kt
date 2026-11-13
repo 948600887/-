@@ -1402,6 +1402,17 @@ class DividendRepository private constructor(
 
             val batchResults = prefetchDividendsBatch(normalizedSymbols, forceRefresh)
 
+            // 逐条阶段按「最久没成功抓过」重排（批量阶段保持调用方原顺序，不受影响）。
+            // 时间预算（手动/日历 28s、后台 Worker 子预算）会自然截断一轮的抓取量，
+            // 排序保证每轮推进的是**不同的一批**：上轮被 514/退避短路的仍留队首，
+            // 本轮刚成功的因 markFetched 时间戳排到队尾。配合 FundDividendApiService
+            // 的匀速闸门，几轮即可把 110 只逐批补齐并固化 7 天负结果 TTL，而不是每次
+            // 刷新都从同一批开始、队尾永远抓不到（详见 prioritizeDividendSymbols KDoc）。
+            val orderedSymbols = prioritizeDividendSymbols(
+                symbols = normalizedSymbols,
+                lastFetchedAt = normalizedSymbols.associateWith { lastFetchedAt(it) }
+            )
+
             // 预算截止时刻：超时后不再启动新代码的逐条抓取
             val deadline = if (timeBudgetMs > 0L) System.currentTimeMillis() + timeBudgetMs else 0L
             val semaphore = Semaphore(maxConcurrentFetch)
@@ -1434,7 +1445,7 @@ class DividendRepository private constructor(
                 // 在当前协程里顺序执行，这里自增没有并发写；收尾汇总据此算「无需重抓数」。
                 var attempted = 0
                 coroutineScope {
-                    normalizedSymbols.map { symbol ->
+                    orderedSymbols.map { symbol ->
                         val entry = cache[symbol]
                         val isOtc = StockCodeManager.isOTCFund(symbol)
                         val ttlExpired = entry == null || !entry.isValid(cacheTTL)

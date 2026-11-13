@@ -7,9 +7,11 @@ import com.example.stockdiary.common.Timeouts
 import com.example.stockdiary.network.NetworkClient
 import com.example.stockdiary.utils.AppLogger
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withLock
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.jsoup.HttpStatusException
@@ -248,6 +250,63 @@ class FundDividendApiService {
             fhspBlockedUntil = 0L
             fhspDegraded = false
         }
+
+        // ======================================================================
+        // 匀速闸门：把真实 fhsp 请求的节奏从「突发」改成「均匀串行」
+        // ======================================================================
+
+        /**
+         * 两次真实 fhsp 请求之间的最小间隔（毫秒）。
+         *
+         * 2026-11-13 真机诊断（goldvault_diagnostics_20261113_160149）：16:01:18.442
+         * → 16:01:20.656 的 2.2 秒内打出 32 个请求（约 14.5 QPS，且日志里 GET 成对
+         * 同毫秒出现 = 突发），第 32 个左右开始收到 514。社区实测东财风控的保守口径是
+         * 「每秒 ≤5 次为高风险线，建议串行 + ≥1s 间隔（QPS ≤2）」，且明确「多个请求
+         * 毫秒级同时到达更像突发流量，比均匀节奏更容易触发限流」。
+         *
+         * 昨天把外层并发 8→2 没能让 514 下降（7 次/轮 → 6 次/轮），因为真实 HTTP
+         * 并发本就由 [fhspHealthySemaphore] 限死在 2；**节奏与总量**才是瓶颈。
+         * 所以这里给「真实发请求」加全局匀速闸门，而不是继续压并发。
+         *
+         * 位置刻意放在**内层闸门之后、真实发请求之前**：批量预取命中的标的根本走不到
+         * 这里，不会被无谓拖慢一个间隔；所有调用点（手动刷新 / 日历页 / 单标的查询）
+         * 统一生效。取消（切后台）时 [delay] 抛 CancellationException，上层
+         * `getDividendsBySymbol` 有专门的 `catch (CancellationException) { throw e }`，
+         * 不会被误记成抓取失败 / 写进失败退避。
+         */
+        internal const val OTC_POLITE_INTERVAL_MS = 1000L
+
+        @Volatile
+        internal var lastOtcRequestAt: Long = 0L
+
+        private val politeGate = Mutex()
+
+        /** 纯函数：距上次真实请求还差多少毫秒才允许发下一个（便于 JVM 单测钉死边界）。 */
+        internal fun computePoliteDelay(lastRequestAt: Long, now: Long, intervalMs: Long): Long {
+            if (lastRequestAt <= 0L || intervalMs <= 0L) return 0L
+            val elapsed = now - lastRequestAt
+            // 系统时钟回拨（elapsed < 0）时按「满一整个间隔」等，宁可保守也不放大请求量
+            if (elapsed < 0L) return intervalMs
+            return (intervalMs - elapsed).coerceAtLeast(0L)
+        }
+
+        /** 测试复位：避免用例之间互相污染节流窗口。 */
+        internal fun resetPoliteGateForTesting() {
+            lastOtcRequestAt = 0L
+        }
+
+        /** 全局匀速闸门：串行化真实 fhsp 请求，消除毫秒级突发。 */
+        internal suspend fun awaitPoliteInterval() {
+            politeGate.withLock {
+                val waitMs = computePoliteDelay(
+                    lastRequestAt = lastOtcRequestAt,
+                    now = System.currentTimeMillis(),
+                    intervalMs = OTC_POLITE_INTERVAL_MS
+                )
+                if (waitMs > 0L) delay(waitMs)
+                lastOtcRequestAt = System.currentTimeMillis()
+            }
+        }
     }
 
     // 复用统一客户端：通过 defaultClient.newBuilder() 派生，共享底层 ConnectionPool/Dispatcher
@@ -313,6 +372,9 @@ class FundDividendApiService {
                 AppLogger.w("天天基金(fhsp)整源熔断冷却中(内层复查)，跳过 $fundCode 本次抓取", TAG)
                 return@withContext Result.failure(Exception("天天基金整源熔断冷却中，跳过"))
             }
+            // 匀速闸门放在三道退避复查之后：退避命中的请求直接短路，不会白等一个间隔；
+            // 只有真正要发 HTTP 的请求才在这里按全局间隔排队（见 OTC_POLITE_INTERVAL_MS）。
+            awaitPoliteInterval()
             return@withContext fetchFundDividendInner(fundCode)
         } finally {
             if (useDegraded) fhspDegradedMutex.unlock() else fhspHealthySemaphore.release()

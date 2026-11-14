@@ -15,7 +15,7 @@
 |---|---|---|---|
 | _(空，无在途认领)_ | | | |
 
-## 当前状态快照（2026-11-09 15:12，以 `git log` 为准）
+## 当前状态快照（2026-11-09 15:12，⚠️ 历史快照、已过时；当前状态见文末「2026-11-15 交接补记」，一切以 `git log` 为准）
 
 - `HEAD` = `b8c532d`（协作约定落地），已推送到 `origin/main`。
 - **最新 APK**：`releases/GoldVault-1.0.0-release-arm64-v8a-b8c532d.apk`（26MB，arm64-v8a，
@@ -280,4 +280,26 @@ CODE_ARCHITECTURE.md 部分过时），一律以实际代码 + git log 为准。
 - 导出 NaN/Infinity 行为为既有行为，未改。
 
 - **门禁结果**：2026-11-11 QA（`software-qa-engineer`）独立全量门禁 `bash tools/check_gate.sh` → **GATE PASSED**（EXIT=0，总耗时 245s / 4m05s）：8 个 run_step + 1 个 `verify_test_count` 共 **9/9 步 EXIT=0**，三条 gradle 任务均带 `--rerun`。结果 **151 个结果 XML / 1632 例 / 失败 0 / 错误 0 / 跳过 0**；STALE=0（全部 XML mtime 16:47:04，均属本轮），无 UP-TO-DATE/FROM-CACHE 假绿。较修复前基线（151 XML / 1627 例）为 **XML +0、用例 +5**（快照护栏 +1、导出 +2、搜索 +2），与 `git diff` 新增 5 个 `@Test`、删除 0 个一致。
+
+---
+
+## 2026-11-15 00:40 交接补记（补 11-12~11-15；此前流水停在 11-11）
+
+> 本板头部「当前状态快照」写于 11-09（`b8c532d` / 1589 例）、末尾流水停在 11-11（1632 例），11-12 之后的工作此前只落在 `.workbuddy/memory/*.md` 与 git log，没同步进交接板（违反「关键状态必须落盘 / 每步同步更新 handoff」）。此段 append-only 补齐，不改写历史条目。
+
+**当前状态（以 `git log` 为准）**：HEAD `90fa4bd`（本地已提交、**未推**），`origin/main = 6481e73`，本地领先 1 笔；门禁 **1701 例 / 155 XML / 0 失败 / STALE=0**、`check_invariants` 9/9。`releases/` 仍只有 `a0f9cd6` 旧包；11-15 构建的 `app-release-unsigned.apk` 在 `app/build/outputs/apk/release/`，**按梦瑶指示停止出包，未签名未交付**。工作区 8 个 `M` 是 `core.autocrlf=true` 的 CRLF 假阳性（`git diff --numstat` 为空），别误提交。
+
+**11-12~11-14 脉络**：11-12「全面优化」评估结论是硬约束下安全空间极小、Lint 32 warning 只消除 3 个、其余 29 刻意不动（别顺手泛改）；11-13 真机诊断证明 `5c660fe` 的 514 方案 A/B 未达预期，根因修正为「单轮请求总量/突发频率」，已上 P1 匀速闸门 + P2 未取到优先（`14f2e69`）与诊断「排障摘要」（`a0f9cd6`）；11-14 完成数据保存层评审（写入侧可靠、恢复侧真空）并按梦瑶「可以在导出数据那里加」实现备份恢复闭环。
+
+**备份恢复闭环（本轮唯一功能改动）**：设置页「导出数据」→「3. 备份与恢复（可回灌）」，导出结构化 JSON 覆盖 Room 7 张表、导入走 DAO + `withTransaction` 整库替换，SAF 由用户选目录、恢复前二次确认，不含显示偏好与币安 API 密钥。**拍板不导出 `.db` 文件**：运行时替换 Room 文件需 close/重建单例 + 处理 WAL/SHM，本项目手动 DI 多处持有 `StockDatabase.getInstance()` 与 DAO 引用，会造成「磁盘新的、内存旧的」甚至崩；JSON 方案不改 schema，不撞 A2/A7 锁 v18。三笔中文提交 `d3825c4`(数据层) / `6481e73`(UI 层) 已推、`90fa4bd`(修 B1~B8) 未推。
+
+**QA 两轮**：第 1 轮 **IS_PASS NO** —— 门禁 1681 例全绿仍抓到 2 个 P2：B1 恢复成功后 `clearDerivedCaches()` → `FundNavCacheDao.clear()` 删光刚写回的第 7 张表（实际只恢复 6 张）；B2 `pendingRestoreUri` 用 `remember` 保存、转屏后确认按钮静默无操作。根因是新增 15 例只测纯 JVM codec + mock 事务，**UI/VM 层零测试**。第 2 轮 **IS_PASS YES**：B1~B8 逐条读码确认真修复、+20 例真断言（VM 状态机用 MockK relaxed Uri + `ByteArrayInputStream` 真跑通）。**别改回去的修法**：清派生缓存**必须在 `restore()` 之前**；`PendingRestore(uri, summary)` 原子进 ViewModel、UI 侧不存 Uri；`restoreBackup()` 二次读流并用 `hasSameIdentity` 比对 `exportedAt + formatVersion + 7 个 count`，不一致零写库；`buildPayload()` 包只读事务；Double `isFinite` 全量校验 + 主键必填 + `snapshotId` 引用校验。
+
+**已知未修（QA 标注遗留）**：5 项 P3 —— L1 持久 Uri 授权不释放会累积；L2 摘要是身份启发式非内容指纹；L3 **孤儿 `snapshotId` 的备份不可恢复**（与刻意不校验的 `assetId` 口径不一致，影响最大，动备份格式时优先处理）；L4 恢复失败/取消时事务外 `DELETE FROM fund_nav_cache` 不可回滚且取消分支无提示；L5 `clearFetchState()` 的 `commit()` 跑在 Room 事务线程内 + WAL 未显式启用。评审期裸奔项 R02/R03/R04/R05/R07 仍未修；真实 Room 事务回滚 / 7 表内容相等、真机 SAF 全链路仍 0 覆盖（`androidTest` 门禁只编译不执行）。
+
+**给接手的人（待办按优先级）**
+1. **push 阻塞**：本机 `127.0.0.1:57055` 代理隧道故障，累计 5 次 push 失败（schannel ×3 / 502 ×2），按「同一手段最多 2 次」已停手。网络恢复后 `git -C "D:/主人的任务/NewStockDiary" push origin main`（必要时 `-c http.version=HTTP/1.1`），`git status -sb` 确认无 ahead。
+2. **真机验证需梦瑶本人**（本机 adb 无设备）：装新包 → 导出全量备份存网盘/电脑 → 卸载重装 → 从备份恢复 → 核对各表条数；**特别验 B2 真实场景：确认框弹出后旋转屏幕，点确认能真正恢复**。
+3. 出包：梦瑶 11-15 明确「不用出包」。若改主意，按硬约定只出 arm64-v8a、debug keystore 手动签名、完整路径告诉她、清理 `releases/` 只留最新包 + 删 `*.idsig`。
+4. `a0f9cd6` 的 514 修复与排障摘要**真机验收仍未完成**（11-14 诊断仍是旧包）；判别只需看诊断头部有无 `--- 排障摘要 ---`。
 

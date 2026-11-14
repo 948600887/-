@@ -9,11 +9,13 @@ import androidx.lifecycle.viewModelScope
 import com.example.stockdiary.common.Result
 import com.example.stockdiary.data.backup.BackupCodec
 import com.example.stockdiary.data.backup.BackupManager
+import com.example.stockdiary.data.backup.BackupSummary
 import com.example.stockdiary.data.backup.InvalidBackupException
 import com.example.stockdiary.data.backup.UnsupportedBackupVersionException
 import com.example.stockdiary.data.repository.AssetRepository
 import com.example.stockdiary.data.prefs.DashboardPreferences
 import com.example.stockdiary.data.prefs.DashboardPreferencesManager
+import com.example.stockdiary.data.prefs.SnapshotManualAdjustmentStore
 import com.example.stockdiary.data.export.DataExporter
 import com.example.stockdiary.data.price.PriceCacheMaintenance
 import com.example.stockdiary.data.sync.AssetSyncFailureStore
@@ -42,6 +44,17 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.CancellationException
 import java.io.File
+
+/**
+ * 待恢复备份的**原子**状态：Uri 与只读摘要必须同生共死，一起留在 ViewModel 里。
+ *
+ * B2/B4：以前 Uri 存在 [androidx.compose.runtime.remember] 中、摘要存在 UiState，
+ * 旋转屏幕（本 App 未声明 orientation 的 configChanges）会丢 Uri 留摘要，确认框照常弹出
+ * 但点确认时 `uri == null`，静默什么都不做；另外 UI 先改 Uri 再调可能被 `isBackingUp`
+ * 守卫拒绝的 VM 方法，会留下 Uri/摘要错配。现在 [readBackup] 一次性把两者写入本对象，
+ * UI 只消费、不持有 Uri。
+ */
+data class PendingRestore(val uri: Uri, val summary: BackupSummary)
 
 class SettingsViewModel(
     private val appContext: Context,
@@ -247,7 +260,14 @@ class SettingsViewModel(
         // 「恢复进行中又点导出」这类跨操作并发写库。标记必须在 launch 之前同步置位。
         if (_uiState.value.isExporting || _uiState.value.isBackingUp) return
         _uiState.update {
-            it.copy(isExporting = true, isBackingUp = true, exportResult = null, backupResult = null)
+            it.copy(
+                isExporting = true,
+                isBackingUp = true,
+                exportResult = null,
+                backupResult = null,
+                // B4 ②：任何一次备份动作开始都清掉残留的待恢复确认框，避免 UI 状态错配
+                pendingRestore = null
+            )
         }
         viewModelScope.launch(Dispatchers.IO) {
             try {
@@ -269,7 +289,7 @@ class SettingsViewModel(
                     )
                 }
             } catch (e: CancellationException) {
-                _uiState.update { it.copy(isExporting = false, isBackingUp = false) }
+                _uiState.update { it.copy(isExporting = false, isBackingUp = false, pendingRestore = null) }
                 throw e
             } catch (e: Exception) {
                 // 清掉残件：CreateDocument 已经把空文件建出来了
@@ -282,6 +302,7 @@ class SettingsViewModel(
                     it.copy(
                         isExporting = false,
                         isBackingUp = false,
+                        pendingRestore = null,
                         exportResult = failure,
                         backupResult = failure
                     )
@@ -291,13 +312,17 @@ class SettingsViewModel(
     }
 
     /**
-     * 只读解析所选备份：把摘要放进 UiState 供二次确认框展示，**绝不写库**。
+     * 只读解析所选备份：**原子地**把 Uri + 摘要写入 [PendingRestore]，绝不写库。
      *
-     * 只读这一层能拦住坏文件 / 高版本备份，用户不会先看到「将覆盖全部账目」的确认框、
-     * 点下去才发现文件根本读不了。
+     * B2/B4：Uri 与摘要由本方法一次 update 同时落地，UI 侧不再先改 Uri 再调 VM。
+     * 这样旋转屏幕重建后两者仍同在 ViewModel 里；守卫拒绝或解析失败也不会留下错配。
      */
     fun readBackup(uri: Uri) {
-        if (_uiState.value.isBackingUp) return
+        if (_uiState.value.isBackingUp) {
+            // 守卫被拒也算「取消」：清掉可能残留的旧确认框，避免 Uri/摘要错配
+            _uiState.update { it.copy(pendingRestore = null) }
+            return
+        }
         _uiState.update { it.copy(isBackingUp = true, pendingRestore = null, backupResult = null) }
         viewModelScope.launch(Dispatchers.IO) {
             try {
@@ -306,9 +331,11 @@ class SettingsViewModel(
                     "已读取备份摘要：格式版本 ${summary.formatVersion}，等待用户二次确认",
                     "SettingsVM"
                 )
-                _uiState.update { it.copy(isBackingUp = false, pendingRestore = summary) }
+                _uiState.update {
+                    it.copy(isBackingUp = false, pendingRestore = PendingRestore(uri, summary))
+                }
             } catch (e: CancellationException) {
-                _uiState.update { it.copy(isBackingUp = false) }
+                _uiState.update { it.copy(isBackingUp = false, pendingRestore = null) }
                 throw e
             } catch (e: Exception) {
                 AppLogger.w("读取备份失败: ${e.message}", "SettingsVM")
@@ -326,28 +353,44 @@ class SettingsViewModel(
     }
 
     /**
-     * 用户二次确认后执行恢复。
+     * 用户二次确认后执行恢复。**不接 Uri 参数**，从 [PendingRestore] 取，旋转重建后仍可用。
      *
-     * 刻意**再次读流 + decode**：不信任 [readBackup] 缓存的摘要 —— 用户在确认框停留期间，
-     * 所选文件可能被别的应用改写或删除。解码与格式校验全在 [BackupManager.restore] 的
-     * 事务之外完成；事务内任一步抛错由 Room 整体回滚，绝不留下半清状态。
-     * 失败写 Result.failure 且记录原始堆栈，绝不静默吞掉。
+     * 流程（顺序被 QA B1/B3 钉死，勿调整）：
+     * 1. 无 pendingRestore → 给明确中文提示，绝不静默；
+     * 2. 再次读流 + decode（不信任缓存摘要）；
+     * 3. 用 [BackupCodec.hasSameIdentity] 重算摘要与确认时缓存的摘要比对
+     *    （exportedAt + formatVersion + 7 张表条数），不一致 → 中止、中文提示、清空、零写库；
+     * 4. **清旧库派生行情缓存必须在 [BackupManager.restore] 之前**（见下方 B1 说明）；
+     * 5. 事务内整表替换；事务成功后才复位其余进程内内存态；
+     * 6. 任何失败都写 Result.failure、清空 pendingRestore、记录原始堆栈，绝不静默吞掉。
      */
-    fun restoreBackup(uri: Uri) {
-        if (_uiState.value.isBackingUp) return
-        _uiState.update {
-            it.copy(
-                isBackingUp = true,
-                pendingRestore = null,
-                exportResult = null,
-                backupResult = null
+    fun restoreBackup() {
+        val pending = _uiState.value.pendingRestore
+        if (pending == null) {
+            val failure: Result<String> = Result.failure(
+                InvalidBackupException("待恢复的备份已失效，请重新选择备份文件")
             )
+            _uiState.update { it.copy(exportResult = failure, backupResult = failure) }
+            return
         }
+        if (_uiState.value.isBackingUp) return
+        _uiState.update { it.copy(isBackingUp = true, exportResult = null, backupResult = null) }
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                val payload = BackupCodec.decode(readBackupText(uri))
+                val payload = BackupCodec.decode(readBackupText(pending.uri))
+                // B3：确认期间文件被替换/改写，重算摘要与缓存摘要必须完全一致，否则绝不写库
+                if (!BackupCodec.hasSameIdentity(payload, pending.summary)) {
+                    throw InvalidBackupException("备份文件在确认期间发生变化，请重新选择")
+                }
+                // B1：清的是**旧库**的派生缓存。Gate 必须早于 restore：
+                // DefaultPriceCacheMaintenance.clearDerivedCaches() 会一路调到 FundNavCacheDao.clear()
+                // 删掉 fund_nav_cache 整张表，而 BackupManager 刚在事务里 upsertAll 写回这张表。
+                // 放在 restore 之后会让「成功恢复」实际只落地 6 张表，每只场外基金下次刷新重下
+                // 完整历史净值（低端机有内存爆/被杀风险）。挪到之前，新库第 7 张表由备份完整保留。
+                // 若 restore 失败回滚，旧派生缓存已被清但属可重建数据，账目由事务保证不变。
+                safelyReset("旧库派生行情缓存") { priceCacheMaintenance.clearDerivedCaches() }
                 backupManager.restore(payload)
-                // 事务成功后才复位进程内内存态：库回滚时旧缓存仍与旧库一致，不能提前清
+                // 事务成功后才复位其余内存态：库回滚时旧缓存仍与旧库一致
                 resetInMemoryStateAfterRestore()
                 val message = "已恢复 ${payload.assets.size} 项资产、" +
                     "${payload.snapshots.size} 条历史快照、${payload.transactions.size} 笔交易、" +
@@ -356,12 +399,13 @@ class SettingsViewModel(
                 _uiState.update {
                     it.copy(
                         isBackingUp = false,
+                        pendingRestore = null,
                         exportResult = Result.success(message),
                         backupResult = Result.success(message)
                     )
                 }
             } catch (e: CancellationException) {
-                _uiState.update { it.copy(isBackingUp = false) }
+                _uiState.update { it.copy(isBackingUp = false, pendingRestore = null) }
                 throw e
             } catch (e: Exception) {
                 AppLogger.e("从备份恢复失败: ${e.message}", e, "SettingsVM")
@@ -369,6 +413,7 @@ class SettingsViewModel(
                 _uiState.update {
                     it.copy(
                         isBackingUp = false,
+                        pendingRestore = null,
                         exportResult = failure,
                         backupResult = failure
                     )
@@ -417,11 +462,12 @@ class SettingsViewModel(
         }
 
     /**
-     * 恢复成功后复位进程内内存态（QA R06）。
+     * 恢复成功后复位进程内内存态（QA R06 / B6）。**派生行情缓存不在这里**——见 [restoreBackup]
+     * 的 B1 说明，它必须在事务之前清，否则会把刚写回的第 7 张表删光。
      *
-     * 账目整表换掉了，旧的分红缓存 / 派生行情缓存 / 汇率 / 同步失败标记都指向旧数据，
-     * 不清会显示错值。逐项尽力而为：某项缓存单例抛错不该把「账目已恢复」报成失败，
-     * 但取消必须原样向外抛，不能吞掉。
+     * 账目整表换掉了，旧的分红缓存 / 汇率 / 同步失败标记 / 手动修正标记都指向旧数据，
+     * 不清会显示错值或残留旧标签。逐项尽力而为：某项缓存单例抛错不该把「账目已恢复」
+     * 报成失败，但取消必须原样向外抛，不能吞掉。
      *
      * 刻意不走「偏好整块回写」（A3 铁律）：这里只调
      * [DashboardPreferencesManager.invalidateAnnualDividendIncome] 让年度分红缓存失效，
@@ -431,7 +477,9 @@ class SettingsViewModel(
         safelyReset("年度分红缓存") { dashboardPreferencesManager.invalidateAnnualDividendIncome() }
         safelyReset("分红内存缓存") { dividendRepository.clearCache() }
         safelyReset("分红抓取状态") { dividendRepository.clearFetchState() }
-        safelyReset("派生行情缓存") { priceCacheMaintenance.clearDerivedCaches() }
+        // B6：历史页「手动修正」标记按日期存 SharedPreferences，恢复后旧日期的标记
+        // 会挂在新库的快照上。它不属于 Room 7 张表，必须单独清。
+        safelyReset("快照手动修正标记") { SnapshotManualAdjustmentStore.getInstance(appContext).clearAll() }
         safelyReset("汇率") { ExchangeRateManager.resetToDefaultRates() }
         safelyReset("同步失败集合") { AssetSyncFailureStore.getInstance(appContext).clear() }
     }

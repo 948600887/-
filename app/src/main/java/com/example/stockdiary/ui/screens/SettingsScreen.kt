@@ -3,8 +3,8 @@ package com.example.stockdiary.ui.screens
 import com.example.stockdiary.common.DateFormats
 import com.example.stockdiary.data.contract.SyncStrategy
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
-import android.net.Uri
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -143,19 +143,16 @@ fun SettingsScreen(
     var showBinanceImportDialog by remember { mutableStateOf(false) }
     var showLogViewerDialog by remember { mutableStateOf(false) }
 
-    /**
-     * 恢复是「先选文件 → 只读解析摘要 → 二次确认 → 再写库」三步，Uri 要跨这几步暂存。
-     * 摘要存在 ViewModel 的 UiState 里（可观察），Uri 只留在本页内存：进程被杀后不残留
-     * 一个「待恢复」的悬空状态，用户得重新走一遍确认。
-     */
-    var pendingRestoreUri by remember { mutableStateOf<Uri?>(null) }
+    // B2：Uri **不再**留在本页的 remember 里。旋转屏幕（未声明 orientation 的 configChanges）
+    // 会重建 Activity 丢掉 remember，而 ViewModel 里的摘要还在，确认框重新弹出却无 Uri 可用，
+    // 点「确认恢复」会静默无操作。现在 Uri + 摘要由 ViewModel 原子持有，本页只消费 UiState。
 
     // 导出：CreateDocument 让用户自己选保存位置，彻底脱离会被 pruneOldExports 清理的 cacheDir。
     // MIME 固定 application/json；建议文件名带时间戳，同目录连续导出不会互相覆盖。
     val createBackupLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.CreateDocument("application/json")
     ) { uri ->
-        if (uri != null) viewModel.exportBackup(uri)
+        if (uri != null) viewModel.exportBackup(uri) else viewModel.clearPendingRestore()
     }
 
     // 恢复：OpenDocument 只读打开用户选中的备份文件。用 */* 兜住各家文件管理器对 .json
@@ -163,10 +160,20 @@ fun SettingsScreen(
     val openBackupLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument()
     ) { uri ->
-        if (uri != null) {
-            pendingRestoreUri = uri
-            viewModel.readBackup(uri)
+        if (uri == null) {
+            // 用户取消文件选择也要清掉旧确认框
+            viewModel.clearPendingRestore()
+            return@rememberLauncherForActivityResult
         }
+        // 持久化读授权：确认框可能跨 Activity 重建（旋转屏幕）才被点确认，
+        // 部分 Uri 提供者不支持 takePersistableUriPermission，用 runCatching 兜住不阻断流程。
+        runCatching {
+            context.contentResolver.takePersistableUriPermission(
+                uri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION
+            )
+        }
+        viewModel.readBackup(uri)
     }
 
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
@@ -491,6 +498,7 @@ fun SettingsScreen(
             transactionCount = transactionCount,
             dividendCount = uiState.dividendCount,
             isExporting = uiState.isExporting,
+            isBackingUp = uiState.isBackingUp,
             onExport = { type ->
                 viewModel.exportData(context, type)
                 showExportDialog = false
@@ -507,14 +515,13 @@ fun SettingsScreen(
         )
     }
 
-    // 恢复前二次确认：先展示只读解析出的摘要，明确「覆盖且不可撤销」，确认后才写库。
-    // 摘要来自 ViewModel 的 UiState；确认时把暂存的 Uri 交给 ViewModel 再读一次流 + decode。
-    uiState.pendingRestore?.let { summary ->
+    // 恢复前二次确认：展示只读解析出的摘要，明确「覆盖且不可撤销」，确认后才写库。
+    // B2：Uri 与摘要同在 UiState.pendingRestore（ViewModel 持有），旋转重建后仍完整；
+    // 确认时 ViewModel 自己从 pendingRestore 取 Uri 再读一次流 + decode + 摘要比对。
+    uiState.pendingRestore?.let { pending ->
+        val summary = pending.summary
         AlertDialog(
-            onDismissRequest = {
-                viewModel.clearPendingRestore()
-                pendingRestoreUri = null
-            },
+            onDismissRequest = { viewModel.clearPendingRestore() },
             title = { Text("确认从备份恢复") },
             text = {
                 Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
@@ -556,22 +563,14 @@ fun SettingsScreen(
             },
             confirmButton = {
                 Button(
-                    onClick = {
-                        val target = pendingRestoreUri
-                        viewModel.clearPendingRestore()
-                        pendingRestoreUri = null
-                        if (target != null) viewModel.restoreBackup(target)
-                    },
+                    onClick = { viewModel.restoreBackup() },
                     enabled = !uiState.isBackingUp
                 ) {
                     Text("确认恢复")
                 }
             },
             dismissButton = {
-                TextButton(onClick = {
-                    viewModel.clearPendingRestore()
-                    pendingRestoreUri = null
-                }) {
+                TextButton(onClick = { viewModel.clearPendingRestore() }) {
                     Text("取消")
                 }
             }

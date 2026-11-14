@@ -1,7 +1,6 @@
 package com.example.stockdiary.ui.viewmodels
 
 import com.example.stockdiary.common.Result
-import com.example.stockdiary.data.backup.BackupSummary
 import com.example.stockdiary.utils.DataSourceHealth
 
 /**
@@ -51,11 +50,16 @@ data class SettingsUiState(
     /** 备份动作的一次性结果，Snackbar 消费后清空 */
     val backupResult: Result<String>? = null,
     /**
-     * 只读解析出的待恢复备份摘要。非 null 时由设置页弹二次确认框；
-     * 用户确认或取消后立即清空。刻意只存摘要、不缓存解析出的整份 payload：
-     * 确认后 ViewModel 会重新读流 + decode，不信任这段时间内可能被替换的文件。
+     * 待恢复的备份（Uri + 只读摘要），**原子地**由 ViewModel 设置：非 null 时设置页弹二次确认框。
+     *
+     * B2：Uri 必须与摘要一起放进程内 ViewModel 状态，不能留在 Composable 的 `remember` 里 ——
+     * 本 App 的 Activity 未声明 orientation 的 configChanges，旋转屏幕会重建并丢掉 remember，
+     * 确认框因摘要还在而重新显示，但 Uri 已丢失，点「确认恢复」会静默什么都不做。
+     *
+     * 刻意只存摘要、不缓存解析出的整份 payload：确认后 ViewModel 会重新读流 + decode，
+     * 并把重算摘要与这里缓存的摘要比对，不信任确认期间可能被替换的文件。
      */
-    val pendingRestore: BackupSummary? = null,
+    val pendingRestore: PendingRestore? = null,
     val deleteResult: Result<Unit>? = null,
     val errorMessage: String? = null,
     // ---- 价格同步快照：与 PriceSyncPreferencesManager 磁盘值一一对应 ----

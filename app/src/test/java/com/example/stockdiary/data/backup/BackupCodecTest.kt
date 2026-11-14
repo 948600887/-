@@ -20,6 +20,7 @@ import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.unmockkAll
+import io.mockk.verify
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.asExecutor
 import kotlinx.coroutines.runBlocking
@@ -514,5 +515,195 @@ class BackupCodecTest {
         assertEquals(expected.transactions, payload.transactions)
         assertEquals(expected.stockBasics, payload.stockBasics)
         assertEquals(expected.fundNavCaches, payload.fundNavCaches)
+    }
+
+    // ------------------------------------------------------------------
+    // B5：buildPayload 必须走只读事务（7 次查询在同一一致性快照里）
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `buildPayload_七次查询包在withTransaction只读事务里`() = runBlocking {
+        coEvery { assetDao.getAllAssetsSync() } returns emptyList()
+        coEvery { snapshotDao.getAllSnapshotsSync() } returns emptyList()
+        coEvery { snapshotDao.getAllSnapshotDetailsSync() } returns emptyList()
+        coEvery { dividendDao.getAllSync() } returns emptyList()
+        coEvery { transactionDao.getAllTransactionsSync() } returns emptyList()
+        coEvery { stockBasicDao.getAll() } returns emptyList()
+        coEvery { fundNavCacheDao.getAll() } returns emptyList()
+
+        manager.buildPayload()
+
+        // withTransaction 的实现就是 beginTransaction / setTransactionSuccessful / endTransaction。
+        // 断言这三次调用，等价于断言 7 次查询都落在同一事务里（而不是 7 个各自独立的读）。
+        verify(exactly = 1) { db.beginTransaction() }
+        verify(exactly = 1) { db.setTransactionSuccessful() }
+        verify(exactly = 1) { db.endTransaction() }
+    }
+
+    // ------------------------------------------------------------------
+    // B3 支撑：summaryOf / hasSameIdentity 纯函数（二次摘要比对的可测落点）
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `summaryOf_从载荷重算的摘要与summary解析一致`() {
+        val payload = samplePayload()
+        assertEquals(BackupCodec.summary(BackupCodec.encode(payload)), BackupCodec.summaryOf(payload))
+    }
+
+    @Test
+    fun `hasSameIdentity_导出时间或任一表条数变化即判定不是同一份备份`() {
+        val payload = samplePayload()
+        val cached = BackupCodec.summaryOf(payload)
+        assertTrue(BackupCodec.hasSameIdentity(payload, cached))
+
+        assertFalse(
+            "导出时间变了必须拒绝",
+            BackupCodec.hasSameIdentity(payload, cached.copy(exportedAt = cached.exportedAt + 1))
+        )
+        assertFalse(
+            "格式版本变了必须拒绝",
+            BackupCodec.hasSameIdentity(payload, cached.copy(formatVersion = cached.formatVersion + 1))
+        )
+        assertFalse(
+            "资产条数变了必须拒绝",
+            BackupCodec.hasSameIdentity(payload, cached.copy(assetCount = cached.assetCount + 1))
+        )
+        assertFalse(
+            "快照明细条数变了必须拒绝",
+            BackupCodec.hasSameIdentity(payload, cached.copy(snapshotDetailCount = cached.snapshotDetailCount + 1))
+        )
+        assertFalse(
+            "基金净值缓存条数变了必须拒绝",
+            BackupCodec.hasSameIdentity(payload, cached.copy(fundNavCacheCount = cached.fundNavCacheCount + 1))
+        )
+        // dbVersion 只是排查元信息，不纳入身份判定
+        assertTrue(BackupCodec.hasSameIdentity(payload, cached.copy(dbVersion = -1)))
+    }
+
+    // ------------------------------------------------------------------
+    // B8：坏数据防御负向用例
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `encode_含NaN_抛InvalidBackupException而不是JSONException`() {
+        val payload = samplePayload().let { p ->
+            p.copy(assets = listOf(p.assets.first().copy(balance = Double.NaN)))
+        }
+        val e = assertThrows(InvalidBackupException::class.java) { BackupCodec.encode(payload) }
+        assertTrue(e.message?.contains("NaN") == true)
+    }
+
+    @Test
+    fun `encode_含Infinity_抛InvalidBackupException`() {
+        val payload = samplePayload().let { p ->
+            p.copy(assets = listOf(p.assets.first().copy(currentPrice = Double.POSITIVE_INFINITY)))
+        }
+        assertThrows(InvalidBackupException::class.java) { BackupCodec.encode(payload) }
+    }
+
+    @Test
+    fun `decode_1e400超范围数字_抛InvalidBackupException而不是静默写Infinity`() {
+        val json = JSONObject().apply {
+            put("formatVersion", BACKUP_FORMAT_VERSION)
+            put(
+                "assets",
+                JSONArray().put(JSONObject().apply {
+                    put("id", 1L)
+                    put("name", "x")
+                    put("type", "STOCK")
+                    put("account", "a")
+                    // org.json 把 1e400 解析成 BigDecimal，toDouble() 会溢出成 Infinity
+                    put("balance", java.math.BigDecimal("1e400"))
+                })
+            )
+        }.toString()
+        assertThrows(InvalidBackupException::class.java) { BackupCodec.decode(json) }
+    }
+
+    @Test
+    fun `decode_formatVersion为小数1_9_抛InvalidBackupException不能截成1放行`() {
+        val json = "{\"formatVersion\":1.9,\"assets\":[]}"
+        assertThrows(InvalidBackupException::class.java) { BackupCodec.decode(json) }
+        assertThrows(InvalidBackupException::class.java) { BackupCodec.summary(json) }
+    }
+
+    @Test
+    fun `decode_缺id_抛InvalidBackupException而不是回退0`() {
+        val json = JSONObject().apply {
+            put("formatVersion", BACKUP_FORMAT_VERSION)
+            put(
+                "assets",
+                JSONArray().put(JSONObject().apply {
+                    put("name", "无 id 的资产")
+                    put("type", "STOCK")
+                    put("account", "a")
+                })
+            )
+        }.toString()
+        val e = assertThrows(InvalidBackupException::class.java) { BackupCodec.decode(json) }
+        assertTrue(e.message?.contains("id") == true)
+    }
+
+    @Test
+    fun `decode_快照明细缺snapshotId或assetId_抛InvalidBackupException`() {
+        listOf("snapshotId", "assetId").forEach { missing ->
+            val row = JSONObject().apply {
+                put("id", 7L)
+                put("snapshotId", 1L)
+                put("assetId", 1L)
+                put("assetName", "x")
+                put("assetType", "STOCK")
+                remove(missing)
+            }
+            val json = JSONObject().apply {
+                put("formatVersion", BACKUP_FORMAT_VERSION)
+                put("snapshots", JSONArray().put(JSONObject().apply {
+                    put("id", 1L)
+                    put("timestamp", 1L)
+                    put("date", "2025-01-01")
+                }))
+                put("snapshotDetails", JSONArray().put(row))
+            }.toString()
+            assertThrows(InvalidBackupException::class.java) { BackupCodec.decode(json) }
+        }
+    }
+
+    @Test
+    fun `decode_重复主键_抛InvalidBackupException`() {
+        val p = samplePayload()
+        val duplicated = p.copy(assets = listOf(p.assets.first(), p.assets.first()))
+        val e = assertThrows(InvalidBackupException::class.java) {
+            BackupCodec.decode(BackupCodec.encode(duplicated))
+        }
+        assertTrue(e.message?.contains("重复主键") == true)
+    }
+
+    @Test
+    fun `decode_重复资产代码主键_抛InvalidBackupException`() {
+        val p = samplePayload()
+        val duplicated = p.copy(stockBasics = listOf(p.stockBasics.first(), p.stockBasics.first()))
+        assertThrows(InvalidBackupException::class.java) {
+            BackupCodec.decode(BackupCodec.encode(duplicated))
+        }
+    }
+
+    @Test
+    fun `decode_孤儿snapshotId_抛InvalidBackupException`() {
+        val p = samplePayload()
+        val orphan = p.copy(snapshotDetails = listOf(p.snapshotDetails.first().copy(snapshotId = 999L)))
+        val e = assertThrows(InvalidBackupException::class.java) {
+            BackupCodec.decode(BackupCodec.encode(orphan))
+        }
+        assertTrue(e.message?.contains("快照 id") == true)
+    }
+
+    @Test
+    fun `decode_孤儿assetId不强制拒绝_现网库可能已有孤儿明细`() {
+        val p = samplePayload()
+        val withOrphanAssetId = p.copy(
+            snapshotDetails = listOf(p.snapshotDetails.first().copy(assetId = 999L))
+        )
+        // assetId 只要求必填，不校验资产引用：否则有历史孤儿明细的用户连备份都导不出来
+        assertEquals(withOrphanAssetId, BackupCodec.decode(BackupCodec.encode(withOrphanAssetId)))
     }
 }

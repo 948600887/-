@@ -34,8 +34,15 @@ import com.example.stockdiary.database.TransactionDao
  */
 class BackupManager(private val db: StockDatabase) {
 
-    /** 从 7 个 DAO 各读一次全表，组装成可读 JSON 的载荷。 */
-    suspend fun buildPayload(): BackupPayload {
+    /**
+     * 从 7 个 DAO 各读一次全表，组装成可读 JSON 的载荷。
+     *
+     * B5：7 次查询包在**只读事务**里。不加事务而后台恰好在导出期间写库，会读到
+     * 「快照表是 T1 时刻、明细表是 T2 时刻」的撕裂快照 —— 新增明细对应的快照行还没读到、
+     * 或删掉的快照其明细还在，恢复出孤儿明细。Room 的 [withTransaction] 对只读查询同样
+     * 提供一致性快照，且不会阻塞写者（WAL 下读写并发）。
+     */
+    suspend fun buildPayload(): BackupPayload = db.withTransaction {
         val assetDao: AssetDao = db.assetDao()
         val snapshotDao: SnapshotDao = db.snapshotDao()
         val dividendDao: DividendDao = db.dividendDao()
@@ -43,7 +50,7 @@ class BackupManager(private val db: StockDatabase) {
         val stockBasicDao: StockBasicDao = db.stockBasicDao()
         val fundNavCacheDao: FundNavCacheDao = db.fundNavCacheDao()
 
-        return BackupPayload(
+        BackupPayload(
             formatVersion = BACKUP_FORMAT_VERSION,
             dbVersion = currentDbVersion(),
             exportedAt = System.currentTimeMillis(),

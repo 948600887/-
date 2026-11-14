@@ -84,11 +84,17 @@ data class BackupSummary(
  * 写入端一眼能核对「到底备份了什么」，读取端对**未知字段忽略**、对**缺失字段安全回退**
  * （兼容旧格式），对**类型错 / 关键字段缺失**抛 [InvalidBackupException]。
  *
- * ## 数值精度
+ * ## 数值精度与坏数据防御
  *
  * Double 一律走 `put(double)` / `getDouble` 一族（org.json 用 `Double.toString` 保 bit 级
  * 精度，项目内 DividendIncomeCacheVerifyTest 已坐实），不用 Float、不经过字符串手拼。
  * 可空字段写 `JSONObject.NULL`，读回 null；不会把 null 静默记成 0。
+ *
+ * NaN / Infinity 必须在写 JSON **之前**拦掉：org.json 的 `put(String, double)` 遇到非有限
+ * 值会抛 `JSONException`，让整份备份导出失败（且异常是英文、用户看不懂）；解码侧同理，
+ * `1e400` 会被 org.json 解析成 BigDecimal、`toDouble()` 变 Infinity 后静默写进 Room。
+ * 另外主键（id / snapshotId / assetId）缺失不能回退 0 —— Room 会重分配自增 id，而明细的
+ * snapshotId 仍是旧值，恢复出孤儿明细；故 decode 后统一校验主键唯一与 snapshotId 引用。
  *
  * 本 object 不依赖 Android Context、不碰 Room，可在 `testDebugUnitTest` 里直接跑。
  */
@@ -107,6 +113,9 @@ object BackupCodec {
 
     /** 把 [payload] 编码成缩进 2 空格、UTF-8 可读的 JSON 文本。 */
     fun encode(payload: BackupPayload): String {
+        // 在写任何 JSON 之前全量校验：org.json 的 put(double) 遇 NaN/Infinity 会抛
+        // JSONException 让整份备份导出失败，且是英文异常。这里换成可读的中文自定义异常。
+        requireFinitePayload(payload)
         val root = JSONObject()
         root.put(KEY_FORMAT_VERSION, payload.formatVersion)
         root.put(KEY_DB_VERSION, payload.dbVersion)
@@ -133,7 +142,7 @@ object BackupCodec {
     fun summary(json: String): BackupSummary {
         val root = parseRoot(json)
         return BackupSummary(
-            formatVersion = root.intField(KEY_FORMAT_VERSION, BACKUP_FORMAT_VERSION),
+            formatVersion = root.strictIntField(KEY_FORMAT_VERSION),
             dbVersion = root.intField(KEY_DB_VERSION, 0),
             exportedAt = root.longField(KEY_EXPORTED_AT, 0L),
             assetCount = rowsArray(root, KEY_ASSETS)?.length() ?: 0,
@@ -146,11 +155,49 @@ object BackupCodec {
         )
     }
 
+    /**
+     * 从已解码的载荷**重算**摘要。
+     *
+     * 恢复前二次 decode 后用它和确认时缓存的摘要比对，识别「用户在确认框停留期间文件被替换」。
+     * 纯函数、不读文件、不写库，可直接在 JVM 单测里钉死。
+     */
+    fun summaryOf(payload: BackupPayload): BackupSummary = BackupSummary(
+        formatVersion = payload.formatVersion,
+        dbVersion = payload.dbVersion,
+        exportedAt = payload.exportedAt,
+        assetCount = payload.assets.size,
+        snapshotCount = payload.snapshots.size,
+        snapshotDetailCount = payload.snapshotDetails.size,
+        dividendCount = payload.dividends.size,
+        transactionCount = payload.transactions.size,
+        stockBasicCount = payload.stockBasics.size,
+        fundNavCacheCount = payload.fundNavCaches.size
+    )
+
+    /**
+     * 比对「二次 decode 重算的摘要」与「确认时缓存的摘要」是否为同一份备份。
+     *
+     * 口径按 QA 规格钉死：exportedAt + formatVersion + 7 张表条数。dbVersion 只是排查元信息，
+     * 同一份文件它必然一致，不纳入身份判定；各表条数覆盖「换了另一份备份但导出时间恰好相同」。
+     */
+    fun hasSameIdentity(payload: BackupPayload, cached: BackupSummary): Boolean {
+        val now = summaryOf(payload)
+        return now.formatVersion == cached.formatVersion &&
+            now.exportedAt == cached.exportedAt &&
+            now.assetCount == cached.assetCount &&
+            now.snapshotCount == cached.snapshotCount &&
+            now.snapshotDetailCount == cached.snapshotDetailCount &&
+            now.dividendCount == cached.dividendCount &&
+            now.transactionCount == cached.transactionCount &&
+            now.stockBasicCount == cached.stockBasicCount &&
+            now.fundNavCacheCount == cached.fundNavCacheCount
+    }
+
     /** 把 JSON 文本完整解码成 [BackupPayload]；任何结构问题都抛可捕获的自定义异常。 */
     fun decode(json: String): BackupPayload {
         val root = parseRoot(json)
-        return BackupPayload(
-            formatVersion = root.intField(KEY_FORMAT_VERSION, BACKUP_FORMAT_VERSION),
+        val payload = BackupPayload(
+            formatVersion = root.strictIntField(KEY_FORMAT_VERSION),
             dbVersion = root.intField(KEY_DB_VERSION, 0),
             exportedAt = root.longField(KEY_EXPORTED_AT, 0L),
             assets = decodeRows(root, KEY_ASSETS) { decodeAsset(it) },
@@ -161,6 +208,92 @@ object BackupCodec {
             stockBasics = decodeRows(root, KEY_STOCK_BASICS) { decodeStockBasic(it) },
             fundNavCaches = decodeRows(root, KEY_FUND_NAV_CACHES) { decodeFundNavCache(it) }
         )
+        validatePayload(payload)
+        return payload
+    }
+
+    /**
+     * decode 后的跨表一致性校验（B8-5）：各表主键唯一、快照明细的 snapshotId 必须指向真实快照。
+     *
+     * 主键重复会让 Room 的 REPLACE/Upsert 静默吞行；snapshotId 悬空会产生永远查不出来的
+     * 孤儿明细。两者都必须在**事务外**拦掉，绝不写库。
+     *
+     * `assetId` 刻意不校验资产引用：现网库可能已有孤儿明细（历史导入/删除遗留），
+     * 强制校验会让这些用户连备份都导不出来。QA 规格明确只要求 assetId 必填。
+     */
+    private fun validatePayload(payload: BackupPayload) {
+        assertUniqueKeys("assets.id", payload.assets.map { it.id })
+        assertUniqueKeys("asset_snapshots.id", payload.snapshots.map { it.id })
+        assertUniqueKeys("asset_snapshot_details.id", payload.snapshotDetails.map { it.id })
+        assertUniqueKeys("dividend.id", payload.dividends.map { it.id })
+        assertUniqueKeys("transactions.id", payload.transactions.map { it.id })
+        assertUniqueKeys("stock_basic.code", payload.stockBasics.map { it.code })
+        assertUniqueKeys("fund_nav_cache.code", payload.fundNavCaches.map { it.code })
+
+        val snapshotIds = payload.snapshots.map { it.id }.toSet()
+        payload.snapshotDetails.firstOrNull { it.snapshotId !in snapshotIds }?.let { orphan ->
+            throw InvalidBackupException(
+                "备份的快照明细引用了不存在的快照 id=${orphan.snapshotId}，文件不完整"
+            )
+        }
+    }
+
+    private fun <T> assertUniqueKeys(table: String, keys: List<T>) {
+        if (keys.size == keys.toSet().size) return
+        val duplicate = keys.groupBy { it }.entries.first { it.value.size > 1 }.key
+        throw InvalidBackupException("备份表 $table 存在重复主键：$duplicate")
+    }
+
+    /** 导出前全量校验 Double：任何 NaN/Infinity 都在写 JSON 之前变成可读的中文异常。 */
+    private fun requireFinitePayload(payload: BackupPayload) {
+        payload.assets.forEach {
+            requireFinite("assets.balance", it.balance)
+            requireFinite("assets.purchasePrice", it.purchasePrice)
+            requireFinite("assets.currentPrice", it.currentPrice)
+            requireFinite("assets.interestRate", it.interestRate)
+            requireFinite("assets.millionCopiesIncome", it.millionCopiesIncome)
+        }
+        payload.snapshots.forEach {
+            requireFinite("snapshots.totalAssets", it.totalAssets)
+            requireFinite("snapshots.totalLiabilities", it.totalLiabilities)
+            requireFinite("snapshots.netAssets", it.netAssets)
+            requireFinite("snapshots.totalCost", it.totalCost)
+            requireFinite("snapshots.totalProfit", it.totalProfit)
+            requireFinite("snapshots.yieldRate", it.yieldRate)
+            requireFinite("snapshots.stockValue", it.stockValue)
+            requireFinite("snapshots.fundValue", it.fundValue)
+            requireFinite("snapshots.cryptoValue", it.cryptoValue)
+            requireFinite("snapshots.bankDepositValue", it.bankDepositValue)
+            requireFinite("snapshots.stockCost", it.stockCost)
+            requireFinite("snapshots.fundCost", it.fundCost)
+            requireFinite("snapshots.cryptoCost", it.cryptoCost)
+            requireFinite("snapshots.bankDepositCost", it.bankDepositCost)
+        }
+        payload.snapshotDetails.forEach {
+            requireFinite("snapshotDetails.balance", it.balance)
+            requireFinite("snapshotDetails.price", it.price)
+            requireFinite("snapshotDetails.totalValue", it.totalValue)
+            requireFinite("snapshotDetails.cost", it.cost)
+            requireFinite("snapshotDetails.profit", it.profit)
+            requireFinite("snapshotDetails.yieldRate", it.yieldRate)
+        }
+        payload.dividends.forEach { requireFinite("dividends.amount", it.amount) }
+        payload.transactions.forEach {
+            requireFinite("transactions.quantity", it.quantity)
+            requireFinite("transactions.price", it.price)
+            requireFinite("transactions.fee", it.fee)
+        }
+        payload.fundNavCaches.forEach {
+            requireFinite("fundNavCaches.nav", it.nav)
+            requireFinite("fundNavCaches.changePercent", it.changePercent)
+            requireFinite("fundNavCaches.millionCopiesIncome", it.millionCopiesIncome)
+        }
+    }
+
+    private fun requireFinite(field: String, value: Double?) {
+        if (value != null && (value.isNaN() || value.isInfinite())) {
+            throw InvalidBackupException("备份含非有限数值（NaN/Infinity）：$field，无法导出")
+        }
     }
 
     // ---------------------------------------------------------------------
@@ -264,7 +397,12 @@ object BackupCodec {
     }
 
     private fun JSONObject.putDoubleOrNull(key: String, value: Double?) {
-        if (value == null) put(key, JSONObject.NULL) else put(key, value)
+        if (value == null) {
+            put(key, JSONObject.NULL)
+        } else {
+            requireFinite(key, value)
+            put(key, value)
+        }
     }
 
     // ---------------------------------------------------------------------
@@ -293,26 +431,90 @@ object BackupCodec {
 
     private fun JSONObject.longField(key: String, default: Long = 0L): Long {
         val value = raw(key) ?: return default
-        return (value as? Number)?.toLong()
+        val number = value as? Number
             ?: throw InvalidBackupException("备份字段 $key 应为整数，实际 ${value.javaClass.simpleName}")
+        val asDouble = number.toDouble()
+        if (asDouble.isNaN() || asDouble.isInfinite()) {
+            throw InvalidBackupException("备份字段 $key 含非有限数值：$value")
+        }
+        return number.toLong()
     }
 
     private fun JSONObject.intField(key: String, default: Int = 0): Int {
         val value = raw(key) ?: return default
-        return (value as? Number)?.toInt()
-            ?: throw InvalidBackupException("备份字段 $key 应为整数，实际 ${value.javaClass.simpleName}")
+        return strictInt(key, value)
+    }
+
+    /** 必填整数：缺失直接报错，绝不静默回退 0（B8-3）。 */
+    private fun JSONObject.strictIntField(key: String): Int {
+        val value = raw(key) ?: throw InvalidBackupException("备份缺少关键字段 $key")
+        return strictInt(key, value)
+    }
+
+    /**
+     * 整型严格解析：`1.9` 不能截成 1 放行，`1e400` 不能变成 Infinity 再截断。
+     * org.json 把超范围数字解析成 BigDecimal，先转 double 判有限与无小数，再转 Int。
+     */
+    private fun strictInt(key: String, value: Any): Int {
+        if (value !is Number) {
+            throw InvalidBackupException("备份字段 $key 应为整数，实际 ${value.javaClass.simpleName}")
+        }
+        val asDouble = value.toDouble()
+        if (asDouble.isNaN() || asDouble.isInfinite() ||
+            asDouble != asDouble.toLong().toDouble() ||
+            asDouble < Int.MIN_VALUE.toDouble() || asDouble > Int.MAX_VALUE.toDouble()
+        ) {
+            throw InvalidBackupException("备份字段 $key 应为 32 位整数，实际 $value")
+        }
+        return value.toInt()
     }
 
     private fun JSONObject.doubleField(key: String, default: Double = 0.0): Double {
         val value = raw(key) ?: return default
-        return (value as? Number)?.toDouble()
+        val number = value as? Number
             ?: throw InvalidBackupException("备份字段 $key 应为数字，实际 ${value.javaClass.simpleName}")
+        val result = number.toDouble()
+        if (result.isNaN() || result.isInfinite()) {
+            throw InvalidBackupException("备份字段 $key 含非有限数值：$value")
+        }
+        return result
     }
 
     private fun JSONObject.optionalDouble(key: String): Double? {
         val value = raw(key) ?: return null
-        return (value as? Number)?.toDouble()
+        val number = value as? Number
             ?: throw InvalidBackupException("备份字段 $key 应为数字或 null，实际 ${value.javaClass.simpleName}")
+        val result = number.toDouble()
+        if (result.isNaN() || result.isInfinite()) {
+            throw InvalidBackupException("备份字段 $key 含非有限数值：$value")
+        }
+        return result
+    }
+
+    /**
+     * 必填 Long 主键 / 外键（B8-4）。
+     *
+     * 缺 id 若静默回退 0，Room 会重分配自增 id，而明细里的 snapshotId / assetId 仍是旧值，
+     * 恢复完得到一批永远查不出来的孤儿明细。宁可拒绝恢复，也不能写半份数据。
+     */
+    private fun JSONObject.requiredLong(key: String): Long {
+        val value = raw(key) ?: throw InvalidBackupException("备份缺少必填字段 $key（主键/外键不可省略）")
+        val number = value as? Number
+            ?: throw InvalidBackupException("备份字段 $key 应为整数，实际 ${value.javaClass.simpleName}")
+        val asDouble = number.toDouble()
+        if (asDouble.isNaN() || asDouble.isInfinite() || asDouble != asDouble.toLong().toDouble()) {
+            throw InvalidBackupException("备份字段 $key 应为整数，实际 $value")
+        }
+        return number.toLong()
+    }
+
+    /** 必填 Int 主键（dividend.id 是 Int）。 */
+    private fun JSONObject.requiredInt(key: String): Int {
+        val value = requiredLong(key)
+        if (value < Int.MIN_VALUE || value > Int.MAX_VALUE) {
+            throw InvalidBackupException("备份字段 $key 超出 32 位整数范围：$value")
+        }
+        return value.toInt()
     }
 
     private fun JSONObject.boolField(key: String, default: Boolean = false): Boolean {
@@ -366,10 +568,11 @@ object BackupCodec {
         } catch (e: JSONException) {
             throw InvalidBackupException("备份文件不是合法的 JSON：${e.message}", e)
         }
-        val rawVersion = root.raw(KEY_FORMAT_VERSION)
-            ?: throw InvalidBackupException("备份缺少关键字段 formatVersion，无法确认格式版本")
-        val formatVersion = (rawVersion as? Number)?.toInt()
-            ?: throw InvalidBackupException("备份字段 formatVersion 应为整数")
+        if (root.raw(KEY_FORMAT_VERSION) == null) {
+            throw InvalidBackupException("备份缺少关键字段 formatVersion，无法确认格式版本")
+        }
+        // 必须严格整型：1.9 不能截成 1 放行，1e400 不能变成 Infinity 再截断
+        val formatVersion = root.strictIntField(KEY_FORMAT_VERSION)
         if (formatVersion > BACKUP_FORMAT_VERSION) {
             throw UnsupportedBackupVersionException(formatVersion, BACKUP_FORMAT_VERSION)
         }
@@ -384,7 +587,7 @@ object BackupCodec {
     // ---------------------------------------------------------------------
 
     private fun decodeAsset(o: JSONObject): Asset = Asset(
-        id = o.longField("id"),
+        id = o.requiredLong("id"),
         name = o.requiredString("name"),
         type = o.assetTypeField("type"),
         symbol = o.optionalString("symbol"),
@@ -403,7 +606,7 @@ object BackupCodec {
     )
 
     private fun decodeSnapshot(o: JSONObject): AssetSnapshot = AssetSnapshot(
-        id = o.longField("id"),
+        id = o.requiredLong("id"),
         timestamp = o.longField("timestamp"),
         date = o.requiredString("date"),
         totalAssets = o.doubleField("totalAssets"),
@@ -423,9 +626,9 @@ object BackupCodec {
     )
 
     private fun decodeSnapshotDetail(o: JSONObject): AssetSnapshotDetail = AssetSnapshotDetail(
-        id = o.longField("id"),
-        snapshotId = o.longField("snapshotId"),
-        assetId = o.longField("assetId"),
+        id = o.requiredLong("id"),
+        snapshotId = o.requiredLong("snapshotId"),
+        assetId = o.requiredLong("assetId"),
         assetName = o.requiredString("assetName"),
         assetType = o.assetTypeField("assetType"),
         balance = o.doubleField("balance"),
@@ -437,7 +640,7 @@ object BackupCodec {
     )
 
     private fun decodeDividend(o: JSONObject): Dividend = Dividend(
-        id = o.intField("id"),
+        id = o.requiredInt("id"),
         symbol = o.requiredString("symbol"),
         name = o.requiredString("name"),
         amount = o.doubleField("amount"),
@@ -447,7 +650,7 @@ object BackupCodec {
     )
 
     private fun decodeTransaction(o: JSONObject): Transaction = Transaction(
-        id = o.longField("id"),
+        id = o.requiredLong("id"),
         symbol = o.requiredString("symbol"),
         name = o.requiredString("name"),
         type = o.requiredString("type"),

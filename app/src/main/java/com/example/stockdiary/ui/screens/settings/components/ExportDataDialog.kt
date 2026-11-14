@@ -59,6 +59,7 @@ fun ExportDataDialog(
     transactionCount: Int,
     dividendCount: Int,
     isExporting: Boolean,
+    isBackingUp: Boolean,
     onExport: (SettingsViewModel.ExportType) -> Unit,
     onBackupExport: () -> Unit,
     onBackupRestore: () -> Unit,
@@ -178,9 +179,11 @@ fun ExportDataDialog(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Spacer(modifier = Modifier.height(8.dp))
+                // B4 ①：两个守卫都要挡。isBackingUp 覆盖 readBackup/restoreBackup 进行中，
+                // 那时 isExporting 仍是 false，只挡 isExporting 会让用户在恢复途中再点一次备份。
                 OutlinedButton(
                     onClick = onBackupExport,
-                    enabled = !isExporting,
+                    enabled = !isExporting && !isBackingUp,
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Text("导出全量备份（可恢复）")
@@ -188,7 +191,7 @@ fun ExportDataDialog(
                 Spacer(modifier = Modifier.height(4.dp))
                 OutlinedButton(
                     onClick = onBackupRestore,
-                    enabled = !isExporting,
+                    enabled = !isExporting && !isBackingUp,
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Text("从备份恢复")

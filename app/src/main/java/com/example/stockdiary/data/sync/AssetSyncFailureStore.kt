@@ -71,13 +71,17 @@ class AssetSyncFailureStore private constructor(context: Context) {
      * 「上次更新未成功」。这里两个地方一起清，[loadFailedIds] 读不到键值即回落空集合。
      *
      * 与 [applyOutcomes] 同样加 [Synchronized]：恢复跑在 IO 协程，同步结果可能并发写入。
+     *
+     * 落盘用 `commit()` 而非 `apply()`（B7）：恢复后用户大概率立刻重启 App，apply 的异步
+     * 落盘可能来不及写，旧失败集合又被读回，卡片重新挂上「上次更新未成功」。本方法已在
+     * IO 协程调用，同步落盘不阻塞界面。
      */
     @Synchronized
     fun clear() {
         if (_failedAssetIds.value.isNotEmpty()) {
             _failedAssetIds.value = emptySet()
         }
-        prefs.edit().remove(KEY_FAILED_ASSET_IDS).apply()
+        prefs.edit().remove(KEY_FAILED_ASSET_IDS).commit()
     }
 
     private fun loadFailedIds(): Set<Long> =

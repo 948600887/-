@@ -1,13 +1,19 @@
 package com.example.stockdiary.ui.viewmodels
 
+import android.content.ContentResolver
 import android.content.Context
+import android.net.Uri
+import com.example.stockdiary.data.backup.BackupCodec
 import com.example.stockdiary.data.backup.BackupManager
+import com.example.stockdiary.data.backup.BackupPayload
 import com.example.stockdiary.data.export.DataExporter
 import com.example.stockdiary.data.prefs.DashboardPreferences
 import com.example.stockdiary.data.prefs.DashboardPreferencesManager
 import com.example.stockdiary.data.prefs.SortOrder
 import com.example.stockdiary.data.repository.AssetRepository
 import com.example.stockdiary.data.price.PriceCacheMaintenance
+import com.example.stockdiary.data.prefs.SnapshotManualAdjustmentStore
+import com.example.stockdiary.data.sync.AssetSyncFailureStore
 import com.example.stockdiary.data.sync.PriceSyncPreferencesManager
 import com.example.stockdiary.data.sync.PriceSyncScheduler
 import com.example.stockdiary.data.sync.SnapshotScheduler
@@ -18,6 +24,7 @@ import com.example.stockdiary.utils.AppLogger
 import com.example.stockdiary.utils.DataSourceHealth
 import com.example.stockdiary.utils.DataSourceHealthChecker
 import com.example.stockdiary.utils.ExchangeRateManager
+import java.io.ByteArrayInputStream
 import io.mockk.Runs
 import io.mockk.coEvery
 import io.mockk.coVerify
@@ -33,11 +40,13 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
+import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import org.junit.After
 import org.junit.AfterClass
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -461,5 +470,228 @@ class SettingsViewModelTest {
         assertEquals(1_700_000_000_000L, vm.uiState.value.lastPriceSyncTime)
         assertTrue(vm.uiState.value.stockIntradaySyncEnabled)
         assertTrue(vm.uiState.value.cryptoAutoSyncEnabled)
+    }
+
+    // ==================== 全量备份 / 恢复：VM 状态机（QA B1/B2/B3/B4/B6 回归） ====================
+    //
+    // 这一组专门补 QA 指出的「UI/VM 层零测试」空白。Android 框架类在 JVM 单测里用
+    // MockK 构造：Uri = mockk<Uri>(relaxed)，ContentResolver 自己持一份 relaxed mock 并
+    // 让 appContext.contentResolver 返回它，openInputStream 返回纯 JDK 的 ByteArrayInputStream。
+    // VM 内部 viewModelScope.launch(Dispatchers.IO) 走真实 IO 线程，runTest 的虚拟时钟推不动，
+    // 断言沿用本文件既有约定：waitUntil 实时轮询等状态落地。
+
+    private val contentResolver = mockk<ContentResolver>(relaxed = true)
+
+    /** 构造一份能被 decode 全量校验通过的合法备份 JSON。 */
+    private fun backupJson(exportedAt: Long, assetCount: Int = 1): String {
+        val assets = (1..assetCount).map { i ->
+            com.example.stockdiary.database.Asset(
+                id = i.toLong(),
+                name = "资产$i",
+                type = com.example.stockdiary.database.AssetType.STOCK,
+                account = "默认账户"
+            )
+        }
+        return BackupCodec.encode(
+            BackupPayload(formatVersion = 1, dbVersion = 18, exportedAt = exportedAt, assets = assets)
+        )
+    }
+
+    /** 让 appContext 走我们能控制的 ContentResolver；每次调用返回一份新的流。 */
+    private fun stubInputStream(uri: Uri, jsonProvider: (Int) -> String) {
+        val reads = AtomicInteger(0)
+        every { appContext.contentResolver } returns contentResolver
+        every { contentResolver.openInputStream(uri) } answers {
+            ByteArrayInputStream(jsonProvider(reads.getAndIncrement()).toByteArray(Charsets.UTF_8))
+        }
+    }
+
+    // 不 mock AppLogger：单测配置已让 android.util.Log 退化为空操作，且 queueLog
+    // 自带 try/catch 兜底，本文件既有用例（如 deleteAllData）也一直是直接跑真身。
+    // 避免为 w(String,String) / w(String,Throwable,String) 两个重载打桩时引入歧义。
+
+    @Test
+    fun `readBackup 成功时原子设置含Uri与摘要的pendingRestore`() = runTest {
+
+        val uri = mockk<Uri>(relaxed = true)
+        stubInputStream(uri) { backupJson(1_700_000_000_000L, assetCount = 2) }
+
+        vm.readBackup(uri)
+        assertTrue("readBackup 应设置 pendingRestore", waitUntil { vm.uiState.value.pendingRestore != null })
+
+        val pending = vm.uiState.value.pendingRestore
+        assertNotNull(pending)
+        assertEquals("Uri 必须与摘要同在 ViewModel 里，不能只留摘要", uri, pending?.uri)
+        assertEquals(1, pending?.summary?.formatVersion)
+        assertEquals(18, pending?.summary?.dbVersion)
+        assertEquals(1_700_000_000_000L, pending?.summary?.exportedAt)
+        assertEquals(2, pending?.summary?.assetCount)
+        assertEquals(0, pending?.summary?.snapshotCount)
+        assertFalse(vm.uiState.value.isBackingUp)
+    }
+
+    @Test
+    fun `readBackup 坏文件失败并清空pendingRestore且给出可读错误`() = runTest {
+
+        val uri = mockk<Uri>(relaxed = true)
+        stubInputStream(uri) { "这不是 JSON" }
+
+        vm.readBackup(uri)
+        assertTrue(waitUntil { vm.uiState.value.backupResult != null })
+
+        assertNull(vm.uiState.value.pendingRestore)
+        assertFalse(vm.uiState.value.isBackingUp)
+        assertTrue(vm.uiState.value.backupResult?.isError == true)
+        // readableBackupError 对自定义 InvalidBackupException 原样透传其自身中文消息
+        // （"备份文件不是合法的 JSON…"），不套英文堆栈，也不静默
+        val message = vm.uiState.value.backupResult?.exceptionOrNull()?.message.orEmpty()
+        assertTrue("应给出可读的中文错误，实际：$message", message.contains("备份"))
+        assertFalse(message.contains("JSONException"))
+    }
+
+    @Test
+    fun `restoreBackup 二次读流成功恢复并清空pendingRestore`() = runTest {
+
+        val uri = mockk<Uri>(relaxed = true)
+        val json = backupJson(1_700_000_000_000L)
+        val reads = AtomicInteger(0)
+        every { appContext.contentResolver } returns contentResolver
+        every { contentResolver.openInputStream(uri) } answers {
+            reads.incrementAndGet()
+            ByteArrayInputStream(json.toByteArray(Charsets.UTF_8))
+        }
+        coEvery { backupManager.restore(any()) } just Runs
+
+        vm.readBackup(uri)
+        assertTrue(waitUntil { vm.uiState.value.pendingRestore != null })
+        vm.restoreBackup()
+        assertTrue(waitUntil { vm.uiState.value.backupResult != null })
+
+        assertEquals("必须二次读流，不信任缓存摘要", 2, reads.get())
+        coVerify(exactly = 1) { backupManager.restore(any()) }
+        assertNull(vm.uiState.value.pendingRestore)
+        assertTrue(vm.uiState.value.backupResult?.isSuccess == true)
+        assertFalse(vm.uiState.value.isBackingUp)
+    }
+
+    @Test
+    fun `restoreBackup 二次摘要不一致时中止且零写库`() = runTest {
+
+        val uri = mockk<Uri>(relaxed = true)
+        // 第一次（只读摘要）是一份文件，第二次（确认后 decode）已被换成另一份
+        stubInputStream(uri) { n -> if (n == 0) backupJson(111L) else backupJson(222L) }
+
+        vm.readBackup(uri)
+        assertTrue(waitUntil { vm.uiState.value.pendingRestore != null })
+        vm.restoreBackup()
+        assertTrue(waitUntil { vm.uiState.value.backupResult != null })
+
+        coVerify(exactly = 0) { backupManager.restore(any()) }
+        coVerify(exactly = 0) { priceCacheMaintenance.clearDerivedCaches() }
+        assertNull(vm.uiState.value.pendingRestore)
+        assertTrue(vm.uiState.value.backupResult?.isError == true)
+        assertTrue(
+            "必须给出中文提示而不是静默",
+            vm.uiState.value.backupResult?.exceptionOrNull()?.message
+                ?.contains("备份文件在确认期间发生变化") == true
+        )
+    }
+
+    @Test
+    fun `clearPendingRestore 取消后清空且restoreBackup不再写库`() = runTest {
+
+        val uri = mockk<Uri>(relaxed = true)
+        stubInputStream(uri) { backupJson(333L) }
+
+        vm.readBackup(uri)
+        assertTrue(waitUntil { vm.uiState.value.pendingRestore != null })
+        assertNotNull(vm.uiState.value.pendingRestore)
+
+        vm.clearPendingRestore()
+        assertNull(vm.uiState.value.pendingRestore)
+
+        // 取消后再误触恢复（例如旋转后残留的点击）：不得写库，且必须给明确提示
+        vm.restoreBackup()
+        coVerify(exactly = 0) { backupManager.restore(any()) }
+        assertTrue(vm.uiState.value.backupResult?.isError == true)
+        assertTrue(
+            vm.uiState.value.backupResult?.exceptionOrNull()?.message
+                ?.contains("请重新选择备份文件") == true
+        )
+    }
+
+    @Test
+    fun `B1 清派生缓存严格在restore之前_其余六项复位在restore之后`() = runTest {
+
+        val uri = mockk<Uri>(relaxed = true)
+        stubInputStream(uri) { backupJson(444L) }
+        val order = mutableListOf<String>()
+
+        coEvery { priceCacheMaintenance.clearDerivedCaches() } answers { order.add("clearDerived"); Unit }
+        coEvery { backupManager.restore(any()) } answers { order.add("restore"); Unit }
+        every { dashboardPreferencesManager.invalidateAnnualDividendIncome() } answers {
+            order.add("invalidate"); DashboardPreferences()
+        }
+        every { dividendRepository.clearCache() } answers { order.add("clearCache"); Unit }
+        every { dividendRepository.clearFetchState() } answers { order.add("clearFetchState"); Unit }
+
+        val adjustments = mockk<SnapshotManualAdjustmentStore>(relaxed = true)
+        mockkObject(SnapshotManualAdjustmentStore)
+        every { SnapshotManualAdjustmentStore.getInstance(any()) } returns adjustments
+        every { adjustments.clearAll() } answers { order.add("clearAll"); Unit }
+
+        mockkObject(ExchangeRateManager)
+        every { ExchangeRateManager.resetToDefaultRates() } answers { order.add("rates"); Unit }
+
+        val failures = mockk<AssetSyncFailureStore>(relaxed = true)
+        mockkObject(AssetSyncFailureStore)
+        every { AssetSyncFailureStore.getInstance(any()) } returns failures
+        every { failures.clear() } answers { order.add("failureStore"); Unit }
+
+        vm.readBackup(uri)
+        assertTrue(waitUntil { vm.uiState.value.pendingRestore != null })
+        vm.restoreBackup()
+        assertTrue(waitUntil { vm.uiState.value.backupResult != null })
+
+        // 6+1 项复位：前置 1 项（清旧库派生缓存）+ 后置 6 项
+        assertEquals(
+            listOf(
+                "clearDerived", "restore",
+                "invalidate", "clearCache", "clearFetchState", "clearAll", "rates", "failureStore"
+            ),
+            order
+        )
+        assertTrue(
+            "B1：clearDerivedCaches 必须在 backupManager.restore 之前，否则会删掉刚写回的第 7 张表",
+            order.indexOf("clearDerived") < order.indexOf("restore")
+        )
+        assertFalse(
+            "B1：restore 之后不得再出现 clearDerivedCaches",
+            order.drop(order.indexOf("restore") + 1).contains("clearDerived")
+        )
+        coVerify(exactly = 1) { priceCacheMaintenance.clearDerivedCaches() }
+        assertTrue(vm.uiState.value.backupResult?.isSuccess == true)
+    }
+
+    @Test
+    fun `B4 exportBackup 失败时清空pendingRestore并删除残件`() = runTest {
+
+        val uri = mockk<Uri>(relaxed = true)
+        val backupUri = mockk<Uri>(relaxed = true)
+        stubInputStream(uri) { backupJson(555L) }
+        every { appContext.contentResolver } returns contentResolver
+        every { contentResolver.openOutputStream(backupUri) } throws IllegalStateException("磁盘已满")
+        every { contentResolver.delete(backupUri, null, null) } returns 1
+
+        vm.readBackup(uri)
+        assertTrue(waitUntil { vm.uiState.value.pendingRestore != null })
+        vm.exportBackup(backupUri)
+        assertTrue(waitUntil { vm.uiState.value.backupResult != null })
+
+        assertNull("导出开始/失败都要清掉残留的待恢复确认框", vm.uiState.value.pendingRestore)
+        assertTrue(vm.uiState.value.backupResult?.isError == true)
+        assertFalse(vm.uiState.value.isExporting)
+        assertFalse(vm.uiState.value.isBackingUp)
+        verify { contentResolver.delete(backupUri, null, null) }
     }
 }

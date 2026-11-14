@@ -114,7 +114,10 @@ class DividendRepository private constructor(
      * 用户以为清干净了、分红却一直空白。见 [AssetRepository.deleteAllData]。
      */
     fun clearFetchState() {
-        runCatching { fetchState.edit().clear().apply() }
+        // B7：恢复后用户大概率立刻重启 App，apply 的异步落盘可能来不及写，
+        // 旧 fetchState 被读回会让最长 7 天不再真正重抓分红。调用点都在 IO 协程，
+        // 用 commit 同步落盘；只改落盘方式，不动 A16 守卫与抓取逻辑。
+        runCatching { fetchState.edit().clear().commit() }
     }
 
     /** 记录一次抓取完成（不管抓没抓到）。必须在抓取**成功**后写，失败时写会把错误固化 24 小时 */

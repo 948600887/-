@@ -20,8 +20,10 @@ import androidx.compose.material.icons.filled.TableChart
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -58,6 +60,8 @@ fun ExportDataDialog(
     dividendCount: Int,
     isExporting: Boolean,
     onExport: (SettingsViewModel.ExportType) -> Unit,
+    onBackupExport: () -> Unit,
+    onBackupRestore: () -> Unit,
     onDismiss: () -> Unit
 ) {
     // 可用内容：按数据有无动态显示（空库时对应项不出现，和旧逻辑一致）
@@ -161,6 +165,41 @@ fun ExportDataDialog(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
+
+                // 「备份与恢复」与上面 6 种「给人看的对账单」是两回事：
+                // 前者是可回灌的结构化 JSON（Room 全表），后者只用于阅读/打印。
+                // 单独分组 + 分隔线，避免用户把 CSV 当成能恢复账目的备份。
+                Spacer(modifier = Modifier.height(16.dp))
+                HorizontalDivider()
+                Spacer(modifier = Modifier.height(12.dp))
+                Text(
+                    text = "3. 备份与恢复（可回灌）",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                OutlinedButton(
+                    onClick = onBackupExport,
+                    enabled = !isExporting,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("导出全量备份（可恢复）")
+                }
+                Spacer(modifier = Modifier.height(4.dp))
+                OutlinedButton(
+                    onClick = onBackupRestore,
+                    enabled = !isExporting,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("从备份恢复")
+                }
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = "包含全部资产/交易/分红/历史快照；不含显示偏好与币安 API 密钥。" +
+                        "备份文件由你自己选择保存位置。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
         },
         confirmButton = {

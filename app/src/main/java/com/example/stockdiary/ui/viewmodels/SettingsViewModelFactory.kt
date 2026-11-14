@@ -24,7 +24,8 @@ fun createSettingsViewModelFactory(container: AppContainer): ViewModelProvider.F
             dashboardPreferencesManager = container.dashboardPreferencesManager,
             dataSourceHealthChecker = DataSourceHealthChecker,
             priceSyncPreferencesManager = container.priceSyncPreferencesManager,
-            priceCacheMaintenance = container.priceCacheMaintenance
+            priceCacheMaintenance = container.priceCacheMaintenance,
+            backupManager = container.backupManager
         )
     }
 }

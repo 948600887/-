@@ -1,6 +1,7 @@
 package com.example.stockdiary.ui.viewmodels
 
 import android.content.Context
+import com.example.stockdiary.data.backup.BackupManager
 import com.example.stockdiary.data.export.DataExporter
 import com.example.stockdiary.data.prefs.DashboardPreferences
 import com.example.stockdiary.data.prefs.DashboardPreferencesManager
@@ -80,6 +81,8 @@ class SettingsViewModelTest {
     private val dataSourceHealthChecker = mockk<DataSourceHealthChecker>(relaxed = true)
     private val priceSyncPreferencesManager = mockk<PriceSyncPreferencesManager>(relaxed = true)
     private val priceCacheMaintenance = mockk<PriceCacheMaintenance>(relaxed = true)
+    // 备份/恢复在本文件不测（由 BackupCodecTest 覆盖数据层契约），这里只需让 VM 能构造
+    private val backupManager = mockk<BackupManager>(relaxed = true)
 
     /** Manager 持有的全应用唯一偏好流；VM 直接暴露它，不再自建副本 */
     private lateinit var prefsFlow: MutableStateFlow<DashboardPreferences>
@@ -119,7 +122,8 @@ class SettingsViewModelTest {
             dashboardPreferencesManager = dashboardPreferencesManager,
             dataSourceHealthChecker = dataSourceHealthChecker,
             priceSyncPreferencesManager = priceSyncPreferencesManager,
-            priceCacheMaintenance = priceCacheMaintenance
+            priceCacheMaintenance = priceCacheMaintenance,
+            backupManager = backupManager
         )
     }
 
@@ -314,7 +318,8 @@ class SettingsViewModelTest {
             dashboardPreferencesManager = dashboardPreferencesManager,
             dataSourceHealthChecker = dataSourceHealthChecker,
             priceSyncPreferencesManager = priceSyncPreferencesManager,
-            priceCacheMaintenance = priceCacheMaintenance
+            priceCacheMaintenance = priceCacheMaintenance,
+            backupManager = backupManager
         )
     }
 

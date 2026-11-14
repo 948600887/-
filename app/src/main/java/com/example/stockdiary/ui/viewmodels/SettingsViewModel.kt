@@ -7,11 +7,16 @@ import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.stockdiary.common.Result
+import com.example.stockdiary.data.backup.BackupCodec
+import com.example.stockdiary.data.backup.BackupManager
+import com.example.stockdiary.data.backup.InvalidBackupException
+import com.example.stockdiary.data.backup.UnsupportedBackupVersionException
 import com.example.stockdiary.data.repository.AssetRepository
 import com.example.stockdiary.data.prefs.DashboardPreferences
 import com.example.stockdiary.data.prefs.DashboardPreferencesManager
 import com.example.stockdiary.data.export.DataExporter
 import com.example.stockdiary.data.price.PriceCacheMaintenance
+import com.example.stockdiary.data.sync.AssetSyncFailureStore
 import com.example.stockdiary.data.sync.PriceSyncPreferencesManager
 import com.example.stockdiary.data.sync.PriceSyncScheduler
 import com.example.stockdiary.data.sync.SnapshotScheduler
@@ -47,7 +52,8 @@ class SettingsViewModel(
     private val dashboardPreferencesManager: DashboardPreferencesManager,
     private val dataSourceHealthChecker: DataSourceHealthChecker,
     private val priceSyncPreferencesManager: PriceSyncPreferencesManager,
-    private val priceCacheMaintenance: PriceCacheMaintenance
+    private val priceCacheMaintenance: PriceCacheMaintenance,
+    private val backupManager: BackupManager
 ) : ViewModel() {
 
 
@@ -218,6 +224,226 @@ class SettingsViewModel(
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
         context.startActivity(Intent.createChooser(shareIntent, title))
+    }
+
+    // ==================================================================
+    // 全量备份 / 恢复（SAF）
+    //
+    // 为什么走 SAF 而不是复用既有 FileProvider 分享：CreateDocument / OpenDocument
+    // 让用户自己选保存位置与文件，脱离 cacheDir/exports —— 那份目录会被
+    // DataExporter.pruneOldExports 只留 5 份、还会误删诊断 txt，留底根本不可靠。
+    // 备份是可回灌的结构化 JSON（Room 7 张表），与 6 种给人看的 CSV 对账单是两回事。
+    // ==================================================================
+
+    /**
+     * 导出全量备份到用户在 SAF 里选定的 [uri]。
+     *
+     * 先在内存里拼好完整 JSON 字符串再一次性写出：边拼边写一旦中途失败，用户拿到的是
+     * 半截文件，看着像备份成功、恢复时却解析失败。失败时删掉 CreateDocument 已建好的
+     * 空文件/残件，避免误以为备份成功。
+     */
+    fun exportBackup(uri: Uri) {
+        // 与既有 6 种导出共用 isExporting 守卫（连点只跑一次）；isBackingUp 额外挡住
+        // 「恢复进行中又点导出」这类跨操作并发写库。标记必须在 launch 之前同步置位。
+        if (_uiState.value.isExporting || _uiState.value.isBackingUp) return
+        _uiState.update {
+            it.copy(isExporting = true, isBackingUp = true, exportResult = null, backupResult = null)
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val payload = backupManager.buildPayload()
+                val json = BackupCodec.encode(payload)
+                val output = appContext.contentResolver.openOutputStream(uri)
+                    ?: throw IllegalStateException("无法打开所选保存位置，请重新选择目录")
+                output.use { it.write(json.toByteArray(Charsets.UTF_8)) }
+                val message = "全量备份已保存（资产 ${payload.assets.size} · " +
+                    "快照 ${payload.snapshots.size} · 交易 ${payload.transactions.size} · " +
+                    "分红 ${payload.dividends.size}）"
+                AppLogger.i("全量备份导出完成：7 张表已写入用户所选位置", "SettingsVM")
+                _uiState.update {
+                    it.copy(
+                        isExporting = false,
+                        isBackingUp = false,
+                        exportResult = Result.success(message),
+                        backupResult = Result.success(message)
+                    )
+                }
+            } catch (e: CancellationException) {
+                _uiState.update { it.copy(isExporting = false, isBackingUp = false) }
+                throw e
+            } catch (e: Exception) {
+                // 清掉残件：CreateDocument 已经把空文件建出来了
+                runCatching { appContext.contentResolver.delete(uri, null, null) }
+                AppLogger.e("全量备份导出失败: ${e.message}", e, "SettingsVM")
+                val failure: Result<String> = Result.failure(
+                    IllegalStateException("备份导出失败：${e.message ?: e.javaClass.simpleName}", e)
+                )
+                _uiState.update {
+                    it.copy(
+                        isExporting = false,
+                        isBackingUp = false,
+                        exportResult = failure,
+                        backupResult = failure
+                    )
+                }
+            }
+        }
+    }
+
+    /**
+     * 只读解析所选备份：把摘要放进 UiState 供二次确认框展示，**绝不写库**。
+     *
+     * 只读这一层能拦住坏文件 / 高版本备份，用户不会先看到「将覆盖全部账目」的确认框、
+     * 点下去才发现文件根本读不了。
+     */
+    fun readBackup(uri: Uri) {
+        if (_uiState.value.isBackingUp) return
+        _uiState.update { it.copy(isBackingUp = true, pendingRestore = null, backupResult = null) }
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val summary = BackupCodec.summary(readBackupText(uri))
+                AppLogger.i(
+                    "已读取备份摘要：格式版本 ${summary.formatVersion}，等待用户二次确认",
+                    "SettingsVM"
+                )
+                _uiState.update { it.copy(isBackingUp = false, pendingRestore = summary) }
+            } catch (e: CancellationException) {
+                _uiState.update { it.copy(isBackingUp = false) }
+                throw e
+            } catch (e: Exception) {
+                AppLogger.w("读取备份失败: ${e.message}", "SettingsVM")
+                val failure: Result<String> = Result.failure(readableBackupError("读取备份失败", e))
+                _uiState.update {
+                    it.copy(
+                        isBackingUp = false,
+                        pendingRestore = null,
+                        exportResult = failure,
+                        backupResult = failure
+                    )
+                }
+            }
+        }
+    }
+
+    /**
+     * 用户二次确认后执行恢复。
+     *
+     * 刻意**再次读流 + decode**：不信任 [readBackup] 缓存的摘要 —— 用户在确认框停留期间，
+     * 所选文件可能被别的应用改写或删除。解码与格式校验全在 [BackupManager.restore] 的
+     * 事务之外完成；事务内任一步抛错由 Room 整体回滚，绝不留下半清状态。
+     * 失败写 Result.failure 且记录原始堆栈，绝不静默吞掉。
+     */
+    fun restoreBackup(uri: Uri) {
+        if (_uiState.value.isBackingUp) return
+        _uiState.update {
+            it.copy(
+                isBackingUp = true,
+                pendingRestore = null,
+                exportResult = null,
+                backupResult = null
+            )
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val payload = BackupCodec.decode(readBackupText(uri))
+                backupManager.restore(payload)
+                // 事务成功后才复位进程内内存态：库回滚时旧缓存仍与旧库一致，不能提前清
+                resetInMemoryStateAfterRestore()
+                val message = "已恢复 ${payload.assets.size} 项资产、" +
+                    "${payload.snapshots.size} 条历史快照、${payload.transactions.size} 笔交易、" +
+                    "${payload.dividends.size} 笔分红"
+                AppLogger.i("从备份恢复完成：7 张表整表替换，未自动触发行情同步", "SettingsVM")
+                _uiState.update {
+                    it.copy(
+                        isBackingUp = false,
+                        exportResult = Result.success(message),
+                        backupResult = Result.success(message)
+                    )
+                }
+            } catch (e: CancellationException) {
+                _uiState.update { it.copy(isBackingUp = false) }
+                throw e
+            } catch (e: Exception) {
+                AppLogger.e("从备份恢复失败: ${e.message}", e, "SettingsVM")
+                val failure: Result<String> = Result.failure(readableBackupError("恢复失败", e))
+                _uiState.update {
+                    it.copy(
+                        isBackingUp = false,
+                        exportResult = failure,
+                        backupResult = failure
+                    )
+                }
+            }
+        }
+    }
+
+    fun clearBackupResult() {
+        _uiState.update { it.copy(backupResult = null) }
+    }
+
+    /**
+     * Snackbar 消费动作结果时**一次 update 同时清两个字段**。
+     *
+     * 备份动作会把同一结果写进 exportResult 与 backupResult（前者复用既有导出提示通道、
+     * 后者是备份动作自己的状态）。若分两次 clear，中间态仍有一个字段非 null，
+     * 界面上 `exportResult ?: backupResult` 会短暂保持「同一个结果」而依赖
+     * Result.equals 才不重复弹提示；一次清干净，不留这种隐式耦合。
+     */
+    fun clearActionResult() {
+        _uiState.update { it.copy(exportResult = null, backupResult = null) }
+    }
+
+    /** 确认框确认 / 取消后清掉待恢复摘要，避免切页回来又弹一次 */
+    fun clearPendingRestore() {
+        _uiState.update { it.copy(pendingRestore = null) }
+    }
+
+    /** 读整个备份文件为 UTF-8 文本；去掉可能存在的 BOM，避免 JSONObject 解析失败 */
+    private fun readBackupText(uri: Uri): String {
+        val input = appContext.contentResolver.openInputStream(uri)
+            ?: throw InvalidBackupException("无法打开所选文件，请确认文件仍存在且可被读取")
+        val text = input.use { it.readBytes().toString(Charsets.UTF_8) }
+        return text.removePrefix("\uFEFF")
+    }
+
+    /**
+     * 自定义备份异常的 message 已经是给用户看的中文，原样透传；其余系统异常包一层
+     * 中文前缀但同时保留 cause（不吞异常，AppLogger 也记了完整堆栈）。
+     */
+    private fun readableBackupError(prefix: String, e: Exception): Throwable =
+        when (e) {
+            is InvalidBackupException, is UnsupportedBackupVersionException -> e
+            else -> IllegalStateException("$prefix：${e.message ?: e.javaClass.simpleName}", e)
+        }
+
+    /**
+     * 恢复成功后复位进程内内存态（QA R06）。
+     *
+     * 账目整表换掉了，旧的分红缓存 / 派生行情缓存 / 汇率 / 同步失败标记都指向旧数据，
+     * 不清会显示错值。逐项尽力而为：某项缓存单例抛错不该把「账目已恢复」报成失败，
+     * 但取消必须原样向外抛，不能吞掉。
+     *
+     * 刻意不走「偏好整块回写」（A3 铁律）：这里只调
+     * [DashboardPreferencesManager.invalidateAnnualDividendIncome] 让年度分红缓存失效，
+     * 显示偏好与月度生活费等字段原样保留 —— 备份本就不含偏好，恢复也不该动它。
+     */
+    private suspend fun resetInMemoryStateAfterRestore() {
+        safelyReset("年度分红缓存") { dashboardPreferencesManager.invalidateAnnualDividendIncome() }
+        safelyReset("分红内存缓存") { dividendRepository.clearCache() }
+        safelyReset("分红抓取状态") { dividendRepository.clearFetchState() }
+        safelyReset("派生行情缓存") { priceCacheMaintenance.clearDerivedCaches() }
+        safelyReset("汇率") { ExchangeRateManager.resetToDefaultRates() }
+        safelyReset("同步失败集合") { AssetSyncFailureStore.getInstance(appContext).clear() }
+    }
+
+    private suspend fun safelyReset(label: String, block: suspend () -> Unit) {
+        try {
+            block()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            AppLogger.w("恢复后复位 $label 失败: ${e.message}", "SettingsVM")
+        }
     }
 
     fun deleteAllData() {

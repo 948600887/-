@@ -4,15 +4,21 @@ import com.example.stockdiary.common.DateFormats
 import com.example.stockdiary.data.contract.SyncStrategy
 import android.Manifest
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.CurrencyExchange
@@ -26,9 +32,13 @@ import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.CurrencyBitcoin
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -133,6 +143,32 @@ fun SettingsScreen(
     var showBinanceImportDialog by remember { mutableStateOf(false) }
     var showLogViewerDialog by remember { mutableStateOf(false) }
 
+    /**
+     * 恢复是「先选文件 → 只读解析摘要 → 二次确认 → 再写库」三步，Uri 要跨这几步暂存。
+     * 摘要存在 ViewModel 的 UiState 里（可观察），Uri 只留在本页内存：进程被杀后不残留
+     * 一个「待恢复」的悬空状态，用户得重新走一遍确认。
+     */
+    var pendingRestoreUri by remember { mutableStateOf<Uri?>(null) }
+
+    // 导出：CreateDocument 让用户自己选保存位置，彻底脱离会被 pruneOldExports 清理的 cacheDir。
+    // MIME 固定 application/json；建议文件名带时间戳，同目录连续导出不会互相覆盖。
+    val createBackupLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/json")
+    ) { uri ->
+        if (uri != null) viewModel.exportBackup(uri)
+    }
+
+    // 恢复：OpenDocument 只读打开用户选中的备份文件。用 */* 兜住各家文件管理器对 .json
+    // 上报的不同 MIME（有的给 application/octet-stream），选错文件由 BackupCodec 校验给出可读错误。
+    val openBackupLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            pendingRestoreUri = uri
+            viewModel.readBackup(uri)
+        }
+    }
+
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { isGranted ->
@@ -191,11 +227,15 @@ fun SettingsScreen(
         }
     }
 
-    LaunchedEffect(uiState.exportResult) {
-        uiState.exportResult?.let { result ->
+    // 6 种 CSV 导出写 exportResult；全量备份 / 恢复同时写 exportResult 与 backupResult。
+    // 合并成一条消费：备份结果也能进 Snackbar，且同一动作不会弹两次提示。
+    // 每次消费后把两个结果都清回 null，保证下一次（哪怕消息文本完全相同）仍会重新触发。
+    val actionResult = uiState.exportResult ?: uiState.backupResult
+    LaunchedEffect(actionResult) {
+        actionResult?.let { result ->
             // 成功也提示：文件名是用户取消分享面板后唯一能追踪导出结果的信息
-            val message = result.getOrNull() ?: result.exceptionOrNull()?.message ?: "导出失败"
-            viewModel.clearExportResult()
+            val message = result.getOrNull() ?: result.exceptionOrNull()?.message ?: "操作失败"
+            viewModel.clearActionResult()
             appSnackbar.show(message)
         }
     }
@@ -455,7 +495,86 @@ fun SettingsScreen(
                 viewModel.exportData(context, type)
                 showExportDialog = false
             },
+            onBackupExport = {
+                showExportDialog = false
+                createBackupLauncher.launch("goldvault_backup_${System.currentTimeMillis()}.json")
+            },
+            onBackupRestore = {
+                showExportDialog = false
+                openBackupLauncher.launch(arrayOf("*/*"))
+            },
             onDismiss = { showExportDialog = false }
+        )
+    }
+
+    // 恢复前二次确认：先展示只读解析出的摘要，明确「覆盖且不可撤销」，确认后才写库。
+    // 摘要来自 ViewModel 的 UiState；确认时把暂存的 Uri 交给 ViewModel 再读一次流 + decode。
+    uiState.pendingRestore?.let { summary ->
+        AlertDialog(
+            onDismissRequest = {
+                viewModel.clearPendingRestore()
+                pendingRestoreUri = null
+            },
+            title = { Text("确认从备份恢复") },
+            text = {
+                Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                    Text(
+                        text = "将覆盖当前全部账目，此操作不可撤销。",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text(
+                        text = "备份时间：${formatBackupTime(summary.exportedAt)}",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    Text(
+                        text = "格式版本：${summary.formatVersion} · 数据库版本：${summary.dbVersion}",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "资产 ${summary.assetCount} 条 · 历史快照 ${summary.snapshotCount} 条 · " +
+                            "快照明细 ${summary.snapshotDetailCount} 条",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    Text(
+                        text = "分红 ${summary.dividendCount} 笔 · 交易 ${summary.transactionCount} 笔",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    Text(
+                        text = "股票基础信息 ${summary.stockBasicCount} 条 · 基金净值缓存 ${summary.fundNavCacheCount} 条",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text(
+                        text = "恢复不包含显示偏好与币安 API 密钥，恢复后不会自动刷新行情。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val target = pendingRestoreUri
+                        viewModel.clearPendingRestore()
+                        pendingRestoreUri = null
+                        if (target != null) viewModel.restoreBackup(target)
+                    },
+                    enabled = !uiState.isBackingUp
+                ) {
+                    Text("确认恢复")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    viewModel.clearPendingRestore()
+                    pendingRestoreUri = null
+                }) {
+                    Text("取消")
+                }
+            }
         )
     }
 
@@ -557,5 +676,12 @@ private data class SettingsItemData(
 
 private fun formatPriceSyncTime(timeMillis: Long): String {
     val sdf = java.text.SimpleDateFormat(DateFormats.MONTH_DAY_TIME, java.util.Locale.getDefault())
+    return sdf.format(java.util.Date(timeMillis))
+}
+
+/** 备份确认框里的导出时间：带完整年月日，便于用户分辨「哪一份」备份。 */
+private fun formatBackupTime(timeMillis: Long): String {
+    if (timeMillis <= 0L) return "未知"
+    val sdf = java.text.SimpleDateFormat(DateFormats.DISPLAY_DATETIME, java.util.Locale.getDefault())
     return sdf.format(java.util.Date(timeMillis))
 }

@@ -41,4 +41,18 @@ interface FundNavCacheDao {
     /** 清空整表（「清除所有数据」用）。 */
     @Query("DELETE FROM fund_nav_cache")
     suspend fun clear()
+
+    /**
+     * 全量备份导出：一次性读全表。
+     * 只给 [com.example.stockdiary.data.backup.BackupManager] 调用，常规取价仍走 [get] / [getByCodes]。
+     */
+    @Query("SELECT * FROM fund_nav_cache")
+    suspend fun getAll(): List<FundNavCache>
+
+    /**
+     * 全量备份恢复：整批写回，同代码已存在则整行覆盖。
+     * 与 [upsert] 同语义，只是批量版；恢复路径先 [clear] 再写，不会留下旧库的残留行。
+     */
+    @Upsert
+    suspend fun upsertAll(rows: List<FundNavCache>)
 }

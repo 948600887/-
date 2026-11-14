@@ -2,6 +2,7 @@ package com.example.stockdiary.di
 
 import android.content.Context
 import androidx.compose.runtime.staticCompositionLocalOf
+import com.example.stockdiary.data.backup.BackupManager
 import com.example.stockdiary.data.repository.AssetRepository
 import com.example.stockdiary.data.repository.AssetQuoteRepository
 import com.example.stockdiary.data.importer.BinanceCredentialsManager
@@ -77,6 +78,8 @@ class AppContainer(private val context: Context) {
         DefaultPriceCacheMaintenance(applicationContext)
     }
     val database: StockDatabase by lazy { StockDatabase.getInstance(context) }
+    /** 全量 JSON 备份 / 恢复的唯一入口（Room 7 张表，走 DAO + withTransaction）。 */
+    val backupManager: BackupManager by lazy { BackupManager(database) }
     /**
      * 基金净值持久化端口。DAO 在这里构造、异常在这里兜住（与旧 FundAPI.init 的降级语义一致）：
      * 构造失败返回 null，FundAPI 自动退回纯内存缓存，不打断取价链路。

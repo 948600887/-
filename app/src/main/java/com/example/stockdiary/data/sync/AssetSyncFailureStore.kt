@@ -62,6 +62,24 @@ class AssetSyncFailureStore private constructor(context: Context) {
         prefs.edit().putStringSet(KEY_FAILED_ASSET_IDS, next.map { it.toString() }.toSet()).apply()
     }
 
+    /**
+     * 从备份恢复后彻底复位失败集合。
+     *
+     * 必须**同时**清 `_failedAssetIds` 内存流与磁盘集合：只清内存的话，下一轮同步
+     * [applyOutcomes] 读到的 `current` 仍是旧集合（本 store 的写入口径是「以内存流为准、
+     * 差量计算后整集合回写磁盘」），会把恢复前的旧失败 id 原样写回磁盘，卡片又挂上
+     * 「上次更新未成功」。这里两个地方一起清，[loadFailedIds] 读不到键值即回落空集合。
+     *
+     * 与 [applyOutcomes] 同样加 [Synchronized]：恢复跑在 IO 协程，同步结果可能并发写入。
+     */
+    @Synchronized
+    fun clear() {
+        if (_failedAssetIds.value.isNotEmpty()) {
+            _failedAssetIds.value = emptySet()
+        }
+        prefs.edit().remove(KEY_FAILED_ASSET_IDS).apply()
+    }
+
     private fun loadFailedIds(): Set<Long> =
         prefs.getStringSet(KEY_FAILED_ASSET_IDS, emptySet())
             ?.mapNotNull { it.toLongOrNull() }

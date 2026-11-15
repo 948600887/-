@@ -491,7 +491,7 @@ object UnifiedPriceService {
         val pairsToFetch = codeToPair.values.distinct()
         if (pairsToFetch.isEmpty()) {
             // 全是稳定币 / 不可交易 / 命中新鲜缓存：一次请求都不用发
-            writeCryptoPricesToCache(resultMap)
+            writeCryptoPricesToCache(resultMap, roundId)
             return@withContext Result.success(resultMap)
         }
 
@@ -507,7 +507,7 @@ object UnifiedPriceService {
                 }
             )
             AppLogger.d("币安主机熔断中，跳过加密货币批量预取（回落逐标的）", TAG)
-            writeCryptoPricesToCache(resultMap)
+            writeCryptoPricesToCache(resultMap, roundId)
             return@withContext Result.success(resultMap)
         }
 
@@ -571,7 +571,7 @@ object UnifiedPriceService {
                     if (context.isActive) {
                         AppLogger.w("加密货币批量预取已达时间预算，跳过剩余分片", TAG)
                     }
-                    writeCryptoPricesToCache(resultMap)
+                    writeCryptoPricesToCache(resultMap, roundId)
                     return@withContext Result.success(resultMap)
                 }
 
@@ -638,7 +638,7 @@ object UnifiedPriceService {
 
         // 协程已取消（切后台等）：这一轮记账不算数，不喂熔断器，直接返回已采集的部分
         if (!context.isActive) {
-            writeCryptoPricesToCache(resultMap)
+            writeCryptoPricesToCache(resultMap, roundId)
             return@withContext Result.success(resultMap)
         }
 
@@ -664,7 +664,7 @@ object UnifiedPriceService {
                 cryptoStats.markDegraded(roundId, "主机连续网络失败，已熔断")
         }
 
-        writeCryptoPricesToCache(resultMap)
+        writeCryptoPricesToCache(resultMap, roundId)
         AppLogger.i("加密货币批量预取 ${codes.distinct().size} 个代码，命中 ${resultMap.size} 个", TAG)
         Result.success(resultMap)
     }
@@ -673,21 +673,46 @@ object UnifiedPriceService {
     private fun stableCoinData(codeNorm: String): CryptoData =
         CryptoData(code = codeNorm, name = codeNorm, price = 1.0, change = null, changePercent = null)
 
-    /** 双写门面 60s 缓存：即便 batchResult 短路没兜住，逐标的 [getPrice] 也能命中这里 */
-    private fun writeCryptoPricesToCache(priceMap: Map<String, AssetPrice>) {
+    /**
+     * 双写门面 60s 缓存：即便 batchResult 短路没兜住，逐标的 [getPrice] 也能命中这里。
+     *
+     * 同时**按 code 补血缘**：批量预取的结果走 `getPrice` 的 batchResult 短路，
+     * 那条路径在 `when(type)` 之前就 return 了，不会经过 [getPrice] 里的
+     * `PriceLineageRecorder.report` —— 这正是真机诊断里「146 个加密资产没有价格血缘」
+     * 的原因（`价格血缘` 只剩新浪 12 + 东财基金 95）。这里预取的每个出口
+     * （命中 / 预算截断 / 取消 / 主机熔断提前返回）都会经过本函数，是最省事的统一收口。
+     *
+     * @param roundId 本轮同步轮次；0 表示非同步路径（既有单测 / 前台单标的调用），
+     *        此时不写血缘，避免把已结束轮次的记录覆盖成 0 号轮。
+     */
+    private fun writeCryptoPricesToCache(priceMap: Map<String, AssetPrice>, roundId: Int) {
         if (priceMap.isEmpty()) return
+        val now = System.currentTimeMillis()
         priceMap.forEach { (code, price) ->
-            val entryTimestamp = System.currentTimeMillis()
             priceCache.put(
                 "${AssetType.CRYPTO.name}_$code",
                 CacheEntry(
                     price = price,
-                    timestamp = entryTimestamp,
+                    timestamp = now,
                     sourceId = SourceIds.BINANCE,
-                    asOf = entryTimestamp
+                    asOf = now
                 ),
-                entryTimestamp
+                now
             )
+            // 与 getPrice 成功路径同口径（来源币安、口径 IN_MEMORY、as-of 取抓取时刻）
+            if (roundId != 0) {
+                PriceLineageRecorder.report(
+                    code,
+                    PriceLineage(
+                        code = code,
+                        sourceId = SourceIds.BINANCE,
+                        origin = LineageOrigin.IN_MEMORY,
+                        asOf = now,
+                        fetchedAt = now,
+                        roundId = roundId
+                    )
+                )
+            }
         }
         trimPriceCacheIfNeeded()
     }

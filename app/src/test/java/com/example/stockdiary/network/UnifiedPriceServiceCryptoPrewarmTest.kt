@@ -8,6 +8,8 @@ import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import com.example.stockdiary.data.price.RoundSourceFailureScope
+import com.example.stockdiary.data.price.PriceLineageRecorder
+import com.example.stockdiary.data.price.SourceIds
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
@@ -445,6 +447,53 @@ class UnifiedPriceServiceCryptoPrewarmTest {
         assertEquals(0, stat.batchFailedShards)
         assertTrue("耗时必须被记录", stat.durationMs >= 5)
         assertNull(stat.degradedReason)
+    }
+
+    /**
+     * 诊断（2026-11-12 起）：币安的源统计行从轮次汇总里消失、146 个加密资产没有价格血缘。
+     *
+     * 根因是批量预取在 `RoundSourceFailureScope` 之外调用 → `currentRoundId()` 取 0
+     * → 统计写进 0 号桶；而批量命中的价走 `getPrice` 的 batchResult 短路，
+     * 不经过逐标的血缘上报。这里把预取放进轮次上下文，钉死两件事：
+     * 1. 统计记到本轮（0 号桶读不到）；
+     * 2. 批量回填的每个 code 都补上了本轮血缘。
+     */
+    @Test
+    fun `轮次上下文内的批量成功_统计记到本轮且按code补血缘`() = runBlocking {
+        val roundId = 4242
+        PriceLineageRecorder.resetForTesting()
+        try {
+            val client = recordingClient { req ->
+                respond(200, tickers("BTCUSDT" to "67000", "ETHUSDT" to "3000"), req)
+            }
+
+            val map = withContext(RoundSourceFailureScope(roundId)) {
+                UnifiedPriceService.prewarmCryptoPrices(
+                    listOf("BTC", "ETH", "USDT"),
+                    forceRefresh = true,
+                    client = client
+                ).getOrThrow()
+            }
+            assertEquals(3, map.size)
+
+            assertTrue(
+                "统计不得再落进 0 号桶（那正是轮次汇总读不到的原因）",
+                UnifiedPriceService.cryptoSourceStatsSnapshot(0).isEmpty()
+            )
+            val stat = UnifiedPriceService.cryptoSourceStatsSnapshot(roundId).single()
+            assertEquals("批量实际回填 2 个，稳定币锚定价不计成功", 2, stat.success)
+            assertEquals(1, stat.batchShards)
+
+            val lineage = PriceLineageRecorder.snapshot()
+            assertEquals("批量成功回填的 code 都应补上血缘", setOf("BTC", "ETH", "USDT"), lineage.keys)
+            lineage.values.forEach { record ->
+                assertEquals("血缘必须归属本轮", roundId, record.roundId)
+                assertEquals("来源应为币安", SourceIds.BINANCE, record.sourceId)
+            }
+        } finally {
+            PriceLineageRecorder.resetForTesting()
+            UnifiedPriceService.discardSourceStats(roundId)
+        }
     }
 
     @Test

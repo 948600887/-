@@ -94,7 +94,9 @@ data class BackupSummary(
  * 值会抛 `JSONException`，让整份备份导出失败（且异常是英文、用户看不懂）；解码侧同理，
  * `1e400` 会被 org.json 解析成 BigDecimal、`toDouble()` 变 Infinity 后静默写进 Room。
  * 另外主键（id / snapshotId / assetId）缺失不能回退 0 —— Room 会重分配自增 id，而明细的
- * snapshotId 仍是旧值，恢复出孤儿明细；故 decode 后统一校验主键唯一与 snapshotId 引用。
+ * snapshotId 仍是旧值，恢复出孤儿明细；故 decode 后校验主键必填与各表主键唯一。
+ * 但外键「必填」不等于「指向现存父行」：snapshotId / assetId 刻意不校验引用一致性，
+ * 因为现网库本身可能已有孤儿明细，强校验会把这类合法备份永久锁死在恢复阶段。
  *
  * 本 object 不依赖 Android Context、不碰 Room，可在 `testDebugUnitTest` 里直接跑。
  */
@@ -213,13 +215,16 @@ object BackupCodec {
     }
 
     /**
-     * decode 后的跨表一致性校验（B8-5）：各表主键唯一、快照明细的 snapshotId 必须指向真实快照。
+     * decode 后的跨表一致性校验（B8-5）：各表主键唯一。
      *
-     * 主键重复会让 Room 的 REPLACE/Upsert 静默吞行；snapshotId 悬空会产生永远查不出来的
-     * 孤儿明细。两者都必须在**事务外**拦掉，绝不写库。
+     * 主键重复会让 Room 的 REPLACE/Upsert 静默吞行，必须在**事务外**拦掉，绝不写库。
      *
-     * `assetId` 刻意不校验资产引用：现网库可能已有孤儿明细（历史导入/删除遗留），
-     * 强制校验会让这些用户连备份都导不出来。QA 规格明确只要求 assetId 必填。
+     * `snapshotId` / `assetId` 刻意都不校验「外键是否指向现存父行」（与 assetId 原口径一致）：
+     * 现网库本就可能已有孤儿明细——createSnapshot 同日覆盖只删快照不删明细、去重同理，
+     * 且恢复自身写回明细后下一份备份还会持续造孤儿。强制校验会让这些用户导出成功、
+     * 确认框正常，点恢复却被拒、零写库且反复重试无解，等于把合法备份永久锁死。
+     * 两个外键的**必填**（非缺失 / 类型正确）由 `decodeSnapshotDetail` 的 `requiredLong` 保证，
+     * 每条明细的 id 唯一由上方 `assertUniqueKeys` 保证；这里只放弃跨表引用这一条约束。
      */
     private fun validatePayload(payload: BackupPayload) {
         assertUniqueKeys("assets.id", payload.assets.map { it.id })
@@ -229,13 +234,6 @@ object BackupCodec {
         assertUniqueKeys("transactions.id", payload.transactions.map { it.id })
         assertUniqueKeys("stock_basic.code", payload.stockBasics.map { it.code })
         assertUniqueKeys("fund_nav_cache.code", payload.fundNavCaches.map { it.code })
-
-        val snapshotIds = payload.snapshots.map { it.id }.toSet()
-        payload.snapshotDetails.firstOrNull { it.snapshotId !in snapshotIds }?.let { orphan ->
-            throw InvalidBackupException(
-                "备份的快照明细引用了不存在的快照 id=${orphan.snapshotId}，文件不完整"
-            )
-        }
     }
 
     private fun <T> assertUniqueKeys(table: String, keys: List<T>) {

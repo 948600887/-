@@ -688,13 +688,16 @@ class BackupCodecTest {
     }
 
     @Test
-    fun `decode_孤儿snapshotId_抛InvalidBackupException`() {
+    fun `decode_孤儿snapshotId不强制拒绝_现网库可能已有孤儿明细`() {
         val p = samplePayload()
         val orphan = p.copy(snapshotDetails = listOf(p.snapshotDetails.first().copy(snapshotId = 999L)))
-        val e = assertThrows(InvalidBackupException::class.java) {
-            BackupCodec.decode(BackupCodec.encode(orphan))
-        }
-        assertTrue(e.message?.contains("快照 id") == true)
+        // snapshotId 与 assetId 同口径：只要求必填，不校验引用一致性。现网库因同日覆盖 / 去重
+        // 只删快照不删明细，会真实产生孤儿；强校验会锁死恢复。原行原值必须保留、不得过滤，
+        // 否则 summary():150 按数组长度数、hasSameIdentity():189 比对 count 会误判「文件被换过」。
+        val json = BackupCodec.encode(orphan)
+        val decoded = BackupCodec.decode(json)
+        assertEquals(orphan, decoded)
+        assertTrue(BackupCodec.hasSameIdentity(decoded, BackupCodec.summary(json)))
     }
 
     @Test

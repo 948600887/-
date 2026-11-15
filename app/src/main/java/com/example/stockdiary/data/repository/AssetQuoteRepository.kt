@@ -7,6 +7,7 @@ import com.example.stockdiary.network.SinaStockAPI
 import com.example.stockdiary.network.UnifiedPriceService
 import com.example.stockdiary.network.model.AssetPrice
 import com.example.stockdiary.network.model.StockData
+import kotlinx.coroutines.flow.StateFlow
 
 /**
  * 行情 / 基金查询的收口层（审计 H1：UI 不应直接调 network 层做 I/O）。
@@ -53,10 +54,13 @@ class AssetQuoteRepository {
     fun formatStockCode(symbol: String): String = SinaStockAPI.formatStockCode(symbol)
 
     /**
-     * 币安主机级熔断是否生效（纯读、无副作用）。UI 用它决定「币安暂不可达」提示文案，
-     * 不再直接 import [BinanceHostGate]。
+     * 币安主机级熔断状态（**可订阅**，语义同 [BinanceHostGate.isUnavailable]）。
+     *
+     * UI 用它决定「币安暂不可达」提示文案，并且要随相位变化**即时**刷新：旧实现让
+     * Composable 读一次性布尔快照，熔断进入/解除后标签要等下一次无关重组才更新。
+     * 这里只暴露状态流，不参与请求闸门，也不直接暴露 [BinanceHostGate]。
      */
-    fun isBinanceUnavailable(): Boolean = BinanceHostGate.isUnavailable()
+    val binanceUnavailable: StateFlow<Boolean> = BinanceHostGate.unavailable
 }
 
 /** 股票 / 场内基金行情的领域模型（UI 渲染用，与 network.StockData 解耦） */

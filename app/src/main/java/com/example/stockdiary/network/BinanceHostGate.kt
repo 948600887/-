@@ -2,6 +2,9 @@ package com.example.stockdiary.network
 
 import com.example.stockdiary.common.SyncLimits
 import com.example.stockdiary.utils.AppLogger
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import java.time.Instant
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
@@ -134,6 +137,24 @@ internal object BinanceHostGate {
     /** 连续网络级失败次数（CLOSED 相位的累计；OPEN/HALF_OPEN 下仅作有界记账） */
     private val state = AtomicReference(GateState(Phase.CLOSED, 0L, 0L, 0))
 
+    /**
+     * 「暂不可达」的**可观察**镜像（语义与 [isUnavailable] 一致：phase != CLOSED）。
+     *
+     * 状态机仍以 [state] 这个 AtomicReference 为唯一事实源；这里只负责把「相位是否离开 CLOSED」
+     * 发布给 UI，让卡片在熔断进入/解除的**瞬间**刷新标签。旧实现让 Composable 直接读
+     * [isUnavailable] 的 volatile 快照，值变了也不会触发重组，标签要等下一次无关重组才更新/消失。
+     *
+     * 只在**相位真正变化**的 CAS 成功后 publish；纯读路径（[isUnavailable]）不经过这里，
+     * 不参与请求闸门、不驱动状态机（闸门仍是 [tryAcquireProbe] 的职责）。
+     */
+    private val _unavailable = MutableStateFlow(false)
+    val unavailable: StateFlow<Boolean> = _unavailable.asStateFlow()
+
+    /** 把 [state] 当前相位同步给 UI 镜像；调用点都在 CAS 成功之后，避免发布中间态。 */
+    private fun publishPhase() {
+        _unavailable.value = state.get().phase != Phase.CLOSED
+    }
+
     /** 累计「从健康态判死」的次数（诊断用；半开探测失败的重开不计入，见 [onNetworkFailure]） */
     private val blockCount = AtomicInteger(0)
 
@@ -177,7 +198,10 @@ internal object BinanceHostGate {
                     if (now < s.blockedUntil) return false
                     // 冷却已过：竞争成为唯一的半开探测
                     val probe = s.copy(phase = Phase.HALF_OPEN, probeUntil = now + PROBE_TIMEOUT_MS)
-                    if (state.compareAndSet(s, probe)) return true
+                    if (state.compareAndSet(s, probe)) {
+                        publishPhase()
+                        return true
+                    }
                     // CAS 失败（并发），重读重试
                 }
                 Phase.HALF_OPEN -> {
@@ -235,6 +259,7 @@ internal object BinanceHostGate {
                 Phase.HALF_OPEN -> {
                     // 探测成功：闭路，全部清零
                     if (state.compareAndSet(s, GateState(Phase.CLOSED, 0L, 0L, 0))) {
+                        publishPhase()
                         AppLogger.i("币安主机探测成功，熔断解除，恢复正常访问", TAG)
                         return
                     }
@@ -285,6 +310,7 @@ internal object BinanceHostGate {
                         consecutiveRegionFailures = 0
                     )
                     if (state.compareAndSet(s, reopened)) {
+                        publishPhase()
                         // 若是地区封锁（探测也 451），打粘性标记，之后永久拒探测。
                         if (type == FailureType.REGION_BLOCKED) regionBlocked = true
                         AppLogger.w(
@@ -324,6 +350,7 @@ internal object BinanceHostGate {
                         val opened = GateState(Phase.OPEN, now + COOLDOWN_MS, 0L, 0, 0)
                         if (state.compareAndSet(s, opened)) {
                             blockCount.incrementAndGet()
+                            publishPhase()
                             // 只有**地区封锁计数本身达阈值**才粘死：本次若是因为总失败数凑满
                             // 瞬断阈值才熔断、而 451 只出现过 1 次，就不该永久冻结（见 [regionBlocked]）。
                             if (regionHit) regionBlocked = true
@@ -354,6 +381,7 @@ internal object BinanceHostGate {
         state.set(GateState(Phase.CLOSED, 0L, 0L, 0))
         blockCount.set(0)
         regionBlocked = false
+        publishPhase()
     }
 
     /** 测试专用读数：当前连续失败计数 */

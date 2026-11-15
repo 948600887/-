@@ -78,6 +78,35 @@ class BinanceHostGateTest {
         assertEquals(0, BinanceHostGate.blockCountForTesting())
     }
 
+    // ---------- 可观察镜像：UI 标签随相位即时刷新 ----------
+
+    @Test
+    fun `熔断与解除时_unavailable_镜像同步翻转`() {
+        assertFalse(BinanceHostGate.unavailable.value)
+
+        tripOpen()
+        assertTrue("熔断后镜像必须立刻为 true", BinanceHostGate.unavailable.value)
+
+        // 半开探测期间仍算「不可达」（语义与 isUnavailable 一致）
+        assertTrue(BinanceHostGate.tryAcquireProbe(afterCooldown))
+        assertEquals(Phase.HALF_OPEN, BinanceHostGate.phaseForTesting())
+        assertTrue(BinanceHostGate.unavailable.value)
+
+        // 探测成功闭路：镜像必须立刻回落，卡片标签才能在同一帧消失
+        BinanceHostGate.onSuccess()
+        assertEquals(Phase.CLOSED, BinanceHostGate.phaseForTesting())
+        assertFalse(BinanceHostGate.unavailable.value)
+    }
+
+    @Test
+    fun `复位后_unavailable_镜像归零`() {
+        tripOpen()
+        assertTrue(BinanceHostGate.unavailable.value)
+
+        BinanceHostGate.resetForTesting()
+        assertFalse("resetForTesting 也要同步镜像，否则下个用例会带着 true 起步", BinanceHostGate.unavailable.value)
+    }
+
     @Test
     fun `累计到阈值那次失败触发熔断且blockCount加一`() {
         tripOpen()

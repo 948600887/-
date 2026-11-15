@@ -355,6 +355,14 @@ fun StockAssetItem(
             // 不占 Room 列、不需要迁移；收藏集变化会精确触发本卡片重组。
             val lastSyncFailed = asset.id in
                 LocalAppContainer.current.assetSyncFailureStore.failedAssetIds.collectAsStateWithLifecycle().value
+            // 币安主机级熔断期间（连不上币安公开行情）要给一个
+            // 区别于「价格待更新」的提示：前者是网络/主机问题，后者可能是数据源缺数据。
+            // 随生命周期订阅 StateFlow：熔断进入/解除的瞬间标签就刷新，不再依赖「下一轮同步后顺手重组」
+            // （旧实现读一次性 volatile 快照，值变了不会触发重组）。
+            // 它只读状态、不驱动熔断状态机（请求闸门是 tryAcquireProbe 的职责）。
+            // 经 AssetQuoteRepository 收口，UI 不再直接 import network 层（审计 H1）。
+            val binanceUnavailable = LocalAppContainer.current.assetQuoteRepository
+                .binanceUnavailable.collectAsStateWithLifecycle().value
             val priceText = when {
                 isLiability -> "待偿还"
                 // 价格是原币口径（与 totalValue 同币种），而同行市值是折算后人民币。
@@ -369,14 +377,7 @@ fun StockAssetItem(
                 // 400xxx/420xxx 与天天基金场外代码段重叠——手动录入的 400030/420102
                 // 规范成 bj400030/bj420102 后仍是 FUND，这里若只看 symbol 会误标「退市」。
                 asset.type == AssetType.STOCK && StockCodeManager.isDelistedForSync(asset.symbol) -> "退市"
-                // 币安主机级熔断期间（连不上币安公开行情）要给一个
-                // 区别于「价格待更新」的提示：前者是网络/主机问题，后者可能是数据源缺数据。
-                // 注意 isUnavailable 是普通 volatile 读、不可观察；列表在每轮同步结束后会重组，
-                // 届时标签会刷新——这个局限写进注释，别做成轮询。它是纯读、无副作用，
-                // 不会驱动熔断状态机（请求闸门是 tryAcquireProbe 的职责）。
-                // 经 AssetQuoteRepository 收口，UI 不再直接 import network 层（审计 H1）。
-                asset.type == AssetType.CRYPTO &&
-                    LocalAppContainer.current.assetQuoteRepository.isBinanceUnavailable() -> "币安暂不可达"
+                asset.type == AssetType.CRYPTO && binanceUnavailable -> "币安暂不可达"
                 else -> "价格待更新"
             }
             Column(modifier = Modifier.weight(1f), horizontalAlignment = Alignment.End) {

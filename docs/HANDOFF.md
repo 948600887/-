@@ -303,3 +303,19 @@ CODE_ARCHITECTURE.md 部分过时），一律以实际代码 + git log 为准。
 3. 出包：梦瑶 11-15 明确「不用出包」。若改主意，按硬约定只出 arm64-v8a、debug keystore 手动签名、完整路径告诉她、清理 `releases/` 只留最新包 + 删 `*.idsig`。
 4. `a0f9cd6` 的 514 修复与排障摘要**真机验收仍未完成**（11-14 诊断仍是旧包）；判别只需看诊断头部有无 `--- 排障摘要 ---`。
 
+---
+
+## 2026-11-15 12:50 交接补记（全面体检后「优化你所有能优化的」）
+
+**当前状态（以 `git log` 为准）**：HEAD `5097893`，`origin/main = 6481e73`，**本地领先 3 笔**：`90fa4bd`(B1~B8) / `17108ae`(交接板补记) / `5097893`(历史文档归档注记)，全部已提交、全部未推。`check_invariants` 9/9 复跑通过；门禁 1701 例 / 155 XML / 0 失败基线未变（本轮纯文档改动，未跑 gradle 全量门禁）；工作区干净、暂存区零改动。`releases/` 仍只有 `a0f9cd6` 旧包，**继续不出包**。
+
+**本轮已落地的三件事（都是「我自己的工具/记忆/工作区」，不是 app 源码）**
+1. **A（上一轮）**：项目 `MEMORY.md` 刷新状态基线、`HANDOFF.md` 头部标历史 + 文末补 11-12~11-15，提交 `17108ae`。
+2. **B（本轮）**：`docs/` 下 7 份老文档统一加「历史归档、不代表当前状态」注记 —— `PROJECT_MEMORY.md`(10-22 快照，并声明第 0 节长期约定仍有效)、`架构评审-20261106.md`(并点名其第 15 行「时效性注记」自身已过时：8 步门禁 → 实为 9 步)、`真机探测清单-加源前可达性验证.md`、`RELEASE_CHECKLIST.md`(并写明当前「不用出包」)、`system_design.md`(2026-09 深色模式) 与两张 `.mermaid`(用 `%%` 注释避免破坏图)。**纯新增 22 行、零删改、不删文件**，统一指向 `git log` / 本文文末补记 / 项目 `MEMORY.md`。提交 `5097893`。
+3. **CRLF 假阳性根治**：8 个 `.kt` 长期显示 M 但 `git diff --numstat` 为空，判因 `git ls-files --eol` = `i/lf w/crlf`（`core.autocrlf=true` 来自 PortableGit 系统配置）。用 `git add --renormalize -- <8 路径>` 刷新索引 stat 缓存后 `git status --porcelain` 为空、`git diff --cached --numstat` 为空 —— **不动源码、不需提交**；以后再见假 M 先判因，别误提交。
+
+**本轮没做、且不打算擅自做的**
+- **C 清理项复查后判定多数不该删**：5 个 CAD 技能包（约 682KB / 54 文件，`skill_management list` 确认 0 个启用）与 `mcp.json` 里 `disabled: true` 的 `TZZB` 都是禁用态、零开销，删了不可逆还可能丢梦瑶以后要用的能力 → **建议保留**；唯一真垃圾是 `D:\主人的任务\nul`(106B，一次 `cd: too many arguments` 报错重定向)，已 scan-only 列清单，等梦瑶明确确认 + 二次确认才删，本轮**未删任何文件**。
+- **push 仍阻塞**：代理已从 `57055` 换到 `127.0.0.1:52184`，但 `curl github` = 000、`git ls-remote origin HEAD` = `CONNECT tunnel failed, response 502`；另试「`--noproxy '*'` 直连」同样 000。两种手段各一轮失败，按「同一手段最多 2 次」停手，未再重试 push。**需梦瑶本人恢复代理/换网络**，之后 `git -C "D:/主人的任务/NewStockDiary" push origin main` 并 `git status -sb` 确认无 ahead。
+- 真机验证（备份恢复全链路、旋转屏幕确认恢复、514 修复装包）仍需梦瑶本人，本机 `adb` 无设备；QA 的 5 项 P3 与 R02~R07 裸奔项维持不动，未纳入本轮「优化」以免引入回归。
+

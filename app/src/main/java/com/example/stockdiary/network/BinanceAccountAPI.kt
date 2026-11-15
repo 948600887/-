@@ -1022,7 +1022,7 @@ object BinanceAccountAPI {
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            val kind = earnKindLabel(locked)
+            val kind = BinanceMessages.earnKindLabel(locked)
             warnEarnFailure(kind, e)
             EarnPageOutcome(
                 positions = emptyList(),
@@ -1073,7 +1073,7 @@ object BinanceAccountAPI {
         locked: Boolean,
         retryDelaysMs: List<Long> = DEFAULT_PAGE_RETRY_BACKOFF_MS
     ): EarnPageOutcome {
-        val kind = earnKindLabel(locked)
+        val kind = BinanceMessages.earnKindLabel(locked)
         val allPositions = mutableListOf<BinanceEarnPosition>()
         val allFailures = mutableListOf<String>()
         // 首个非「权限类」的失败决定最终文案分支（网络 / 限流），并记住它的 HTTP 码
@@ -1176,7 +1176,7 @@ object BinanceAccountAPI {
                 throw binanceError(body, resp.code)
             }
             val parsed = parseEarnPositions(body, locked)
-            val kind = earnKindLabel(locked)
+            val kind = BinanceMessages.earnKindLabel(locked)
             // 诊断：在原有「响应 N 行 → 有效 M 行」后面直接标出 USDT 在不在本页，以及本页前 3 个资产。
             // 目的：真机「USDT 144.99 到底在不在 simple-earn 返回里」这个问题，一眼可判——
             // 在 → 是我们合并/落库丢了；不在 → 是接口侧没给（权限/地区/钱不在这里），别再改合并公式。
@@ -1186,8 +1186,8 @@ object BinanceAccountAPI {
                     (if (parsed.badRows.isNotEmpty()) {
                         "，被跳过 ${parsed.badRows.size} 行（${parsed.badRows.joinToString("、")}）"
                     } else "") +
-                    "，含USDT=${describeUsdt(parsed.positions)}" +
-                    "，本页前3个资产=${describeHeadAssets(parsed.positions)}",
+                    "，含USDT=${BinanceMessages.describeUsdt(parsed.positions)}" +
+                    "，本页前3个资产=${BinanceMessages.describeHeadAssets(parsed.positions)}",
                 "BinanceAccountAPI"
             )
             // 形状异常（非 JSON / 无 rows / 行内缺字段）**或接口回了 200 但 0 条有效持仓**时，
@@ -1211,37 +1211,6 @@ object BinanceAccountAPI {
             return parsed
         }
     }
-
-    /** 活期 / 定期的人话标签（用于失败原因与诊断日志） */
-    private fun earnKindLabel(locked: Boolean): String = if (locked) "定期" else "活期"
-
-    /**
-     * 诊断用：本页有没有 USDT，有就带上金额（`是(144.99343452)` / `否`）。
-     *
-     * 只进日志、不参与任何判定——它是给「USDT 到底在不在接口返回里」这个反复排查的问题
-     * 一个确定性答案，而不是又一次靠猜。
-     */
-    private fun describeUsdt(positions: List<BinanceEarnPosition>): String {
-        val usdt = positions.firstOrNull { it.asset.uppercase(Locale.US) == "USDT" }
-            ?: return "否"
-        return "是(${formatAmount(usdt.amount)})"
-    }
-
-    /** 诊断用：本页前 3 个资产（`USDT:144.99、BUSD:12.3…`），看清接口到底给了什么 */
-    private fun describeHeadAssets(positions: List<BinanceEarnPosition>): String {
-        if (positions.isEmpty()) return "无"
-        return positions.take(3).joinToString("、") {
-            "${it.asset}:${formatAmount(it.amount)}"
-        }
-    }
-
-    /**
-     * 把金额格式化成诊断日志里好读的形态：最多 8 位小数、去掉尾随 0。
-     *
-     * 固定用 [Locale.US]：日志是要拿去 grep 的，绝不能让某些语言环境把小数点变成逗号。
-     */
-    private fun formatAmount(value: Double): String =
-        String.format(Locale.US, "%.8f", value).trimEnd('0').trimEnd('.')
 
     /**
      * 解析理财持仓响应：`{"rows":[{...}],"total":N}`。

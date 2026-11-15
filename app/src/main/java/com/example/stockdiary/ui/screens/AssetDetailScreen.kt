@@ -61,6 +61,7 @@ fun AssetDetailScreen(
     val isDividendLoading = uiState.isDividendLoading
     val errorMessage = uiState.errorMessage
     val isRefreshing = uiState.isRefreshing
+    val dividendStaleHint = uiState.dividendStaleHint
 
     var showEditDialog by remember { mutableStateOf(false) }
     var showAdjustDialog by remember { mutableStateOf(false) }
@@ -250,6 +251,17 @@ fun AssetDetailScreen(
                                     Text("分红信息", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
                                 }
                                 Spacer(modifier = Modifier.height(12.dp))
+
+                                // 陈旧提示放在数据之前：空结果保留旧值是刻意的（不清库），
+                                // 但用户必须知道「这次没取到、年化用的是 N 天前的记录」。
+                                if (dividendStaleHint != null) {
+                                    Text(
+                                        text = dividendStaleHint,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = AppTheme.colors.error
+                                    )
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                }
 
                                 if (isDividendLoading) {
                                     CircularProgressIndicator(modifier = Modifier.size(24.dp))

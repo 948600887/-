@@ -173,6 +173,38 @@ class DividendRepository private constructor(
     private fun failureCount(symbol: String): Int =
         runCatching { fetchState.getInt(FAILURE_COUNT_PREFIX + symbol, 0) }.getOrDefault(0)
 
+    /** 记录一次**真正取到非空分红**的时间（与 [markFetched] 的「抓过」区分，见 [DATA_AT_PREFIX]） */
+    private fun markDataFetched(symbol: String) {
+        runCatching { fetchState.edit().putLong(DATA_AT_PREFIX + symbol, System.currentTimeMillis()).apply() }
+    }
+
+    /**
+     * 记录一次「源返回空结果、沿用库内旧记录」。
+     *
+     * 只做展示簿记：不参与清库、负缓存、退避的任何判定（那条分支的取舍见
+     * [getDividendsBySymbol] 里的注释），单纯回答「这份旧数据是什么时候开始陈旧的」。
+     */
+    private fun markEmptyResult(symbol: String) {
+        runCatching { fetchState.edit().putLong(MISS_AT_PREFIX + symbol, System.currentTimeMillis()).apply() }
+    }
+
+    /**
+     * 某标的分红数据的新鲜度（只供 UI 提示，不参与抓取 / 缓存 / 退避）。
+     *
+     * 读的是本次改动新写的两个键：正常升级上来的老用户第一次命中「空结果保留
+     * 旧值」时 `lastDataAt` 还是 null，此时提示退化为不带天数的文案，不会编造天数。
+     */
+    fun dividendFreshness(symbol: String): DividendDataFreshness {
+        val normalized = StockCodeManager.normalizeSymbol(symbol)
+        fun read(prefix: String): Long? = runCatching {
+            fetchState.getLong(prefix + normalized, 0L)
+        }.getOrDefault(0L).takeIf { it > 0L }
+        return DividendDataFreshness(
+            lastDataAt = read(DATA_AT_PREFIX),
+            lastMissedAt = read(MISS_AT_PREFIX)
+        )
+    }
+
 // ==========================================================================
 // §3 预取入口 prefetchDividendsBatch（批量抓取，冷启动/后台主力路径）
 // 东财合并请求 + Semaphore 限流 + 超时预算判定在 withPermit 内部。Semaphore 用法是踩过的坑：判定写在外层等于没判定，改法照抄 AssetSyncManager。
@@ -606,6 +638,20 @@ class DividendRepository private constructor(
         private const val FAILURE_KEY_PREFIX = "failed_"
         private const val FAILURE_COUNT_PREFIX = "failedcnt_"
 
+        /**
+         * 「最近一次真正抓到**非空**分红」的时间（UI 陈旧提示用）。
+         *
+         * 与 [FETCH_STATE_PREFS] 里的「抓过时间」（裸 symbol 键）刻意分开：
+         * 后者在空结果时也会写（「抓过且确实没有分红」是结论），无法回答
+         * 「当前展示的这批记录是哪天抓回来的」。空结果保留旧值的分支会让
+         * 裸键时间戳变成 now，于是年化收入长期沿用旧记录而用户无感知
+         * （sz161226 诊断），这个键才是那份旧记录的真实年龄。
+         */
+        private const val DATA_AT_PREFIX = "dataAt_"
+
+        /** 「最近一次源返回空结果、沿用库内旧记录」的时间（UI 陈旧提示用） */
+        private const val MISS_AT_PREFIX = "missAt_"
+
     /**
      * 冷启动允许使用的过期数据上限。
      *
@@ -748,6 +794,8 @@ class DividendRepository private constructor(
 
             if (data.isNotEmpty()) {
                 saveDividendsToDb(normalizedSymbol, data, isIncremental)
+                // 展示簿记：这批记录确实是「今天抓回来的」，陈旧提示据此折算天数
+                markDataFetched(normalizedSymbol)
             } else if (!isIncremental) {
                 // 全量刷新拿到空结果：清库前先看库里有没有旧自动记录。
                 //
@@ -761,6 +809,10 @@ class DividendRepository private constructor(
                 // 修复；本轮不实现「连续 N 次可信空结论」计数，避免过度设计。手动记录始终保留。
                 val existingAutoCount = dividendDao.getBySymbol(normalizedSymbol).count { !it.isManual }
                 if (existingAutoCount > 0) {
+                    // 展示簿记：这次确实没取到新数据，旧记录继续沿用 ——
+                    // 详情页据此提示「最近一次未取到、来自 N 天前」，避免年化收入
+                    // 长期沿用旧值而用户毫无感知（不改变保留 / 清库策略本身）
+                    markEmptyResult(normalizedSymbol)
                     AppLogger.w(
                         "空结果但库里仍有 $existingAutoCount 条自动分红记录，保留旧值不清库: $normalizedSymbol",
                         "DividendRepository"
@@ -1566,3 +1618,36 @@ private fun DividendData.toDividendRecord(): DividendRecord = DividendRecord(
     fiscalYear = date.take(4),
     paymentDate = paymentDate
 )
+
+/**
+ * 某标的分红数据的「新鲜度」快照（纯展示，不参与任何抓取 / 缓存 / 退避判定）。
+ *
+ * @param lastDataAt 最近一次真正抓到**非空**分红并写库的时间
+ * @param lastMissedAt 最近一次「源返回空结果、沿用库内旧记录」的时间
+ */
+data class DividendDataFreshness(
+    val lastDataAt: Long?,
+    val lastMissedAt: Long?
+)
+
+private const val DAY_MS = 24L * 60 * 60 * 1000
+
+/**
+ * 分红陈旧提示文案（纯函数，便于单测钉死措辞与边界）。
+ *
+ * 只在「最近一次抓取是空结果（[DividendDataFreshness.lastMissedAt] 晚于
+ * 最近一次取到数据）」时返回文案：
+ * - 有旧记录时间 → 「分红数据最近一次未取到，当前沿用 N 天前的记录」；
+ * - 老用户升级上来还没写过该键 → 退化为「当前沿用更早的记录」，**不编造天数**。
+ *
+ * 之后若又成功取到非空数据（lastDataAt >= lastMissedAt），提示自动消失。
+ */
+internal fun staleDividendHint(freshness: DividendDataFreshness, now: Long): String? {
+    val missedAt = freshness.lastMissedAt ?: return null
+    val dataAt = freshness.lastDataAt
+    if (dataAt == null) return "分红数据最近一次未取到，当前沿用更早的记录"
+    if (dataAt >= missedAt) return null
+    val days = ((now - dataAt).coerceAtLeast(0L) / DAY_MS).coerceAtLeast(1L)
+    return "分红数据最近一次未取到，当前沿用 $days 天前的记录"
+}
+

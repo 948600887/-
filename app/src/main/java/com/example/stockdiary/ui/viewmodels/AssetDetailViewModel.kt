@@ -9,6 +9,7 @@ import com.example.stockdiary.data.sync.PriceSyncCoordinator
 import com.example.stockdiary.data.sync.PriceSyncRequest
 import com.example.stockdiary.data.sync.SyncScenario
 import com.example.stockdiary.data.dividend.DividendRecord
+import com.example.stockdiary.data.repository.staleDividendHint
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.di.AppContainer
@@ -48,6 +49,12 @@ class AssetDetailViewModel(private val container: AppContainer, private val asse
     data class AssetDetailUiState(
         val asset: Asset? = null,
         val dividends: List<DividendRecord> = emptyList(),
+        /**
+         * 分红陈旧提示：最近一次抓取未取到、当前沿用 N 天前的旧记录时非空。
+         * 空结果保留旧值是刻意的数据策略（不清库），但用户必须能看见，
+         * 否则年化收入会长期沿用旧值而毫无提示。
+         */
+        val dividendStaleHint: String? = null,
         val isLoading: Boolean = true,
         val isDividendLoading: Boolean = false,
         val errorMessage: String? = null,
@@ -91,7 +98,13 @@ class AssetDetailViewModel(private val container: AppContainer, private val asse
 
             if (symbol.isNotBlank()) {
                 val result = dividendRepository.getDividendsBySymbol(symbol, forceRefresh = forceRefresh)
-                _uiState.update { it.copy(dividends = result) }
+                // 取数之后再看新鲜度：本轮若正好「空结果保留旧值」，这里就能立刻提示；
+                // 正常取到新数据时 staleDividendHint 会返回 null，提示自动消失。
+                val staleHint = staleDividendHint(
+                    freshness = dividendRepository.dividendFreshness(symbol),
+                    now = System.currentTimeMillis()
+                )
+                _uiState.update { it.copy(dividends = result, dividendStaleHint = staleHint) }
             }
         } catch (e: CancellationException) {
             throw e

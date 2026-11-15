@@ -29,8 +29,11 @@ import com.example.stockdiary.utils.AppLogger
 import com.example.stockdiary.utils.FailureLogFormat
 import com.example.stockdiary.utils.StockCodeManager
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineExceptionHandler
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
@@ -150,6 +153,52 @@ object AssetSyncManager {
      * Worker 路径(startTime>0)从不登记，所以不受影响。
      */
     private val manualSyncJobs = ConcurrentHashMap.newKeySet<Job>()
+
+    /**
+     * 分红预取的**后台**作用域：预取不再占住价格同步的前台时间。
+     *
+     * 诊断（2026-11-15）实锤：手动刷新 31~33s 里，分红预取独占 29.4s（吃满
+     * [SyncBudget.PREFETCH_PHASE_MAX_MS] 的 28s 子预算），价格同步只剩 2.0s。
+     * 用户点刷新要看的是行情，分红只是配角，因此把预取移出 [runSync] 的等待链：
+     * 同一份 symbols / forceRefresh / [SyncBudget.prefetchPhaseBudget] 预算原样交给
+     * 这个作用域推进，[runSync] 立刻开始取价。预算、天天基金 1 秒匀速闸门与退避
+     * 策略**全部不动**，只是不再阻塞前台。
+     *
+     * 用独立的进程级作用域（SupervisorJob）而不是调用方的 viewModelScope：
+     * 前者不会因为页面关闭/刷新结束就中途夭折，预取可以跑完自己的子预算
+     * （「分红宁可晚几轮补齐」）；进程内只有一份，不随页面重建而翻倍。
+     * 必须带 [CoroutineExceptionHandler]：没有父协程的作用域不会把异常交给
+     * Android 默认处理器，未捕获异常会直接崩进程。
+     */
+    private val dividendPrefetchScope = CoroutineScope(
+        SupervisorJob() + Dispatchers.IO + CoroutineExceptionHandler { _, e ->
+            AppLogger.e("分红预取后台任务异常: ${e.message}", e, TAG)
+        }
+    )
+
+    /**
+     * 在途的后台分红预取 job（进程内单份，只保留最新一轮）。
+     *
+     * 新轮启动前先取消旧轮：`prefetchDividends` 里没有跨轮互斥，连点刷新会同时
+     * 跑两份逐条级联，把天天基金的匀速闸门与退避计数放大成双倍请求量。
+     * 被取消的旧轮不写缓存、不写「抓过」时间戳（见 [DividendRepository] 的预算
+     * 语义），下一轮按 `prioritizeDividendSymbols` 从没抓到的标的继续，不丢数据。
+     */
+    @Volatile
+    private var dividendPrefetchJob: Job? = null
+
+    /**
+     * 最近一次**被取消**的同步轮次收尾文本，供诊断与单测读取。
+     *
+     * 取消（退后台 / VM 销毁）此前只打「同步开始」一行，日志上像丢了轮次。
+     * 完成回调里写一行取消收尾，同时留一份在这里：单测能直接断言，
+     * 诊断报告将来也能取到「最后一轮是取消而非静默消失」。
+     */
+    @Volatile
+    private var lastRoundCancelledSummary: String? = null
+
+    /** 测试专用读数：最近一次取消收尾文本；没有取消过则为 null */
+    internal fun lastRoundCancelledSummaryForTesting(): String? = lastRoundCancelledSummary
 
     /**
      * 场外基金下载的专属并发上限 —— **按数据源分两档**。
@@ -406,6 +455,12 @@ object AssetSyncManager {
      *  finally 里复位，不会弹错误提示也不会永久转圈。
      */
     fun cancelActiveManualSync(reason: String) {
+        // 后台分红预取独立于手动轮次存活：轮次可能已经结束、预取还在推进，
+        // 退后台时也要一起停掉（改造前它是同步链的一部分，本就会随轮次取消）。
+        dividendPrefetchJob?.takeIf { it.isActive }?.let { job ->
+            AppLogger.i("取消后台分红预取：$reason", TAG)
+            job.cancel()
+        }
         if (manualSyncJobs.isEmpty()) return
         AppLogger.i("取消进行中的手动同步：$reason（${manualSyncJobs.size} 个在途）", TAG)
         // 取消集合里的每一个：正在跑的那一轮立即收尾，排队等待的那一轮在 withLock 挂起处
@@ -417,7 +472,14 @@ object AssetSyncManager {
     /** 测试专用复位：清掉在途手动同步句柄（object 是进程内单例，用例之间必须清状态） */
     internal fun resetForTesting() {
         manualSyncJobs.clear()
+        // 后台预取也是进程级单例：不复位会让上一条用例的 job 泄漏到下一条
+        dividendPrefetchJob?.cancel()
+        dividendPrefetchJob = null
+        lastRoundCancelledSummary = null
     }
+
+    /** 测试专用读数：当前后台分红预取 job（供「预取不阻塞」用例断言它确实在跑） */
+    internal fun backgroundDividendPrefetchJobForTesting(): Job? = dividendPrefetchJob
 
     /** 测试专用读数：当前是否还有登记的在途手动同步 job（供取消用例断言登记/清空） */
     internal fun activeManualSyncJobForTesting(): Job? = manualSyncJobs.firstOrNull()
@@ -570,16 +632,39 @@ object AssetSyncManager {
             TAG
         )
 
+        // 取消收尾（只加日志，数据行为不变）：退后台 / VM 销毁会让整轮在某个挂起点
+        // 抛 CancellationException，此前只有上面那行「同步开始」，日志上像丢了一轮。
+        // 用当前 job 的完成回调补一行，不包 try/catch 是为了不把 400 行主体整体缩进、
+        // 让 diff 保持在几行内。回调在 job 状态落定后同步执行，AppLogger 只入队，
+        // 不阻塞取消线程。
+        currentCoroutineContext()[Job]?.invokeOnCompletion { cause ->
+            if (cause is CancellationException) {
+                val reason = cause.message?.takeIf { it.isNotBlank() }?.let { "（取消原因：$it）" } ?: ""
+                val summary = "价格同步取消收尾 [轮次#$roundId][$syncTrigger]：" +
+                    "已完成 ${completedCount.get()}/$totalCount，" +
+                    "成功 ${successCount.get()}，失败 ${failedCount.get()}$reason"
+                lastRoundCancelledSummary = summary
+                AppLogger.i(summary, TAG)
+            }
+        }
+
         val stocksAndFunds = assets.filter { it.type == AssetType.STOCK || it.type == AssetType.FUND }
         if (stocksAndFunds.isNotEmpty()) {
             val symbols = stocksAndFunds.mapNotNull { it.symbol }
             // 注意：notifyProgress 是函数类型变量，Kotlin 不允许对函数类型用命名实参，只能按位置传
-            notifyProgress(SyncProgress(0, totalCount, "正在获取分红数据..."), true)
+            notifyProgress(SyncProgress(0, totalCount, "正在同步行情..."), true)
             // 分红预取是刷新的配角，只划一段子预算（见 SyncBudget），
-            // 剩下的留给价格同步——用户点刷新真正要看的是行情
+            // 剩下的留给价格同步——用户点刷新真正要看的是行情。
+            // 预算照旧，但**不再在这里 await**：转后台协程推进（见 [dividendPrefetchScope]），
+            // 否则手动刷新会被预取吃满 28s 子预算（诊断实测 29.4s），价格只能等它跑完。
             val prefetchBudget = SyncBudget.prefetchPhaseBudget(timeLimitMs)
-            dividendRepository.prefetchDividends(symbols, forceRefresh, prefetchBudget)
-            AppLogger.i("分红预取阶段结束，开始逐标的价格同步", TAG)
+            startBackgroundDividendPrefetch(
+                repository = dividendRepository,
+                symbols = symbols,
+                forceRefresh = forceRefresh,
+                timeBudgetMs = prefetchBudget,
+                roundId = roundId
+            )
         }
 
         withHeartbeat(
@@ -655,11 +740,17 @@ object AssetSyncManager {
             val cryptoDeadline = if (enforceTimeLimit) startTime + timeLimitMs else Long.MAX_VALUE
             val cryptoPriceMap: Map<String, AssetPrice> =
                 if (batchCryptoCodes.isNotEmpty() && networkAvailable) {
-                    UnifiedPriceService.prewarmCryptoPrices(
-                        batchCryptoCodes,
-                        forceRefresh,
-                        deadlineMs = cryptoDeadline
-                    ).getOrDefault(emptyMap())
+                    // 必须带上本轮上下文：prewarmCryptoPrices 用 RoundSourceFailureScope
+                    // 读轮次 ID 记源统计。批量预取在逐标的扇出的 withContext 之外，
+                    // 从前没这层 → roundId 取默认 0 → 统计写进 0 号桶，轮次汇总按
+                    // 本轮 ID 读不到，币安的源统计行整条消失（诊断 11-12 起）。
+                    withContext(roundFailureScope) {
+                        UnifiedPriceService.prewarmCryptoPrices(
+                            batchCryptoCodes,
+                            forceRefresh,
+                            deadlineMs = cryptoDeadline
+                        ).getOrDefault(emptyMap())
+                    }
                 } else {
                     emptyMap()
                 }
@@ -874,6 +965,49 @@ object AssetSyncManager {
         FundAPI.discardSourceStats(roundId)
         UnifiedPriceService.discardSourceStats(roundId)
         result
+    }
+
+    /**
+     * 启动一轮**后台**分红预取，不阻塞价格同步。
+     *
+     * 与改造前逐项对齐的只有「调用谁、传什么」：symbols、forceRefresh 与
+     * `SyncBudget.prefetchPhaseBudget` 的同一份子预算原样交给
+     * [DividendRepository.prefetchDividends]，限速 / 退避 / 预算语义一处未改。
+     * 变的是**归属**：不再挂在当前同步 job 下，轮次结束也不影响它跑完自己的子预算。
+     *
+     * 取消旧 job 再启动新的：连点刷新时两份逐条级联会同时压天天基金，
+     * 把匀速闸门与退避计数放大成双倍请求量。被取消的旧轮不写缓存、不写
+     * 「抓过」时间戳，下一轮按 `prioritizeDividendSymbols` 从没抓到的标的继续。
+     */
+    private fun startBackgroundDividendPrefetch(
+        repository: DividendRepository,
+        symbols: List<String>,
+        forceRefresh: Boolean,
+        timeBudgetMs: Long,
+        roundId: Int
+    ) {
+        dividendPrefetchJob?.takeIf { it.isActive }?.let { previous ->
+            AppLogger.i("上一轮分红预取仍在后台推进，先取消再启动本轮 [轮次#$roundId]", TAG)
+            previous.cancel()
+        }
+        dividendPrefetchJob = dividendPrefetchScope.launch {
+            AppLogger.i(
+                "分红预取转入后台 [轮次#$roundId]：${symbols.size} 个代码，" +
+                    "预算=${if (timeBudgetMs > 0) "${timeBudgetMs}ms" else "无"}",
+                TAG
+            )
+            try {
+                repository.prefetchDividends(symbols, forceRefresh, timeBudgetMs)
+                AppLogger.i("分红预取阶段结束（后台）[轮次#$roundId]", TAG)
+            } catch (e: CancellationException) {
+                // 取消是预期路径（退后台 / 新一轮启动），只留一行收尾，不吞信号
+                AppLogger.i("分红预取被取消（后台）[轮次#$roundId]", TAG)
+                throw e
+            } catch (e: Exception) {
+                // 预取失败不该影响已经完成的价格同步；只记一笔，下一轮再补
+                AppLogger.e("分红预取失败（后台）[轮次#$roundId]: ${e.message}", e, TAG)
+            }
+        }
     }
 
     /**

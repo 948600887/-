@@ -25,6 +25,7 @@ import com.example.stockdiary.utils.DataSourceHealth
 import com.example.stockdiary.utils.DataSourceHealthChecker
 import com.example.stockdiary.utils.ExchangeRateManager
 import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
 import io.mockk.Runs
 import io.mockk.coEvery
 import io.mockk.coVerify
@@ -32,6 +33,7 @@ import io.mockk.every
 import io.mockk.just
 import io.mockk.mockk
 import io.mockk.mockkObject
+import io.mockk.slot
 import io.mockk.verify
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -575,6 +577,46 @@ class SettingsViewModelTest {
     }
 
     @Test
+    fun `L1 恢复结束后配对释放持久Uri读授权`() = runTest {
+        val uri = mockk<Uri>(relaxed = true)
+        val json = backupJson(1_700_000_000_000L)
+        every { appContext.contentResolver } returns contentResolver
+        every { contentResolver.openInputStream(uri) } answers {
+            ByteArrayInputStream(json.toByteArray(Charsets.UTF_8))
+        }
+        coEvery { backupManager.restore(any()) } just Runs
+
+        vm.readBackup(uri)
+        assertTrue(waitUntil { vm.uiState.value.pendingRestore != null })
+        vm.restoreBackup()
+        assertTrue(waitUntil { vm.uiState.value.backupResult != null })
+
+        assertTrue(vm.uiState.value.backupResult?.isSuccess == true)
+        // 成功恢复后必须配对释放 take 时拿到的持久读授权（L1）
+        verify(exactly = 1) {
+            contentResolver.releasePersistableUriPermission(
+                uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
+            )
+        }
+    }
+
+    @Test
+    fun `L1 取消恢复时配对释放持久Uri读授权`() = runTest {
+        val uri = mockk<Uri>(relaxed = true)
+        stubInputStream(uri) { backupJson(1_700_000_000_000L) }
+
+        vm.readBackup(uri)
+        assertTrue(waitUntil { vm.uiState.value.pendingRestore != null })
+        vm.clearPendingRestore() // 用户点「取消」
+
+        verify(exactly = 1) {
+            contentResolver.releasePersistableUriPermission(
+                uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
+            )
+        }
+    }
+
+    @Test
     fun `restoreBackup 二次摘要不一致时中止且零写库`() = runTest {
 
         val uri = mockk<Uri>(relaxed = true)
@@ -671,6 +713,114 @@ class SettingsViewModelTest {
         )
         coVerify(exactly = 1) { priceCacheMaintenance.clearDerivedCaches() }
         assertTrue(vm.uiState.value.backupResult?.isSuccess == true)
+    }
+
+    /**
+     * 7 张表各放 1 行的可识别载荷（每表带哨兵值），用于「真实写出的字节」与「传给
+     * BackupManager 的实参」断言——空表 payload 无法暴露「写成 {} 或半份数据」的假绿。
+     */
+    private fun sentinelPayload(exportedAt: Long = 1_700_000_000_777L): BackupPayload {
+        val asset = com.example.stockdiary.database.Asset(
+            id = 1L,
+            name = "哨兵资产",
+            type = com.example.stockdiary.database.AssetType.STOCK,
+            account = "哨兵账户",
+            symbol = "sh600519"
+        )
+        val snapshot = com.example.stockdiary.database.AssetSnapshot(
+            id = 10L, timestamp = exportedAt, date = "2025-11-14",
+            totalAssets = 1.0, totalLiabilities = 2.0, netAssets = -1.0
+        )
+        val detail = com.example.stockdiary.database.AssetSnapshotDetail(
+            id = 100L, snapshotId = 10L, assetId = 1L, assetName = "哨兵资产",
+            assetType = com.example.stockdiary.database.AssetType.STOCK,
+            balance = 1.0, price = 2.0, totalValue = 2.0, cost = 1.0, profit = 1.0, yieldRate = 1.0
+        )
+        val dividend = com.example.stockdiary.database.Dividend(
+            id = 7, symbol = "sh600519", name = "哨兵分红", amount = 3.5, date = "2025-06-01"
+        )
+        val transaction = com.example.stockdiary.database.Transaction(
+            id = 3L, symbol = "sh600519", name = "哨兵交易", type = "BUY",
+            quantity = 2.0, price = 10.0, date = "2025-05-01", fee = 0.5
+        )
+        val stockBasic = com.example.stockdiary.database.StockBasic(
+            code = "sh600519", name = "哨兵证券", market = "sh"
+        )
+        val fundNav = com.example.stockdiary.database.FundNavCache(
+            code = "000306", name = "哨兵基金", nav = 1.2345, changePercent = 0.5,
+            navDate = "2025-11-14", fetchedAt = exportedAt
+        )
+        return BackupPayload(
+            formatVersion = 1, dbVersion = 18, exportedAt = exportedAt,
+            assets = listOf(asset),
+            snapshots = listOf(snapshot),
+            snapshotDetails = listOf(detail),
+            dividends = listOf(dividend),
+            transactions = listOf(transaction),
+            stockBasics = listOf(stockBasic),
+            fundNavCaches = listOf(fundNav)
+        )
+    }
+
+    @Test
+    fun `exportBackup_真实写出的字节是完整七表备份而非空壳`() = runTest {
+        val uri = mockk<Uri>(relaxed = true)
+        val payload = sentinelPayload()
+        // buildPayload 返回 7 表齐全的哨兵载荷；openOutputStream 用 ByteArrayOutputStream 捕获真实写出字节
+        coEvery { backupManager.buildPayload() } returns payload
+        val sink = ByteArrayOutputStream()
+        every { appContext.contentResolver } returns contentResolver
+        every { contentResolver.openOutputStream(uri) } returns sink
+
+        vm.exportBackup(uri)
+        assertTrue(waitUntil { vm.uiState.value.backupResult != null })
+
+        assertTrue("导出应成功，实际 ${vm.uiState.value.backupResult}", vm.uiState.value.backupResult?.isSuccess == true)
+        val written = sink.toByteArray()
+        assertTrue("不得写出空文件", written.isNotEmpty())
+        // 真实写出的字节必须能 decode 回同一份 7 表载荷：把 encode 写成 "{}" 或只写半份，
+        // 这里 decode 会抛 InvalidBackupException 或字段对不上，测试失败。
+        val decoded = BackupCodec.decode(String(written, Charsets.UTF_8))
+        assertEquals(payload, decoded)
+        // 逐表哨兵断言：明确证明每一张表都真的写进了文件
+        assertEquals("哨兵资产", decoded.assets.single().name)
+        assertEquals("哨兵分红", decoded.dividends.single().name)
+        assertEquals("哨兵交易", decoded.transactions.single().name)
+        assertEquals("哨兵证券", decoded.stockBasics.single().name)
+        assertEquals("哨兵基金", decoded.fundNavCaches.single().name)
+        assertEquals(1, decoded.snapshots.size)
+        assertEquals(10L, decoded.snapshotDetails.single().snapshotId)
+    }
+
+    @Test
+    fun `restoreBackup_传给BackupManager的实参是完整解码载荷且身份摘要一致`() = runTest {
+        val uri = mockk<Uri>(relaxed = true)
+        val payload = sentinelPayload()
+        val json = BackupCodec.encode(payload)
+        // 两次读流都返回同一份完整 JSON（第一次摘要、第二次 decode）
+        stubInputStream(uri) { json }
+        val captured = slot<BackupPayload>()
+        coEvery { backupManager.restore(capture(captured)) } just Runs
+
+        vm.readBackup(uri)
+        assertTrue(waitUntil { vm.uiState.value.pendingRestore != null })
+        vm.restoreBackup()
+        assertTrue(waitUntil { vm.uiState.value.backupResult != null })
+
+        assertTrue(vm.uiState.value.backupResult?.isSuccess == true)
+        val passed = captured.captured
+        // 7 张表行数与载荷一致（不是被换成空列表/半份）
+        assertEquals(1, passed.assets.size)
+        assertEquals(1, passed.snapshots.size)
+        assertEquals(1, passed.snapshotDetails.size)
+        assertEquals(1, passed.dividends.size)
+        assertEquals(1, passed.transactions.size)
+        assertEquals(1, passed.stockBasics.size)
+        assertEquals(1, passed.fundNavCaches.size)
+        // 关键字段未被替换，且传给 Manager 的载荷与确认时摘要身份一致
+        assertEquals("哨兵资产", passed.assets.single().name)
+        assertEquals(10L, passed.snapshotDetails.single().snapshotId)
+        assertTrue(BackupCodec.hasSameIdentity(passed, BackupCodec.summary(json)))
     }
 
     @Test

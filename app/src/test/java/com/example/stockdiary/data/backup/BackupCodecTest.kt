@@ -442,6 +442,12 @@ class BackupCodecTest {
         coVerify(exactly = 1) { transactionDao.insertAll(payload.transactions) }
         coVerify(exactly = 1) { stockBasicDao.insertAll(payload.stockBasics) }
         coVerify(exactly = 1) { fundNavCacheDao.upsertAll(payload.fundNavCaches) }
+        // 断言事务边界真实存在：withTransaction 的实现就是 begin → block → setSuccessful → end。
+        // 把 restore 里的 db.withTransaction{} 换成 run{} 时，上面 14 步调用日志与 coVerify 仍全绿，
+        // 但这里三条会全部失败——这是「清表+写回必须同生共死」唯一的可执行护栏。
+        verify(exactly = 1) { db.beginTransaction() }
+        verify(exactly = 1) { db.setTransactionSuccessful() }
+        verify(exactly = 1) { db.endTransaction() }
     }
 
     @Test
@@ -480,6 +486,11 @@ class BackupCodecTest {
         assertTrue(calls.contains("clear.assets"))
         assertTrue(calls.contains("insert.snapshots"))
         assertFalse(calls.contains("insert.dividends"))
+        // 回滚护栏：异常时 Room 仍 endTransaction() 但绝不 setTransactionSuccessful()，
+        // 已清的 6 张表随事务一起回滚，不会留下「删了旧数据、没写回新数据」的空库。
+        // run{} 没有这两次调用，assertThrows 仍能过，所以必须显式钉死。
+        verify(exactly = 1) { db.endTransaction() }
+        verify(exactly = 0) { db.setTransactionSuccessful() }
     }
 
     @Test

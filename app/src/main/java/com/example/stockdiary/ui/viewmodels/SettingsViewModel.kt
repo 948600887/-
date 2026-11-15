@@ -259,6 +259,8 @@ class SettingsViewModel(
         // 与既有 6 种导出共用 isExporting 守卫（连点只跑一次）；isBackingUp 额外挡住
         // 「恢复进行中又点导出」这类跨操作并发写库。标记必须在 launch 之前同步置位。
         if (_uiState.value.isExporting || _uiState.value.isBackingUp) return
+        // L1：导出会清掉残留的待恢复确认框，那份 Uri 的持久读授权也要一并释放
+        _uiState.value.pendingRestore?.uri?.let { releaseBackupUri(it) }
         _uiState.update {
             it.copy(
                 isExporting = true,
@@ -320,9 +322,13 @@ class SettingsViewModel(
     fun readBackup(uri: Uri) {
         if (_uiState.value.isBackingUp) {
             // 守卫被拒也算「取消」：清掉可能残留的旧确认框，避免 Uri/摘要错配
+            // L1：那份旧确认框的 Uri 读授权一并释放
+            _uiState.value.pendingRestore?.uri?.let { releaseBackupUri(it) }
             _uiState.update { it.copy(pendingRestore = null) }
             return
         }
+        // L1：重新选备份会覆盖旧确认框，旧 Uri 的持久读授权先配对释放
+        _uiState.value.pendingRestore?.uri?.let { releaseBackupUri(it) }
         _uiState.update { it.copy(isBackingUp = true, pendingRestore = null, backupResult = null) }
         viewModelScope.launch(Dispatchers.IO) {
             try {
@@ -335,9 +341,13 @@ class SettingsViewModel(
                     it.copy(isBackingUp = false, pendingRestore = PendingRestore(uri, summary))
                 }
             } catch (e: CancellationException) {
+                // L1：摘要读取已结束（异常路径），不再需要这份 Uri 的读权限
+                releaseBackupUri(uri)
                 _uiState.update { it.copy(isBackingUp = false, pendingRestore = null) }
                 throw e
             } catch (e: Exception) {
+                // L1：读摘要失败，不会进入二次确认，配对释放持久读授权
+                releaseBackupUri(uri)
                 AppLogger.w("读取备份失败: ${e.message}", "SettingsVM")
                 val failure: Result<String> = Result.failure(readableBackupError("读取备份失败", e))
                 _uiState.update {
@@ -396,6 +406,8 @@ class SettingsViewModel(
                     "${payload.snapshots.size} 条历史快照、${payload.transactions.size} 笔交易、" +
                     "${payload.dividends.size} 笔分红"
                 AppLogger.i("从备份恢复完成：7 张表整表替换，未自动触发行情同步", "SettingsVM")
+                // L1：恢复全程（含二次读流）已结束，配对释放持久读授权
+                releaseBackupUri(pending.uri)
                 _uiState.update {
                     it.copy(
                         isBackingUp = false,
@@ -405,9 +417,13 @@ class SettingsViewModel(
                     )
                 }
             } catch (e: CancellationException) {
+                // L1：恢复被取消，不再读这份 Uri，配对释放
+                releaseBackupUri(pending.uri)
                 _uiState.update { it.copy(isBackingUp = false, pendingRestore = null) }
                 throw e
             } catch (e: Exception) {
+                // L1：恢复失败，配对释放持久读授权
+                releaseBackupUri(pending.uri)
                 AppLogger.e("从备份恢复失败: ${e.message}", e, "SettingsVM")
                 val failure: Result<String> = Result.failure(readableBackupError("恢复失败", e))
                 _uiState.update {
@@ -440,7 +456,25 @@ class SettingsViewModel(
 
     /** 确认框确认 / 取消后清掉待恢复摘要，避免切页回来又弹一次 */
     fun clearPendingRestore() {
+        // L1：取消 / 关闭确认框后不再需要读这份 Uri，配对释放持久读授权（与 take 侧对称）
+        _uiState.value.pendingRestore?.uri?.let { releaseBackupUri(it) }
         _uiState.update { it.copy(pendingRestore = null) }
+    }
+
+    /**
+     * L1：配对释放 SAF 持久读授权。
+     *
+     * take 在 SettingsScreen 的 OpenDocument 回调里；这里只在 ViewModel 确认「这条 Uri 的
+     * 读取流程已结束」后调用——二次确认恢复还要再读一次流，提前释放会破坏 B2 旋屏恢复。
+     * 对没有成功 take 的 Uri（部分 provider 不支持持久授权），release 会抛 SecurityException，
+     * 与 take 侧对称地用 runCatching 兜住，绝不因释放失败阻断备份主流程。
+     */
+    private fun releaseBackupUri(uri: Uri) {
+        runCatching {
+            appContext.contentResolver.releasePersistableUriPermission(
+                uri, Intent.FLAG_GRANT_READ_URI_PERMISSION
+            )
+        }
     }
 
     /** 读整个备份文件为 UTF-8 文本；去掉可能存在的 BOM，避免 JSONObject 解析失败 */

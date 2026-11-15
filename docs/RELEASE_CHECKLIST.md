@@ -1,5 +1,9 @@
 # 发版前检查清单（Release Checklist）
 
+> ⚠️ **历史归档（2026-11-15 标注）**：本文写于 **2026-11-06**，流程思路仍有参考价值，但文中门禁步数、测试数量、APK 命名等具体数字已演进，**不代表当前基线**。
+> 现行门禁 `tools/check_gate.sh` 为 **9 步**（8 个 `run_step` + `verify_test_count`），基线 **1701 例 / 155 XML / 0 失败**；出包约定见项目记忆 `D:\主人的任务\.workbuddy\memory\MEMORY.md`（只出 arm64-v8a、release unsigned 后用 `apksigner.bat` 手动签名）。
+> **当前明确不出包**（梦瑶 2026-11-15 指示「不用出包」）；若她改主意，再按 `docs/HANDOFF.md` 文末补记与最新 `git log` 执行本清单。
+
 > **为什么需要这份清单**：`tools/check_gate.sh` 与 `.github/workflows/gate.yml` 都是**无设备**的
 > 静态 / JVM 校验：它们能编译 androidTest 源码、能离线比对迁移 SQL 与 schema JSON，
 > 但**执行不了** instrumentation 测试，也**验不了** release 混淆后的真实行为。

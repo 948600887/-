@@ -1,5 +1,8 @@
 # 金库 App「深色模式根治」系统设计与任务拆解
 
+> ⚠️ **历史归档（2026-11-15 标注）**：本文是 **2026-09** 深色模式改造期的设计与任务拆解，属**当时实施依据的历史快照**，不代表当前代码结构、依赖版本或任务状态；文中「待办」不要当成在途工作。
+> 当前状态一律以 `git log`、`docs/HANDOFF.md` 文末「2026-11-15 交接补记」、项目记忆 `D:\主人的任务\.workbuddy\memory\MEMORY.md` 为准。
+
 - 项目：GoldVault（`D:/主人的任务/NewStockDiary`），Kotlin + Compose Material3（compose-bom 2024.02.00 / Compose 1.6.1）+ Room，minSdk 26，包 `com.example.stockdiary`
 - 范围：全 App 深浅自适应（用户已确认）
 - 角色：架构师 Bob（高见远）｜日期：2026-09

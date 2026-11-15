@@ -319,3 +319,23 @@ CODE_ARCHITECTURE.md 部分过时），一律以实际代码 + git log 为准。
 - **push 仍阻塞**：代理已从 `57055` 换到 `127.0.0.1:52184`，但 `curl github` = 000、`git ls-remote origin HEAD` = `CONNECT tunnel failed, response 502`；另试「`--noproxy '*'` 直连」同样 000。两种手段各一轮失败，按「同一手段最多 2 次」停手，未再重试 push。**需梦瑶本人恢复代理/换网络**，之后 `git -C "D:/主人的任务/NewStockDiary" push origin main` 并 `git status -sb` 确认无 ahead。
 - 真机验证（备份恢复全链路、旋转屏幕确认恢复、514 修复装包）仍需梦瑶本人，本机 `adb` 无设备；QA 的 5 项 P3 与 R02~R07 裸奔项维持不动，未纳入本轮「优化」以免引入回归。
 
+---
+
+## 2026-11-15 app 层三路只读审查最终结论（梦瑶「继续检查app」→「继续」）
+
+**边界**：三路审查全程只读 —— 未改任何 app 源码/测试、未出包、未 push、未做真机。路线：架构体检（备份恢复闭环、L1~L5、A1~A9）+ 独立 QA（实跑门禁、找假绿、评 0 覆盖）+ 既有链路（导出/诊断/写入侧、R02~R07、诊断摘要是否全而准）。
+
+**门禁实跑**：`tools/check_gate.sh` EXIT=0 / GATE PASSED / 279s；**1701 例 / 155 XML / 0 失败 / 0 错误 / 0 跳过 / STALE=0**；`check_invariants` 9/9。架构侧确认 A1~A9 零违规、`BackupManager.restore()` 的 Room v18 事务边界本身正确、7 表覆盖完整、B2 状态机有效、DAO 与内存单例一致。
+
+**交付判定：不可交付**。限定措辞：唯一的 **P0 级功能缺陷阻断 = L3**；另有独立的「验证未完成」理由。修完 L3 只清掉 P0，仍须补测 + 真机验收。QA 第 2 轮 `IS_PASS: YES` 已收窄为「B1~B8 静态读码验收通过 + 门禁全绿」，**不代表运行时端到端已验证，更不代表可交付**。
+
+**L3（P0，唯一功能缺陷阻断）**：`BackupCodec.kt:233-238` 的 `validatePayload()` 对孤儿 `snapshotId` 强制抛异常，而 `assetId` 被显式豁免；`encode()` 不调 `validatePayload()`、`BackupCodec.summary()` 只数数组长度 → 导出成功、确认框正常，**点确认恢复才失败、零写库**，用户误判备份文件损坏。修法 A（唯一推荐）：`decode()` 遇孤儿 `snapshotId` **不抛异常、不过滤、原行原值保留，禁止 `filter`**（filter 会让 count 变 N-k，撞 B3 身份校验）；`validatePayload()` 其余校验与 `requireFinitePayload`/`requiredLong`/`strictInt`/`assertUniqueKeys` 全部保留；`BackupCodecTest.kt:691-698` 由「断言抛异常」改正向护栏 `assertEquals(orphan, decode(encode(orphan)))` + `assertTrue(hasSameIdentity(decoded, summary(json)))`。**别用方案 B（导出端过滤）**：违反 `BackupPayload`「Room 7 表全部行」规格、确认框条数与库内不符、救不了存量已导出备份。
+
+**三处断言真空 + 6 个假绿反例（独立「验证未完成」）**：把 `BackupManager.restore()` 的 `db.withTransaction {}` 换成 `run {}`、`exportBackup()` 写出 `"{}"`、VM 传给 `BackupManager` 的 `BackupPayload` 实参多处 `any()` —— 以上改动 1701 例仍全绿。另有调用日志断言自我镜像、B3 身份比对只钉 3/7 count、门禁无用例数下限、清库实现被整体 mock。须补：真 Room 事务回滚 / 7 表内容相等、真机 SAF 全链路、旋转屏确认恢复、`exportBackup` 写出字节。（本轮只记录，未动测试代码。）
+
+**其余遗留口径（多轮交叉复核已收敛）**：L1 持久 Uri 授权只 take 不 release、L2 摘要是身份启发式非内容指纹、L4 恢复失败时事务外 `DELETE FROM fund_nav_cache` 不可回滚且取消无提示、L5 `clearFetchState()` 的 `commit()` 在 `deleteAllData()` 的 Room 事务线程内 + WAL 未显式启用（**QA 原文无误，别写「QA 写错」**）—— 四项维持 P3。R04 `stock_basic` 清库未清降 **P2 待定口径，不要给 `deleteAllData()` 补 `clearAll()`**（真正待定的是备份是否该含可重建参考表）。R02(诊断被 CSV 挤掉)/R03(非原子写)/R05(凭据降级明文)/R07(`apply()` 竞态) 遗留。诊断「排障摘要」结论：准 > 全 —— 514/退避/预算顺延一屏可见，但 ERROR/崩溃类型/失败原因/构建标识不足、进程内存态快照会静默缺失、链路覆盖把下界 0 误报「未覆盖」。
+
+**待梦瑶决策**：是否授权 ①修 L3 + 改护栏测试（仅 `BackupCodec.kt` + `BackupCodecTest.kt` 两个文件、零新依赖）②补三处断言真空相关测试 ③修 R02/R03/R05/R07。任何一项授权后须补跑 9 步门禁（1701 例为基线，只增不减）。push 与真机两项阻塞不变，见上节。
+
+**当前状态（以 `git log` 为准）**：本段追加会产生一笔新的本地文档提交；`origin/main` 与 ahead 笔数实时以 `git status -sb` 为准，不在此写死。
+

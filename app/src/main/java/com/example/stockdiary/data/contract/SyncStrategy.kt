@@ -1,5 +1,6 @@
 package com.example.stockdiary.data.contract
 
+import com.example.stockdiary.common.FailureClassifier
 import com.example.stockdiary.database.AssetType
 import java.io.IOException
 import java.net.ConnectException
@@ -108,19 +109,20 @@ object SyncStrategy {
                 when {
                     message.contains("timeout") -> SyncErrorType.NETWORK
                     message.contains("unable to resolve") -> SyncErrorType.NETWORK
-                    // 5xx 服务端错误：匹配关键字或独立的 5xx 状态码（避免误匹配含 "5" 的端口号等）
+                    // 5xx 服务端错误：关键字优先，其次才看独立的 5xx 状态码。
+                    // 状态码解析统一走 FailureClassifier，避免与请求级重试各写一套正则。
                     message.contains("internal server") ||
                         message.contains("bad gateway") ||
                         message.contains("service unavailable") ||
                         message.contains("gateway timeout") ||
                         message.contains("server error") ||
-                        STATUS_5XX.containsMatchIn(message) -> SyncErrorType.SERVER
-                    // 4xx 数据/请求错误：匹配关键字或独立的 4xx 状态码
+                        FailureClassifier.hasServerErrorStatus(message) -> SyncErrorType.SERVER
+                    // 4xx 数据/请求错误：同样关键字优先，其次看独立的 4xx 状态码
                     message.contains("not found") ||
                         message.contains("bad request") ||
                         message.contains("no such") ||
                         message.contains("does not exist") ||
-                        STATUS_4XX.containsMatchIn(message) -> SyncErrorType.DATA
+                        FailureClassifier.hasClientErrorStatus(message) -> SyncErrorType.DATA
                     else -> SyncErrorType.UNKNOWN
                 }
             }
@@ -189,8 +191,4 @@ object SyncStrategy {
 
     private const val UNKNOWN_BASE_DELAY_MILLIS = 30_000L
     private const val UNKNOWN_MAX_DELAY_MILLIS = 5 * 60 * 1000L
-
-    // 匹配独立的 4xx/5xx HTTP 状态码，使用词边界避免误匹配端口号等（如 5432、8080）
-    private val STATUS_4XX = Regex("\\b4\\d\\d\\b")
-    private val STATUS_5XX = Regex("\\b5\\d\\d\\b")
 }

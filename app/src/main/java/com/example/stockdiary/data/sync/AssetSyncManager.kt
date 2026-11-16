@@ -18,7 +18,6 @@ import com.example.stockdiary.data.price.PriceLineage
 import com.example.stockdiary.data.price.PriceLineageRecorder
 import com.example.stockdiary.data.price.RoundSourceFailureScope
 import com.example.stockdiary.data.price.SourceIds
-import com.example.stockdiary.data.price.SourceStats
 import com.example.stockdiary.data.price.StockDataManager
 import com.example.stockdiary.common.SyncLimits
 import com.example.stockdiary.network.FundAPI
@@ -26,7 +25,6 @@ import com.example.stockdiary.network.EastmoneyDelistedQuoteApi
 import com.example.stockdiary.network.UnifiedPriceService
 import com.example.stockdiary.network.model.AssetPrice
 import com.example.stockdiary.utils.AppLogger
-import com.example.stockdiary.utils.FailureLogFormat
 import com.example.stockdiary.utils.StockCodeManager
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineExceptionHandler
@@ -49,8 +47,6 @@ import kotlinx.coroutines.withContext
 import java.time.LocalDate
 import java.time.ZoneId
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.ConcurrentLinkedQueue
-import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
@@ -558,30 +554,9 @@ object AssetSyncManager {
         // 基金与加密链路共用同一套 SourceStats，轮次节奏也必须一致
         FundAPI.resetSourceStats(roundId)
         UnifiedPriceService.resetSourceStats(roundId)
-        // 跳过原因分类计数：汇总里「跳过 127」必须能拆开，否则等于没统计
-        val skipReasons = ConcurrentHashMap<String, AtomicInteger>()
-        fun countSkip(reason: String) {
-            skipReasons.computeIfAbsent(reason) { AtomicInteger() }.incrementAndGet()
-        }
-
-        val successCount = AtomicInteger(0)
-        val failedCount = AtomicInteger(0)
-        val completedCount = AtomicInteger(0)
-        val totalCount = assets.size
-        val errorTypes = ConcurrentLinkedQueue<SyncErrorType>()
-        val truncated = java.util.concurrent.atomic.AtomicBoolean(false)
-
-        // 本轮「卡片提示」口径的账本：只有真成功 / 真失败进集合，跳过与被截断的资产两边都不出现。
-        // 并发子任务各自写入，收尾时一次性套用到 [AssetSyncFailureStore]，避免逐标的写磁盘。
-        val succeededAssetIds = ConcurrentHashMap.newKeySet<Long>()
-        val failedAssetIds = ConcurrentHashMap.newKeySet<Long>()
-        // 「走完同步流程」的资产：成功/失败/显式跳过都算。取消级联只统计
-        // 这个集合之外、又不在成功/失败集合里的标的——它们是被取消/没来得及开始的，
-        // 既不是真失败也不是源的问题，必须如实计进 skipped 原因。
-        val settledAssetIds = ConcurrentHashMap.newKeySet<Long>()
-        // 因预算/取消而根本没开始的标的：已单独计入「超时截断」，
-        // 收尾统计取消级联时必须排除，否则会重复计一次。
-        val budgetSkippedAssetIds = ConcurrentHashMap.newKeySet<Long>()
+        // 本轮统计账本：成功/失败/跳过原因、错误类型、截断标记、卡片提示集合。
+        // 记账细节全部收在 SyncRoundStats，编排流程只负责在正确的时机调它的方法。
+        val stats = SyncRoundStats(roundId, syncTrigger, assets.size)
 
         val semaphore = Semaphore(MAX_CONCURRENT_SYNC)
         val dividendRepository = DividendRepository.getInstance(context)
@@ -626,7 +601,7 @@ object AssetSyncManager {
         logMemoryState(context, "同步起点")
 
         AppLogger.i(
-            "价格同步开始 [轮次#$roundId][$syncTrigger]：${totalCount} 个资产，" +
+            "价格同步开始 [轮次#$roundId][$syncTrigger]：${stats.totalCount} 个资产，" +
                 "forceRefresh=$forceRefresh，" +
                 "时间预算=${if (enforceTimeLimit) "${timeLimitMs}ms" else "无"}",
             TAG
@@ -639,10 +614,7 @@ object AssetSyncManager {
         // 不阻塞取消线程。
         currentCoroutineContext()[Job]?.invokeOnCompletion { cause ->
             if (cause is CancellationException) {
-                val reason = cause.message?.takeIf { it.isNotBlank() }?.let { "（取消原因：$it）" } ?: ""
-                val summary = "价格同步取消收尾 [轮次#$roundId][$syncTrigger]：" +
-                    "已完成 ${completedCount.get()}/$totalCount，" +
-                    "成功 ${successCount.get()}，失败 ${failedCount.get()}$reason"
+                val summary = stats.cancellationSummary(cause)
                 lastRoundCancelledSummary = summary
                 AppLogger.i(summary, TAG)
             }
@@ -652,7 +624,7 @@ object AssetSyncManager {
         if (stocksAndFunds.isNotEmpty()) {
             val symbols = stocksAndFunds.mapNotNull { it.symbol }
             // 注意：notifyProgress 是函数类型变量，Kotlin 不允许对函数类型用命名实参，只能按位置传
-            notifyProgress(SyncProgress(0, totalCount, "正在同步行情..."), true)
+            notifyProgress(SyncProgress(0, stats.totalCount, "正在同步行情..."), true)
             // 分红预取是刷新的配角，只划一段子预算（见 SyncBudget），
             // 剩下的留给价格同步——用户点刷新真正要看的是行情。
             // 预算照旧，但**不再在这里 await**：转后台协程推进（见 [dividendPrefetchScope]），
@@ -672,7 +644,7 @@ object AssetSyncManager {
             phase = "价格同步",
             status = {
                 val doing = inFlightAssets.take(3).joinToString("、")
-                "已完成 ${completedCount.get()}/$totalCount" +
+                "已完成 ${stats.completedCount}/${stats.totalCount}" +
                     "，进行中 ${inFlightAssets.size} 个" +
                     if (doing.isNotEmpty()) "（$doing）" else ""
             }
@@ -767,7 +739,7 @@ object AssetSyncManager {
                         // 上排队恢复时早已错过检查点，预算形同虚设——这正是手动刷新曾跑满数分钟、
                         // 被系统 LMK 静默击毙、且币安行情永远排不到的根因。
                         if (SyncBudget.isExceeded(startTime, timeLimitMs, System.currentTimeMillis())) {
-                            if (truncated.compareAndSet(false, true)) {
+                            if (stats.markTruncated()) {
                                 AppLogger.w(
                                     "已达时间预算（${timeLimitMs}ms），后续未开始的标的本次跳过",
                                     TAG
@@ -775,8 +747,8 @@ object AssetSyncManager {
                             }
                             // 没来得及开始的标的也是「跳过」，必须进轮次摘要，
                             // 否则 total 与 成功/失败/跳过 三项之和对不上。
-                            budgetSkippedAssetIds.add(asset.id)
-                            countSkip("超时截断")
+                            stats.markBudgetSkipped(asset.id)
+                            stats.countSkip("超时截断")
                             return@withPermit
                         }
                         val label = "${asset.name}（${asset.symbol ?: "无代码"}）".take(24)
@@ -792,17 +764,11 @@ object AssetSyncManager {
                                     repository,
                                     priceWriter,
                                     delistedQuoteCache,
-                                    successCount,
-                                    failedCount,
-                                    errorTypes,
+                                    stats,
                                     forceRefresh,
                                     correctNames,
                                     batchResult = batchPriceMap[asset.symbol] ?: cryptoPriceMap[asset.symbol],
-                                    networkAvailable = networkAvailable,
-                                    roundId = roundId,
-                                    onSkip = ::countSkip,
-                                    onSyncSucceeded = { id -> succeededAssetIds.add(id) },
-                                    onSyncFailed = { id -> failedAssetIds.add(id) }
+                                    networkAvailable = networkAvailable
                                 )
                             }
                         } finally {
@@ -810,12 +776,12 @@ object AssetSyncManager {
                         }
                         // 同步流程正常走完（含显式跳过）：之后才登记为 settled。
                         // 被取消的标的走不到这一句，留给收尾统一计入「取消级联」。
-                        settledAssetIds.add(asset.id)
-                        val completed = completedCount.incrementAndGet()
+                        stats.markSettled(asset.id)
+                        val completed = stats.recordCompleted()
                         // 收尾那一次强制发出：否则标题栏会停在「103 / 106」这类中间态
                         notifyProgress(
-                            SyncProgress(completed, totalCount, "同步 ${asset.name}..."),
-                            completed >= totalCount
+                            SyncProgress(completed, stats.totalCount, "同步 ${asset.name}..."),
+                            completed >= stats.totalCount
                         )
                     }
                 }
@@ -832,7 +798,7 @@ object AssetSyncManager {
                     while (isActive) {
                         delay(WATCHDOG_INTERVAL_MS)
                         if (SyncBudget.isExceeded(startTime, timeLimitMs, System.currentTimeMillis())) {
-                            if (truncated.compareAndSet(false, true)) {
+                            if (stats.markTruncated()) {
                                 AppLogger.w(
                                     "看门狗触发：已达时间预算（${timeLimitMs}ms），取消在途请求并收尾",
                                     TAG
@@ -866,17 +832,9 @@ object AssetSyncManager {
                 // 取消级联如实计入 skipped：被看门狗取消的在途标的既不成功也不失败，
                 // 不计的话轮次摘要会出现「总数 106，但成功+失败+跳过只有 50」的缺口。
                 // 只加统计，不改取消传播（外部取消仍原样上抛）。
-                if (truncated.get()) {
-                    val cancelledCascade = orderedAssets.count { asset ->
-                        asset.id !in settledAssetIds &&
-                            asset.id !in succeededAssetIds &&
-                            asset.id !in failedAssetIds &&
-                            asset.id !in budgetSkippedAssetIds
-                    }
-                    if (cancelledCascade > 0) {
-                        skipReasons.computeIfAbsent("取消级联") { AtomicInteger() }
-                            .addAndGet(cancelledCascade)
-                    }
+                if (stats.truncated) {
+                    val cancelledCascade = stats.countCancelledCascade(orderedAssets.map { it.id })
+                    stats.addSkipCount("取消级联", cancelledCascade)
                 }
             } finally {
                 // 无论正常收尾还是外部取消，都要把看门狗停掉，否则 withHeartbeat 会一直等它空转
@@ -901,7 +859,7 @@ object AssetSyncManager {
                     // 成功 / 失败结果不能丢，否则提示会停在上一轮的旧状态。
                     try {
                         AssetSyncFailureStore.getInstance(context)
-                            .applyOutcomes(succeededAssetIds, failedAssetIds)
+                            .applyOutcomes(stats.succeededIds, stats.failedIds)
                     } catch (e: Exception) {
                         // 提示状态是纯展示信息，写失败绝不能让整轮同步判失败
                         AppLogger.e("落盘上次同步失败标记出错: ${e.message}", e, TAG)
@@ -909,12 +867,6 @@ object AssetSyncManager {
                 }
             }
         }
-
-        val networkErrorCount = errorTypes.count { it == SyncErrorType.NETWORK }
-        val serverErrorCount = errorTypes.count { it == SyncErrorType.SERVER }
-        val dataErrorCount = errorTypes.count { it == SyncErrorType.DATA }
-        val unknownErrorCount = errorTypes.count { it == SyncErrorType.UNKNOWN }
-        val dominantErrorType = errorTypes.groupingBy { it }.eachCount().maxByOrNull { it.value }?.key
 
         // ===== 轮次末的结构化汇总 =====
         // 排障时最先想知道的三件事——「这轮跑了多少、卡在哪、哪个数据源在掉链子」——
@@ -929,31 +881,8 @@ object AssetSyncManager {
             FundAPI.sourceStatsSnapshot(roundId) +
             UnifiedPriceService.cryptoSourceStatsSnapshot(roundId)
 
-        logRoundSummary(
-            roundId = roundId,
-            trigger = syncTrigger,
-            total = totalCount,
-            success = successCount.get(),
-            failed = failedCount.get(),
-            truncated = truncated.get(),
-            elapsedMs = elapsedMs,
-            skipReasons = skipReasons.mapValues { it.value.get() },
-            sourceStats = sourceStats
-        )
-
-        val result = SyncResult(
-            successCount = successCount.get(),
-            failedCount = failedCount.get(),
-            networkErrorCount = networkErrorCount,
-            serverErrorCount = serverErrorCount,
-            dataErrorCount = dataErrorCount,
-            unknownErrorCount = unknownErrorCount,
-            dominantErrorType = dominantErrorType,
-            truncatedByTimeLimit = truncated.get(),
-            skippedByReason = skipReasons.mapValues { it.value.get() },
-            sourceStats = sourceStats,
-            elapsedMs = elapsedMs
-        )
+        lastRoundSummary = stats.logSummary(elapsedMs, sourceStats)
+        val result = stats.toResult(elapsedMs, sourceStats)
         AppLogger.i(
             "价格同步结束 [轮次#$roundId][$syncTrigger]：成功 ${result.successCount}，失败 ${result.failedCount}，" +
                 "跳过 ${result.skippedCount}，超时截断=${result.truncatedByTimeLimit}",
@@ -1010,150 +939,6 @@ object AssetSyncManager {
         }
     }
 
-    /**
-     * 打印一轮同步的结构化汇总（单行，用 ` | ` 分段，便于按行检索）。
-     *
-     * 设计要点：
-     * - **跳过必须拆原因**：只说"跳过 127"等于没统计。币安熔断 / 退市 / 停牌 /
-     *   不可交易 / 非行情类型各自多少，决定了"该不该管"。
-     * - **数据源按三个出口计数**：成功 / 源级失败 / 符号级失败。这一行直接回答
-     *   "某个源是不是全挂了"——真机日志里新浪 44 次空报价、0 成功，就是靠人肉
-     *   grep -c 才看出来的，现在轮次自己会说。
-     */
-    private fun logRoundSummary(
-        roundId: Int,
-        trigger: String,
-        total: Int,
-        success: Int,
-        failed: Int,
-        truncated: Boolean,
-        elapsedMs: Long,
-        skipReasons: Map<String, Int>,
-        sourceStats: List<SourceStats>
-    ) {
-        val skipped = skipReasons.values.sum()
-        val skipText = if (skipReasons.isEmpty()) {
-            "无"
-        } else {
-            skipReasons.entries.sortedByDescending { it.value }
-                .joinToString(" · ") { "${it.key} ${it.value}" }
-        }
-        val sourceText = if (sourceStats.isEmpty()) {
-            "无"
-        } else {
-            sourceStats.joinToString(" · ") { s ->
-                val reason = s.lastFailureReason
-                    ?.takeIf { it.isNotBlank() }
-                    ?.let { "（${it.take(24)}）" }
-                    ?: ""
-                // 批量源（币安）额外带上分片结果；单源没有批量请求时保持不显示
-                val batch = s.batchShards
-                    ?.takeIf { it > 0 }
-                    ?.let { total -> "/分片败${s.batchFailedShards ?: 0}/$total" }
-                    ?: ""
-                val degrade = s.degradedReason
-                    ?.takeIf { it.isNotBlank() }
-                    ?.let { "（降级：${it.take(30)}）" }
-                    ?: ""
-                "${s.source} 成${s.success}/源败${s.sourceLevelFailure}/" +
-                    "符败${s.symbolLevelFailure}/耗时${s.durationMs}ms$batch$reason$degrade"
-            }
-        }
-        val summary = "=== 同步轮次 #$roundId 汇总 [$trigger] === | " +
-            "资产 $total：成功 $success / 失败 $failed / 跳过 $skipped（$skipText） | " +
-            "数据源：$sourceText | " +
-            "超时截断=$truncated · 总耗时 ${elapsedMs / 1000.0}s"
-        // 血缘摘要与轮次汇总一起落地：日志能回答「这个价来自哪个源、哪一轮、什么时间」，
-        // 诊断导出头部也带上这段。只统计内存里的血缘记录，不影响任何取价/缓存/落库结果。
-        val lineageSummary = PriceLineageRecorder.summary(roundId)
-        // 存一份给诊断报告头部用，再照常打日志
-        lastRoundSummary = "$summary\n$lineageSummary"
-        AppLogger.i(summary, TAG)
-        AppLogger.i(lineageSummary, TAG)
-        // 本轮已汇总完，清掉进程内本轮血缘（只删 roundId 匹配的，不碰并发中的其它轮）
-        PriceLineageRecorder.endRound(roundId)
-
-        // 每源一行：逐标的行给细节，这一行回答「这个源这轮到底怎样」（跳过/失败的数量与原因分布）
-        sourceStats.forEach { s ->
-            if (s.success + s.sourceLevelFailure + s.skipped <= 0) return@forEach
-            AppLogger.i(
-                FailureLogFormat.sourceSummaryLine(
-                    roundId = roundId,
-                    source = s.source,
-                    success = s.success,
-                    failed = s.sourceLevelFailure,
-                    skipped = s.skipped,
-                    failureReasons = s.failureReasons,
-                    skipReasons = s.skipReasons,
-                    durationMs = s.durationMs
-                ),
-                TAG
-            )
-        }
-    }
-
-    /**
-     * 同步期的价格批量落库器。
-     *
-     * ## 为什么必须有它
-     *
-     * 见 [PRICE_WRITE_BATCH_SIZE]：Assets 表每写一行 Room 就整表重查重发一次，
-     * 逐只标的单独 UPDATE 会让「一次刷新 = N 次整页重组」。这里把拿到的价先攒在缓冲区，
-     * 攒够一批才用一个事务写下去，Room 的失效通知次数约为原来的 1/8。
-     *
-     * ## 失败语义（刻意与改造前对齐）
-     *
-     * 凑满一批触发的 flush 是**在调用方（[syncSingleAsset]）自己的协程里同步执行**的，
-     * 落库异常照旧冒到 `syncSingleAsset` 的 catch —— 与改造前「写库失败算这个标的失败」
-     * 的语义一致，不会悄悄吞掉一次写库故障。只有收尾那次 [flushAll] 无法归属到单个标的，
-     * 才退化为记 WARN。
-     *
-     * ## 并发
-     *
-     * 三个并发标的都可能同时放价。缓冲区用无锁队列；flush 用 [Mutex] 串行：
-     * 已在 flush 中的协程会把缓冲区**一次抽干**（含别的协程刚放进去的），
-     * 后来的协程用 [Mutex.tryLock] 抢不到锁就直接返回——它不该在信号量名额里
-     * 为一个已经在进行的写操作空等。
-     */
-    private class SyncPriceWriter(
-        private val repository: AssetRepository,
-        private val batchSize: Int
-    ) {
-        private val pending = ConcurrentLinkedQueue<PendingPriceWrite>()
-        private val flushMutex = Mutex()
-
-        /** 放入一条落价意图；缓冲区够大就顺手 flush 一批（可能抛，交由调用方的 catch 记账） */
-        suspend fun write(write: PendingPriceWrite) {
-            pending.offer(write)
-            flushIfBatchFull()
-        }
-
-        /** 收尾：把缓冲区里剩下的全写掉。同步被取消时也要调用，否则会丢价 */
-        suspend fun flushAll() {
-            flushMutex.withLock { drainAllLocked() }
-        }
-
-        private suspend fun flushIfBatchFull() {
-            if (pending.size < batchSize) return
-            if (!flushMutex.tryLock()) return
-            try {
-                drainAllLocked()
-            } finally {
-                flushMutex.unlock()
-            }
-        }
-
-        /** 调用方必须持有 [flushMutex]。循环抽干：别的协程可能在 flush 期间又放进了新的 */
-        private suspend fun drainAllLocked() {
-            while (true) {
-                val batch = ArrayList<PendingPriceWrite>(batchSize)
-                repeat(batchSize) { pending.poll()?.let(batch::add) }
-                if (batch.isEmpty()) return
-                repository.updatePricesInTransaction(batch)
-            }
-        }
-    }
-
     private suspend fun syncSingleAsset(
         asset: Asset,
         repository: AssetRepository,
@@ -1161,23 +946,14 @@ object AssetSyncManager {
         priceWriter: SyncPriceWriter,
         /** 退市股兜底收盘的按日缓存（同一自然日不重复请求东财） */
         delistedQuoteCache: DelistedQuoteCache,
-        successCount: AtomicInteger,
-        failedCount: AtomicInteger,
-        errorTypes: ConcurrentLinkedQueue<SyncErrorType>,
+        /** 本轮统计账本：成功/失败/跳过/错误类型与卡片提示集合都由它记账 */
+        stats: SyncRoundStats,
         forceRefresh: Boolean,
         correctNames: Boolean,
         /** 批量预取回填的现成价；非 null 时 STOCK/场内基金分支直接采信，跳过逐标的网络请求（P3） */
         batchResult: AssetPrice? = null,
         /** 同步起点一次性算好的网络可用性（P4）：非 null 时不再逐标的读 ConnectivityManager */
-        networkAvailable: Boolean? = null,
-        /** 本轮轮次 ID，只用于日志归属（由 runSync 显式传入，无默认值） */
-        roundId: Int,
-        /** 跳过原因回调（退市/停牌/币安熔断…），供轮次末汇总分类计数 */
-        onSkip: (String) -> Unit = {},
-        /** 本轮该资产**确实**成功落到新价（含退市股东财兜底成功） */
-        onSyncSucceeded: (Long) -> Unit = {},
-        /** 本轮该资产计入 `failedCount`（真失败，不含任何「跳过」） */
-        onSyncFailed: (Long) -> Unit = {}
+        networkAvailable: Boolean? = null
     ) {
         val symbol = asset.symbol
         val startedAt = System.currentTimeMillis()
@@ -1210,12 +986,12 @@ object AssetSyncManager {
                 // 同一自然日已经确认过：不再请求东财（失败也落检查日，避免每轮重试）
                 if (delistedQuoteCache.isCheckedOn(delistedSymbol)) {
                     AppLogger.d("跳过退市标的（今日已确认无新收盘）: ${asset.name}（$delistedSymbol）", TAG)
-                    skipReason = "退市"; onSkip("退市")
+                    skipReason = "退市"; stats.countSkip("退市")
                     return
                 }
                 if (networkAvailable == false) {
                     AppLogger.i("跳过退市标的（当前无网络，待恢复后再取历史收盘）: ${asset.name}（$delistedSymbol）", TAG)
-                    skipReason = "退市"; onSkip("退市")
+                    skipReason = "退市"; stats.countSkip("退市")
                     return
                 }
 
@@ -1248,11 +1024,11 @@ object AssetSyncManager {
                                 origin = LineageOrigin.IN_MEMORY,
                                 asOf = asOf,
                                 fetchedAt = System.currentTimeMillis(),
-                                roundId = roundId
+                                roundId = stats.roundId
                             )
                         )
                         // 退市兜底也是**成功落到新价**：卡片上的「上次更新未成功」必须随之消失
-                        onSyncSucceeded(asset.id)
+                        stats.markSucceeded(asset.id)
                         // 交易日只进日志/缓存，界面按普通价格展示，不加「历史收盘」标注
                         AppLogger.i(
                             "退市标的按东财最后收盘更新: ${asset.name}（$delistedSymbol，" +
@@ -1270,7 +1046,7 @@ object AssetSyncManager {
                     delistedQuoteCache.record(delistedSymbol, null)
                     AppLogger.i("跳过退市标的: ${asset.name}（$delistedSymbol，东财无可用历史收盘）", TAG)
                 }
-                skipReason = "退市"; onSkip("退市")
+                skipReason = "退市"; stats.countSkip("退市")
                 return
             }
 
@@ -1279,8 +1055,7 @@ object AssetSyncManager {
                     val fundCode = symbol?.removePrefix("fund_")
                     if (fundCode == null) {
                         failureRecorded = true
-                        failedCount.incrementAndGet()
-                        errorTypes.offer(SyncErrorType.DATA)
+                        stats.recordFailure(SyncErrorType.DATA)
                         return
                     }
                     // ETF/LOF/场内基金用股票API获取价格，场外基金用基金API
@@ -1370,8 +1145,7 @@ object AssetSyncManager {
                     val stockSymbol = symbol
                     if (stockSymbol == null) {
                         failureRecorded = true
-                        failedCount.incrementAndGet()
-                        errorTypes.offer(SyncErrorType.DATA)
+                        stats.recordFailure(SyncErrorType.DATA)
                         return
                     }
                     // 股票与场内基金同源：统一走行情门面，多源容错在门面下游。
@@ -1402,8 +1176,7 @@ object AssetSyncManager {
                     val cryptoSymbol = symbol
                     if (cryptoSymbol == null) {
                         failureRecorded = true
-                        failedCount.incrementAndGet()
-                        errorTypes.offer(SyncErrorType.DATA)
+                        stats.recordFailure(SyncErrorType.DATA)
                         return
                     }
                     // 理财/锁仓产品（LD 前缀）不再在这里预跳过：LD 与底层资产 1:1 可赎回，
@@ -1434,19 +1207,19 @@ object AssetSyncManager {
                 }
                 else -> {
                     // 银行存款/负债等没有行情可同步的类型：不算失败，也不该悄无声息
-                    skipReason = "非行情类型"; onSkip("非行情类型")
+                    skipReason = "非行情类型"; stats.countSkip("非行情类型")
                     return
                 }
             }
 
             if (isSuccess) {
-                successCount.incrementAndGet()
+                stats.recordSuccess()
             } else if (com.example.stockdiary.network.QuoteSuspendedException.isSuspended(lastError)) {
                 // 停牌不是同步失败：计进 failedCount 会让 PriceSyncWorker 走到
                 // 「同步多次失败，请检查网络」的通知，用户被一条根本不是故障的事骚扰。
                 // 价格保持上次的值不动（AssetRepository 也不会写入 0 价）。
                 AppLogger.i("跳过停牌标的: ${asset.name}（${lastError?.message}）", TAG)
-                skipReason = "停牌"; onSkip("停牌")
+                skipReason = "停牌"; stats.countSkip("停牌")
             } else if (com.example.stockdiary.network.NonTradableAssetException.isNonTradable(lastError)) {
                 // 币安理财/锁仓产品剥不掉底层交易对（如稳定币壳 LDUSDT）：不是网络故障、
                 // 也不是暂时停牌，而是本就不可取价。有底层的 LD 已改按底层 1:1 计价
@@ -1454,21 +1227,21 @@ object AssetSyncManager {
                 // 手动刷新等没走上面 CRYPTO 分支短路的路径也会走到这里，同样不计失败，
                 // 价格保持上次的值。
                 AppLogger.i("跳过不可交易标的: ${asset.name}（${lastError?.message}）", TAG)
-                skipReason = "不可交易"; onSkip("不可交易")
+                skipReason = "不可交易"; stats.countSkip("不可交易")
             } else if (com.example.stockdiary.network.BinanceHostUnavailableException.isUnavailable(lastError)) {
                 // 币安主机级熔断（BinanceHostGate）：临时暂停访问、不是故障，也不是
                 // 标的的问题。熔断期内每个加密货币都会走到这里，计进 failedCount
                 // 会推高「同步多次失败，请检查网络」通知，用户被一条与真实原因
                 // 无关的提示骚扰。价格保持上次的值，冷却过去后自然恢复。
                 AppLogger.i("币安接口临时熔断，跳过: ${asset.name}（${lastError?.message}）", TAG)
-                skipReason = "币安熔断"; onSkip("币安熔断")
+                skipReason = "币安熔断"; stats.countSkip("币安熔断")
             } else if (com.example.stockdiary.network.StalePriceCacheException.isStaleCache(lastError)) {
                 // 断网 / 行情源全挂且 PriceCacheManager 判定旧价已过 TTL：
                 // 旧价**不能**重新落库——AssetDao.updatePriceBySymbol 会把 lastSyncTime
                 // 刷成「刚刚」，三天前的收盘价就伪装成刚抓的新价。归到「跳过」（不算失败），
                 // 库里的旧价原样保留（不清空、不写 0），等网络恢复后自然更新。
                 AppLogger.i("过期缓存回落，跳过且不刷新 lastSyncTime: ${asset.name}（${lastError?.message}）", TAG)
-                skipReason = "缓存过期"; onSkip("缓存过期")
+                skipReason = "缓存过期"; stats.countSkip("缓存过期")
             } else {
                 // 仅当协程仍活跃时才把这次记为同步失败。协程已被取消（切后台 / VM 销毁 /
                 // 看门狗超预算）时，lastError 多半是「我们自己放弃」的产物（如币安抓取层把
@@ -1477,8 +1250,7 @@ object AssetSyncManager {
                 // 已成功取得的价在上面的 isSuccess 分支已记成功，这里只跳过失败计数，避免误伤。
                 if (currentCoroutineContext().isActive) {
                     failureRecorded = true
-                    failedCount.incrementAndGet()
-                    errorTypes.offer(SyncStrategy.classifyError(lastError))
+                    stats.recordFailure(SyncStrategy.classifyError(lastError))
                 } else {
                     AppLogger.d("协程已取消，跳过失败记账: ${asset.name}", TAG)
                 }
@@ -1494,8 +1266,7 @@ object AssetSyncManager {
             if (currentCoroutineContext().isActive) {
                 AppLogger.w("同步资产 ${asset.name} 失败: ${e.message}", TAG)
                 failureRecorded = true
-                failedCount.incrementAndGet()
-                errorTypes.offer(SyncStrategy.classifyError(e))
+                stats.recordFailure(SyncStrategy.classifyError(e))
             } else {
                 AppLogger.d(
                     "协程已取消，跳过异常记账: ${asset.name}（${e::class.simpleName}）",
@@ -1512,11 +1283,11 @@ object AssetSyncManager {
             }
             // 卡片提示口径：成功 → 清除；真失败 → 置位；跳过 / 被截断 / 取消 → 两边都不动。
             when {
-                isSuccess -> onSyncSucceeded(asset.id)
-                failureRecorded -> onSyncFailed(asset.id)
+                isSuccess -> stats.markSucceeded(asset.id)
+                failureRecorded -> stats.markFailed(asset.id)
             }
             AppLogger.d(
-                "[轮次#$roundId] $outcome ${asset.name}（${symbol ?: "无代码"}）" +
+                "[轮次#${stats.roundId}] $outcome ${asset.name}（${symbol ?: "无代码"}）" +
                     " ${System.currentTimeMillis() - startedAt}ms",
                 TAG
             )

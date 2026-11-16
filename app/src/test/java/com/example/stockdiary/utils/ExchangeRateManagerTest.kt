@@ -267,6 +267,25 @@ class ExchangeRateManagerTest {
         assertEquals(123L, ExchangeRateManager.getLastRefreshTimeMillis())
     }
 
+    // ==================== 汇率版本可观察 ====================
+
+    @Test
+    fun `刷新成功与复位都会推进版本流_且与普通字段同值`() = runTest {
+        val start = ExchangeRateManager.rateRevisionFlow.value
+        ExchangeRateManager.rateSource = FakeRateSource(result = mapOf("USD" to 6.9))
+
+        assertTrue(ExchangeRateManager.refresh())
+
+        // Compose 订阅的是流；普通字段是给非 Compose 路径的读数，两者必须一致
+        assertEquals(start + 1, ExchangeRateManager.rateRevisionFlow.value)
+        assertEquals(start + 1, ExchangeRateManager.rateRevision)
+
+        // 复位把流与普通字段一起归零，避免跨用例残留版本号
+        ExchangeRateManager.resetForTesting()
+        assertEquals(0, ExchangeRateManager.rateRevisionFlow.value)
+        assertEquals(0, ExchangeRateManager.rateRevision)
+    }
+
     // ==================== 汇率第二源降级 ====================
 
     @Test

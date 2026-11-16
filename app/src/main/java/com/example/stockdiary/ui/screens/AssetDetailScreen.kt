@@ -23,6 +23,7 @@ import com.example.stockdiary.data.dividend.DividendYieldCalculator
 import com.example.stockdiary.data.dividend.DividendIncomeCalculator
 import com.example.stockdiary.ui.components.LocalAppSnackbar
 import com.example.stockdiary.ui.components.SingleLineText
+import com.example.stockdiary.ui.components.rememberExchangeRateRevision
 import com.example.stockdiary.data.importer.stripLoanSuffix
 import com.example.stockdiary.ui.dialogs.AdjustPositionDialog
 import com.example.stockdiary.ui.dialogs.EditAssetDialog
@@ -62,6 +63,8 @@ fun AssetDetailScreen(
     val errorMessage = uiState.errorMessage
     val isRefreshing = uiState.isRefreshing
     val dividendStaleHint = uiState.dividendStaleHint
+    // 订阅汇率版本：详情页的「¥ 当前价」在汇率刷新后立即更新（读普通字段不会触发重组）
+    rememberExchangeRateRevision()
 
     var showEditDialog by remember { mutableStateOf(false) }
     var showAdjustDialog by remember { mutableStateOf(false) }

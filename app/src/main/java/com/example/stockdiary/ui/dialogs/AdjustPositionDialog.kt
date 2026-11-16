@@ -22,6 +22,7 @@ import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.ui.components.DialogInfoItem
 import com.example.stockdiary.ui.components.DialogSectionHeader
+import com.example.stockdiary.ui.components.rememberExchangeRateRevision
 import com.example.stockdiary.utils.ExchangeRateManager
 import com.example.stockdiary.utils.currencySymbol
 import com.example.stockdiary.utils.format
@@ -43,6 +44,9 @@ fun AdjustPositionDialog(
     var amount by remember { mutableStateOf("") }
     var price by remember { mutableStateOf("") }
     val isSaving = remember { mutableStateOf(false) }
+
+    // 订阅汇率版本：刷新汇率后弹窗里的参考价 / 成交额折算立即更新，而不是等下次重组
+    rememberExchangeRateRevision()
 
     // 只有用户改过某个字段后才给那个字段报错，避免刚打开空框就一片红
     var amountTouched by remember { mutableStateOf(false) }

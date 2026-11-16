@@ -268,6 +268,8 @@ fun StockAssetItem(
     // 同一只股票列表显示 12.34、弹窗显示 12.340，现在三处共用同一套判定
     val pricePrecision = pricePrecisionFor(asset.type, asset.symbol)
     val unitLabel = if (asset.type == AssetType.STOCK) "股" else "份"
+    // 订阅汇率版本：外币标的的「¥」折算在汇率刷新后立即跟着变，不再停留在旧汇率
+    rememberExchangeRateRevision()
 
     Card(
         modifier = Modifier.fillMaxWidth().clickable(onClick = { onClick(asset.id) }),

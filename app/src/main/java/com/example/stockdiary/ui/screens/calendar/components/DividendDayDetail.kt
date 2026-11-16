@@ -19,6 +19,7 @@ import com.example.stockdiary.data.dividend.DividendRecord
 import com.example.stockdiary.data.dividend.cashDateOrNull
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.ui.theme.AppTheme
+import com.example.stockdiary.ui.components.rememberExchangeRateRevision
 import com.example.stockdiary.database.amountFor
 import com.example.stockdiary.utils.format
 import com.example.stockdiary.utils.shareUnitWord
@@ -54,8 +55,9 @@ fun DividendDayDetail(
     // remember：与上面的 dayDividendDetails 一样，选中日期后的其它重组（例如上方金额/净资产
     // 刷新）不应重跑 map + 汇率换算；只有「当日明细」或持仓表变化时才重算。
     // 汇率版本必须进 key：外币分红折算的是汇率，汇率刷新后若只靠 date/assetMap 变化，
-    // 这里会一直返回旧金额。
-    val details = remember(dayDividendDetails, assetMap, ExchangeRateManager.rateRevision) {
+    // 这里会一直返回旧金额。版本号必须来自可观察流——读普通字段不会触发重组。
+    val rateRevision = rememberExchangeRateRevision()
+    val details = remember(dayDividendDetails, assetMap, rateRevision) {
         dayDividendDetails.map { (sym, record) ->
             val asset = assetMap[sym]
             // 折算成人民币：外币基金（USD/HKD）的每份金额按标的币种换算，

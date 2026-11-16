@@ -8,6 +8,9 @@ import com.example.stockdiary.network.NoOpRateSource
 import com.example.stockdiary.network.RateSource
 import com.example.stockdiary.network.SinaExchangeRateSource
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
@@ -87,14 +90,32 @@ object ExchangeRateManager {
     private var lastRefreshTimeMs: Long = 0L
 
     /**
-     * 汇率版本号：汇率表或时间戳每次变化就 +1。
+     * 汇率版本号：汇率表或时间戳每次变化就 +1。只增不减，进程内单调
+     * （[resetForTesting] 复位除外）。
      *
-     * 供 Compose `remember(...)` 做 key——否则汇率刷新后面板不重组，
-     * 缓存住的外币折算结果会一直显示旧值。只增不减，进程内单调。
+     * 保留为普通字段是给非 Compose 的读路径用的；**Composition 必须订阅
+     * [rateRevisionFlow]**——读普通字段不会触发重组，界面会一直显示旧折算值。
      */
     @Volatile
     var rateRevision: Int = 0
         private set
+
+    private val revisionFlowState = MutableStateFlow(0)
+
+    /**
+     * 可观察的汇率版本（同 [rateRevision] 的值）。
+     *
+     * 供 Compose `collectAsStateWithLifecycle()` 订阅：汇率刷新后读取方自动重组，
+     * 不再依赖「下一次其它状态变化顺手带一下」。旧实现把普通字段塞进 `remember` 的
+     * key 里，看似能刷新，实际因为字段变化本身不会触发重组而形同虚设。
+     */
+    val rateRevisionFlow: StateFlow<Int> = revisionFlowState.asStateFlow()
+
+    /** 版本号前进一格：普通字段与可观察流必须同时更新，避免两套读数漂移 */
+    private fun bumpRateRevision() {
+        rateRevision++
+        revisionFlowState.value = rateRevision
+    }
 
     /**
      * 已经告警过的未知币种集合：每个未知币种只警告一次，避免 Compose 重组合期
@@ -140,7 +161,7 @@ object ExchangeRateManager {
         if (accepted.isEmpty()) return
         liveRates = defaultRates + accepted
         lastRefreshTimeMs = saved.timestampMs
-        rateRevision++
+        bumpRateRevision()
     }
 
     /**
@@ -153,7 +174,7 @@ object ExchangeRateManager {
         liveRates = defaultRates
         lastRefreshTimeMs = 0L
         warnedUnknownCurrencies.clear()
-        rateRevision++
+        bumpRateRevision()
     }
 
     fun getRate(currency: String): Double {
@@ -240,7 +261,7 @@ object ExchangeRateManager {
         // 只覆盖响应里有的币种，其余保留现值（静态默认或上次的 live 值）
         liveRates = liveRates + accepted
         lastRefreshTimeMs = now
-        rateRevision++
+        bumpRateRevision()
         rateStore.save(liveRates, now)
         AppLogger.i(
             "汇率已刷新: ${accepted.entries.joinToString { "${it.key}=${it.value}" }}",
@@ -291,6 +312,8 @@ object ExchangeRateManager {
     internal fun resetForTesting(store: RateStore = InMemoryRateStore()) {
         liveRates = defaultRates
         lastRefreshTimeMs = 0L
+        rateRevision = 0
+        revisionFlowState.value = 0
         rateStore = store
         rateSource = NoOpRateSource()
         warnedUnknownCurrencies.clear()

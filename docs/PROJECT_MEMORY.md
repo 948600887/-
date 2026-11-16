@@ -132,7 +132,7 @@
 
 - **币安公开行情已绕开中国大陆地区封锁**：公开行情镜像 `data-api.binance.vision` 与 `api.binance.com` 同套 `/api/v3` 路径、**不做地区封锁**（实测 200 + lastPrice），所以**行情/查价/市值估算无需代理即可联网**。但**签名 `/account` 导入仍只能走 `api.binance.com`**，在封锁地区会 451 / `UnknownHostException`，仍只能挂代理导入持仓。App 对行情已能正常取价；账户导入失败会给出明确的「请检查网络或代理」中文提示。
 - **代码里没有 `DataManager.kt`**：早期架构文档（CODE_ARCHITECTURE.md）曾写「DataManager 旧版全局状态容器」，但仓库中**不存在**该文件（已核实）。当前行情抓取层是 `StockDataManager`（多源聚合 + `SourceCircuitBreaker` 数据源级熔断），它本身**被 Repository 调用**，是活跃代码而非历史遗留。**不要**按「消灭 DataManager」去做大规模重构——它不存在，`StockDataManager` 也无需大改。新增功能仍尽量走 Repository 边界。
-- **`CODE_ARCHITECTURE.md` 部分过时**：导航实际是 `ui/navigation/GoldVaultNavHost.kt`（不是 `StockDiaryNavHost.kt`）；`common/` 现在只有 `APIConfig.kt` 和 `Result.kt`。**以实际代码为准**。
+- **`CODE_ARCHITECTURE.md` 部分过时**：导航实际是 `ui/navigation/GoldVaultNavHost.kt`（不是 `StockDiaryNavHost.kt`）；`common/` 现在是 `APIConfig.kt`、`FailureClassifier.kt`、`DateFormats.kt`、`Result.kt`、`SyncLimits.kt`。**以实际代码为准**。
 - **设备端网络不稳会放大问题**：诊断日志曾出现东财/新浪/天天基金多域名同时 DNS 失败、价格同步 0/102。这是当时的网络状况，不是逻辑 Bug。
 
 ## 5. 提过但**未派工**的想法（不是欠债，是有意搁置）
@@ -141,3 +141,33 @@
   > 注：改除息日口径后超额已不再触发，此需求基本失去意义，**除非**将来再改口径。
 - release 签名包：需要 keystore，用户未确认，目前只有 debug 包。
 - GitHub 仓库描述为空、仓库名是 `-`：需用户在网页 Settings 自行改（`gh` CLI 未安装）。
+
+## 6. 架构取舍（2026-11-16 结构性审查结论，**别重复提**）
+
+### 6.1 失败分类：统一了什么、为什么不全统一
+
+- **已统一**：`common/FailureClassifier.kt` 是「从文案识别 4xx/5xx、限流、确定性业务失败」的**唯一入口**（纯函数，带独立的 3 位状态码 token 正则，不会被 14035 / 4291 / 40300 / sz000403 误伤）。
+  `SyncStrategy.classifyError`（轮次级）与 `NetworkRetryHelper.shouldRetry`（请求级）都只做映射，不再各写一套正则。
+- **有意不统一 ①：请求级 vs 轮次级的重试结论不同**。
+  `UnknownHostException` 请求级**不重试**（几秒内不会突然可解析，重试会把单次等待放大 maxRetries 倍，真机曾因此整轮开头 20s 卡在「0/240」），轮次级仍归 `NETWORK`（下一轮值得再试）；403/429 请求级不重试，轮次级仍按 4xx 归 `DATA`。统一会复活已修事故。
+- **有意不统一 ②：各源的重试次数、退避窗口、熔断档位保持原样**。新浪 / 腾讯 / 基金 legacy / 妙想 / 币安是不同源策略，强行统一等于重新调参，收益为零、风险为正。
+- **有意不统一 ③：`BinanceAccountAPI.classifyFailure` 的 `BinanceFailureKind`** 回答的是「用户该改什么」（权限 / 地区 / 限流），与 `SyncErrorType` 的「机器该不该重试」语义不同，各自保留。
+
+### 6.2 四个巨型类为什么不拆
+
+`AssetSyncManager`、`DividendRepository`、`BinanceAccountAPI`、`UnifiedPriceService` **暂不拆分**：
+
+- 它们承载的是本项目最贵的口径（取价优先级、预算/取消语义、分红限速与退避、账户失败分流），任何结构调整都要真机回归；本项目单模块、双 AI 并行、无 CI 真机，回归成本远高于可读性收益。
+- 拆分需要先冻结行为契约（每个公开入口的输入/输出/副作用/取消语义），否则只是把一个大文件变成多个互相引用的小文件。
+- 若将来要拆，先交**拆分方案**（边界建议、预计改动面、回归风险、需补测试）评审，不在日常优化轮里顺手拆。当前只允许「外提纯函数」这种不改变调用图的做法（如 `BinanceMessages`、`FailureLogFormat`）。
+
+### 6.3 已清理的死代码 / 空壳
+
+- `NetworkChecker`（`isNetworkError` / `getErrorMessage` / `isRateLimitError`，全仓零引用）已删除。
+- `NetworkRetryHelper.executeWithFallback`（全仓零引用；且它在兜底也失败时返回主异常，是可观测性瑕疵）已删除。
+
+### 6.4 可观察状态：别让 Composition 读普通字段
+
+- `ExchangeRateManager.rateRevision` 是普通 `@Volatile` 字段，在 composition 里读它**不会**触发重组；把它当 `remember` 的 key 曾被认为"能刷新"，实际是空转。
+- 现新增 `ExchangeRateManager.rateRevisionFlow: StateFlow<Int>`，UI 统一通过 `ui/components/ExchangeRateObservation.kt` 的 `rememberExchangeRateRevision()` 订阅。
+- **新增凡是在 composition 期被读取的进程级可变状态，必须提供 `StateFlow` / Compose `State`**，否则就是"要等下次重组才更新"。

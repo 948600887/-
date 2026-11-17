@@ -132,6 +132,9 @@ class AssetSyncManagerPrefetchNonBlockingTest {
         // 收尾：释放 gate 并等后台 job 结束，避免泄漏到下一个用例
         prefetchGate.complete(Unit)
         AssetSyncManager.backgroundDividendPrefetchJobForTesting()?.join()
+        // 表达式体 + 末尾 safe-call 会让返回类型变成 Unit?，JUnit4 要求 @Test 方法返回 void；
+        // 补一个非空 Unit 把返回类型钉回 Unit，避免 initializationError。
+        Unit
     }
 
     @Test

@@ -419,7 +419,20 @@ class SettingsViewModel(
             } catch (e: CancellationException) {
                 // L1：恢复被取消，不再读这份 Uri，配对释放
                 releaseBackupUri(pending.uri)
-                _uiState.update { it.copy(isBackingUp = false, pendingRestore = null) }
+                // L4：取消可能发生在 clearDerivedCaches() 之后——旧的 fund_nav_cache 已被事务外
+                // 删除且不会回滚（它是可重建派生缓存，账目 6 表仍由事务保证不变）。明确告知用户，
+                // 避免「缓存清空却毫无提示」。页面若已关闭，LaunchedEffect 不消费该 Result，无副作用。
+                val cancelled: Result<String> = Result.failure(
+                    IllegalStateException("恢复已取消；旧行情缓存可能已清理，下次刷新会自动重新下载")
+                )
+                _uiState.update {
+                    it.copy(
+                        isBackingUp = false,
+                        pendingRestore = null,
+                        exportResult = cancelled,
+                        backupResult = cancelled
+                    )
+                }
                 throw e
             } catch (e: Exception) {
                 // L1：恢复失败，配对释放持久读授权

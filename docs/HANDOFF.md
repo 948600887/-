@@ -339,3 +339,22 @@ CODE_ARCHITECTURE.md 部分过时），一律以实际代码 + git log 为准。
 
 **当前状态（以 `git log` 为准）**：本段追加会产生一笔新的本地文档提交；`origin/main` 与 ahead 笔数实时以 `git status -sb` 为准，不在此写死。
 
+---
+
+## 2026-11-17 出包 + 遗留项收口（梦瑶「全部优化」→「我修改了，你出包」）
+
+**梦瑶 11-15 曾选「先不动源码」，11-17 改口「全部优化」并授权实施；随后两路 worker（app-arch-check/app-legacy-check）因 429 限频中断，梦瑶自己接续修了很多并让我出包。** 现场核正：她自 11-15 起已自行提交多笔（`856e7d2` L3 修复 / `c50e712` 断言真空补测 + L1 Uri 释放 / 及 history/sync/failure/dividend/network 等 10 笔），已 push 到 `f218d9d`。工作区残留两路 worker 中断前的导出/凭据/诊断半成品，本轮收口。
+
+**本轮落地（均已提交，中文信息写清为什么改）**
+- `33154f9` 导出/诊断：R02 文件清理按用途分组保底，诊断报告不被 CSV 挤掉；R03 导出写出改 tmp+rename 原子落盘（覆盖已存在目标先删后 rename，Windows 兼容）；诊断 null 补说明行、链路覆盖措辞改「本份日志未见记录（可能未导入或已轮转）」与「未解析到≠0」一致。新增 AtomicWriteTest 3 例 / PruneTest 6 例。
+- `60b3145` 凭据/VM：R07 凭据 save/clear/迁移统一 commit 同步落盘，迁移先写密文读回校验成功再清旧明文；L4 恢复取消补缓存清理提示；修 `AssetSyncManagerPrefetchNonBlockingTest` 的 JUnit4「should be void」初始化错误（表达式体末尾 `?.join()` 推断成 `Unit?`，补非空 `Unit`）。新增凭据测试 6 例真钉 commit/apply 调用数。
+- **授权外我做的 3 处纯编译修复**：① 撤销误加的 `import io.mockk.capture`（`capture` 是 MockK `MockKMatcherScope` 成员，`coEvery{}` 内可直接解析，顶层 import 反而 Unresolved）；② `FakePrefs` 加 `open` 允许匿名继承；③ 上述 JUnit4 void 修复。都不是改被测逻辑。
+
+**明确没做并已向梦瑶说明**：R05 凭据明文兜底维持（改「拒绝保存」会让 Keystore 不可用设备彻底无法导入币安，属破坏功能+大重构）；R04 `stock_basic` 清库未清仍 P2 待定（别补 clearAll）；L5 WAL/commit 位置风险高收益低；所有硬约定与「行为差异别顺手统一」。诊断「准 > 全」：构建标识已有（`environmentInfo()` 已带 versionName(versionCode)），ERROR/崩溃类型入头部属「全」不动。
+
+**验证**：9 步门禁 EXIT=0 / GATE PASSED，**1756 例 / 164 XML / 0 失败 / 0 错误 / 0 跳过 / STALE=0**；`check_invariants` 9/9、迁移双向校验全过。门禁前工作区残留的 2 个编译错误 + 1 个 JUnit4 初始化错误均已修复后才跑出全绿。
+
+**出包（按硬约定）**：只出 arm64-v8a；release unsigned 用 debug keystore 手动签名；`releases/` 已按授权清理只留最新 + 删 `*.idsig`。产物 `releases/GoldVault-1.0.0-release-arm64-v8a-60b3145.apk`（v1.0.0/code11，26,812,826 B，SHA-256 `ff54a857423ddb342943b732f267270c875f0e1a6d2070bf3655fa78afdd4284`，签名证书 Android Debug）。apksigner verify 通过、native-code 仅 arm64-v8a。
+
+**阻塞中（需梦瑶本人）**：① push —— 本地 ahead 以 `git status -sb` 实时为准，网络/代理恢复后 `git -C "D:/主人的任务/NewStockDiary" push origin main` 并确认无 ahead；② 真机验收 —— 本机 adb 无设备，装新包后验备份恢复全链路、旋转屏确认恢复、514 修复与诊断排障摘要（判别装对没有看诊断头部有无 `--- 排障摘要 ---`）。**门禁全绿 ≠ 真机通过；本包未做真机冒烟。**
+

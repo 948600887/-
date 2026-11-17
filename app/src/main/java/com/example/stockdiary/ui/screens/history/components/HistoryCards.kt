@@ -207,6 +207,14 @@ fun LazyListScope.historyPeriodReturnCard(
             }
             Spacer(modifier = Modifier.height(4.dp))
             Text(periodLabel, fontSize = 11.sp, color = AppTheme.colors.onSurfaceVariant)
+            Spacer(modifier = Modifier.height(2.dp))
+            // 终点取的是窗口内最后一条**已有**快照；缺今天时会停在昨天。
+            // 光看「11-01 ~ 11-15」不够直观，明确写出截至日期，避免误以为含今天。
+            Text(
+                "截至 ${latest.date}",
+                fontSize = 11.sp,
+                color = AppTheme.colors.onSurfaceVariant
+            )
         }
     }
 }

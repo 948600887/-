@@ -32,8 +32,11 @@ import com.example.stockdiary.data.calculator.SnapshotAmountInput
 import com.example.stockdiary.database.AssetSnapshot
 import com.example.stockdiary.ui.theme.AppTheme
 import com.example.stockdiary.utils.format
+import com.example.stockdiary.utils.formatDateLabel
+import com.example.stockdiary.utils.toLocalDate
 import com.example.stockdiary.utils.toProfitDisplay
 import com.example.stockdiary.ui.theme.profitColor
+import java.time.temporal.ChronoUnit
 
 /**
  * 快照管理：按日期倒序列出历史快照，行内可编辑、用当前持仓重存、删除。
@@ -180,9 +183,28 @@ private fun SnapshotManagerRow(
     onDelete: () -> Unit,
     onResave: () -> Unit
 ) {
+    // 与上一条**已有**快照的差。缺日时它跨了不止一天，文案必须把跨度说出来，
+    // 否则「当日涨跌」会把三天的变化说成一天——显示层误导，不是数据错误。
     val dailyChange = previous?.let { snapshot.netAssets - it.netAssets }
     val dailyRate = previous?.takeIf { it.netAssets > 0 }
         ?.let { (snapshot.netAssets - it.netAssets) / it.netAssets * 100 }
+    val spanDays = previous?.let { prev ->
+        val prevDate = prev.date.toLocalDate()
+        val currDate = snapshot.date.toLocalDate()
+        if (prevDate != null && currDate != null) {
+            ChronoUnit.DAYS.between(prevDate, currDate).toInt()
+        } else {
+            null
+        }
+    }
+    // 相邻日（或日期是脏数据）沿用「当日涨跌」；跨多日改成「较 MM-dd · 跨 N 天」，
+    // 日期解析不出来时退回「较上一条快照」，绝不把多日变化标成当日。
+    val changeLabel = when {
+        previous == null -> "当日涨跌"
+        spanDays == null -> "较上一条快照"
+        spanDays <= 1 -> "当日涨跌"
+        else -> "较 ${previous.date.formatDateLabel()} · 跨 $spanDays 天"
+    }
 
     Row(
         modifier = Modifier.fillMaxWidth().padding(vertical = 10.dp),
@@ -209,9 +231,9 @@ private fun SnapshotManagerRow(
             )
             Text(
                 text = when {
-                    dailyChange == null -> "当日涨跌 —"
-                    dailyRate == null -> "当日涨跌 ${dailyChange.toProfitDisplay("¥")}"
-                    else -> "当日涨跌 ${dailyChange.toProfitDisplay("¥")} " +
+                    dailyChange == null -> "$changeLabel —"
+                    dailyRate == null -> "$changeLabel ${dailyChange.toProfitDisplay("¥")}"
+                    else -> "$changeLabel ${dailyChange.toProfitDisplay("¥")} " +
                         "(${if (dailyRate >= 0) "+" else ""}${dailyRate.format(2)}%)"
                 },
                 fontSize = 12.sp,

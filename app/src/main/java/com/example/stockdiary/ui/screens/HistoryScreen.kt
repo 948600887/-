@@ -125,9 +125,11 @@ fun HistoryScreen(
             TopAppBar(
                 title = { Text("资产分析", fontWeight = FontWeight.Bold) },
                 actions = {
-                    if (uiState.hasTodaySnapshot) {
+                    // 只客观陈述状态：已保存 / 未保存。首帧未到（snapshotsFrameReady=false）
+                    // 不表态——UiState 初始 hasTodaySnapshot=false，否则会先闪一下「未保存」
+                    if (uiState.snapshotsFrameReady) {
                         Text(
-                            text = "今日快照已保存",
+                            text = if (uiState.hasTodaySnapshot) "今日快照已保存" else "今日快照未保存",
                             style = MaterialTheme.typography.labelSmall,
                             color = AppTheme.colors.onSurfaceVariant,
                             modifier = Modifier.padding(end = 8.dp)

@@ -6,6 +6,8 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import androidx.core.content.FileProvider
+import com.example.stockdiary.data.export.DIAGNOSTICS_FILE_PREFIX
+import com.example.stockdiary.data.export.writeAtomically
 import com.example.stockdiary.data.price.PriceCacheManager
 import com.example.stockdiary.network.BinanceHostGate
 import com.example.stockdiary.data.sync.AssetSyncManager
@@ -252,14 +254,16 @@ object LogDiagnostics {
         }
 
         runCatching {
-            AssetSyncManager.lastRoundSummaryForDiagnostics()?.let { lines += it }
+            // null 时补一行说明，而不是让整行静默消失：新装的包 / 刚重启还没跑过同步时，
+            // 排查者看到「少了这一行」会以为是采集失败，其实只是本进程还没有这个内存态。
+            lines += AssetSyncManager.lastRoundSummaryForDiagnostics()
+                ?: "最近一轮同步: 本进程尚无同步记录（新启动或尚未刷新）"
         }
 
         // 最近一次体检的结论：用户说「数据源坏了」时，这一行能直接对上是他侧的封锁还是全局故障
         runCatching {
-            DataSourceHealthChecker.lastHealthSummaryForDiagnostics()?.let {
-                lines += "健康检查(最近一次): $it"
-            }
+            lines += "健康检查(最近一次): " + (DataSourceHealthChecker.lastHealthSummaryForDiagnostics()
+                ?: "本进程尚无体检记录（新启动或尚未体检）")
         }
 
         return lines.joinToString("\n")
@@ -584,14 +588,17 @@ object LogDiagnostics {
                     " / 514请求失败=" + countLines(lines, refreshTs, "OkHttp HTTP 请求失败: 514") +
                     " / 预算顺延=" + countLines(lines, refreshTs, "分红预取达到时间预算")
             )
-            // 链路覆盖看整份日志：几天前导入过也算「这份诊断里有迹可查」
+            // 链路覆盖看整份日志：几天前导入过也算「这份诊断里有迹可查」。
+            // 注意措辞：0 行只说明「这份日志里没解析到相关痕迹」，可能是用户从没导入，
+            // 也可能是导入日志早被 app.log 轮转冲掉——绝不能写成「本次导出未覆盖」，
+            // 那会被读成「用户没导入过」，与「未解析到≠0」的口径自相矛盾。
             val brokerage = countLines(lines, null, "ImportBrokerage", "交割单")
             val binance = countLines(lines, null, "BinanceImport", "币安导入")
             appendLine(
                 "链路覆盖: 交割单/ImportBrokerage=$brokerage 行" +
-                    (if (brokerage == 0) " ⚠️本次导出未覆盖" else "") +
+                    (if (brokerage == 0) "（本份日志未见记录，可能未导入或日志已轮转）" else "") +
                     " / 币安导入=$binance 行" +
-                    (if (binance == 0) " ⚠️本次导出未覆盖" else "")
+                    (if (binance == 0) "（本份日志未见记录，可能未导入或日志已轮转）" else "")
             )
         }.trimEnd()
     }
@@ -638,9 +645,11 @@ object LogDiagnostics {
     fun export(context: Context, report: Report): Uri? {
         return try {
             val dir = File(context.cacheDir, "exports").apply { mkdirs() }
-            val file = File(dir, "goldvault_diagnostics_${System.currentTimeMillis().toFileTimestamp()}.txt")
-        // 分享用**全文**，不截断：界面上截是为了不卡，给别人看时少一行都可能少一条线索
-        file.writeText(composeReport(report, envInfo = environmentInfo(context), tailLines = Int.MAX_VALUE))
+            val file = File(dir, "${DIAGNOSTICS_FILE_PREFIX}${System.currentTimeMillis().toFileTimestamp()}.txt")
+            // 分享用**全文**，不截断：界面上截是为了不卡，给别人看时少一行都可能少一条线索。
+            // 原子落盘（tmp + rename）：直接 writeText 中途被杀会留下半截诊断，正是排障最不该丢的东西。
+            val content = composeReport(report, envInfo = environmentInfo(context), tailLines = Int.MAX_VALUE)
+            writeAtomically(file, content)
             FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
         } catch (e: Exception) {
             AppLogger.e("导出诊断报告失败: ${e.message}", e, "LogDiagnostics")

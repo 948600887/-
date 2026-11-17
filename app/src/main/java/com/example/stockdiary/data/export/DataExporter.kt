@@ -28,12 +28,95 @@ import com.example.stockdiary.utils.debts
 import com.example.stockdiary.utils.toFileTimestamp
 import com.example.stockdiary.utils.totalValueCny
 import java.io.File
-import java.io.OutputStreamWriter
+import java.io.StringWriter
 import java.io.Writer
 import java.math.BigDecimal
-import java.nio.charset.StandardCharsets
 import java.time.LocalDateTime
 import java.util.Locale
+
+/**
+ * 诊断报告导出文件的文件名前缀。
+ *
+ * 与 [com.example.stockdiary.utils.LogDiagnostics.export] 共用同一个常量，
+ * 保证「清理分组识别到的诊断文件」与「诊断实际写出的文件名」不会各自漂移。
+ */
+internal const val DIAGNOSTICS_FILE_PREFIX = "goldvault_diagnostics_"
+
+/**
+ * 导出文件的用途分组。
+ *
+ * 缓存目录里的导出文件必须**分组**保留：从前不分扩展名只留最近 5 个，
+ * 用户一次导出多份 CSV 就会把刚分享出去的诊断报告挤掉——而诊断报告正是
+ * 排障唯一线索，丢它比丢 CSV 严重得多。诊断单独成组、独立保底。
+ */
+internal enum class ExportFileGroup {
+    DIAGNOSTICS, CSV, TEXT, OTHER
+}
+
+/**
+ * 按文件名判定导出文件用途（**纯函数**，可直接单测）。
+ *
+ * 只认两种稳定特征：诊断前缀 + 扩展名。前缀用 [DIAGNOSTICS_FILE_PREFIX]，
+ * 与诊断实际写文件名同源；CSV / 文本按扩展名，避免依赖具体前缀命名。
+ */
+internal fun classifyExportFile(name: String): ExportFileGroup = when {
+    name.startsWith(DIAGNOSTICS_FILE_PREFIX, ignoreCase = true) &&
+        name.endsWith(".txt", ignoreCase = true) -> ExportFileGroup.DIAGNOSTICS
+    name.endsWith(".csv", ignoreCase = true) -> ExportFileGroup.CSV
+    name.endsWith(".txt", ignoreCase = true) -> ExportFileGroup.TEXT
+    else -> ExportFileGroup.OTHER
+}
+
+/**
+ * 计算需要清理的旧文件（**纯函数**，不删文件、不碰 Context，便于单测）。
+ *
+ * 按 [classifyExportFile] 分组后，**每组各自**只保留修改时间最新的 [keepPerGroup] 份。
+ * 这样诊断组即使只有 1 份，也不会被 CSV 组的大量文件挤掉。
+ * [keepPerGroup] = 0 表示清空所有组（供「清除所有数据」调用）。
+ */
+internal fun filesToPrune(files: List<File>, keepPerGroup: Int = DataExporter.MAX_EXPORT_FILES): List<File> =
+    files.groupBy { classifyExportFile(it.name) }
+        .values
+        .flatMap { group ->
+            if (group.size <= keepPerGroup) emptyList()
+            else group.sortedByDescending { it.lastModified() }.drop(keepPerGroup)
+        }
+
+/**
+ * 把 [text] **原子地**写入 [target]：先写同目录 `.tmp`，成功后再 [File.renameTo] 覆盖目标。
+ *
+ * 直接 `target.writeText(text)` 若在写入中途进程被杀 / 磁盘写满，会留下**半截文件**：
+ * 下次导出同名前缀时用户拿到的就是一份缺行的账目或日志，而且没有任何报错。
+ * tmp + rename 保证目标文件要么完整、要么还是旧的完整版本（rename 是原子操作）。
+ * 失败时清掉 tmp，避免残留；rename 偶发失败时退回直接写，仍保住这次导出。
+ *
+ * 返回是否最终把内容落到了 [target]（供日志/测试判断），异常由调用方 [runCatching] 处理。
+ */
+internal fun writeAtomically(target: File, text: String): Boolean {
+    val tmp = File(target.parentFile, "${target.name}.tmp")
+    return try {
+        tmp.writeText(text)
+        // Windows 的 renameTo 不会覆盖已存在的目标文件（Linux 会）。
+        // 导出文件名带时间戳通常不重名，但诊断/同秒重名场景要先移走旧目标，
+        // 让覆盖也走原子 rename，而不是退化成原地直接写（那正是要修的非原子行为）。
+        if (target.exists() && !target.delete()) {
+            target.writeText(text)
+            tmp.delete()
+            return false
+        }
+        if (tmp.renameTo(target)) {
+            true
+        } else {
+            // rename 偶发失败（跨分区/权限）：退回直接写，别丢这次导出，再清 tmp
+            target.writeText(text)
+            tmp.delete()
+            false
+        }
+    } catch (e: Exception) {
+        tmp.delete()
+        throw e
+    }
+}
 
 /**
  * 导出文件生成器。
@@ -66,16 +149,20 @@ class DataExporter(private val context: Context) {
         get() = File(context.cacheDir, "exports").apply { mkdirs() }
 
     /**
-     * 打开一个**带 UTF-8 BOM** 的写入器，供所有 CSV / 文本导出使用。
+     * 建一个**带 UTF-8 BOM** 的内存写入器，供所有 CSV / 文本导出构建内容。
      *
      * 不能再用 `FileWriter(file)`：它走平台默认字符集且**不输出 BOM**，
      * Windows 中文版 Excel 打开无 BOM 的 CSV 会按 GBK/ANSI 解码，
      * 表头「名称,类型,代码,账户…」与全部中文资产名/备注直接变乱码 ——
      * 而导出按钮的目的就是给表格软件打开，等于该功能实际不可用。
-     * 显式 UTF-8 + BOM 后 Excel 能正确识别编码。
+     * 显式 UTF-8 BOM 后 Excel 能正确识别编码。
+     *
+     * 内容先在内存拼好，再交给 [writeAtomically] 原子落盘：这样写失败也不会
+     * 留下半截目标文件（原来 `outputStream()` 直接写目标是 R03 的根因）。
+     * 中文资产名 + 长交易流水通常在几百 KB 量级，内存拼接无 OOM 风险。
      */
-    private fun openWriter(file: File): Writer {
-        val writer = OutputStreamWriter(file.outputStream(), StandardCharsets.UTF_8)
+    private fun newBomWriter(): Writer {
+        val writer = StringWriter()
         writer.write('\uFEFF'.toString()) // UTF-8 BOM
         return writer
     }
@@ -123,7 +210,9 @@ class DataExporter(private val context: Context) {
         return try {
             pruneOldExports()
             val file = File(exportDir, "${prefix}_${System.currentTimeMillis().toFileTimestamp()}.$extension")
-            openWriter(file).use(build)
+            val writer = newBomWriter()
+            writer.use(build)
+            writeAtomically(file, writer.toString())
             Result.success(getUriForFile(file))
         } catch (e: Exception) {
             AppLogger.e("导出失败($prefix): ${e.message}", e, "DataExporter")
@@ -141,11 +230,16 @@ class DataExporter(private val context: Context) {
         pruneOldExports(keep = 0)
     }
 
+    /**
+     * 按用途分组清理旧文件：每组各自保留最近 [keep] 份。
+     *
+     * 关键在「分组」——诊断报告单独成组，哪怕只导出过 1 份，也不会被一次
+     * 批量 CSV 导出挤掉。原来不分扩展名、全局只留 5 份，是 R02 的根因。
+     */
     private fun pruneOldExports(keep: Int = MAX_EXPORT_FILES) {
         try {
             val files = exportDir.listFiles()?.filter { it.isFile } ?: return
-            if (files.size <= keep) return
-            files.sortedByDescending { it.lastModified() }.drop(keep).forEach { it.delete() }
+            filesToPrune(files, keep).forEach { it.delete() }
         } catch (e: Exception) {
             AppLogger.w("清理旧导出文件失败: ${e.message}", "DataExporter")
         }

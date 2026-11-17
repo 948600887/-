@@ -112,10 +112,24 @@ class LogDiagnosticsTriageTest {
     }
 
     @Test
-    fun 链路没被测到时显式提醒_不要静默给0() {
+    fun 链路没被测到时说明是本份日志未见_而非断言用户没导入() {
+        // 0 行只说明「这份日志里没解析到」，可能是没导入，也可能是日志已轮转。
+        // 旧文案「本次导出未覆盖」会被读成「用户没导入过」，与「未解析到≠0」口径矛盾。
         val s = LogDiagnostics.buildTriageSummary(fullLog())
-        assertTrue(s, s.contains("交割单/ImportBrokerage=0 行 ⚠️本次导出未覆盖"))
-        assertTrue(s, s.contains("币安导入=0 行 ⚠️本次导出未覆盖"))
+        assertTrue(s, s.contains("交割单/ImportBrokerage=0 行（本份日志未见记录，可能未导入或日志已轮转）"))
+        assertTrue(s, s.contains("币安导入=0 行（本份日志未见记录，可能未导入或日志已轮转）"))
+        assertFalse("不能再说成「本次导出未覆盖」", s.contains("本次导出未覆盖"))
+    }
+
+    @Test
+    fun 链路有记录时不加未见提示() {
+        val withImport = fullLog() + "\n" + line(
+            "2026-11-13 16:02:00.000",
+            "[INFO/ImportBrokerage] 交割单导入完成，共 12 行"
+        )
+        val s = LogDiagnostics.buildTriageSummary(withImport)
+        assertTrue(s, s.contains("交割单/ImportBrokerage="))
+        assertFalse("有记录就不该出现未见提示", s.contains("交割单/ImportBrokerage=0"))
     }
 
     @Test

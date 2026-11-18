@@ -61,7 +61,9 @@ fun SnapshotManagerDialog(
         Surface(
             shape = MaterialTheme.shapes.large,
             color = AppTheme.colors.surface,
-            tonalElevation = 6.dp
+            // 深色下不做 tonal 抬升：surfaceTint 是品牌绿，6dp 会把 #121212 叠成偏绿的灰，
+            // 看起来「不是暗色」。浅色维持 6dp，外观零变化。
+            tonalElevation = if (AppTheme.colors.isDark) 0.dp else 6.dp
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
                 Text(

@@ -74,7 +74,9 @@ fun SnapshotEditDialog(
             modifier = Modifier.fillMaxWidth(0.92f),
             shape = MaterialTheme.shapes.large,
             color = AppTheme.colors.surface,
-            tonalElevation = 6.dp
+            // 同 SnapshotManagerDialog：深色下避免 surfaceTint 把弹窗叠成偏绿灰，
+            // 浅色保留原有 6dp，视觉不变。
+            tonalElevation = if (AppTheme.colors.isDark) 0.dp else 6.dp
         ) {
             Column(
                 modifier = Modifier

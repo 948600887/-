@@ -64,6 +64,15 @@ private val DarkColorScheme = darkColorScheme(
     onSurface = OnSurfaceDark,
     surfaceVariant = SurfaceContainerLowDark,
     onSurfaceVariant = OnSurfaceVariantDark,
+    // M3 1.2 起 AlertDialog/ModalBottomSheet/DropdownMenu/DatePicker 改用 surfaceContainer*
+    // 角色取容器底色。这里不显式映射的话，它们会落到 Material 默认的紫灰色令牌
+    // （#1D1B20/#211F26/#2B2930），与 App 的中性深色（#121212/#181818）不一致，
+    // 观感就是「暗色下弹窗发灰、不像 App 的深色」。映射只动深色，浅色配色不变。
+    surfaceContainerLowest = SurfaceContainerLowestDark,
+    surfaceContainerLow = SurfaceContainerLowDark,
+    surfaceContainer = SurfaceContainerDark,
+    surfaceContainerHigh = SurfaceContainerHighDark,
+    surfaceContainerHighest = SurfaceContainerHighestDark,
     outline = OutlineDark,
     outlineVariant = OutlineVariantDark,
     inverseSurface = InverseSurfaceDark,

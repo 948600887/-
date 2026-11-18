@@ -31,7 +31,7 @@ import java.util.concurrent.TimeUnit
  */
 object DividendPrefetchScheduler {
 
-    fun schedule(context: Context) {
+    suspend fun schedule(context: Context) {
         val constraints = Constraints.Builder()
             .setRequiredNetworkType(NetworkType.CONNECTED)
             .build()
@@ -53,5 +53,8 @@ object DividendPrefetchScheduler {
             request
         )
         AppLogger.i("分红补齐已调度：每 30 分钟一轮，单轮预算 4 分钟", "DividendPrefetchScheduler")
+        // 冷启动时记录一次系统限制与排期，用于区分「系统压住」和「排期算错」
+        WorkDiagnostics.logSystemState(context, "启动调度")
+        WorkDiagnostics.logWorkInfo(context, DividendPrefetchWorker.WORK_NAME, "启动调度")
     }
 }

@@ -42,6 +42,11 @@ class DividendPrefetchWorker(
 
     override suspend fun doWork(): Result {
         return try {
+            // 只在真正执行时记录，用来对照「启动调度」那条：若 WorkInfo 计划时间已过、
+            // 系统却直到前台才调度，就能直接判定是系统侧压住而非排期错误。
+            WorkDiagnostics.logSystemState(applicationContext, "Worker执行")
+            WorkDiagnostics.logWorkInfo(applicationContext, WORK_NAME, "Worker执行")
+
             val assetRepository = AssetRepository.getInstance(applicationContext)
             val symbols = assetRepository.getAllAssets().first()
                 .asSequence()

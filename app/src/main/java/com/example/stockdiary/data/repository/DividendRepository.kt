@@ -20,6 +20,7 @@ import com.example.stockdiary.database.StockDatabase
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
@@ -580,6 +581,20 @@ class DividendRepository private constructor(
      *   不拖慢已补抓路径（批量预取已覆盖东财标的，逐条只是 OTC / Sina 兜底等少量补充）。
      */
     private val maxConcurrentFetch = 2
+
+    /**
+     * 预取互斥闸：前台刷新后的后台预取、日历页预取、定期补齐 Worker 只能有一份在跑。
+     *
+     * 用 [Mutex.tryLock] 而不是 `withLock`：抢不到锁的一侧**立即放弃本轮**，
+     * 不排队等待。理由：
+     * - 前台刷新不能被 Worker 的 4 分钟预算拖住（后台预取本身不阻塞价格同步，
+     *   但也没必要让它空等）；
+     * - 正在跑的那一份已经在按「最久没抓过」推进同一批标的，重复排一轮只会
+     *   把天天基金的匀速闸门与退避计数放大成双倍请求量；
+     * - 被跳过的一侧下一个周期（Worker 30 分钟 / 下一次刷新）自然会续上，
+     *   已成功的标的由 [markFetched] 的跨进程时间戳去重，不会重复拉。
+     */
+    private val prefetchGate = Mutex()
     
     private val cacheHits = AtomicInteger(0)
     private val cacheMisses = AtomicInteger(0)
@@ -1441,6 +1456,23 @@ class DividendRepository private constructor(
         forceRefresh: Boolean = false,
         timeBudgetMs: Long = 0L
     ) {
+        if (!prefetchGate.tryLock()) {
+            AppLogger.i("已有分红预取在进行，本轮跳过（避免与前台/定期任务重复请求）", "DividendRepository")
+            return
+        }
+        try {
+            prefetchDividendsLocked(symbols, forceRefresh, timeBudgetMs)
+        } finally {
+            prefetchGate.unlock()
+        }
+    }
+
+    /** [prefetchDividends] 的加锁实现：互斥与去重只在上一层处理，抓取语义原样保留 */
+    private suspend fun prefetchDividendsLocked(
+        symbols: List<String>,
+        forceRefresh: Boolean,
+        timeBudgetMs: Long
+    ) {
         withContext(Dispatchers.IO) {
             // 本轮观测标识与起点：prefetchDividends 也会被日历页直接调用（不经价格同步
             // 轮次），所以自带一个轻量序号；roundStartMs 用来判定 markFetched / markFailed
@@ -1513,7 +1545,12 @@ class DividendRepository private constructor(
                                 fetchedToday = isFetchedToday(symbol)
                             )
                         } else {
-                            forceRefresh || ttlExpired
+                            // 非场外基金：forceRefresh 之外，还要求「今天没成功抓过」。
+                            // 缓存是进程内的，进程被杀后必然为空；只看 ttlExpired 会让
+                            // 定期任务在冷启动后把前台今天刚抓过的标的全量重拉一遍。
+                            // markFetched 写的时间戳跨进程存活，用它做去重，请求量与
+                            // 前台预取保持一致，不额外增加天天基金压力。
+                            forceRefresh || (ttlExpired && !isFetchedToday(symbol))
                         }
                         if (shouldFetch) {
                             attempted++

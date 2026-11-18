@@ -1,6 +1,7 @@
 package com.example.stockdiary
 
 import android.app.Application
+import com.example.stockdiary.data.sync.DividendPrefetchScheduler
 import com.example.stockdiary.data.sync.PriceSyncScheduler
 import com.example.stockdiary.data.sync.SnapshotScheduler
 import com.example.stockdiary.data.sync.shouldCreateAutoSnapshot
@@ -79,6 +80,9 @@ class StockDiaryApplication : Application() {
             scheduleDailySnapshot()
             fillMissingSnapshots()
             scheduleAutoPriceSync()
+            // 分红补齐改为系统周期任务：不再依赖刷新后那个活不过 onStop 的后台协程。
+            // 调度幂等（UPDATE），每次冷启动挂一次即可；空库不排，导入资产后下次启动自然补上。
+            scheduleDividendPrefetch()
             // 一次性修复已存的 LD 锁仓脏符号（旧版导入落库的 LDBCHUSDT 等），
             // 否则这些资产之后每次行情同步都向币安问不存在的交易对 → 永远 400。
             repairLdDirtySymbols()
@@ -140,6 +144,26 @@ class StockDiaryApplication : Application() {
             throw e
         } catch (e: Exception) {
             AppLogger.e("调度自动价格同步失败: ${e.message}", e, "StockDiaryApplication")
+        }
+    }
+
+    /**
+     * 分红补齐的周期任务（[DividendPrefetchScheduler]）。
+     *
+     * 与每日快照同样的空库守卫：没有股票/基金时不唤醒设备；导入资产后的下一次
+     * 冷启动会自然补上调度。调度频次与单轮预算见 Scheduler/Worker 的 KDoc。
+     */
+    private suspend fun scheduleDividendPrefetch() {
+        try {
+            if (!container.assetRepository.hasAnyAsset()) {
+                AppLogger.i("资产为空，跳过分红补齐调度", "StockDiaryApplication")
+                return
+            }
+            DividendPrefetchScheduler.schedule(this)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            AppLogger.e("调度分红补齐失败: ${e.message}", e, "StockDiaryApplication")
         }
     }
 

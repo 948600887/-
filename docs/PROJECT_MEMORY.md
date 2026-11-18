@@ -172,3 +172,11 @@
 - `ExchangeRateManager.rateRevision` 是普通 `@Volatile` 字段，在 composition 里读它**不会**触发重组；把它当 `remember` 的 key 曾被认为"能刷新"，实际是空转。
 - 现新增 `ExchangeRateManager.rateRevisionFlow: StateFlow<Int>`，UI 统一通过 `ui/components/ExchangeRateObservation.kt` 的 `rememberExchangeRateRevision()` 订阅。
 - **新增凡是在 composition 期被读取的进程级可变状态，必须提供 `StateFlow` / Compose `State`**，否则就是"要等下次重组才更新"。
+
+### 6.5 分红补齐：为什么改成系统周期任务，而不是延长前台协程
+
+- **前台后台协程只活到 `onStop`**：真机实测刷新后 6~9 秒被取消，110 只只推进到 7 只；「刷完就切后台」的用户永远补不完。延长存活时间既不可控，也会在退后台后继续占资源。
+- **现方案**：`DividendPrefetchWorker` + `DividendPrefetchScheduler`，周期 **30 分钟**（WorkManager 周期下限 15 分钟，写更小会被静默夹取），单轮预算 **4 分钟**（系统单次上限约 10 分钟，留足收尾余量）。一轮跑不完，下一轮按 `prioritizeDividendSymbols` 的「最久没抓过」顺序续跑，不会永远卡在同一批。
+- **不重复拉前台已抓的标的**：`markFetched` 的时间戳在 SharedPreferences 里跨进程存活；非场外基金在非强制刷新时改为 `ttlExpired && !isFetchedToday(symbol)`，进程重启、内存缓存为空也不会把当天抓过的再打一遍。
+- **不双倍压天天基金**：`DividendRepository.prefetchDividends` 加了 `prefetchGate`（`tryLock`），前台预取、日历预取、Worker 同时只允许一份；抢不到的直接跳过本轮，不排队、不空等。匀速闸门、退避窗口、批量/逐条顺序一处未改。
+- **不加通知**：没有 `setForeground`、没有通知渠道；用户明确不要提醒类功能，补齐是静默行为。前台刷新主路径不受影响：同步里仍是「转后台、不 await」。

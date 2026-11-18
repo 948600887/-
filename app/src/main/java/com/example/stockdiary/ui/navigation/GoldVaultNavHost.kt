@@ -23,6 +23,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.stockdiary.di.LocalAppContainer
 import com.example.stockdiary.ui.components.AppSnackbarController
 import com.example.stockdiary.ui.components.LocalAppSnackbar
+import com.example.stockdiary.ui.theme.AppTheme
 import com.example.stockdiary.ui.screens.*
 import com.example.stockdiary.ui.viewmodels.DashboardViewModel
 import com.example.stockdiary.ui.viewmodels.PortfolioViewModel
@@ -129,7 +130,24 @@ fun GoldVaultNavHost() {
             // 宿主只有这一处。底部多留 88dp：首页/持仓页的 FAB 就贴在内容区右下角，
             // 不留空隙的话提示条会正好压在按钮上（提示期间用户还得能点到「+」）。
             snackbarHost = {
-                SnackbarHost(snackbarHostState, modifier = Modifier.padding(bottom = 88.dp))
+                SnackbarHost(snackbarHostState, modifier = Modifier.padding(bottom = 88.dp)) { data ->
+                    // M3 默认的 Snackbar 取 inverseSurface/inverseOnSurface，深色下按规范
+                    // 必然反成「浅底深字」，和全 App 的深色表面割裂。这里只在深色下换成
+                    // App 的中性深色表面 + 反白文字；浅色继续用 M3 默认反色（深底浅字），
+                    // 对比度不变。圆角、留白、FAB 避让都沿用 Snackbar 默认布局。
+                    val isDark = AppTheme.colors.isDark
+                    Snackbar(
+                        snackbarData = data,
+                        containerColor = if (isDark) AppTheme.colors.surfaceContainerHigh else SnackbarDefaults.color,
+                        contentColor = if (isDark) AppTheme.colors.onSurface else SnackbarDefaults.contentColor,
+                        actionColor = if (isDark) AppTheme.colors.primary else SnackbarDefaults.actionColor,
+                        dismissActionContentColor = if (isDark) {
+                            AppTheme.colors.onSurfaceVariant
+                        } else {
+                            SnackbarDefaults.dismissActionContentColor
+                        }
+                    )
+                }
             },
             bottomBar = {
                 if (!isDetailScreen) {

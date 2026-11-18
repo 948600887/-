@@ -358,3 +358,15 @@ CODE_ARCHITECTURE.md 部分过时），一律以实际代码 + git log 为准。
 
 **阻塞中（需梦瑶本人）**：① push —— 本地 ahead 以 `git status -sb` 实时为准，网络/代理恢复后 `git -C "D:/主人的任务/NewStockDiary" push origin main` 并确认无 ahead；② 真机验收 —— 本机 adb 无设备，装新包后验备份恢复全链路、旋转屏确认恢复、514 修复与诊断排障摘要（判别装对没有看诊断头部有无 `--- 排障摘要 ---`）。**门禁全绿 ≠ 真机通过；本包未做真机冒烟。**
 
+---
+
+## 2026-11-18 再出包（基于 HEAD `0de53b8`）
+
+梦瑶 11-18 再次要求出包。距上次出包（`60b3145`）新增 3 笔提交：`0de53b8` 深色 Snackbar 改用 App 深色表面、`ca3aaca` 深色弹窗/浮层改中性深色表面、`bce406a` 分红补齐改由系统周期任务推进（新增 DividendPrefetchScheduler/Worker + Application 注册 + Repository 适配 + `docs/PROJECT_MEMORY.md` 注记）。逐笔确认**未碰硬约定**（无 Accept-Encoding / 并发常量 / 熔断 / WAL / deleteAllData / 版本号改动），版本号仍 1.0.0/code11。工作区仅 `tools/__pycache__` 缓存垃圾，已清；提交后工作区干净。
+
+**验证**：9 步门禁 EXIT=0 / GATE PASSED，**1756 例 / 164 XML / 0 失败 / 0 错误 / 0 跳过 / STALE=0**。
+
+**产物**：`releases/GoldVault-1.0.0-release-arm64-v8a-0de53b8.apk`（v1.0.0/code11，26,829,210 B，SHA-256 `21a263a07b0c4bd579aec31fe6055ea56303b61951d4d9cb3f7968cecf2e154b`，Android Debug 签名，apksigner verify 通过，native-code 仅 arm64-v8a）。`releases/` 已清理只留此包，旧 `60b3145` 包已删。
+
+**阻塞不变**：push（本地 ahead 以 `git status -sb` 实时为准）+ 真机验收（adb 无设备，需梦瑶本人）。本包未做真机冒烟。
+

@@ -19,8 +19,20 @@ import com.example.stockdiary.utils.StockCodeManager
  * 所以预取轮次内改为：**内存立即可见 + 分段检查点 + 轮末收尾**。
  * [beginBatch] / [endBatch] 由编排层包住整轮（正常结束、预算用尽、取消、抛异常都会走到 `finally`）。
  * 轮内每累计 [CHECKPOINT_MAX_PENDING] 条待落盘记录，或距上次落盘超过
- * [CHECKPOINT_MAX_INTERVAL_MS]，就先合并 commit 一次：进程被杀时最多丢一个检查点区间，
+ * [CHECKPOINT_MAX_INTERVAL_MS]，就先合并落盘一次：进程被杀时最多丢一个检查点区间，
  * 而不是整轮。读取方法会先查批次内待落盘的值，因此同一轮里的 [isFetchedToday] 去重仍然即时准确。
+ *
+ * ## 落盘方式：检查点异步 apply，轮末同步 commit
+ *
+ * 检查点与轮末刻意用两种口径。原因：持批次的不只是后台预取——详情页的
+ * `AssetDetailViewModel` 也在主线程（`Main.immediate`）里抓分红，抓成功就 [markFetched]，
+ * 命中检查点时如果同步 `commit()`，就是**主线程上一次 fsync**（StrictMode DiskWriteViolation、
+ * 慢 flash 上掉帧），而且主线程随后的读取还要排队等同一把 [lock]。
+ *
+ * 检查点的作用只是「别攒整轮」，本身不需要「已写进磁盘」这个强保证：
+ * 「同轮立刻可见」由待落盘表保证，进程被杀最多丢一个区间——异步 `apply()` 就能满足。
+ * 轮末 [endBatch] 则保持同步 `commit()`：它的调用点在 `NonCancellable + Dispatchers.IO` 上，
+ * 且是「本轮结论」的最后一道保证，值得等磁盘。
  *
  * 不在批次内时保持原有 `apply()` 行为（单标的查询、详情页等零星写入）。
  */
@@ -65,8 +77,9 @@ internal class DividendFetchStateStore(
     }
 
     /**
-     * 结束批次：深度归零时把本轮所有待落盘值合并成**一次 commit**。
+     * 结束批次：深度归零时把本轮所有待落盘值合并成**一次同步 commit**。
      *
+     * 这里必须同步：调用点在 `NonCancellable + Dispatchers.IO`，且这是本轮结论的最后一道保证。
      * 失败只记日志不抛：本轮结论留在内存，最多导致下次冷启动多抓一轮，不能影响预取收尾。
      * 调用方必须在 `finally` 里执行（取消 / 异常路径同样要落盘）。
      */
@@ -74,7 +87,7 @@ internal class DividendFetchStateStore(
         synchronized(lock) {
             if (batchDepth == 0) return
             batchDepth--
-            if (batchDepth == 0) flushLocked()
+            if (batchDepth == 0) flushLocked(synchronous = true)
         }
     }
 
@@ -202,16 +215,19 @@ internal class DividendFetchStateStore(
     }
 
     /**
-     * 分段检查点：待落盘条目达到上限，或距上次落盘超过时间窗口，就提前 commit 一次。
+     * 分段检查点：待落盘条目达到上限，或距上次落盘超过时间窗口，就提前落盘一次。
      *
      * 进程被杀是这台设备上的常态（日志里两次抓到一半就没结束行）。整轮只在轮末落盘，
      * 一旦被杀就是整轮重抓；检查点把丢失窗口压到一个区间（最多 N 条 / 30 秒）。
+     *
+     * **走异步 apply**：本方法会在持锁状态下被任意线程调用，包括主线程
+     * （详情页抓分红成功后 [markFetched]）。同步 commit 会让主线程等一次 fsync。
      */
     private fun maybeCheckpointLocked() {
         if (pendingEntryCountLocked() >= CHECKPOINT_MAX_PENDING ||
             clock() - lastFlushAtMs >= CHECKPOINT_MAX_INTERVAL_MS
         ) {
-            flushLocked()
+            flushLocked(synchronous = false)
         }
     }
 
@@ -269,12 +285,20 @@ internal class DividendFetchStateStore(
     }
 
     /**
-     * 一次 commit 写出本轮全部待落盘值。
+     * 合并写出本轮全部待落盘值。
+     *
+     * @param synchronous true（轮末 [endBatch]）：`commit()` 同步落盘，返回 false 说明没写进磁盘，
+     *   必须 WARN 留痕，否则「以为记住了、重启全忘」无从排查。
+     *   false（分段检查点）：`apply()` 异步落盘。apply 没有返回值，**不能**谎报落盘结果，
+     *   日志只说明「已提交」。这条路主要是为了避免主线程 fsync。
      *
      * 失败日志要能回答「丢了什么」：已抓只数 / 失败只数 / 辅助簿记条数。
      * 无论成功失败都清空待落盘表，避免跨轮无限累积；失败后下一轮冷启动重抓即可。
+     *
+     * 注意：待落盘表在 `finally` 里清空，与落盘是否真的完成无关——异步 apply 之后
+     * 读取会直接命中 SharedPreferences 的内存副本（apply 同步改内存），所以清空是安全的。
      */
-    private fun flushLocked() {
+    private fun flushLocked(synchronous: Boolean) {
         val hasPending = pendingFetched.isNotEmpty() || pendingFailureAt.isNotEmpty() ||
             pendingFailureCount.isNotEmpty() || pendingFailureCleared.isNotEmpty() ||
             pendingDataAt.isNotEmpty() || pendingMissAt.isNotEmpty()
@@ -295,23 +319,34 @@ internal class DividendFetchStateStore(
             pendingDataAt.forEach { (symbol, at) -> editor.putLong(DATA_AT_PREFIX + symbol, at) }
             pendingMissAt.forEach { (symbol, at) -> editor.putLong(MISS_AT_PREFIX + symbol, at) }
 
-            // 一次同步 commit：落盘失败必须留痕，否则「以为记住了、重启全忘」无从排查
-            if (!editor.commit()) {
-                AppLogger.w(
-                    "分红抓取状态批量落盘失败(commit=false)：已抓 $fetchedCount 只、失败 $failedCount 只、" +
-                        "辅助簿记 $auxCount 条；本轮结论只在内存，重启后会重抓",
-                    "DividendRepository"
+            if (synchronous) {
+                // 轮末：一次同步 commit。落盘失败必须留痕
+                if (!editor.commit()) {
+                    AppLogger.w(
+                        "分红抓取状态批量落盘失败(commit=false)：已抓 $fetchedCount 只、失败 $failedCount 只、" +
+                            "辅助簿记 $auxCount 条；本轮结论只在内存，重启后会重抓",
+                        TAG
+                    )
+                }
+            } else {
+                // 分段检查点：异步落盘，不阻塞调用线程（可能是主线程）
+                editor.apply()
+                // apply 无返回值——这里只能说明「已提交」，不能说「已落盘成功」
+                AppLogger.i(
+                    "分红抓取状态批量落盘已提交(异步)：已抓 $fetchedCount 只、失败 $failedCount 只、" +
+                        "辅助簿记 $auxCount 条",
+                    TAG
                 )
             }
         } catch (e: Exception) {
             AppLogger.w(
                 "分红抓取状态批量落盘异常：已抓 $fetchedCount 只、失败 $failedCount 只、" +
                     "辅助簿记 $auxCount 条；重启后会重抓: ${e.message}",
-                "DividendRepository"
+                TAG
             )
         } finally {
             clearPendingLocked()
-            // 无论 commit 成功与否都重置窗口：失败后不应每次写入都重试一次磁盘
+            // 无论落盘成功与否都重置窗口：失败后不应每次写入都重试一次磁盘
             lastFlushAtMs = clock()
         }
     }
@@ -326,10 +361,13 @@ internal class DividendFetchStateStore(
     }
 
     private companion object {
-        /** 分段检查点：累计待落盘条目达到该数量就提前 commit 一次 */
+        /** 日志 tag：沿用原 `DividendRepository` 口径，既有日志过滤规则不用改 */
+        const val TAG = "DividendRepository"
+
+        /** 分段检查点：累计待落盘条目达到该数量就提前落盘一次（异步 apply） */
         const val CHECKPOINT_MAX_PENDING = 10
 
-        /** 分段检查点：距上次落盘超过该时长也提前 commit，避免低频写入一直攒到轮末 */
+        /** 分段检查点：距上次落盘超过该时长也提前落盘，避免低频写入一直攒到轮末（异步 apply） */
         const val CHECKPOINT_MAX_INTERVAL_MS = 30_000L
 
         /** 「上次抓取时间」存放的 preferences 名 */

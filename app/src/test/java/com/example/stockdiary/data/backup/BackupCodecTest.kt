@@ -225,6 +225,56 @@ class BackupCodecTest {
     }
 
     @Test
+    fun `缺数据表_拒绝恢复并指明缺的是哪张表`() {
+        // P2-1：formatVersion>=1 的文件缺少某张表时，旧实现会按空表恢复 → 静默清库。
+        // 现在必须在解析阶段拒绝，不能再走「清空 7 张表再写回」。
+        val root = JSONObject(BackupCodec.encode(samplePayload()))
+        root.remove("dividends")
+        val json = root.toString()
+
+        val fromDecode = assertThrows(InvalidBackupException::class.java) { BackupCodec.decode(json) }
+        val decodeMessage = fromDecode.message.orEmpty()
+        assertTrue("应指名缺的表，实际：$decodeMessage", decodeMessage.contains("分红记录"))
+        assertTrue("应带原始键名便于排查，实际：$decodeMessage", decodeMessage.contains("dividends"))
+        assertTrue("应说明拒绝恢复，实际：$decodeMessage", decodeMessage.contains("拒绝恢复"))
+
+        // 读取摘要阶段就要拒绝，不能先给用户一个正常的确认框
+        val fromSummary = assertThrows(InvalidBackupException::class.java) { BackupCodec.summary(json) }
+        assertEquals(decodeMessage, fromSummary.message)
+    }
+
+    @Test
+    fun `缺多张表_一次报全且不误伤其他表`() {
+        val root = JSONObject(BackupCodec.encode(samplePayload()))
+        root.remove("transactions")
+        root.remove("fundNavCaches")
+
+        val message = assertThrows(InvalidBackupException::class.java) {
+            BackupCodec.decode(root.toString())
+        }.message.orEmpty()
+        assertTrue("实际：$message", message.contains("交易记录"))
+        assertTrue("实际：$message", message.contains("基金净值缓存"))
+        assertFalse("已存在的表不应出现在缺失列表：$message", message.contains("「资产」"))
+    }
+
+    @Test
+    fun `七张表齐全但内容为空_合法空备份仍可恢复`() {
+        // 兼容性边界：拒绝的是「缺键」，不是「空表」。用户清空账目后导出的 7 个空数组
+        // 必须继续可用，不能和缺表混为一谈。
+        val emptyPayload = BackupPayload(formatVersion = BACKUP_FORMAT_VERSION, dbVersion = 18, exportedAt = 1L)
+        val decoded = BackupCodec.decode(BackupCodec.encode(emptyPayload))
+
+        assertEquals(BACKUP_FORMAT_VERSION, decoded.formatVersion)
+        assertTrue(decoded.assets.isEmpty())
+        assertTrue(decoded.snapshots.isEmpty())
+        assertTrue(decoded.snapshotDetails.isEmpty())
+        assertTrue(decoded.dividends.isEmpty())
+        assertTrue(decoded.transactions.isEmpty())
+        assertTrue(decoded.stockBasics.isEmpty())
+        assertTrue(decoded.fundNavCaches.isEmpty())
+    }
+
+    @Test
     fun `格式版本高于当前_抛UnsupportedBackupVersionException`() {
         val json = JSONObject().apply {
             put("formatVersion", BACKUP_FORMAT_VERSION + 1)
@@ -314,6 +364,14 @@ class BackupCodecTest {
             put("dbVersion", 18)
             put("exportedAt", 42L)
             put("assets", JSONArray().put(row))
+            // P2-1 后 7 张表键必须齐全；本用例只验证「空表 + 未知字段 + 可空字段缺失」，
+            // 缺键本身应被拒绝（见 `缺数据表_拒绝恢复并指明缺的是哪张表`）。
+            put("snapshots", JSONArray())
+            put("snapshotDetails", JSONArray())
+            put("dividends", JSONArray())
+            put("transactions", JSONArray())
+            put("stockBasics", JSONArray())
+            put("fundNavCaches", JSONArray())
         }.toString()
         val decoded = BackupCodec.decode(json)
         assertEquals(1, decoded.assets.size)
@@ -324,7 +382,7 @@ class BackupCodecTest {
         assertNull(asset.notes)
         assertEquals("CNY", asset.currency)
         assertFalse(asset.isEarnLocked)
-        // 缺失的 6 张表回退成空列表，而不是抛错或半份数据
+        // 其余 6 张表是合法空表，解码为空列表
         assertTrue(decoded.snapshots.isEmpty())
         assertTrue(decoded.snapshotDetails.isEmpty())
         assertTrue(decoded.dividends.isEmpty())

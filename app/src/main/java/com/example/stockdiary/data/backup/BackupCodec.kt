@@ -143,6 +143,9 @@ object BackupCodec {
      */
     fun summary(json: String): BackupSummary {
         val root = parseRoot(json)
+        // 缺表的备份必须在这一步就拒绝：用户还没点「确认恢复」，不该先看到一个
+        // 正常的摘要框。这里报的错与 decode 完全一致，避免两阶段口径不一致。
+        requireAllTables(root)
         return BackupSummary(
             formatVersion = root.strictIntField(KEY_FORMAT_VERSION),
             dbVersion = root.intField(KEY_DB_VERSION, 0),
@@ -211,6 +214,10 @@ object BackupCodec {
             fundNavCaches = decodeRows(root, KEY_FUND_NAV_CACHES) { decodeFundNavCache(it) }
         )
         validatePayload(payload)
+        // 放在行级校验之后：字段错误仍优先报字段错误；但缺表一定在返回 payload 前拦掉。
+        // 不这样做的后果是 [com.example.stockdiary.data.backup.BackupManager.restore]
+        // 会把缺失的表演成空表，先清空再写 0 行，等于静默清库。
+        requireAllTables(root)
         return payload
     }
 
@@ -531,7 +538,7 @@ object BackupCodec {
         }
     }
 
-    /** 表字段必须是数组；缺失视为空表（旧格式可能没这张表），类型错必须报错。 */
+    /** 表字段必须是数组；类型错必须报错。缺失由 [requireAllTables] 在入口统一拒绝。 */
     private fun rowsArray(root: JSONObject, key: String): JSONArray? {
         val value = root.raw(key) ?: return null
         return value as? JSONArray
@@ -558,7 +565,8 @@ object BackupCodec {
      *
      * 版本检查刻意放在最前：高版本备份即使其余字段也坏了，也应报「请升级应用」而不是
      * 一堆看不懂的字段错误。formatVersion 是唯一必填的顶层字段（它是判断「这是不是本 App
-     * 的备份文件」的最低门槛），其余元信息与表数组都允许缺失回退。
+     * 的备份文件」的最低门槛）；元信息允许缺失回退，但 7 张表数组**不允许缺失**——
+     * 缺失会被 [requireAllTables] 拒绝，绝不能当成空表去覆盖现有数据。
      */
     private fun parseRoot(json: String): JSONObject {
         val root = try {
@@ -578,6 +586,39 @@ object BackupCodec {
             throw InvalidBackupException("备份格式版本非法：$formatVersion")
         }
         return root
+    }
+
+    /** 7 张表在备份里的键与用户可读名称，用于「缺表」时的明确报错。 */
+    private val REQUIRED_TABLES = listOf(
+        KEY_ASSETS to "资产",
+        KEY_SNAPSHOTS to "历史快照",
+        KEY_SNAPSHOT_DETAILS to "快照明细",
+        KEY_DIVIDENDS to "分红记录",
+        KEY_TRANSACTIONS to "交易记录",
+        KEY_STOCK_BASICS to "股票基础信息",
+        KEY_FUND_NAV_CACHES to "基金净值缓存"
+    )
+
+    /**
+     * formatVersion >= 1 的备份必须包含全部 7 张表数组。
+     *
+     * 缺表在旧实现里会被 [decodeRows] 当成空表，随后 [com.example.stockdiary.data.backup.BackupManager.restore]
+     * 先清空再写入 0 行——文件被手改、传输截断或格式演进时就会静默清库。这里在
+     * **解析阶段**直接拒绝，并指名缺哪张表，让用户能判断是文件不完整还是选错了文件。
+     *
+     * 兼容性：只约束「表键是否存在」，不要求表有内容——合法的空库备份（7 个空数组）
+     * 仍可正常恢复；formatVersion 缺失或 <1 的文件由 [parseRoot] 更早拒绝。
+     */
+    private fun requireAllTables(root: JSONObject) {
+        val missing = REQUIRED_TABLES
+            .filter { (key, _) -> root.isNull(key) }
+            .map { (key, name) -> "「$name」($key)" }
+        if (missing.isNotEmpty()) {
+            throw InvalidBackupException(
+                "备份文件缺少数据表：${missing.joinToString("、")}。" +
+                    "为避免清空现有数据，已拒绝恢复；请选择完整的备份文件。"
+            )
+        }
     }
 
     // ---------------------------------------------------------------------

@@ -533,6 +533,23 @@ class SettingsViewModelTest {
     }
 
     @Test
+    fun `readBackup 缺数据表时拒绝_不进入确认框且零写库`() = runTest {
+
+        val uri = mockk<Uri>(relaxed = true)
+        val root = org.json.JSONObject(backupJson(1_700_000_000_000L)).apply { remove("transactions") }
+        stubInputStream(uri) { root.toString() }
+
+        vm.readBackup(uri)
+        assertTrue(waitUntil { vm.uiState.value.backupResult?.isError == true })
+
+        // 缺表文件不应产生待确认恢复，更不应触达 BackupManager（库内数据不变）
+        assertNull(vm.uiState.value.pendingRestore)
+        val message = vm.uiState.value.backupResult?.exceptionOrNull()?.message.orEmpty()
+        assertTrue("应指名缺的表，实际：$message", message.contains("交易记录"))
+        coVerify(exactly = 0) { backupManager.restore(any()) }
+    }
+
+    @Test
     fun `readBackup 坏文件失败并清空pendingRestore且给出可读错误`() = runTest {
 
         val uri = mockk<Uri>(relaxed = true)

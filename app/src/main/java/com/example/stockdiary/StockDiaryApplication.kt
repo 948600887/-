@@ -5,6 +5,7 @@ import com.example.stockdiary.data.sync.DividendPrefetchScheduler
 import com.example.stockdiary.data.sync.PriceSyncScheduler
 import com.example.stockdiary.data.sync.SnapshotScheduler
 import com.example.stockdiary.data.sync.shouldCreateAutoSnapshot
+import com.example.stockdiary.data.export.DataExporter
 import com.example.stockdiary.di.AppContainer
 import com.example.stockdiary.network.FundAPI
 import com.example.stockdiary.network.UnifiedPriceService
@@ -100,6 +101,8 @@ class StockDiaryApplication : Application() {
             // 崩溃日志的磁盘裁剪挪到启动阶段：崩溃现场多一次目录遍历与排序，
             // 在 OOM/StackOverflow 时只会火上浇油。
             GlobalExceptionHandler.pruneCrashFiles()
+            // 上次导出写到一半被杀的 .tmp 残件：文件名带随机后缀，不主动扫会一直留着
+            DataExporter.getInstance(this@StockDiaryApplication).cleanupStaleTempExports()
         }
     }
 

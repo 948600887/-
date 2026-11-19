@@ -243,8 +243,8 @@ class SettingsViewModel(
     // 全量备份 / 恢复（SAF）
     //
     // 为什么走 SAF 而不是复用既有 FileProvider 分享：CreateDocument / OpenDocument
-    // 让用户自己选保存位置与文件，脱离 cacheDir/exports —— 那份目录会被
-    // DataExporter.pruneOldExports 只留 5 份、还会误删诊断 txt，留底根本不可靠。
+    // 让用户自己选保存位置与文件，脱离 cacheDir/exports —— 那份目录是临时导出区，
+    // DataExporter 会按用途分组只保留最近几份（CSV 还按导出类型前缀细分），留底不可靠。
     // 备份是可回灌的结构化 JSON（Room 7 张表），与 6 种给人看的 CSV 对账单是两回事。
     // ==================================================================
 

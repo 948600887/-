@@ -7,6 +7,7 @@ import android.net.Uri
 import android.os.Build
 import androidx.core.content.FileProvider
 import com.example.stockdiary.data.export.DIAGNOSTICS_FILE_PREFIX
+import com.example.stockdiary.data.export.DataExporter
 import com.example.stockdiary.data.export.writeAtomically
 import com.example.stockdiary.data.price.PriceCacheManager
 import com.example.stockdiary.network.BinanceHostGate
@@ -650,6 +651,9 @@ object LogDiagnostics {
             // 原子落盘（tmp + rename）：直接 writeText 中途被杀会留下半截诊断，正是排障最不该丢的东西。
             val content = composeReport(report, envInfo = environmentInfo(context), tailLines = Int.MAX_VALUE)
             writeAtomically(file, content)
+            // 诊断文件也写在 exports/ 里：分享诊断这条路径同样触发一次清理，
+            // 否则只用诊断、不导出 CSV 的用户目录会一直涨。清理规则仍只由 DataExporter 定义。
+            DataExporter.getInstance(context).pruneExports()
             FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
         } catch (e: Exception) {
             AppLogger.e("导出诊断报告失败: ${e.message}", e, "LogDiagnostics")

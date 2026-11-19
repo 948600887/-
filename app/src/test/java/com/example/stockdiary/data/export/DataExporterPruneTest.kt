@@ -109,4 +109,50 @@ class DataExporterPruneTest {
         )
         assertTrue(filesToPrune(files, keepPerGroup = 5).isEmpty())
     }
+
+    @Test
+    fun `CSV按导出类型分组_依次导出6类不会挤掉最早那份`() {
+        val base = 1_700_000_000_000L
+        // 5 个真实导出前缀 + 1 个历史/新增类型：总量超过旧的全局配额 5，
+        // 但每类只有 1 份，分组后任何一份都不该被删。
+        val names = listOf(
+            "assets_1.csv",
+            "snapshots_1.csv",
+            "dividends_1.csv",
+            "statement_1.csv",
+            "full_statement_1.csv",
+            "transactions_1.csv"
+        )
+        val files = names.mapIndexed { i, name -> fileAt(name, base + i * 1_000L) }
+
+        assertTrue(
+            "不同导出类型各自成组，6 类 CSV 互不挤占",
+            filesToPrune(files, keepPerGroup = 5).isEmpty()
+        )
+    }
+
+    @Test
+    fun `同类型CSV仍共享配额_只删最旧的`() {
+        val base = 1_700_000_000_000L
+        val files = listOf(
+            fileAt("assets_old.csv", base + 1_000L),
+            fileAt("assets_new.csv", base + 9_000L),
+            fileAt("snapshots_old.csv", base + 2_000L),
+            fileAt("snapshots_new.csv", base + 8_000L)
+        )
+
+        // 每类 2 份、配额 1：各类各删最旧的一份，跨类互不影响
+        assertEquals(
+            setOf("assets_old.csv", "snapshots_old.csv"),
+            filesToPrune(files, keepPerGroup = 1).map { it.name }.toSet()
+        )
+    }
+
+    @Test
+    fun `保留分组键能区分CSV导出类型_非CSV按用途分组`() {
+        assertEquals("CSV:assets", exportRetentionGroup("assets_20261119_101500.csv"))
+        assertEquals("CSV:full_statement", exportRetentionGroup("full_statement_20261119_101500.csv"))
+        assertEquals("DIAGNOSTICS", exportRetentionGroup("goldvault_diagnostics_20261119_101500.txt"))
+        assertEquals("TEXT", exportRetentionGroup("asset_report_20261119_101500.txt"))
+    }
 }

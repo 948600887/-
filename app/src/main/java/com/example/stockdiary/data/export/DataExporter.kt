@@ -42,6 +42,9 @@ import java.util.Locale
  */
 internal const val DIAGNOSTICS_FILE_PREFIX = "goldvault_diagnostics_"
 
+/** 原子写的临时文件后缀。启动清理残留时只认这个后缀，避免误删正常导出。 */
+internal const val EXPORT_TEMP_SUFFIX = ".tmp"
+
 /**
  * 导出文件的用途分组。
  *
@@ -70,12 +73,16 @@ internal fun classifyExportFile(name: String): ExportFileGroup = when {
 /**
  * 计算需要清理的旧文件（**纯函数**，不删文件、不碰 Context，便于单测）。
  *
- * 按 [classifyExportFile] 分组后，**每组各自**只保留修改时间最新的 [keepPerGroup] 份。
- * 这样诊断组即使只有 1 份，也不会被 CSV 组的大量文件挤掉。
- * [keepPerGroup] = 0 表示清空所有组（供「清除所有数据」调用）。
+ * 分组规则：
+ * - 诊断、文本、其它按用途分组；
+ * - **CSV 再按导出类型前缀细分**（assets / snapshots / dividends / statement / ...），
+ *   避免依次导出 6 类 CSV 时互相挤掉最早那份。
+ *
+ * 每组各自只保留修改时间最新的 [keepPerGroup] 份；[keepPerGroup] = 0 表示清空所有组
+ * （供「清除所有数据」调用）。
  */
 internal fun filesToPrune(files: List<File>, keepPerGroup: Int = DataExporter.MAX_EXPORT_FILES): List<File> =
-    files.groupBy { classifyExportFile(it.name) }
+    files.groupBy { exportRetentionGroup(it.name) }
         .values
         .flatMap { group ->
             if (group.size <= keepPerGroup) emptyList()
@@ -83,35 +90,66 @@ internal fun filesToPrune(files: List<File>, keepPerGroup: Int = DataExporter.MA
         }
 
 /**
- * 把 [text] **原子地**写入 [target]：先写同目录 `.tmp`，成功后再 [File.renameTo] 覆盖目标。
+ * 保留策略的分组键。
  *
- * 直接 `target.writeText(text)` 若在写入中途进程被杀 / 磁盘写满，会留下**半截文件**：
- * 下次导出同名前缀时用户拿到的就是一份缺行的账目或日志，而且没有任何报错。
- * tmp + rename 保证目标文件要么完整、要么还是旧的完整版本（rename 是原子操作）。
- * 失败时清掉 tmp，避免残留；rename 偶发失败时退回直接写，仍保住这次导出。
+ * CSV 用「导出类型」区分（文件名形如 `assets_20261119_101500.csv`）；同类型仍共享配额，
+ * 不同类型的导出互不影响。诊断/文本/其它保持整组共享。
  *
- * 返回是否最终把内容落到了 [target]（供日志/测试判断），异常由调用方 [runCatching] 处理。
+ * 类型名优先按导出时追加的 `yyyyMMdd_HHmmss` 时间戳剥离；没有时间戳的旧命名
+ * （如 `assets_1.csv`）退回「第一个下划线前」推断，避免把旧文件归成一组。
  */
-internal fun writeAtomically(target: File, text: String): Boolean {
-    val tmp = File(target.parentFile, "${target.name}.tmp")
+internal fun exportRetentionGroup(name: String): String {
+    val group = classifyExportFile(name)
+    if (group != ExportFileGroup.CSV) return group.name
+    val stem = name.substringBeforeLast('.', name)
+    val withoutTimestamp = stem.replace(CSV_TIMESTAMP_SUFFIX, "")
+    val prefix = if (withoutTimestamp != stem) {
+        // 标准命名（含时间戳）：`full_statement_20261119_101500` → `full_statement`
+        withoutTimestamp
+    } else {
+        // 旧命名没有时间戳：只能按第一段推断类型
+        stem.substringBefore('_').ifBlank { stem }
+    }
+    return "${group.name}:$prefix"
+}
+
+/** 导出文件名末尾的时间戳（与 `toFileTimestamp()` 的 pattern 一致） */
+private val CSV_TIMESTAMP_SUFFIX = Regex("_\\d{8}_\\d{6}$")
+
+/**
+ * 把 [text] **原子地**写入 [target]：先写同目录随机命名的 `.tmp`，成功后用
+ * [File.renameTo] 覆盖目标（Linux/Android 上是原子替换）。
+ *
+ * 正常路径**不会先删目标**：任何时刻目标要么是新的完整版，要么还是旧的完整版，
+ * 进程被杀也不会让文件消失。只有 rename 在个别文件系统上不支持覆盖时，才删旧目标
+ * 后重试一次；再失败则退回直接写，保住这次导出。
+ *
+ * [rename] / [deleteTarget] 可注入，仅用于单测构造 rename / delete 失败分支。
+ *
+ * @return true 表示通过原子 rename 落盘；false 表示走了删后重试或直接写兜底。
+ */
+internal fun writeAtomically(
+    target: File,
+    text: String,
+    rename: (File, File) -> Boolean = { from, to -> from.renameTo(to) },
+    deleteTarget: (File) -> Boolean = { it.delete() }
+): Boolean {
+    val parent = target.parentFile ?: error("导出目标没有父目录: $target")
+    // 随机后缀：同一秒内两次同前缀导出不会争用同一个 .tmp
+    val tmp = File.createTempFile("${target.name}.", EXPORT_TEMP_SUFFIX, parent)
     return try {
         tmp.writeText(text)
-        // Windows 的 renameTo 不会覆盖已存在的目标文件（Linux 会）。
-        // 导出文件名带时间戳通常不重名，但诊断/同秒重名场景要先移走旧目标，
-        // 让覆盖也走原子 rename，而不是退化成原地直接写（那正是要修的非原子行为）。
-        if (target.exists() && !target.delete()) {
-            target.writeText(text)
-            tmp.delete()
+        if (rename(tmp, target)) return true
+
+        // rename 不支持覆盖已存在目标（部分文件系统）：删旧目标后重试一次
+        if (target.exists() && deleteTarget(target) && rename(tmp, target)) {
             return false
         }
-        if (tmp.renameTo(target)) {
-            true
-        } else {
-            // rename 偶发失败（跨分区/权限）：退回直接写，别丢这次导出，再清 tmp
-            target.writeText(text)
-            tmp.delete()
-            false
-        }
+
+        // 仍失败（权限/占用）：退回直接写，别丢这次导出，再清 tmp
+        target.writeText(text)
+        tmp.delete()
+        false
     } catch (e: Exception) {
         tmp.delete()
         throw e
@@ -228,6 +266,37 @@ class DataExporter(private val context: Context) {
      */
     fun clearExportedFiles() {
         pruneOldExports(keep = 0)
+    }
+
+    /**
+     * 触发一次常规清理（按用途分组保留最近若干份）。
+     *
+     * 供诊断分享等**其它写 exports 的路径**在写完后调用：清理逻辑只留在本类，
+     * 不让第二处也各写一套删文件规则，否则两边会互相删对方的产物。
+     */
+    fun pruneExports() {
+        pruneOldExports()
+    }
+
+    /**
+     * 清掉上次进程被杀留下的 `.tmp` 残件（启动时调用）。
+     *
+     * 正常路径 tmp 会被 rename 走或显式删除；只有写盘中途被杀才会留下。
+     * 这些文件名带随机后缀，不在保留策略的识别范围里，不主动扫就会一直占空间。
+     */
+    fun cleanupStaleTempExports() {
+        try {
+            // 不用 exportDir（它带 mkdirs）：从没导出过就不必凭空建目录
+            val dir = File(context.cacheDir, "exports")
+            if (!dir.isDirectory) return
+            dir.listFiles()?.forEach { file ->
+                if (file.isFile && file.name.endsWith(EXPORT_TEMP_SUFFIX)) {
+                    file.delete()
+                }
+            }
+        } catch (e: Exception) {
+            AppLogger.w("清理残留临时导出文件失败: ${e.message}", "DataExporter")
+        }
     }
 
     /**

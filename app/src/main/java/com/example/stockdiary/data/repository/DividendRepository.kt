@@ -18,6 +18,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
@@ -624,9 +625,17 @@ class DividendRepository private constructor(
             AppLogger.i("已有分红预取在进行，本轮跳过（避免与前台/定期任务重复请求）", "DividendRepository")
             return
         }
+        // 整轮抓取状态改成「内存即时 + 轮末一次 commit」：逐只 apply 的异步落盘
+        // 在进程刚被回收时会丢，导致下一轮冷启动重抓。批次内的读取仍即时准确。
+        fetchStateStore.beginBatch()
         try {
             prefetchDividendsLocked(symbols, forceRefresh, timeBudgetMs)
         } finally {
+            // 正常结束、预算用尽、取消、抛异常都要落盘；NonCancellable 保证取消后
+            // 仍能切到 IO 完成这一次同步 commit（不能在主线程做磁盘写）
+            withContext(NonCancellable + Dispatchers.IO) {
+                fetchStateStore.endBatch()
+            }
             prefetchGate.unlock()
         }
     }

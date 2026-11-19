@@ -1,54 +1,68 @@
 package com.example.stockdiary.data.repository
 
-import com.example.stockdiary.common.DateFormats
-import com.example.stockdiary.data.dividend.DividendData
+import android.annotation.SuppressLint
+import android.content.Context
+import com.example.stockdiary.data.contract.withHeartbeat
 import com.example.stockdiary.data.dividend.DividendRecord
-import com.example.stockdiary.data.dividend.DividendService
+import com.example.stockdiary.data.dividend.isFetchedToday
+import com.example.stockdiary.data.dividend.shouldRefetchOtc
+import com.example.stockdiary.database.Dividend
+import com.example.stockdiary.database.StockDatabase
 import com.example.stockdiary.network.EastmoneyDividendApiService
 import com.example.stockdiary.network.FundDividendApiService
 import com.example.stockdiary.network.OtcBackoffStore
-import com.example.stockdiary.data.contract.withHeartbeat
-import com.example.stockdiary.data.dividend.isFetchedToday
-import com.example.stockdiary.data.dividend.shouldRefetchOtc
-import android.annotation.SuppressLint
-import android.content.Context
-import kotlinx.coroutines.flow.Flow
-import androidx.room.withTransaction
-import com.example.stockdiary.database.AssetType
-import com.example.stockdiary.database.Dividend
-import com.example.stockdiary.database.StockDatabase
+import com.example.stockdiary.utils.AppLogger
+import com.example.stockdiary.utils.StockCodeManager
+import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
-import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.ConcurrentLinkedQueue
-import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicInteger
-import com.example.stockdiary.common.Result
-import com.example.stockdiary.utils.AppLogger
-import com.example.stockdiary.utils.StockCodeManager
-import kotlinx.coroutines.CancellationException
-import java.io.IOException
 
 // ==========================================================================
-// §1 构造与依赖
-// 三个上游（东财 / 新浪 / 场外基金）+ Room DAO + 内存缓存与容量上限 + 本轮限流标志。
-// 全文件分区：§1 构造 §2 抓取状态 §3 预取 §4 缓存读 §5 单例/维护 §6 查询/抓取编排
-//            §7 写入 §8 旧批量预取 §9 文件级纯函数辅助。
+// 分红仓库（编排层）
+//
+// 拆分后的职责边界：
+// - 抓取状态 / 新鲜度簿记 → DividendFetchStateStore
+// - 内存缓存 + 三层读取判定 → DividendMemoryCache / DividendCacheReader
+// - 东财合并请求批量预取 → DividendBatchPrefetcher
+// - 三个数据源适配与解析映射 → DividendSourceFetcher / DividendRecordMapping
+// - 写库与残缺解析保护 → DividendWriter
+// - 策略纯函数（退避 / 负缓存 / 切块 / 汇总文案）→ DividendRepositoryPolicy
+//
+// 本类只保留：单例与公开契约、单标的查询编排、逐条预取的预算与互斥编排。
 // ==========================================================================
-
 
 class DividendRepository private constructor(
     private val context: Context
 ) {
     private val eastmoneyApi by lazy { EastmoneyDividendApiService(context) }
-    private val sinaService = DividendService()
-    private val fundDividendApi = FundDividendApiService()
     private val dividendDao by lazy { StockDatabase.getInstance(context).dividendDao() }
+
+    /** 抓取状态（SharedPreferences）簿记 */
+    private val fetchStateStore by lazy { DividendFetchStateStore(context) }
+
+    /** 内存缓存与命中统计 */
+    private val memoryCache = DividendMemoryCache()
+
+    /** 缓存三层判定（内存 / Room / 「抓过」时间戳） */
+    private val cacheReader by lazy { DividendCacheReader(memoryCache, fetchStateStore, dividendDao) }
+
+    /** 数据源适配（东财 / 新浪 / 天天基金） */
+    private val sourceFetcher by lazy { DividendSourceFetcher(eastmoneyApi) }
+
+    /** 批量预取（东财合并请求） */
+    private val batchPrefetcher by lazy { DividendBatchPrefetcher(eastmoneyApi, cacheReader) }
+
+    /** 写库与残缺解析保护 */
+    private val writer by lazy { DividendWriter(context, dividendDao, memoryCache) }
 
     init {
         // 注入跨进程退避持久化：使天天基金限流(514/429)与主机不可达(DNS)退避窗口在冷启动后
@@ -62,50 +76,20 @@ class DividendRepository private constructor(
 
     /** 设置页导出用：同步取全部分红（避免 ViewModel 直连 DAO） */
     suspend fun getAllDividendsSync(): List<Dividend> = dividendDao.getAllSync()
-    
-    private val cache = ConcurrentHashMap<String, CacheEntry>()
-    private val cacheTTL = 24 * 60 * 60 * 1000L
-
-    /** 分红缓存上限：与行情侧各缓存同量级（~200），避免长会话里无限增长 */
-    private val MAX_CACHE_ENTRIES = 200
 
     /**
      * 本轮 [prefetchDividends] 是否撞过天天基金限流（514/429）。
      *
      * 进程级的 [FundDividendApiService.otcRateLimitSignal] 是只增计数，
      * 每轮预取在轮首/轮末各取一次做差，判「这一轮」是否新增了限流；
-     * 这里存的是「本轮新增过」的结论，由 [consumeOtcRateLimitWarning] 消费一次（读即清零），
-     * 这样 ViewModel 在刷新收尾弹过一次提示后，不会在下一轮 / 同一轮别处入口重复弹。
+     * 这里存的是「本轮新增过」的结论，由 [consumeOtcRateLimitWarning] 消费一次（读即清零）。
      */
     @Volatile
     private var _otcRateLimitedThisCycle: Boolean = false
 
 // ==========================================================================
-// §2 抓取状态簿记（SharedPreferences，跨进程存活）
-// markFetched / markFailed / lastFetchedAt 等：记住「抓过」与「刚失败」。空结果（抓过且确实没分红）必须被记住，否则每次冷启动重抓全部标的 → 接口 514 限流（见 fetchState 的 KDoc）。
+// §1 抓取状态 / 新鲜度（委托 DividendFetchStateStore）
 // ==========================================================================
-
-    /**
-     * 每个代码「上次抓过的时间」，跨进程存活。
-     *
-     * ## 为什么非有它不可
-     *
-     * 实测（2026-10-14 的诊断报告）：一次全量抓取里 **525 次抓回 0 条、只有 77 次有数据** ——
-     * 87% 的标的确实没有分红。而 [getDividendsBySymbol] 里写库那句是
-     * `if (data.isNotEmpty())`，**空结果从不落库**；[tryGetFromCache] 又只在库里有记录时
-     * 才算命中。两边一凑：空结果永远记不住。
-     *
-     * 于是进程一死（Android 后台进程被系统回收是常态），内存缓存全没，
-     * 库里又查不到 → 全部重新抓一遍。59 个代码 × 3 个数据源 ≈ 250 个请求，
-     * 每次冷启动来一轮，一天好几轮。后果是接口被打到返回 **HTTP 514（反爬限流）**
-     * （实测 106 次），请求排队到 60 秒才返回，进程长时间占着大量内存做 Jsoup 解析
-     * —— 然后更容易被系统回收，进入下一轮。这就是「闪退」反复出现的放大器。
-     *
-     * 所以：**「抓过，且确实没有分红」是一个必须记住的结论**，不是「没数据」。
-     */
-    private val fetchState by lazy {
-        context.getSharedPreferences(FETCH_STATE_PREFS, Context.MODE_PRIVATE)
-    }
 
     /**
      * 清空全部抓取状态簿记（"清除所有数据"时调用）。
@@ -115,78 +99,7 @@ class DividendRepository private constructor(
      * 用户以为清干净了、分红却一直空白。见 [AssetRepository.deleteAllData]。
      */
     fun clearFetchState() {
-        // B7：恢复后用户大概率立刻重启 App，apply 的异步落盘可能来不及写，
-        // 旧 fetchState 被读回会让最长 7 天不再真正重抓分红。调用点都在 IO 协程，
-        // 用 commit 同步落盘；只改落盘方式，不动 A16 守卫与抓取逻辑。
-        runCatching { fetchState.edit().clear().commit() }
-    }
-
-    /** 记录一次抓取完成（不管抓没抓到）。必须在抓取**成功**后写，失败时写会把错误固化 24 小时 */
-    private fun markFetched(symbol: String) {
-        runCatching { fetchState.edit().putLong(symbol, System.currentTimeMillis()).apply() }
-    }
-
-    private fun lastFetchedAt(symbol: String): Long? {
-        val value = runCatching { fetchState.getLong(symbol, 0L) }.getOrDefault(0L)
-        return value.takeIf { it > 0L }
-    }
-
-    /**
-     * 记一次抓取失败（所有数据源都没应答）。
-     *
-     * 与 [markFetched] 是**两个独立状态**：[markFetched] 记「源应答了，结论是没有
-     * 分红」（7 天有效），这里记「源没答上」（按 [computeFailureBackoff] 指数退避：
-     * 首档 5 分钟、封顶 6 小时；从未成功过的标的 1 分钟起、封顶 1 小时）。
-     * 混在一起就会把错误固化成结论 —— 正是本次要修的东西。
-     */
-    private fun markFailed(symbol: String) {
-        runCatching {
-            // 读-改-写必须原子：资产页与持仓页可能同时抓同一只标的，
-            // 两个线程各自读到旧值再各自 +1，会把失败次数少记一次、退避档位涨不上去。
-            // 锁在 SharedPreferences 实例上（同进程同 name 只有一个实例），不引入额外字段。
-            synchronized(fetchState) {
-                val countKey = FAILURE_COUNT_PREFIX + symbol
-                val newCount = fetchState.getInt(countKey, 0) + 1
-                fetchState.edit()
-                    .putLong(FAILURE_KEY_PREFIX + symbol, System.currentTimeMillis())
-                    .putInt(countKey, newCount)
-                    .apply()
-            }
-        }
-    }
-
-    /** 抓取成功即清除失败标记与连续失败计数，让它立刻回到正常的 TTL 节奏 */
-    private fun clearFailure(symbol: String) {
-        runCatching {
-            fetchState.edit()
-                .remove(FAILURE_KEY_PREFIX + symbol)
-                .remove(FAILURE_COUNT_PREFIX + symbol)
-                .apply()
-        }
-    }
-
-    private fun lastFailedAt(symbol: String): Long? {
-        val value = runCatching { fetchState.getLong(FAILURE_KEY_PREFIX + symbol, 0L) }.getOrDefault(0L)
-        return value.takeIf { it > 0L }
-    }
-
-    /** 该 symbol 连续抓取失败的次数（成功一次即清零） */
-    private fun failureCount(symbol: String): Int =
-        runCatching { fetchState.getInt(FAILURE_COUNT_PREFIX + symbol, 0) }.getOrDefault(0)
-
-    /** 记录一次**真正取到非空分红**的时间（与 [markFetched] 的「抓过」区分，见 [DATA_AT_PREFIX]） */
-    private fun markDataFetched(symbol: String) {
-        runCatching { fetchState.edit().putLong(DATA_AT_PREFIX + symbol, System.currentTimeMillis()).apply() }
-    }
-
-    /**
-     * 记录一次「源返回空结果、沿用库内旧记录」。
-     *
-     * 只做展示簿记：不参与清库、负缓存、退避的任何判定（那条分支的取舍见
-     * [getDividendsBySymbol] 里的注释），单纯回答「这份旧数据是什么时候开始陈旧的」。
-     */
-    private fun markEmptyResult(symbol: String) {
-        runCatching { fetchState.edit().putLong(MISS_AT_PREFIX + symbol, System.currentTimeMillis()).apply() }
+        fetchStateStore.clear()
     }
 
     /**
@@ -195,390 +108,71 @@ class DividendRepository private constructor(
      * 读的是本次改动新写的两个键：正常升级上来的老用户第一次命中「空结果保留
      * 旧值」时 `lastDataAt` 还是 null，此时提示退化为不带天数的文案，不会编造天数。
      */
-    fun dividendFreshness(symbol: String): DividendDataFreshness {
-        val normalized = StockCodeManager.normalizeSymbol(symbol)
-        fun read(prefix: String): Long? = runCatching {
-            fetchState.getLong(prefix + normalized, 0L)
-        }.getOrDefault(0L).takeIf { it > 0L }
-        return DividendDataFreshness(
-            lastDataAt = read(DATA_AT_PREFIX),
-            lastMissedAt = read(MISS_AT_PREFIX)
-        )
-    }
+    fun dividendFreshness(symbol: String): DividendDataFreshness = fetchStateStore.freshness(symbol)
 
 // ==========================================================================
-// §3 预取入口 prefetchDividendsBatch（批量抓取，冷启动/后台主力路径）
-// 东财合并请求 + Semaphore 限流 + 超时预算判定在 withPermit 内部。Semaphore 用法是踩过的坑：判定写在外层等于没判定，改法照抄 AssetSyncManager。
+// §2 批量预取（委托 DividendBatchPrefetcher）
 // ==========================================================================
 
     /**
      * 一次性把一批标的的分红抓完，结果**按次返回**，由调用方在随后的逐条
      * [getDividendsBySymbol] 里作为 `batchResults` 传回来。
      *
-     * ## 为什么按次返回而不是放共享字段
-     *
-     * 结果曾经放在单例的 `batchPrefetch` 字段里。资产页与持仓页同时刷新
-     * （或后台 PriceSyncWorker 撞上手动刷新）时，两个预取周期会互相
-     * clear / remove：后启动的清掉前一个的结果，整批退化成逐条级联，
-     * 请求风暴照旧。按次返回后每个周期只读自己那份不可变结果，并发互不干扰。
-     *
-     * ## 为什么值得单独做一次
-     *
-     * 东财的 filter 支持 `SECURITY_CODE in ("a","b",…)`，**一个请求就能问全部代码**。
-     * 逐条抓的话：59 个代码一个请求，ETF 空手后还要顺序试三种代码格式（再 3 个），
-     * 一次全量 100 多个请求。合并后 1~N 个。
-     *
-     * ## 只走东财这条路
-     *
-     * 天天基金的分红页是**每个基金一个 HTML 页面**，没有可用的批量入口
-     * （实测 `FundArchivesDatas.aspx?type=jjfh&code=a,b` 返回空，单代码也返回空），
-     * 所以场外基金仍逐个抓 —— 那部分请求量省不掉，交给 TTL 分层去治。
-     *
-     * ## 不改变兜底语义
-     *
-     * 批量拿到记录的标的，后续不再级联（数据已经有了，没必要再问）；
-     * 批量说没有的标的，级联照旧走完，只是**跳过已经问过的东财那一步**，
-     * 让 Sina 兜底有机会发言。这样不因为合并请求而丢任何数据来源。
+     * 结果按次返回而不是放共享字段：资产页与持仓页同时刷新时，两个预取周期
+     * 曾互相 clear / remove，整批退化成逐条级联，请求风暴照旧。
      */
     suspend fun prefetchDividendsBatch(
         symbols: List<String>,
         forceRefresh: Boolean = false
-    ): Map<String, List<DividendRecord>> {
-        if (symbols.isEmpty()) return emptyMap()
-
-        val normalized = symbols.map { StockCodeManager.normalizeSymbol(it) }.distinct()
-
-        // 已经有缓存的不用再问。forceRefresh 时全问（调用方明确要刷新）
-        val pending = normalized.filter { symbol ->
-            forceRefresh || tryGetFromCache(symbol) == null
-        }
-        if (pending.isEmpty()) return emptyMap()
-
-        // 每个标的候选的 SECURITY_CODE：直接码 + （ETF 才有的）三种格式变体。
-        // ETF 的格式历史上换过，接口三种都认，一起塞进批量查询比顺序重试省两个请求
-        val codesBySymbol = mutableMapOf<String, MutableList<String>>()
-        val codeToSymbol = mutableMapOf<String, String>()
-        val eastmoneySymbols = mutableListOf<String>()
-
-        for (symbol in pending) {
-            // fund_ 前缀（场外份额的显式标记）必须比号段推断先判：
-            // 400030（东方添益债券）/ 420102 落在 400/420 号段，isOTCFundCode 认不出来
-            // （它只认 01/02 开头与 004xxx-009xxx），于是这些真基金会被塞进东财批量查询、
-            // 拿不到结果后再级联到新浪股票接口，一路问的都是不存在的证券代码。
-            // 场外基金走天天基金，没有批量入口 —— 与下面逐条抓取用的是同一个判据。
-            //
-            // 数据影响（已知且已认可）：修完之后 fund_400030 / fund_420102 的分红来源
-            // 由「东财批量 + 新浪」切到天天基金，已入库的分红记录可能随之变化。
-            if (StockCodeManager.isOTCFund(symbol)) continue
-
-            val pure = StockCodeManager.stripFundPrefix(symbol)
-            val code = StockCodeManager.extractPureCode(pure)
-
-            eastmoneySymbols += symbol
-            val candidates = codesBySymbol.getOrPut(symbol) { mutableListOf() }
-            candidates += code
-            codeToSymbol.putIfAbsent(code, symbol)
-
-            if (StockCodeManager.isETF(pure)) {
-                val marketPre = if (code.startsWith("5")) "SH" else "SZ"
-                for (fmt in listOf("${marketPre}.$code", "${marketPre}$code", "$code.$marketPre")) {
-                    candidates += fmt
-                    codeToSymbol.putIfAbsent(fmt, symbol)
-                }
-            }
-        }
-
-        if (eastmoneySymbols.isEmpty()) return emptyMap()
-
-        // 分块发：每块一个请求，URL 长度与代码数双保险（见 [chunkSecurityCodes]）。
-        // 不切块的后果不是慢，是整批失败后退回逐条级联 —— 59 个标的打出 250~400 个请求，
-        // 那就是这次要修掉的「点刷新闪退」
-        val chunks = chunkSecurityCodes(codeToSymbol.keys.toList())
-        // 被**成功**块覆盖的标的才会写进结果；块失败的标的不写 ——
-        // 没有条目 ⇔ 级联里照常逐条重问，不能用「批量失败」冒充「批量问过且没有」
-        val answeredSymbols = ConcurrentHashMap.newKeySet<String>()
-        val recordsByCode = ConcurrentHashMap<String, MutableList<DividendData>>()
-
-        coroutineScope {
-            val chunkSemaphore = Semaphore(MAX_CONCURRENT_BATCH_CHUNKS)
-            chunks.map { chunk ->
-                async {
-                    chunkSemaphore.withPermit {
-                        val result = try {
-                            eastmoneyApi.getDividendHistoryBySecurityCodes(chunk)
-                        } catch (e: CancellationException) {
-                            throw e
-                        } catch (e: Exception) {
-                            // 只废这一块：块内标的不写结果条目，随后会走逐条级联，
-                            // 其他块的结果照常生效 —— 一块失败不能把整批拖垮
-                            AppLogger.w(
-                                "批量预取分块失败（${chunk.size} 个代码）: ${e.message}",
-                                "DividendRepository"
-                            )
-                            return@withPermit
-                        }
-                        if (!result.isSuccess) {
-                            AppLogger.w(
-                                "批量预取分块未成功（${chunk.size} 个代码）",
-                                "DividendRepository"
-                            )
-                            return@withPermit
-                        }
-                        result.getOrNull().orEmpty().forEach { record ->
-                            recordsByCode.computeIfAbsent(record.ticker) { mutableListOf() }
-                                .add(record)
-                        }
-                        chunk.forEach { code -> codeToSymbol[code]?.let { answeredSymbols += it } }
-                    }
-                }
-            }.forEach { it.await() }
-        }
-
-        if (answeredSymbols.isEmpty()) {
-            // 全块失败：一个条目都不写，全部标的走逐条级联（与改造前批量失败的行为一致）
-            AppLogger.w("批量预取所有分块均失败，退回逐条路径", "DividendRepository")
-            return emptyMap()
-        }
-
-        // 按接口返回的 SECURITY_CODE 归组，再发回给各个标的。
-        // 同一标的可能靠多种格式命中，取并集并按除息日去重。
-        // 这里要把 [DividendData]（接口层）转成 [DividendRecord]（领域层）——
-        // 口径与逐条路径 [fetchFromEastmoneyWithFormat] 保持一致，否则同一天的分红
-        // 会因为走了批量还是逐条而算出不同的金额
-        val batchResults = HashMap<String, List<DividendRecord>>(eastmoneySymbols.size)
-        for (symbol in eastmoneySymbols) {
-            if (symbol !in answeredSymbols) continue
-            val codes = codesBySymbol[symbol].orEmpty()
-            val merged = codes.flatMap { recordsByCode[it].orEmpty() }
-                .map { it.toDividendRecord() }
-                .distinctBy { it.exDividendDate }
-                .sortedByDescending { it.exDividendDate }
-            batchResults[symbol] = merged
-        }
-
-        AppLogger.i(
-            "批量预取：${eastmoneySymbols.size} 只走东财的标的分 ${chunks.size} 个请求，" +
-                "${batchResults.size} 只拿到批量答案，其中 " +
-                "${batchResults.values.count { it.isNotEmpty() }} 只有分红记录",
-            "DividendRepository"
-        )
-        return batchResults
-    }
+    ): Map<String, List<DividendRecord>> = batchPrefetcher.prefetch(symbols, forceRefresh)
 
 // ==========================================================================
-// §4 缓存读取（内存 Map + Room + 「抓过」时间戳三层判定）
-// getCachedAllowingStale(Batch) / primeDividendCache / CacheEntry。返回值可能是空列表（= 抓过且没有分红，有效答案）；只有 null 才代表调用方该去抓。
+// §3 缓存读取（委托 DividendCacheReader）
 // ==========================================================================
 
     /**
      * 冷启动专用的缓存读取：**TTL 过期也照用**，只留一个很硬的上限。
      *
-     * 打开 App 不该为了刷新「预计收入」去敲几十个接口 —— 那是用户点「刷新」时才该做的事。
-     * 所以这里故意比 [cacheTTL] / [NEGATIVE_RESULT_TTL] 宽松：过期几天照样用，
-     * 只有超过 [STALE_CEILING_MS]（30 天）才判定「连过期数据都没有」，让调用方去抓。
-     *
      * 返回值可能是**空列表**：那表示「抓过，且确实没有分红」，是有效答案，不是没数据。
      * 只有 null 才代表调用方该去抓。
      */
-    suspend fun getCachedAllowingStale(symbol: String): List<DividendRecord>? {
-        val normalized = StockCodeManager.normalizeSymbol(symbol)
-
-        // 先按正常 TTL 走一遍（命中就直接返回，顺带把内存缓存填上）
-        tryGetFromCache(normalized)?.let { return it }
-
-        // TTL 过期了：只要还没超过硬上限，就承认这份数据。
-        // 只认抓取时间戳（库里记录本身不带时间戳，没法判断它有多旧）
-        val stamp = lastFetchedAt(normalized)
-        val freshEnough = stamp != null && System.currentTimeMillis() - stamp < STALE_CEILING_MS
-        if (!freshEnough) return null
-
-        val dbRecords = dividendDao.getBySymbol(normalized)
-        return dbRecords.map { dbDiv ->
-            DividendRecord(
-                exDividendDate = dbDiv.date,
-                dividendPerShare = dbDiv.amount.toString(),
-                announceDate = "",
-                fiscalYear = dbDiv.date.take(4),
-                paymentDate = dbDiv.payDate
-            )
-        }
-    }
+    suspend fun getCachedAllowingStale(symbol: String): List<DividendRecord>? =
+        cacheReader.getCachedAllowingStale(symbol)
 
     /**
-     * 批量版 [getCachedAllowingStale]：一次读 N 个标的。
+     * 批量版 [getCachedAllowingStale]：一次读 N 个标的（2 次 IO 取代 2N 次）。
      *
-     * ## 为什么要有这个方法
-     *
-     * 冷启动时 [DividendIncomeLoader.loadIncome] 的「同日短路」要先把每个标的的
-     * 缓存记录取出来算 dataHash。逐标的走 [getCachedAllowingStale] 的代价是
-     * **2N 次 IO**：每个符号一次 `dividendDao.getBySymbol`（Room 查询，最坏还会
-     * 因库里已有记录而再查一次）+ 两次 `fetchState.getLong`（同步 SP 读）。
-     * 用户有 240 个标的 → 约 480 次 IO，实测冷启动这一段就占 3~4 秒
-     * （诊断日志 19:53:36 起、19:53:38 已跑到首页那遍）。
-     *
-     * 批量后：内存 Map 命中零 IO；未命中的一次 `dividendDao.getBySymbols`
-     * （单条 IN 查询）+ 一次 `fetchState.getAll()`。
-     *
-     * ## 语义必须与逐标的版本逐分支一致
-     *
-     * 这不是「顺手优化」，判据错一个分支的代价都是静默的：
-     * - 有分红记录 + 24h 内抓过 → 用记录（并回填内存缓存）
-     * - 有分红记录 + 24h 外但 30 天内抓过 → 仍用旧记录（[STALE_CEILING_MS] 宽口径）
-     * - 有分红记录 + 超过 30 天 → null（让调用方去抓）
-     * - 无分红记录 + 7 天内抓过 → 「没有分红」是结论，返回**空列表**而非 null
-     *   （[shouldReuseEmptyResult]；返回 null 会让调用方以为没抓过而反复重抓）
-     * - 无分红记录 + 7 天外但 30 天内 → 同样是空列表（逐标的路径会重查 DB 后返回空）
-     * - 无分红记录 + 超过 30 天 → null
-     *
-     * 内存缓存回填的时机也照抄逐标的版本：只有「24h 内抓过」与「空结果可复用」
-     * 两条路回填，30 天宽口径那条不回填（它本就该在下次抓取时被刷新）——
-     * **除非调用方显式要 [primeCache]**，见下。
-     *
-     * @param primeCache true = 把宽口径（24h~30 天）读到的记录也写进内存缓存。
-     *        用途只有一个：**进程刚重启、内存缓存全丢**时，让随后按 symbol 的
-     *        [getDividendsBySymbol] 命中内存而不再联网。此时把过期记录的
-     *        timestamp 记成 now，等价于「这一轮先认旧数据，权威刷新交给同步链路」。
-     *        默认 false，[DividendIncomeLoader] 等既有调用方行为完全不变。
+     * @param primeCache true = 把宽口径（24h~30 天）读到的记录也写进内存缓存，
+     *        供进程刚重启时预热；默认 false，既有调用方行为完全不变。
      * @return symbol（已规范化）→ 记录；值为 null 表示「连过期数据都没有，该去抓」。
-     *          **值可以是空列表**（表示抓过且确实没有分红），与 null 是两回事。
      */
     suspend fun getCachedAllowingStaleBatch(
         symbols: List<String>,
         primeCache: Boolean = false
-    ): Map<String, List<DividendRecord>?> = withContext(Dispatchers.IO) {
-        if (symbols.isEmpty()) return@withContext emptyMap()
-        val normalized = symbols.map { StockCodeManager.normalizeSymbol(it) }.distinct()
-        val now = System.currentTimeMillis()
-
-        // 抓取时间戳一次全读，取代逐标的 N 次同步 SP 读。
-        // fetchState 里混着失败标记（FAILURE_KEY_PREFIX 前缀），那些不是 Long 之外的类型，
-        // 统一按 Long 过滤掉即可，不影响时间戳判定。
-        val stamps: Map<String, Long> = runCatching {
-            fetchState.all.mapNotNull { (key, value) ->
-                (value as? Long)?.takeIf { it > 0L }?.let { key to it }
-            }.toMap()
-        }.getOrDefault(emptyMap())
-
-        val out = HashMap<String, List<DividendRecord>?>(normalized.size)
-        val needDb = ArrayList<String>()
-        for (symbol in normalized) {
-            val cached = cache[symbol]
-            if (cached != null && cached.isValid(cacheTTL)) {
-                cacheHits.incrementAndGet()
-                out[symbol] = cached.data
-            } else {
-                needDb.add(symbol)
-            }
-        }
-        if (needDb.isEmpty()) return@withContext out
-
-        // 一次 IN 查询取代 N 次按 symbol 查（240 个远低于 SQLite 的 999 变量上限）
-        val rowsBySymbol = dividendDao.getBySymbols(needDb)
-            .groupBy { StockCodeManager.normalizeSymbol(it.symbol) }
-
-        for (symbol in needDb) {
-            val dbRecords = rowsBySymbol[symbol].orEmpty()
-            val stamp = stamps[symbol]
-            val fetchedRecently = stamp != null && now - stamp < cacheTTL
-            val withinStaleCeiling = stamp != null && now - stamp < STALE_CEILING_MS
-
-            if (dbRecords.isNotEmpty()) {
-                if (fetchedRecently) {
-                    val records = recordsFromDb(dbRecords)
-                    // 与逐标的路径一致：数据库恢复的缓存不标记为全量拉取
-                    cache[symbol] = CacheEntry(records, now, lastFullFetch = 0L)
-                    out[symbol] = records
-                } else if (withinStaleCeiling) {
-                    // 宽口径：过期几天的记录照样用。默认不回填内存缓存（照抄逐标的版本）；
-                    // 调用方显式要预热时才回填，见 [primeCache] 参数说明
-                    if (primeCache) {
-                        cache[symbol] = CacheEntry(
-                            recordsFromDb(dbRecords),
-                            now,
-                            lastFullFetch = stamp ?: 0L
-                        )
-                    }
-                    out[symbol] = recordsFromDb(dbRecords)
-                } else {
-                    out[symbol] = null
-                }
-                continue
-            }
-
-            // 库里一条都没有：先按 [shouldReuseEmptyResult] 判「抓过且没有分红」
-            if (shouldReuseEmptyResult(
-                    dbRecordCount = 0,
-                    lastFetchedAt = stamp,
-                    now = now,
-                    ttl = NEGATIVE_RESULT_TTL
-                )
-            ) {
-                cacheHits.incrementAndGet()
-                // 负缓存沿用**原始抓取时间**，不写成 now：
-                // CacheEntry.timestamp 是 TTL 起点，写成 now 等于每次读取都把
-                // 「抓过且没分红」的结论重新续期，7 天负结果窗口会被无限滑动。
-                val fetchedAt = stamp ?: now
-                cache[symbol] = CacheEntry(emptyList(), fetchedAt, lastFullFetch = fetchedAt)
-                out[symbol] = emptyList()
-            } else if (withinStaleCeiling) {
-                // 逐标的路径这里会再查一次 DB（空）后返回空列表；批量版 DB 已查过，直接给空
-                out[symbol] = emptyList()
-            } else {
-                out[symbol] = null
-            }
-        }
-        out
-    }
+    ): Map<String, List<DividendRecord>?> = cacheReader.getCachedAllowingStaleBatch(symbols, primeCache)
 
     /**
      * 把库里有记录的标的预热进内存缓存，返回「仍然需要联网抓取」的 symbol 列表。
      *
-     * ## 为什么需要它（日历页冷启动转圈的根因）
-     *
-     * [CalendarViewModel] 生成日历时无条件调一次 `prefetchDividends(全部标的)`。
-     * 而预取的判据是 `forceRefresh || ttlExpired`，其中 `cache` 是**进程内内存 Map**、
-     * 一重启就全丢 —— 于是每个标的都算 `ttlExpired`，全部进抓取队列。
-     * 更糟的是 [getDividendsBySymbol] 里「DB 有记录但 `lastFetchedAt` 超过
-     * [cacheTTL]（24h）」会 **return null 转去联网**：用户只要超过一天没同步，
-     * 200 个标的就得重抓一遍，日历页在 `isLoading` 里转圈到预算耗尽
-     * （`generateCalendarData` 是 suspend 且被 collect 直接调用，转圈期间整条链阻塞）。
-     *
-     * 修法：冷启动先用本方法做一次宽口径批量读（零网络、2 次 IO）把有库记录的标的
-     * 预热进内存缓存，只让「连过期数据都没有」的标的去联网。
-     *
-     * ## 取舍（明确记下）
-     *
-     * 预热会把过期数据的 timestamp 记成 now，意味着接下来 24h 内这些标的不会因
-     * 「有新公告」而重抓。这是**有意**的：冷启动先用旧数据把界面填上，远比转圈几十秒
-     * 好；权威刷新由 [AssetSyncManager] 的同步链路（forceRefresh）与用户手动刷新负责，
-     * 两条路都不经过这里。首页/持仓页的预计收入冷启动也早就是同一套宽口径语义
-     * （[getCachedAllowingStale] 的 [STALE_CEILING_MS] = 30 天）。
+     * 冷启动先用本方法做一次宽口径批量读（零网络、2 次 IO）把有库记录的标的
+     * 预热进内存缓存，只让「连过期数据都没有」的标的去联网 —— 否则日历页会为
+     * 每个标的都判 TTL 过期、全量重抓。
      *
      * @param forceRefresh true = 不预热、直接返回全部 symbol 让调用方全量重抓
-     * @return 仍需抓取的 symbol（**原始 symbol**，未规范化；[prefetchDividends]
-     *         内部会自己 normalize + distinct）
+     * @return 仍需抓取的 symbol（**原始 symbol**，未规范化）
      */
-    suspend fun primeDividendCache(symbols: List<String>, forceRefresh: Boolean): List<String> {
-        if (symbols.isEmpty()) return emptyList()
-        if (forceRefresh) return symbols
-        val cached = getCachedAllowingStaleBatch(symbols, primeCache = true)
-        return symbols.filter { cached[StockCodeManager.normalizeSymbol(it)] == null }
-            .distinct()
-    }
+    suspend fun primeDividendCache(symbols: List<String>, forceRefresh: Boolean): List<String> =
+        cacheReader.prime(symbols, forceRefresh)
+
+// ==========================================================================
+// §4 抓取并发与预取互斥
+// ==========================================================================
 
     /**
      * 预取分红逐条抓取的并发上限。
      *
-     * 从前是 8（注释「与 AssetSyncManager.MAX_CONCURRENT_SYNC 一致」），但在天天基金
-     * (fundf10.eastmoney.com，同属 eastmoney.com) 这一唯一场外基金主源上，8 并发首发会在一波内
-     * 打出多个 514：首个 514 回来设退避窗口前，8 个请求已通过入口检查、在内层
-     * fhspHealthySemaphore(2) 上排队，仍会补发 HTTP（退避检查只在入口做一次，排队请求不再复核）。
-     *
-     * 现降到 2，与基金源 fhsp 健康档(2) 对齐、刻意低于同步总闸(6)，根治 514 首发浪涌：
-     * - 首发浪涌从 8 压到 2，撞 514 设退避后，剩余在排队的请求由 FundDividendApiService
-     *   内层闸门后的复查短路，不再补发冗余 HTTP；
-     * - 真实 HTTP 并发本就被 fhspHealthySemaphore(2) 限制为 2，降外层只是少 launch 协程，
-     *   不拖慢已补抓路径（批量预取已覆盖东财标的，逐条只是 OTC / Sina 兜底等少量补充）。
+     * 从前是 8，在天天基金这一唯一场外基金主源上，8 并发首发会在一波内打出多个 514；
+     * 现降到 2，与基金源 fhsp 健康档(2) 对齐、刻意低于同步总闸(6)，根治 514 首发浪涌。
      */
     private val maxConcurrentFetch = 2
 
@@ -586,37 +180,16 @@ class DividendRepository private constructor(
      * 预取互斥闸：前台刷新后的后台预取、日历页预取、定期补齐 Worker 只能有一份在跑。
      *
      * 用 [Mutex.tryLock] 而不是 `withLock`：抢不到锁的一侧**立即放弃本轮**，
-     * 不排队等待。理由：
-     * - 前台刷新不能被 Worker 的 4 分钟预算拖住（后台预取本身不阻塞价格同步，
-     *   但也没必要让它空等）；
-     * - 正在跑的那一份已经在按「最久没抓过」推进同一批标的，重复排一轮只会
-     *   把天天基金的匀速闸门与退避计数放大成双倍请求量；
-     * - 被跳过的一侧下一个周期（Worker 30 分钟 / 下一次刷新）自然会续上，
-     *   已成功的标的由 [markFetched] 的跨进程时间戳去重，不会重复拉。
+     * 不排队等待。前台刷新不能被 Worker 的 4 分钟预算拖住；被跳过的一侧下一个周期
+     * 自然会续上，已成功的标的由 markFetched 的跨进程时间戳去重。
      */
     private val prefetchGate = Mutex()
-    
-    private val cacheHits = AtomicInteger(0)
-    private val cacheMisses = AtomicInteger(0)
-    
-    data class CacheEntry(
-        val data: List<DividendRecord>,
-        val timestamp: Long,
-        val lastFullFetch: Long = System.currentTimeMillis()
-    ) {
-        fun isValid(ttl: Long): Boolean = System.currentTimeMillis() - timestamp < ttl
-        fun needsFullFetch(): Boolean = System.currentTimeMillis() - lastFullFetch > 30L * 24 * 60 * 60 * 1000
-    }
-    
+
 // ==========================================================================
 // §5 单例与缓存维护
-// getInstance（双检锁单例）+ clearCache / trimCacheIfNeeded / getCacheStats / close / consumeOtcRateLimitWarning（限流信号读即清零，供 VM 弹一次 Snackbar）。
 // ==========================================================================
 
     companion object {
-        /** 「上次抓取时间」存放的 preferences 名，见 [fetchState] 的说明 */
-        private const val FETCH_STATE_PREFS = "dividend_fetch_state"
-
         /** 场外基金退避窗口持久化名（跨进程存活，见 [SharedPreferencesOtcBackoffStore]）。 */
         private const val OTC_BACKOFF_PREFS = "otc_backoff_state"
 
@@ -624,97 +197,29 @@ class DividendRepository private constructor(
          * 分红预取轮次序号（进程内自增，仅供收尾汇总日志做归属）。
          *
          * [prefetchDividends] 不总在 [com.example.stockdiary.data.sync.AssetSyncManager]
-         * 的同步轮次里（日历页也会直接调它），所以自带一套轻量序号，不与价格同步的
-         * `syncRoundSeq` 强行对齐。纯观测：只给一行 INFO 用，不参与任何抓取 / 缓存 /
-         * 退避决策，也不影响 [FundDividendApiService.otcRateLimitSignal] 的只增语义。
+         * 的同步轮次里（日历页也会直接调它），所以自带一套轻量序号。纯观测：只给一行 INFO 用。
          */
         private val prefetchRoundSeq = AtomicInteger(0)
-
-        /**
-         * 「抓过，且确实没有分红」这个结论的有效期。
-         *
-         * 比 [cacheTTL] 长得多是刻意的：实测一次全量抓取里 87% 的标的没有分红，
-         * 它们是绝大多数请求量的来源，而「没有分红」这个结论又极不容易变。
-         * 仍保留上限（而不是永久）是因为万一第一次抓取正好撞上限流/反爬拿到空结果，
-         * 过期后还有机会重试；而且用户点「刷新」本来就会 forceRefresh 绕开缓存。
-         */
-        private const val NEGATIVE_RESULT_TTL = 7L * 24 * 60 * 60 * 1000
-
-        /**
-         * 抓取**失败**后不再重打同一标的的退避窗。
-         *
-         * 失败既不能写进 [fetchState]（那等于把网络抖动固化成「这只没有分红」最长
-         * 7 天，界面还一声不吭），也不能什么都不记 —— 场外基金没有批量入口
-         * （天天基金是每基金一个页面，见 [prefetchDividendsBatch] 的说明），上百只标的
-         * 每轮各重打一次失败的接口就是请求风暴。所以给失败单独一个短窗：
-         * 窗内不重打，过期自动重试；用户点刷新（forceRefresh）随时可以绕过。
-         */
-        /** 失败时间戳与「抓过」时间戳共用一份 SP，靠前缀区分，避免多一个文件 */
-        private const val FAILURE_KEY_PREFIX = "failed_"
-        private const val FAILURE_COUNT_PREFIX = "failedcnt_"
-
-        /**
-         * 「最近一次真正抓到**非空**分红」的时间（UI 陈旧提示用）。
-         *
-         * 与 [FETCH_STATE_PREFS] 里的「抓过时间」（裸 symbol 键）刻意分开：
-         * 后者在空结果时也会写（「抓过且确实没有分红」是结论），无法回答
-         * 「当前展示的这批记录是哪天抓回来的」。空结果保留旧值的分支会让
-         * 裸键时间戳变成 now，于是年化收入长期沿用旧记录而用户无感知
-         * （sz161226 诊断），这个键才是那份旧记录的真实年龄。
-         */
-        private const val DATA_AT_PREFIX = "dataAt_"
-
-        /** 「最近一次源返回空结果、沿用库内旧记录」的时间（UI 陈旧提示用） */
-        private const val MISS_AT_PREFIX = "missAt_"
-
-    /**
-     * 冷启动允许使用的过期数据上限。
-     *
-     * 比 [NEGATIVE_RESULT_TTL] 长得多是刻意的：打开 App 不该为了刷新「预计收入」
-     * 去敲几十个接口。超过这个天数才判定「连过期数据都没有」，让调用方去抓 ——
-     * 那是为了防止用户换了手机/清了数据之后，界面上永远显示一份很旧的数。
-     */
-    private const val STALE_CEILING_MS = 30L * 24 * 60 * 60 * 1000
-
-    // 基金/ETF 每10份分红超过100元视为异常（基金分红来自净值拆分，不可能达到）
-    private const val MAX_DIVIDEND_PER_TEN_SHARES_FUND = 100.0
-        // 股票每10股分红上限放宽：A股极端高分红如茅台约300元/10股（含特别分红更高），留足余量
-        private const val MAX_DIVIDEND_PER_TEN_SHARES_STOCK = 1000.0
 
         @SuppressLint("StaticFieldLeak")
         @Volatile
         private var instance: DividendRepository? = null
-        
+
         fun getInstance(context: Context): DividendRepository {
             return instance ?: synchronized(this) {
                 instance ?: DividendRepository(context.applicationContext).also { instance = it }
             }
         }
     }
-    
+
     fun clearCache() {
-        cache.clear()
+        memoryCache.clear()
     }
 
-    /**
-     * 分红缓存超过上限时淘汰最旧条目（按写入时间戳）。避免长会话里缓存无限增长。
-     * 最近写入的（本次同步/刷新窗口内）时间戳最新，不会被误删。
-     */
-    private fun trimCacheIfNeeded() {
-        if (cache.size <= MAX_CACHE_ENTRIES) return
-        val entries = cache.entries.sortedBy { it.value.timestamp }
-        val removeCount = cache.size - MAX_CACHE_ENTRIES
-        entries.take(removeCount).forEach { cache.remove(it.key) }
-    }
-    
-    fun getCacheStats(): Map<String, Any> = mapOf(
-        "size" to cache.size,
-        "hits" to cacheHits.get(),
-        "misses" to cacheMisses.get()
-    )
-    
+    fun getCacheStats(): Map<String, Any> = memoryCache.stats()
+
     fun close() {
-        cache.clear()
+        memoryCache.clear()
     }
 
     /**
@@ -722,7 +227,6 @@ class DividendRepository private constructor(
      *
      * 只存两个**确定性短退避窗口**（限流 514/429、主机不可达 DNS），不持久化 fhsp 整源熔断
      * —— 后者是动态状态机、已有自愈机制，跨进程持久化反而可能误判「已恢复的源为熔断」。
-     * 存的是绝对截止时间戳，进程在窗口内重启仍读得到、照常短路，冷启动不再立即浪涌。
      */
     private class SharedPreferencesOtcBackoffStore(ctx: Context) : OtcBackoffStore {
         private val prefs = ctx.getSharedPreferences(OTC_BACKOFF_PREFS, Context.MODE_PRIVATE)
@@ -738,8 +242,6 @@ class DividendRepository private constructor(
      *
      * 返回 true 表示这一轮手动刷新撞过 514/429（部分场外基金分红因限流没抓全），
      * 并**清零**，避免下一次刷新（或同一轮别处的入口）重复提示。
-     * 不消费 [FundDividendApiService.otcRateLimitSignal] 本身（那是进程级只增计数，
-     * 由 [prefetchDividends] 轮首/轮末做差）；这里只回仓库实例级累积的结论。
      */
     internal fun consumeOtcRateLimitWarning(): Boolean {
         val hit = _otcRateLimitedThisCycle
@@ -749,27 +251,25 @@ class DividendRepository private constructor(
 
 // ==========================================================================
 // §6 单标的查询与抓取编排
-// getDividendsBySymbol 总入口 → tryGetFromCache（库/「抓过」复用）→ fetchSource 按标的分派到 东财 / 新浪 / 场外基金。失败抛 NoDividendAnswer 而不是返回 emptyList——「没问到」与「没有分红」不能混。
+// getDividendsBySymbol 总入口 → cacheReader 三层判定 → fetchSource 按标的分派
+// 到东财 / 新浪 / 场外基金。失败抛 NoDividendAnswer 而不是返回 emptyList——
+// 「没问到」与「没有分红」不能混。
 // ==========================================================================
 
     /**
      * 判断 [symbol] 今天是否已经成功抓过一次分红。
      *
-     * 基于 [lastFetchedAt]（markFetched 写入的时间戳）与**同一自然日**比较
-     * （按设备时区的 LocalDate，而非只比毫秒差 24h——跨零点刷新也要算「今天」）。
-     * 抽成成员 + 顶部 [isFetchedToday] 纯函数，便于单测跨日 / 同日边界。
+     * 基于「上次抓取时间戳」与**同一自然日**比较（按设备时区），跨零点刷新也要算「今天」。
      */
     private fun isFetchedToday(symbol: String): Boolean =
-        isFetchedToday(lastFetchedAt(symbol), System.currentTimeMillis())
-    
+        isFetchedToday(fetchStateStore.lastFetchedAt(symbol), System.currentTimeMillis())
+
     /**
      * 取某个标的的分红记录。
      *
      * @param forceRefresh true 时跳过缓存强制重抓（用户点「刷新」走这条）
      * @param batchResults 同一批 [prefetchDividendsBatch] 的结果，key 是**标准化后**的 symbol。
      *        命中就跳过逐条级联；为 null 时行为与从前完全一致（单标的查询传 null）。
-     *        按次传入而不是读共享字段，是为了让并发的两个预取周期互不干扰 ——
-     *        共享字段会互相清空，导致整批退化成逐条级联
      */
     suspend fun getDividendsBySymbol(
         symbol: String,
@@ -779,28 +279,28 @@ class DividendRepository private constructor(
         val normalizedSymbol = StockCodeManager.normalizeSymbol(symbol)
 
         if (!forceRefresh) {
-            tryGetFromCache(normalizedSymbol)?.let { return it }
+            cacheReader.tryGetFromCache(normalizedSymbol)?.let { return it }
 
             // 上一轮所有数据源都没应答，且还在退避窗内 → 这一轮一个请求都不发，
             // 只用已经有的（内存旧值 / 库里记录）。场外基金没有批量入口，
             // 上百只失败标的每轮各重打一次就是请求风暴
             if (shouldSkipAfterFailure(
-                    lastFailedAt = lastFailedAt(normalizedSymbol),
+                    lastFailedAt = fetchStateStore.lastFailedAt(normalizedSymbol),
                     now = System.currentTimeMillis(),
                     ttl = computeFailureBackoff(
-                        count = failureCount(normalizedSymbol),
-                        everSucceeded = lastFetchedAt(normalizedSymbol) != null
+                        count = fetchStateStore.failureCount(normalizedSymbol),
+                        everSucceeded = fetchStateStore.lastFetchedAt(normalizedSymbol) != null
                     )
                 )
             ) {
-                return cache[normalizedSymbol]?.data
-                    ?: recordsFromDb(dividendDao.getBySymbol(normalizedSymbol))
+                return memoryCache.get(normalizedSymbol)?.data
+                    ?: dividendRecordsFromDb(dividendDao.getBySymbol(normalizedSymbol))
             }
         }
 
-        cacheMisses.incrementAndGet()
+        memoryCache.recordMiss()
 
-        val existingEntry = cache[normalizedSymbol]
+        val existingEntry = memoryCache.get(normalizedSymbol)
         // forceRefresh=true 时强制全量刷新，避免旧错误数据通过增量合并残留
         val isIncremental = !forceRefresh && existingEntry != null && !existingEntry.needsFullFetch()
 
@@ -808,9 +308,9 @@ class DividendRepository private constructor(
             val data = fetchDividendData(normalizedSymbol, batchResults)
 
             if (data.isNotEmpty()) {
-                saveDividendsToDb(normalizedSymbol, data, isIncremental)
+                writer.saveFromFetch(normalizedSymbol, data, isIncremental)
                 // 展示簿记：这批记录确实是「今天抓回来的」，陈旧提示据此折算天数
-                markDataFetched(normalizedSymbol)
+                fetchStateStore.markDataFetched(normalizedSymbol)
             } else if (!isIncremental) {
                 // 全量刷新拿到空结果：清库前先看库里有没有旧自动记录。
                 //
@@ -825,9 +325,8 @@ class DividendRepository private constructor(
                 val existingAutoCount = dividendDao.getBySymbol(normalizedSymbol).count { !it.isManual }
                 if (existingAutoCount > 0) {
                     // 展示簿记：这次确实没取到新数据，旧记录继续沿用 ——
-                    // 详情页据此提示「最近一次未取到、来自 N 天前」，避免年化收入
-                    // 长期沿用旧值而用户毫无感知（不改变保留 / 清库策略本身）
-                    markEmptyResult(normalizedSymbol)
+                    // 详情页据此提示「最近一次未取到、来自 N 天前」
+                    fetchStateStore.markEmptyResult(normalizedSymbol)
                     AppLogger.w(
                         "空结果但库里仍有 $existingAutoCount 条自动分红记录，保留旧值不清库: $normalizedSymbol",
                         "DividendRepository"
@@ -847,27 +346,29 @@ class DividendRepository private constructor(
                 // 全量刷新后从数据库读取完整记录（含保留的手动记录），保证缓存与DB一致
                 val dbRecords = dividendDao.getBySymbol(normalizedSymbol)
                 if (dbRecords.isNotEmpty()) {
-                    recordsFromDb(dbRecords)
+                    dividendRecordsFromDb(dbRecords)
                 } else {
                     data
                 }
             }
 
             // 抓成功了就记一笔，**不管抓没抓到**。空结果也是结论，不记下来
-            // 下次冷启动会再抓一遍（见 [fetchState] 的说明）。
-            // 「抓成功」≠「抓到了」：所有数据源都没应答时 [fetchDividendData] 抛
-            // [DividendSourceUnavailableException]，直接落到下面的 catch —— 那时
-            // 一个字都不写，否则一次网络抖动会被固化成「这只没有分红」最长 7 天
-            markFetched(normalizedSymbol)
+            // 下次冷启动会再抓一遍。「抓成功」≠「抓到了」：所有数据源都没应答时
+            // fetchDividendData 抛 DividendSourceUnavailableException，直接落到下面的
+            // catch —— 那时一个字都不写，否则一次网络抖动会被固化成「这只没有分红」最长 7 天
+            fetchStateStore.markFetched(normalizedSymbol)
             // 抓通过了就清掉失败退避标记，让它立刻回到正常的 TTL 节奏
-            clearFailure(normalizedSymbol)
+            fetchStateStore.clearFailure(normalizedSymbol)
 
-            cache[normalizedSymbol] = CacheEntry(
-                data = mergedData,
-                timestamp = System.currentTimeMillis(),
-                lastFullFetch = if (isIncremental) existingEntry?.lastFullFetch ?: System.currentTimeMillis() else System.currentTimeMillis()
+            memoryCache.put(
+                normalizedSymbol,
+                DividendCacheEntry(
+                    data = mergedData,
+                    timestamp = System.currentTimeMillis(),
+                    lastFullFetch = if (isIncremental) existingEntry?.lastFullFetch ?: System.currentTimeMillis() else System.currentTimeMillis()
+                )
             )
-            trimCacheIfNeeded()
+            memoryCache.trimIfNeeded()
             mergedData
         } catch (e: CancellationException) {
             throw e
@@ -878,15 +379,15 @@ class DividendRepository private constructor(
                 "分红数据源未应答[$normalizedSymbol]，退避中不再重打: ${e.message}",
                 "DividendRepository"
             )
-            markFailed(normalizedSymbol)
-            cache[normalizedSymbol]?.data
-                ?: recordsFromDb(dividendDao.getBySymbol(normalizedSymbol))
+            fetchStateStore.markFailed(normalizedSymbol)
+            memoryCache.get(normalizedSymbol)?.data
+                ?: dividendRecordsFromDb(dividendDao.getBySymbol(normalizedSymbol))
         } catch (e: Exception) {
             AppLogger.e("获取分红数据失败: ${e.message}", e, "DividendRepository")
             // 抓不回来也不该让已入库的分红凭空消失：内存有旧值用旧值，没有就退回
-            // 数据库记录（离线/限流时 24h TTL 刚过期的常见场景，见 [tryGetFromCache]）
-            cache[normalizedSymbol]?.data
-                ?: recordsFromDb(dividendDao.getBySymbol(normalizedSymbol))
+            // 数据库记录（离线/限流时 24h TTL 刚过期的常见场景）
+            memoryCache.get(normalizedSymbol)?.data
+                ?: dividendRecordsFromDb(dividendDao.getBySymbol(normalizedSymbol))
         }
     }
 
@@ -895,13 +396,14 @@ class DividendRepository private constructor(
      *
      * 先用一次 `IN` 查询把内存/数据库能覆盖的标的一次拿齐，只有「连过期数据都没有」的
      * 标的才回落到逐符号抓取——回落路径就是 [getDividendsBySymbol] 本身，因此 TTL、失败
-     * 退避、空结果 vs 无数据等语义与逐 symbol 完全一致，只是把 N 次查询收成 1 次。
+     * 退避、空结果 vs 无数据等语义与逐 symbol 完全一致。
      *
      * 返回的 key 是调用方传入的原始 symbol，方便直接按 `asset.symbol` 取值。
      */
     suspend fun getDividendRecordsBatch(symbols: List<String>): Map<String, List<DividendRecord>> {
         val distinct = symbols.distinct()
         if (distinct.isEmpty()) return emptyMap()
+        // 走公开成员而不是 cacheReader：保留「调用方可整体替换批量读」的既有行为（含单测桩）
         val cached = getCachedAllowingStaleBatch(distinct, primeCache = false)
         val out = LinkedHashMap<String, List<DividendRecord>>(distinct.size)
         for (symbol in distinct) {
@@ -921,84 +423,6 @@ class DividendRepository private constructor(
         }
         return out
     }
-
-    private suspend fun tryGetFromCache(normalizedSymbol: String): List<DividendRecord>? {
-        val cached = cache[normalizedSymbol]
-        if (cached != null && cached.isValid(cacheTTL)) {
-            cacheHits.incrementAndGet()
-            return cached.data
-        }
-
-        val dbRecords = dividendDao.getBySymbol(normalizedSymbol)
-        if (dbRecords.isNotEmpty()) {
-            // 有分红记录的标的必须受 24h 短 TTL 约束（到账日/金额会随新公告变）。
-            // 从前这里不看抓取时间直接返回 DB 记录 → prefetch 的 pending 判空
-            // （tryGetFromCache(symbol) == null）永远不为真 → 抓过一次后永远不再抓，
-            // 新公告进不了「今年预计」/下一笔倒计时/月度柱图（用户实测：4/17 除息、
-            // 4/24 到账的记录在日历里一直不显示）。stamp 为 null（从未抓过，如纯手动
-            // 录入）也放行重抓——抓取过程会合并保留手动记录，不会丢
-            val stamp = lastFetchedAt(normalizedSymbol)
-            if (stamp == null || System.currentTimeMillis() - stamp >= cacheTTL) {
-                return null
-            }
-            val records = recordsFromDb(dbRecords)
-            cache[normalizedSymbol] = CacheEntry(records, System.currentTimeMillis(), lastFullFetch = 0L)  // 数据库恢复的缓存不标记为全量拉取
-            return records
-        }
-
-        // 库里一条都没有，但**近期确实抓过** → 结论是「这只没有分红」，不是「没抓过」。
-        // 判据抽成纯函数 [shouldReuseEmptyResult] 是为了能单测：这条判断错了要么
-        // 每次冷启动重抓几百个请求，要么把「真的有分红」误判成没有并压 24 小时
-        //
-        // 空结果用**长得多的 TTL**：走到这里说明这只标的没有分红记录，
-        // 而一只从没分过红的基金/股票不会明天突然开始分（要分也是先出公告，
-        // 那时 lastFetchedAt 也会被刷新）。有分红的标的仍走 24 小时短 TTL ——
-        // 它们的到账日、金额会随新公告变化，得勤着点。
-        val stamp = lastFetchedAt(normalizedSymbol)
-        if (shouldReuseEmptyResult(
-                dbRecordCount = dbRecords.size,
-                lastFetchedAt = stamp,
-                now = System.currentTimeMillis(),
-                ttl = NEGATIVE_RESULT_TTL
-            )
-        ) {
-            cacheHits.incrementAndGet()
-            cache[normalizedSymbol] = CacheEntry(
-                emptyList(),
-                System.currentTimeMillis(),
-                lastFullFetch = stamp ?: 0L
-            )
-            return emptyList()
-        }
-
-        return null
-    }
-
-    /**
-     * 「数据源没应答」的信号 —— 与「问过了，确实没有分红」是两回事，不能混。
-     *
-     * 分红抓取的失败与空结果在 List 上完全同形（都是 emptyList），而调用方
-     * [getDividendsBySymbol] 抓完就 [markFetched]，一旦把「没问到」记成「没有」，
-     * 冷启动的只读缓存路径会把它当有效结论复用 7 天：预计分红 / 收息进度 / 日历
-     * 全显示 0，**且界面没有任何错误提示**。所以每个数据源失败时抛本异常而不是
-     * 返回 emptyList，由 [fetchDividendData] 汇总后决定这是不是真的「没有分红」。
-     */
-    private class DividendSourceUnavailableException(message: String) : IOException(message)
-
-    /**
-     * 数据库行 → [DividendRecord]。三处读取点（缓存恢复、抓取后合并、抓取失败兜底）
-     * 必须是同一套口径，否则同一条记录在日历与进度条上会长出两个版本。
-     */
-    private fun recordsFromDb(dbRecords: List<Dividend>): List<DividendRecord> =
-        dbRecords.map { dbDiv ->
-            DividendRecord(
-                exDividendDate = dbDiv.date,
-                dividendPerShare = dbDiv.amount.toString(),
-                announceDate = "",
-                fiscalYear = dbDiv.date.take(4),
-                paymentDate = dbDiv.payDate
-            )
-        }
 
     /**
      * 调一个数据源：应答过就置位 [answered] 并返回数据（**可以是空列表**），
@@ -1025,57 +449,42 @@ class DividendRepository private constructor(
     ): List<DividendRecord> {
         // 批量预取优先。[prefetchDividendsBatch] 已经用少量请求把这批标的问完了，
         // 命中就直接用，省掉逐条的级联（ETF 空手还要顺序试三种代码格式，再 3 个请求）
-        //
-        // 从入参读而不是从共享字段 remove：共享字段在资产页与持仓页同时刷新时
-        // 会被另一个预取周期清空，整批退化成逐条级联 —— 请求风暴照旧、闪退照旧
         val prefetched = batchResults?.get(normalizedSymbol)
         if (prefetched != null && prefetched.isNotEmpty()) return prefetched
 
         // 有条目 ⇔ 这个标的参与过东财批量查询（场外基金与批量失败时无条目，行为不变）。
-        // 从预取结果派生而不是收形参：唯一的调用点从来传不过来，形参是死代码，
-        // 批量只让「有数据」的标的省了请求，空标的首次 sweep 仍付全级联
-        // （逐条重问东财 + ETF 重问 3 种格式 + 非 ETF 空股票多打一次新浪）。
         // 批量说没有的标的，级联里跳过重复问东财那一步，但保留 Sina 兜底 ——
         // 那是独立的第二来源，不能因为合并了请求就把它一起省掉
         val eastmoneyAnswered = prefetched != null
 
         // fund_ 前缀必须在这里剥掉。extractPureCode 只认 sh/sz/bj，不认 fund_，
         // 不剥的话 stockCode 会带着 "fund_" 传下去，于是 isOTCFundCode / isETF 全部判错，
-        // 最后拿着 "fund_004502" 去请求接口——场外基金的分红永远抓不到，
-        // 而且失败是静默的（接口返回空 → 不写库 → 分红弹窗显示「暂无」）
+        // 最后拿着 "fund_004502" 去请求接口——场外基金的分红永远抓不到，而且失败是静默的
         val pureSymbol = StockCodeManager.stripFundPrefix(normalizedSymbol)
         val stockCode = StockCodeManager.extractPureCode(pureSymbol)
         // 剥完前缀还不够：fund_ 本身就是「场外份额」的显式标记，但 400030 / 420102
-        // 落在 400/420 号段，isOTCFundCode 按号段认不出它们（它只认 01/02 开头与
-        // 004xxx-009xxx）。不把前缀算进场外判定，这些真基金会被送进东财 + 新浪股票接口，
-        // 而场外基金的分红只在天天基金有 —— 请求全打出去，结果还是空的，而且不报错。
+        // 落在 400/420 号段，isOTCFundCode 按号段认不出它们。不把前缀算进场外判定，
+        // 这些真基金会被送进东财 + 新浪股票接口，而场外基金的分红只在天天基金有
         val isOTCFund = StockCodeManager.isOTCFund(normalizedSymbol)
         val isEtf = !StockCodeManager.hasFundPrefix(normalizedSymbol) &&
             StockCodeManager.isETF(pureSymbol)
 
-        // 场内交易型基金：含 ETF 与「非 ETF 的场内基金」（REITs 508xxx、封闭式基金 500/501xxx）。
-        // 它们都在交易所挂牌、却不是股票也不是场外基金，分红/收益分配只在天天基金有，
-        // 东财股票分红报告(RPT_SHAREBONUS_DET)与 Sina 都不覆盖。从前只把 isEtf 当门槛，
-        // 导致 REIT 永远到不了基金分红源、静默显示 0 并被 7 天负缓存固化（见 sh508085）。
-        // LOF（16xxxx/18xxxx 深交所上市开放式基金）同样在交易所挂牌、分红/收益分配
-        // 只在天天基金有，东财股票分红表与 Sina 都不覆盖。classifyCode 把它们单列为
-        // CodeCategory.LOF（不是 EXCHANGE_FUND），只认 EXCHANGE_FUND 会让 LOF 掉到下面的
-        // 新浪兜底分支 → 恒为空 → 被 7 天负缓存固化，与上面 REIT 那次是同一个漏网。
+        // 场内交易型基金：含 ETF 与「非 ETF 的场内基金」（REITs 508xxx、封闭式基金 500/501xxx），
+        // 以及 LOF（16xxxx/18xxxx）。它们的分红/收益分配只在天天基金有，
+        // 东财股票分红报告与 Sina 都不覆盖。从前只把 isEtf 当门槛，导致 REIT 永远到不了
+        // 基金分红源、静默显示 0 并被 7 天负缓存固化（见 sh508085）。
         val category = StockCodeManager.classifyCode(pureSymbol)
         val isExchangeFund = isEtf || (!StockCodeManager.hasFundPrefix(normalizedSymbol) &&
             (category == StockCodeManager.CodeCategory.EXCHANGE_FUND ||
                 category == StockCodeManager.CodeCategory.LOF))
 
         // 「本轮有没有任何一个数据源应答过」。只要有一个应答，空结果就是有效结论
-        // （该写负缓存）；一个都没应答说明是网络/限流问题，上抛让调用方什么都不写
+        // （该写负缓存）；一个都没应答说明是网络/限流问题，上抛让调用方什么都不写。
         //
         // A19 修复（阻断）：东财批量只覆盖股票/场外基金的分红报告，场内基金（ETF/REIT/LOF）
-        // 的分红**不在**东财股票分红报告里（AI_GUIDE 第 6 条）。因此标的「在批量里且返回空」
-        // 对场内基金**不代表**它没分红——批量预取本来就不问它的基金源。
-        // 旧实现把 eastmoneyAnswered 直接灌进 answered 初值，导致「天天基金 SUSPICIOUS 失败」
-        // 仍被当成「源已应答、无分红」，库里无旧自动记录时固化 7 天负缓存，整类资产被绕过 R1 保证。
-        // 现在：只有「东财确实是该标的的权威来源（股票）且批量已应答」才预置 answered=true；
-        // 场内基金一律留空，交由天天基金真正抓取后再定（成功才置位，失败则上抛保留旧记录）。
+        // 的分红**不在**东财股票分红报告里。因此标的「在批量里且返回空」对场内基金
+        // **不代表**它没分红——批量预取本来就不问它的基金源。只有「东财确实是该标的的
+        // 权威来源（股票）且批量已应答」才预置 answered=true；场内基金一律留空。
         val answered = AtomicBoolean(eastmoneyAnswered && !isExchangeFund)
 
         var data: List<DividendRecord> = when {
@@ -1146,310 +555,65 @@ class DividendRepository private constructor(
         }
     }
 
-    private suspend fun saveDividendsToDb(
-        symbol: String,
-        data: List<DividendRecord>,
-        isIncremental: Boolean
-    ) {
-        if (isIncremental) {
-            val oneYearAgo = java.time.LocalDate.now().minusYears(1)
-            val recentData = data.filter { record ->
-                try {
-                    val date = java.time.LocalDate.parse(
-                        record.exDividendDate,
-                        DateFormats.ISO_DATE_FORMATTER
-                    )
-                    date.isAfter(oneYearAgo)
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    false
-                }
-            }
-            saveDividendsToDbInternal(symbol = symbol, records = recentData, isIncremental = true)
-        } else {
-            saveDividendsToDbInternal(symbol = symbol, records = data, isIncremental = false)
-        }
-    }
-    
-    /**
-     * 合并增量分红记录到现有数据中，去重
-     */
-    private fun mergeDividendRecords(existing: List<DividendRecord>, newData: List<DividendRecord>): List<DividendRecord> {
-        val existingDates = existing.map { it.exDividendDate }.toSet()
-        val uniqueNewRecords = newData.filter { it.exDividendDate !in existingDates }
-        return existing + uniqueNewRecords
-    }
-    
-    private suspend fun fetchFromEastmoney(stockCode: String): List<DividendRecord> {
-        return try {
-            val result = eastmoneyApi.getDividendHistory(stockCode)
-            if (result.isSuccess) {
-                val dividendDataList = result.getOrNull() ?: emptyList()
-                dividendDataList.map { divData ->
-                    DividendRecord(
-                        exDividendDate = divData.date,
-                        dividendPerShare = divData.dividendPerShare.toString(),
-                        announceDate = divData.reportDate ?: "",
-                        fiscalYear = divData.date.substring(0, 4),
-                        paymentDate = divData.paymentDate
-                    )
-                }
-            } else {
-                throw DividendSourceUnavailableException("东方财富分红接口未应答[$stockCode]")
-            }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: DividendSourceUnavailableException) {
-            throw e
-        } catch (e: Exception) {
-            AppLogger.w("东方财富分红数据获取失败: ${e.message}", "DividendRepository")
-            throw DividendSourceUnavailableException("东方财富分红数据获取失败[$stockCode]")
-        }
-    }
-    
-    private suspend fun fetchFromEastmoneyWithFormat(securityCode: String): List<DividendRecord> {
-        return try {
-            val result = eastmoneyApi.getDividendHistoryBySecurityCode(securityCode)
-            if (result.isSuccess) {
-                val dividendDataList = result.getOrNull() ?: emptyList()
-                dividendDataList.map { divData ->
-                    DividendRecord(
-                        exDividendDate = divData.date,
-                        dividendPerShare = divData.dividendPerShare.toString(),
-                        announceDate = divData.reportDate ?: "",
-                        fiscalYear = divData.date.substring(0, 4),
-                        paymentDate = divData.paymentDate
-                    )
-                }
-            } else {
-                throw DividendSourceUnavailableException("东方财富带格式分红接口未应答[$securityCode]")
-            }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: DividendSourceUnavailableException) {
-            throw e
-        } catch (e: Exception) {
-            AppLogger.w("ETF东方财富带格式[$securityCode]获取失败: ${e.message}", "DividendRepository")
-            throw DividendSourceUnavailableException("东方财富带格式分红获取失败[$securityCode]")
-        }
-    }
-    
-    internal suspend fun fetchFromFundApiForETF(fundCode: String): List<DividendRecord> {
-        return try {
-            val result = fundDividendApi.getFundDividendHistory(fundCode)
-            if (result.isSuccess) {
-                result.getOrNull() ?: emptyList()
-            } else {
-                throw DividendSourceUnavailableException("天天基金分红接口未应答(ETF)[$fundCode]")
-            }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: DividendSourceUnavailableException) {
-            throw e
-        } catch (e: Exception) {
-            AppLogger.w("ETF天天基金接口获取失败[${fundCode}]: ${e.message}", "DividendRepository")
-            throw DividendSourceUnavailableException("天天基金分红获取失败(ETF)[$fundCode]")
-        }
-    }
-    
-    internal suspend fun fetchFromSina(stockCode: String, market: String): List<DividendRecord> {
-        return try {
-            val result = sinaService.fetchDividendData(stockCode, market)
-            if (result.isSuccess) {
-                result.getOrNull() ?: emptyList()
-            } else {
-                throw DividendSourceUnavailableException("新浪分红接口未应答[$stockCode]")
-            }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: DividendSourceUnavailableException) {
-            throw e
-        } catch (e: Exception) {
-            AppLogger.w("新浪分红数据获取失败: ${e.message}", "DividendRepository")
-            throw DividendSourceUnavailableException("新浪分红数据获取失败[$stockCode]")
-        }
-    }
-    
-    private suspend fun fetchFromFundApi(fundCode: String): List<DividendRecord> {
-        return try {
-            AppLogger.d("天天基金分红数据获取: $fundCode", "DividendRepository")
-            val result = fundDividendApi.getFundDividendHistory(fundCode)
-            if (result.isSuccess) {
-                result.getOrNull() ?: emptyList()
-            } else {
-                throw DividendSourceUnavailableException("天天基金分红接口未应答[$fundCode]")
-            }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: DividendSourceUnavailableException) {
-            throw e
-        } catch (e: Exception) {
-            AppLogger.w("天天基金分红数据获取失败: ${e.message}", "DividendRepository")
-            throw DividendSourceUnavailableException("天天基金分红数据获取失败[$fundCode]")
-        }
-    }
-    
+    // 数据源访问保留为成员方法：既有单测用 spyk 桩掉 fetchFromSina / fetchFromFundApiForETF
+    // 来验证路由，成员方法委托给 DividendSourceFetcher，公开与 internal 权限不变。
+    private suspend fun fetchFromEastmoney(stockCode: String): List<DividendRecord> =
+        sourceFetcher.fetchFromEastmoney(stockCode)
+
+    private suspend fun fetchFromEastmoneyWithFormat(securityCode: String): List<DividendRecord> =
+        sourceFetcher.fetchFromEastmoneyWithFormat(securityCode)
+
+    internal suspend fun fetchFromFundApiForETF(fundCode: String): List<DividendRecord> =
+        sourceFetcher.fetchFromFundApiForETF(fundCode)
+
+    internal suspend fun fetchFromSina(stockCode: String, market: String): List<DividendRecord> =
+        sourceFetcher.fetchFromSina(stockCode, market)
+
+    private suspend fun fetchFromFundApi(fundCode: String): List<DividendRecord> =
+        sourceFetcher.fetchFromFundApi(fundCode)
+
 // ==========================================================================
-// §7 写入（save / delete / getDb）
-// saveDividends / saveManualDividend / deleteManualDividend / getDbDividendsBySymbol / saveDividendsToDbInternal（增量与全量两条路径，合并规则见 mergeDividendRecords）。
+// §7 写库（委托 DividendWriter）
 // ==========================================================================
 
     suspend fun saveDividends(symbol: String, records: List<DividendRecord>) {
-        if (records.isEmpty()) return
-        val normalized = StockCodeManager.normalizeSymbol(symbol)
-        saveDividendsToDbInternal(normalized, records)
+        writer.saveDividends(symbol, records)
     }
 
     /**
      * 手动添加或更新分红记录。用于用户纠错。
      * @return 保存后的 Dividend id
      */
-    suspend fun saveManualDividend(dividend: Dividend): Long {
-        val normalized = StockCodeManager.normalizeSymbol(dividend.symbol)
-        val toSave = dividend.copy(symbol = normalized, isManual = true)
-        val id = if (toSave.id != 0) {
-            dividendDao.update(toSave)
-            toSave.id.toLong()
-        } else {
-            // 如果同一天已存在，则覆盖
-            val existing = dividendDao.getBySymbolAndDate(normalized, toSave.date)
-            if (existing != null) {
-                dividendDao.update(toSave.copy(id = existing.id))
-                existing.id.toLong()
-            } else {
-                dividendDao.insert(toSave)
-            }
-        }
-        // 清除缓存，强制下次从数据库重新加载
-        cache.remove(normalized)
-        return id
-    }
+    suspend fun saveManualDividend(dividend: Dividend): Long = writer.saveManualDividend(dividend)
 
-    /**
-     * 手动删除分红记录。
-     */
+    /** 手动删除分红记录 */
     suspend fun deleteManualDividend(id: Int, symbol: String) {
-        dividendDao.deleteById(id.toLong())
-        cache.remove(StockCodeManager.normalizeSymbol(symbol))
+        writer.deleteManualDividend(id, symbol)
     }
 
-    /**
-     * 获取数据库中某资产的手动/自动分红记录（原始 Dividend 实体）。
-     */
-    suspend fun getDbDividendsBySymbol(symbol: String): List<Dividend> {
-        return dividendDao.getBySymbol(StockCodeManager.normalizeSymbol(symbol))
-    }
+    /** 获取数据库中某资产的手动/自动分红记录（原始 Dividend 实体） */
+    suspend fun getDbDividendsBySymbol(symbol: String): List<Dividend> =
+        dividendDao.getBySymbol(StockCodeManager.normalizeSymbol(symbol))
 
-    private suspend fun saveDividendsToDbInternal(symbol: String, records: List<DividendRecord>, isIncremental: Boolean = false) {
-        if (records.isEmpty()) return
-
-        // 过滤异常分红数据：基金/ETF 上限 100 元/10份，股票上限 1000 元/10股（茅台类高分红不误杀）
-        // symbol 是规范化后的（fund_ 前缀原样保留）。isStock 对带该前缀的场外份额返回 false，
-        // 所以 fund_400030 这类**必须**拿基金的 100 上限——此前它误判成股票，用的是 1000。
-        val maxAmount = if (StockCodeManager.isStock(symbol)) {
-            MAX_DIVIDEND_PER_TEN_SHARES_STOCK
-        } else {
-            MAX_DIVIDEND_PER_TEN_SHARES_FUND
-        }
-        val validRecords = records.filter { record ->
-            val amount = record.dividendPerShare.toDoubleOrNull() ?: 0.0
-            if (amount <= 0) {
-                AppLogger.w("跳过非正分红记录: $symbol, 日期=${record.exDividendDate}, 金额=$amount", "DividendRepository")
-                false
-            } else if (amount > maxAmount) {
-                AppLogger.w("跳过异常高分红记录: $symbol, 日期=${record.exDividendDate}, 金额=$amount", "DividendRepository")
-                false
-            } else {
-                true
-            }
-        }
-
-        if (validRecords.isEmpty()) {
-            AppLogger.w("无有效分红记录可保存: $symbol", "DividendRepository")
-            return
-        }
-
-        // 全量刷新时是否允许删旧插新；残缺解析下为 false（DB 保留旧记录）
-        var replaceAllowed = false
-
-        StockDatabase.getInstance(context).withTransaction {
-            if (!isIncremental) {
-                // 全量更新：先核对「本次解析是否完整」，不完整则**不能**删库。
-                // A16（阻断）：R1 只护住空结果分支；这里补全「残缺解析」分支——
-                // 一次全量刷新如果解析到的有效记录数少于库里已有的自动记录数，说明解析
-                // 大概率不完整（HTML 200、表头在、但只解析出一小部分行），此时若照旧
-                // 无条件 deleteNonManualBySymbol 再只插回残缺集合，就会把其余记录洗掉，
-                // 年化收入当场缩水（用户原始「刷新跳动」残留根因）。
-                // 不完整时跳过删库，只做下方 upsert（按 symbol+date 跳过已存在），保留旧值。
-                val existingAutoCount = dividendDao.getBySymbol(symbol).count { !it.isManual && it.amount > 0 }
-                replaceAllowed = shouldReplaceRecordsOnFullRefresh(existingAutoCount, validRecords.size)
-                if (replaceAllowed) {
-                    // 完整或更多：只删除自动抓取的记录，保留用户手动修正的记录(isManual=1)
-                    dividendDao.deleteNonManualBySymbol(symbol)
-                } else {
-                    AppLogger.w(
-                        "全量刷新解析到的有效记录(${validRecords.size})少于库里已有自动记录($existingAutoCount)，" +
-                            "按残缺解析处理，跳过删库以保留旧分红记录: $symbol",
-                        "DividendRepository"
-                    )
-                }
-            }
-
-            // 增量与全量统一逻辑：跳过已存在记录（含手动记录），避免覆盖用户修正
-            val dividends = validRecords.mapNotNull { record ->
-                val existing = dividendDao.getBySymbolAndDate(symbol, record.exDividendDate)
-                if (existing == null) {
-                    Dividend(
-                        symbol = symbol,
-                        name = "",
-                        amount = record.dividendPerShare.toDoubleOrNull() ?: 0.0,
-                        date = record.exDividendDate,
-                        payDate = record.paymentDate,
-                        isManual = false
-                    )
-                } else {
-                    null
-                }
-            }
-
-            if (dividends.isNotEmpty()) {
-                dividendDao.insertAll(dividends)
-            }
-        }
-        // A16：残缺解析时上面已跳过删库（DB 保留旧记录），内存缓存同样不能写入残缺集合 ——
-        // 否则 [tryGetFromCache] 会在 24h 内直接返回「只解析到一部分」的列表，DB 与缓存口径
-        // 不一致、年化收入缩水。此时保留旧缓存（若有）不覆盖。
-        if (shouldUpdateDividendCache(isIncremental, replaceAllowed)) {
-            cache[symbol] = CacheEntry(validRecords, System.currentTimeMillis())
-            trimCacheIfNeeded()
-        }
-    }
-    
 // ==========================================================================
 // §8 prefetchDividends（按 SyncBudget 预算的预取编排）
-// 与 §3 的 prefetchDividendsBatch 并存：这版按调用方传入的预算跳过后续代码、超时不写缓存（「抓过且没有分红」的结论留空，之后按需抓取再补，不丢数据）。
+// 与 §2 的批量预取并存：这版按调用方传入的预算跳过后续代码、超时不写缓存
+// （「抓过且没有分红」的结论留空，之后按需抓取再补，不丢数据）。
 // ==========================================================================
 
     /**
      * 老入口：逐条抓一批标的的分红（内部先跑一次 [prefetchDividendsBatch] 批量预取）。
      *
-     * 先批量再逐条是这次修复的核心：刷新按钮（forceRefresh=true）是全 App
-     * 唯一还在走这条老入口的路径，而它从前**完全绕开批量预取** —— 每个标的
-     * 各打一遍完整级联（东财逐条 + ETF 三种代码格式 + 新浪兜底 + 场外基金
-     * 逐个抓 HTML），59 个标的打出 250~400 个请求：OkHttp 队列排长龙、
-     * 多个协程同时做 Jsoup 解析，内存压力直接让系统回收进程 ——
-     * 就是用户看到的「按了刷新就闪退」。
-     * forceRefresh 时 [prefetchDividendsBatch] 内部全量 pending，不存在「刷新拿到旧数据」。
+     * 先批量再逐条是这次修复的核心：刷新按钮（forceRefresh=true）从前完全绕开批量预取，
+     * 每个标的各打一遍完整级联，59 个标的打出 250~400 个请求 —— 就是用户看到的
+     * 「按了刷新就闪退」。
      *
      * 整段强制跑在 [Dispatchers.IO] 上：调用方可能是 `viewModelScope`
      * （`Dispatchers.Main.immediate`），52 个代码的协程启动与续体挤在主线程
      * Looper 里，就是「点刷新黑屏、日志还全静默」的直接原因之一。
      *
      * @param timeBudgetMs 本阶段的时间预算（毫秒），<=0 表示不设限。
-     *        [AssetSyncManager] 的手动刷新会传入子预算（见
-     *        [SyncBudget.prefetchPhaseBudget]）：超时后跳过的代码不写缓存，
-     *        「抓过且没有分红」的结论留空，之后按需抓取时还会补上，不丢数据。
+     *        超时后跳过的代码不写缓存，「抓过且没有分红」的结论留空，之后按需抓取时还会补上。
      */
     suspend fun prefetchDividends(
         symbols: List<String>,
@@ -1490,14 +654,11 @@ class DividendRepository private constructor(
             val batchResults = prefetchDividendsBatch(normalizedSymbols, forceRefresh)
 
             // 逐条阶段按「最久没成功抓过」重排（批量阶段保持调用方原顺序，不受影响）。
-            // 时间预算（手动/日历 28s、后台 Worker 子预算）会自然截断一轮的抓取量，
-            // 排序保证每轮推进的是**不同的一批**：上轮被 514/退避短路的仍留队首，
-            // 本轮刚成功的因 markFetched 时间戳排到队尾。配合 FundDividendApiService
-            // 的匀速闸门，几轮即可把 110 只逐批补齐并固化 7 天负结果 TTL，而不是每次
-            // 刷新都从同一批开始、队尾永远抓不到（详见 prioritizeDividendSymbols KDoc）。
+            // 时间预算会自然截断一轮的抓取量，排序保证每轮推进的是**不同的一批**：
+            // 上轮被 514/退避短路的仍留队首，本轮刚成功的因 markFetched 时间戳排到队尾。
             val orderedSymbols = prioritizeDividendSymbols(
                 symbols = normalizedSymbols,
-                lastFetchedAt = normalizedSymbols.associateWith { lastFetchedAt(it) }
+                lastFetchedAt = normalizedSymbols.associateWith { fetchStateStore.lastFetchedAt(it) }
             )
 
             // 预算截止时刻：超时后不再启动新代码的逐条抓取
@@ -1508,9 +669,6 @@ class DividendRepository private constructor(
             // 本轮收尾汇总所需的纯观测簿记。逐标的的 WARN 会被 app.log 的环形缓冲冲掉
             // 大半，事后只能靠正则从几 MB 日志里捞；这里在并发子任务里只做内存计数，
             // 最后统一打一行 INFO，不新增任何循环内日志、不改抓取 / 缓存 / 退避行为。
-            // - successCount：本轮源应答并写下新结论（markFetched）的标的数
-            // - unavailableCount：本轮新记「数据源全未应答」（markFailed）的标的数
-            // - skippedCodes：本轮未取到新数据的规范化代码（用于清单与截断）
             val successCount = AtomicInteger(0)
             val unavailableCount = AtomicInteger(0)
             val skippedCodes = ConcurrentLinkedQueue<String>()
@@ -1528,14 +686,13 @@ class DividendRepository private constructor(
                         (leftSeconds?.let { "，预算剩余 ${it}s" } ?: "")
                 }
             ) {
-                // 本轮真正发起逐条抓取的标的数（含被时间预算拦下的）。normalizedSymbols.map
-                // 在当前协程里顺序执行，这里自增没有并发写；收尾汇总据此算「无需重抓数」。
+                // 本轮真正发起逐条抓取的标的数（含被时间预算拦下的）。
                 var attempted = 0
                 coroutineScope {
                     orderedSymbols.map { symbol ->
-                        val entry = cache[symbol]
+                        val entry = memoryCache.get(symbol)
                         val isOtc = StockCodeManager.isOTCFund(symbol)
-                        val ttlExpired = entry == null || !entry.isValid(cacheTTL)
+                        val ttlExpired = entry == null || !entry.isValid(DIVIDEND_CACHE_TTL_MS)
                         val shouldFetch = if (isOtc) {
                             // 手动刷新(forceRefresh)时，场外基金只补抓「TTL 已过期 且 今天还没成功抓过」的，
                             // 避免每次刷新把所有场外基金打一遍再踩 514 请求风暴；非手动刷新维持原 TTL 语义。
@@ -1548,8 +705,6 @@ class DividendRepository private constructor(
                             // 非场外基金：forceRefresh 之外，还要求「今天没成功抓过」。
                             // 缓存是进程内的，进程被杀后必然为空；只看 ttlExpired 会让
                             // 定期任务在冷启动后把前台今天刚抓过的标的全量重拉一遍。
-                            // markFetched 写的时间戳跨进程存活，用它做去重，请求量与
-                            // 前台预取保持一致，不额外增加天天基金压力。
                             forceRefresh || (ttlExpired && !isFetchedToday(symbol))
                         }
                         if (shouldFetch) {
@@ -1558,11 +713,7 @@ class DividendRepository private constructor(
                                 // 预算检查必须放在「拿到信号量之后」，不能放在 async 开头：
                                 // 上面 N 个 async 是**一次性全部 launch** 的，若在 withPermit 之前检查，
                                 // 它们全都在 t≈0 落空、之后在信号量上排队恢复时早已错过检查点，
-                                // 预算形同虚设。真机日志坐实过这个坑：手动刷新 70s 预算里
-                                // 预取子预算明明只有 28s（SyncBudget.prefetchPhaseBudget），
-                                // 实测却跑了 50.3s（轮次#3 19:53:45→19:54:35），
-                                // 把价格同步的时间挤掉大半。价格同步那一侧同样的问题早已修掉
-                                // （见 AssetSyncManager 中 withPermit 内的 SyncBudget.isExceeded）。
+                                // 预算形同虚设（真机日志坐实过：28s 子预算实际跑了 50.3s）。
                                 semaphore.withPermit {
                                     if (deadline > 0L && System.currentTimeMillis() > deadline) {
                                         AppLogger.w(
@@ -1581,18 +732,12 @@ class DividendRepository private constructor(
                                     // 写进 fetchState（markFetched），把「全源未应答」
                                     // 写进失败标记（markFailed），两者都在本类作用域可读。
                                     // 只比时间戳，不改变任何返回语义、不触发重试 / 退避。
-                                    // 514/429 限流（真实响应 + 60s 退避窗口内短路）会抛
-                                    // DividendSourceUnavailableException 并写本轮 markFailed，
-                                    // 因此落入「数据源未应答（含 514/429 限流）」档；
-                                    // 「退避/预算/缓存复用等」档装的是时间预算跳过、上一轮失败
-                                    // 退避窗复用旧值、内部缓存 / DB 命中、普通异常兜底等
-                                    // 本轮未写 markFailed 的情形。
-                                    val fetchedAt = lastFetchedAt(symbol)
+                                    val fetchedAt = fetchStateStore.lastFetchedAt(symbol)
                                     if (fetchedAt != null && fetchedAt >= roundStartMs) {
                                         successCount.incrementAndGet()
                                     } else {
                                         skippedCodes.add(symbol)
-                                        val failedAt = lastFailedAt(symbol)
+                                        val failedAt = fetchStateStore.lastFailedAt(symbol)
                                         if (failedAt != null && failedAt >= roundStartMs) {
                                             unavailableCount.incrementAndGet()
                                         }
@@ -1611,10 +756,6 @@ class DividendRepository private constructor(
                 }
 
                 // ===== 分红预取阶段收尾：只打一行汇总 =====
-                // 逐标的的 WARN 时间戳全挤在同一毫秒、又会被 app.log 环形缓冲冲掉大半，
-                // 事后只能靠正则从几 MB 日志里捞，看不出「一轮多少只成功 / 多少只被限流
-                // 跳过 / 多少只未应答」。这里把本轮计数与去重后的代码清单收成一行 INFO，
-                // 与 AssetSyncManager 的「分红预取阶段结束」那行相邻，按 tag 就能过滤。
                 // 纯观测：不把 514 当错误处理、不触发任何重试 / 退避 / 缓存写入。
                 val rateLimitDelta =
                     (FundDividendApiService.otcRateLimitSignal - rateLimitSignalAtStart)
@@ -1635,26 +776,6 @@ class DividendRepository private constructor(
         }
     }
 }
-
-
-/**
- * 接口层 [DividendData] → 领域层 [DividendRecord]。
- *
- * 与逐条路径 `fetchFromEastmoneyWithFormat` 里的映射是同一套口径：
- * 东财的 `PRETAX_BONUS_RMB` 实际是「每 10 股」分红，与应用内 `dividendPerShare` 单位一致，
- * 不做换算。抽成扩展函数是为了让批量路径和逐条路径不可能各写一份而对不上 ——
- * 分红金额差一位就是一个数量级，而且是静默的。
- */
-private fun DividendData.toDividendRecord(): DividendRecord = DividendRecord(
-    exDividendDate = date,
-    dividendPerShare = dividendPerShare.toString(),
-    announceDate = reportDate ?: "",
-    // date 理论上不会为空（mapDividendItem 里已挡掉空除息日），
-    // 但仍不能直接 substring(0, 4)：一旦为空会 StringIndexOutOfBounds，
-    // 而这里在批量路径上，一次异常会把整批预取全废掉
-    fiscalYear = date.take(4),
-    paymentDate = paymentDate
-)
 
 /**
  * 某标的分红数据的「新鲜度」快照（纯展示，不参与任何抓取 / 缓存 / 退避判定）。
@@ -1687,4 +808,3 @@ internal fun staleDividendHint(freshness: DividendDataFreshness, now: Long): Str
     val days = ((now - dataAt).coerceAtLeast(0L) / DAY_MS).coerceAtLeast(1L)
     return "分红数据最近一次未取到，当前沿用 $days 天前的记录"
 }
-

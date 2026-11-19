@@ -27,7 +27,19 @@ private const val MAX_DIVIDEND_PER_TEN_SHARES_STOCK = 1000.0
 internal class DividendWriter(
     private val context: Context,
     private val dao: DividendDao,
-    private val cache: DividendMemoryCache
+    private val cache: DividendMemoryCache,
+    /**
+     * 事务执行器。默认实现才碰 [StockDatabase]（懒加载到调用期，构造期不打开数据库），
+     * 现有生产调用点无需改动。
+     *
+     * 抽成参数只有一个目的：让「全量刷新是否真的删库」这条 A16 判定的**集成路径**
+     * 能在纯 JVM 单测里跑（传 `{ it() }` 即可），不必起 Room、也不必
+     * `mockkStatic("androidx.room.RoomDatabaseKt")`（本仓库有过 mockkStatic 自递归
+     * StackOverflow 的前科）。**生产行为零变化。**
+     */
+    private val transactionRunner: suspend (suspend () -> Unit) -> Unit = { block ->
+        StockDatabase.getInstance(context).withTransaction { block() }
+    }
 ) {
 
     suspend fun saveDividends(symbol: String, records: List<DividendRecord>) {
@@ -130,7 +142,7 @@ internal class DividendWriter(
         // 全量刷新时是否允许删旧插新；残缺解析下为 false（DB 保留旧记录）
         var replaceAllowed = false
 
-        StockDatabase.getInstance(context).withTransaction {
+        transactionRunner {
             if (!isIncremental) {
                 // 全量更新：先核对「本次解析是否完整」，不完整则**不能**删库。
                 //

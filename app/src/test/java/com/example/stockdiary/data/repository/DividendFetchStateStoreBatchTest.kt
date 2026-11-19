@@ -293,6 +293,30 @@ class DividendFetchStateStoreBatchTest {
         assertNotNull(bgStore.lastFetchedAt("s0"))
     }
 
+    /**
+     * 单独钉住「endBatch 的落盘口径是常量 true，与调用线程无关」。
+     *
+     * 刻意把 [DividendFetchStateStore] 构造在主线程模式（`isMainThread = { true }`）：
+     * 若有人图省事把 `endBatch` 也写成 `flushLocked(synchronous = !isMainThread())`，
+     * 本用例会立刻红——那正是 a9d804b「进程被杀不丢整轮结论」被打穿的形状。
+     */
+    @Test
+    fun `主线程下轮末endBatch仍强制同步commit`() {
+        val mainStore = DividendFetchStateStore(context, isMainThread = { true }) { now }
+        mainStore.beginBatch()
+        mainStore.markFetched("sh600519")
+
+        // 批次内零星写入：未触发检查点，此刻还没有任何落盘
+        assertEquals(0, prefs.commitCount)
+        assertEquals(0, prefs.applyCount)
+
+        mainStore.endBatch()
+
+        assertEquals("轮末必须同步 commit，不因当前在主线程而退化", 1, prefs.commitCount)
+        assertEquals("轮末不得退化成 apply", 0, prefs.applyCount)
+        assertNotNull(prefs.values["sh600519"])
+    }
+
     /** 够用的内存版 SharedPreferences：记录 commit / apply 次数与 commit 线程，可模拟 commit 失败 */
     private class FakeSharedPreferences : SharedPreferences {
         val values = mutableMapOf<String, Any?>()

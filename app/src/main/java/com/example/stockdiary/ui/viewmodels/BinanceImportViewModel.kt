@@ -42,6 +42,9 @@ open class BinanceImportViewModel(
     /** 当前密钥是否以明文存储（Keystore 不可用），UI 据此向用户告警 */
     val isPlaintextStorage: Boolean get() = credentialsManager.isPlaintextFallback
 
+    /** 回退明文且本机没有任何可用密钥：需要提示用户重新录入 */
+    val needsCredentialReentry: Boolean get() = credentialsManager.needsCredentialReentry
+
     enum class Step { INPUT, FETCHING, PREVIEW, COMMITTING, RESULT }
 
     data class UiState(
@@ -57,6 +60,11 @@ open class BinanceImportViewModel(
         val knownAccounts: List<String> = emptyList(),
         val result: BinanceImportService.CommitResult? = null,
         val error: String? = null,
+        /**
+         * 密钥落盘失败等「不影响本次导入、但下次会丢」的提示。
+         * 与 [error] 分开：拉取已经成功，不能弹“没能同步”的错误框吓用户。
+         */
+        val credentialWarning: String? = null,
         /** 本次拉取用到的交易对最新价，供预览行估算市值 */
         val prices: Map<String, Double> = emptyMap(),
         /**
@@ -164,8 +172,14 @@ open class BinanceImportViewModel(
                 }
 
                 is BinanceImportService.FetchOutcome.Ok -> {
-                    // 拉到了再存密钥：见方法注释（只在成功后存，避免存无效密钥）
-                    credentialsManager.save(current.apiKey, current.apiSecret)
+                    // 拉到了再存密钥：见方法注释（只在成功后存，避免存无效密钥）。
+                    // commit 返回 false 表示没真正写盘：本次导入照常，但必须告诉用户下次要重填。
+                    val saved = credentialsManager.save(current.apiKey, current.apiSecret)
+                    val saveWarning = if (saved) {
+                        null
+                    } else {
+                        "密钥没能保存到本机（磁盘写入失败），下次进入需要重新填写；本次导入不受影响。"
+                    }
 
                     if (outcome.preview.items.isEmpty()) {
                         // 一条不剩：账户为空或只剩 dust 零头。
@@ -182,7 +196,8 @@ open class BinanceImportViewModel(
                                 fetching = false,
                                 step = Step.INPUT,
                                 error = "账户里没有可导入的持仓。$hint",
-                                prices = emptyMap()
+                                prices = emptyMap(),
+                                credentialWarning = saveWarning
                             )
                         }
                         return@launchIo
@@ -196,7 +211,8 @@ open class BinanceImportViewModel(
                             prices = outcome.priceMap,
                             earnWarning = outcome.earnWarning,
                             loanWarning = outcome.loanWarning,
-                            loanNote = outcome.loanNote
+                            loanNote = outcome.loanNote,
+                            credentialWarning = saveWarning
                         )
                     }
                 }

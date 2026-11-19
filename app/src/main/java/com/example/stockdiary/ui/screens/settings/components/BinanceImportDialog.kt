@@ -1,6 +1,7 @@
 package com.example.stockdiary.ui.screens.settings.components
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -115,28 +116,49 @@ fun BinanceImportDialog(
             }
         }
     ) {
-        when (state.step) {
-            BinanceImportViewModel.Step.INPUT ->
-                BinanceInputStep(state = state, viewModel = viewModel)
+        Column(modifier = Modifier.fillMaxSize()) {
+            // 落盘失败不阻断本次导入，但必须留在界面上（失败在 INPUT/PREVIEW 都可能发生）
+            state.credentialWarning?.let { message ->
+                Card(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 8.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.35f)
+                    )
+                ) {
+                    Text(
+                        message,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onErrorContainer,
+                        modifier = Modifier.padding(12.dp)
+                    )
+                }
+            }
 
-            BinanceImportViewModel.Step.FETCHING -> BinanceFetchingStep()
+            Box(modifier = Modifier.weight(1f)) {
+                when (state.step) {
+                    BinanceImportViewModel.Step.INPUT ->
+                        BinanceInputStep(state = state, viewModel = viewModel)
 
-            BinanceImportViewModel.Step.PREVIEW ->
-                BinancePreviewStep(state, viewModel)
+                    BinanceImportViewModel.Step.FETCHING -> BinanceFetchingStep()
 
-            BinanceImportViewModel.Step.COMMITTING -> ImportCommittingStep()
+                    BinanceImportViewModel.Step.PREVIEW ->
+                        BinancePreviewStep(state, viewModel)
 
-            BinanceImportViewModel.Step.RESULT -> ImportResultStep(
-                summary = ImportCommitSummary(
-                    inserted = state.result?.inserted ?: 0,
-                    updated = state.result?.updated ?: 0,
-                    skipped = state.result?.skipped ?: 0,
-                    // 币安结果没有「同名不唯一」冲突概念
-                    conflicts = 0,
-                    extraNote = "新导入的加密货币现价留空，去「持仓」页刷新一次行情就会显示市值。"
-                ),
-                unit = "项"
-            )
+                    BinanceImportViewModel.Step.COMMITTING -> ImportCommittingStep()
+
+                    BinanceImportViewModel.Step.RESULT -> ImportResultStep(
+                        summary = ImportCommitSummary(
+                            inserted = state.result?.inserted ?: 0,
+                            updated = state.result?.updated ?: 0,
+                            skipped = state.result?.skipped ?: 0,
+                            // 币安结果没有「同名不唯一」冲突概念
+                            conflicts = 0,
+                            extraNote = "新导入的加密货币现价留空，去「持仓」页刷新一次行情就会显示市值。"
+                        ),
+                        unit = "项"
+                    )
+                }
+            }
         }
     }
 
@@ -213,8 +235,13 @@ private fun BinanceInputStep(
                     )
                     Spacer(Modifier.width(8.dp))
                     Text(
-                        "本设备不支持加密存储，币安密钥将以明文保存在本机。已 root 的设备可读，" +
-                            "建议仅在可信环境使用，或尽快更换支持加密存储的设备。",
+                        if (viewModel.needsCredentialReentry) {
+                            "本设备不支持加密存储，且没有找到此前保存的密钥，请重新填写 API Key 与 Secret。" +
+                                "重新保存后将明文存在本机，已 root 的设备可读。"
+                        } else {
+                            "本设备不支持加密存储，币安密钥将以明文保存在本机。已 root 的设备可读，" +
+                                "建议仅在可信环境使用，或尽快更换支持加密存储的设备。"
+                        },
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onErrorContainer
                     )

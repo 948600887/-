@@ -23,6 +23,8 @@ class BinanceCredentialsManagerTest {
     private class RecordingEditor(private val values: MutableMap<String, String>) : SharedPreferences.Editor {
         var commitCount = 0
         var applyCount = 0
+        /** 模拟写盘失败：commit 返回 false，但内存里的值仍会更新（与真实 SharedPreferences 一致） */
+        var commitResult = true
         private var staged = mutableMapOf<String, String?>()
 
         override fun putString(key: String, value: String?): SharedPreferences.Editor {
@@ -45,18 +47,25 @@ class BinanceCredentialsManagerTest {
             staged.forEach { (k, v) -> if (k != "__clear__") { if (v == null) values.remove(k) else values[k] = v } }
         }
 
-        override fun commit(): Boolean { commitCount++; flush(); return true }
+        // 真实 commit 无论成败都会先改内存；这里保持一致，才能证明「读回通过≠落盘成功」
+        override fun commit(): Boolean { commitCount++; flush(); return commitResult }
         override fun apply() { applyCount++; flush() }
     }
 
     private open class FakePrefs : SharedPreferences {
         val values = mutableMapOf<String, String>()
         var lastEditor: RecordingEditor? = null
+        val editors = mutableListOf<RecordingEditor>()
         var editCount = 0
+        var nextCommitResult = true
 
         override fun edit(): SharedPreferences.Editor {
             editCount++
-            return RecordingEditor(values).also { lastEditor = it }
+            return RecordingEditor(values).also {
+                it.commitResult = nextCommitResult
+                lastEditor = it
+                editors += it
+            }
         }
         override fun getAll(): MutableMap<String, *> = values
         override fun getString(key: String, default: String?): String? = values[key] ?: default
@@ -73,7 +82,7 @@ class BinanceCredentialsManagerTest {
     @Test
     fun `save走commit同步落盘且apply零调用`() {
         val prefs = FakePrefs()
-        saveCredentials(prefs, "my-key", "my-secret")
+        assertTrue(saveCredentials(prefs, "my-key", "my-secret"))
 
         assertEquals(1, prefs.lastEditor!!.commitCount)
         assertEquals(0, prefs.lastEditor!!.applyCount)
@@ -82,12 +91,27 @@ class BinanceCredentialsManagerTest {
     }
 
     @Test
+    fun `save落盘失败返回false_不能当成功`() {
+        val prefs = FakePrefs().apply { nextCommitResult = false }
+        assertFalse(saveCredentials(prefs, "my-key", "my-secret"))
+    }
+
+    @Test
+    fun `clear落盘失败返回false_不能当成功`() {
+        val prefs = FakePrefs().apply {
+            values[KEY_API_KEY] = "old-key"
+            nextCommitResult = false
+        }
+        assertFalse(clearCredentials(prefs))
+    }
+
+    @Test
     fun `clear走commit同步落盘且apply零调用`() {
         val prefs = FakePrefs().apply {
             values[KEY_API_KEY] = "old-key"
             values[KEY_API_SECRET] = "old-secret"
         }
-        clearCredentials(prefs)
+        assertTrue(clearCredentials(prefs))
 
         assertEquals(1, prefs.lastEditor!!.commitCount)
         assertEquals(0, prefs.lastEditor!!.applyCount)
@@ -120,15 +144,30 @@ class BinanceCredentialsManagerTest {
         }
         assertEquals(MigrationOutcome.MIGRATED, migrateCredentials(enc, legacy))
 
-        // enc 写入走 commit
-        assertEquals(1, enc.lastEditor!!.commitCount)
-        assertEquals(0, enc.lastEditor!!.applyCount)
+        // 每个 prefs 只允许 edit 一次；多调一次会在这里暴露（不再只看 lastEditor）
+        assertEquals(1, enc.editCount)
+        assertEquals(1, legacy.editCount)
+        assertEquals(1, enc.editors.sumOf { it.commitCount })
+        assertEquals(1, legacy.editors.sumOf { it.commitCount })
+        assertEquals(0, enc.editors.sumOf { it.applyCount })
+        assertEquals(0, legacy.editors.sumOf { it.applyCount })
         assertEquals("old-key", enc.getString(KEY_API_KEY, null))
         assertEquals("old-secret", enc.getString(KEY_API_SECRET, null))
-        // legacy 清空也走 commit
-        assertEquals(1, legacy.lastEditor!!.commitCount)
-        assertEquals(0, legacy.lastEditor!!.applyCount)
         assertNull(legacy.getString(KEY_API_KEY, null))
+    }
+
+    @Test
+    fun `迁移时enc的commit失败_即使读回成功也必须保留legacy`() {
+        // 关键回归：SharedPreferences 先改内存再写盘，commit 返回 false 时读回照样非空。
+        // 只看读回就会误判成功并删掉明文；这里必须返回 VERIFY_FAILED 且不动 legacy。
+        val enc = FakePrefs().apply { nextCommitResult = false }
+        val legacy = FakePrefs().apply { values[KEY_API_KEY] = "old-key" }
+
+        assertEquals(MigrationOutcome.VERIFY_FAILED, migrateCredentials(enc, legacy))
+
+        assertEquals("old-key", enc.getString(KEY_API_KEY, null)) // 内存里确实“写”进去了
+        assertEquals("old-key", legacy.getString(KEY_API_KEY, null))
+        assertEquals(0, legacy.editCount)
     }
 
     @Test

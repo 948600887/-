@@ -8,6 +8,16 @@ import com.example.stockdiary.utils.AppLogger
 /** 迁移结果：无旧数据 / 迁移成功 / 加密写入校验失败（保留明文） */
 internal enum class MigrationOutcome { NO_LEGACY_DATA, MIGRATED, VERIFY_FAILED }
 
+/**
+ * 凭据实际落在哪里。
+ *
+ * - [ENCRYPTED]：加密存储可用，正常路径。
+ * - [PLAINTEXT_LEGACY]：Keystore 不可用，但旧明文里还有密钥（与旧版行为一致，UI 需警示明文风险）。
+ * - [PLAINTEXT_EMPTY]：Keystore 不可用且旧明文里也没有密钥——用户此前的密钥在本次升级中
+ *   已无法读取，必须明确提示重新录入，不能只说「回退明文存储」。
+ */
+enum class CredentialStorageMode { ENCRYPTED, PLAINTEXT_LEGACY, PLAINTEXT_EMPTY }
+
 /** 凭据存储 key。提升为 top-level internal，供纯函数与单测共用（值不变，兼容老数据） */
 internal const val KEY_API_KEY = "api_key"
 internal const val KEY_API_SECRET = "api_secret"
@@ -17,22 +27,27 @@ internal const val KEY_API_SECRET = "api_secret"
  *
  * 抽出来是为了让 save/clear/迁移共用同一落盘口径，也便于单测用一个
  * 记录 commit 调用的内存版 Editor 验证「确实走同步落盘而非 apply」。
- * 返回是否成功写入；凭据路径忽略返回值（加密 prefs 的 commit 失败极罕见）。
+ * 返回值表示**是否真正写盘成功**；SharedPreferences 先在内存生效、写盘失败也读得回，
+ * 所以调用方必须看这个返回值，不能靠读回判断。
  */
 internal fun commitSync(editor: SharedPreferences.Editor): Boolean = editor.commit()
 
-/** 保存密钥到给定 prefs（commit 同步落盘，纯逻辑便于单测） */
-internal fun saveCredentials(prefs: SharedPreferences, apiKey: String, apiSecret: String) {
-    commitSync(
+/** 保存密钥到给定 prefs（commit 同步落盘）。返回是否落盘成功。 */
+internal fun saveCredentials(
+    prefs: SharedPreferences,
+    apiKey: String,
+    apiSecret: String
+): Boolean {
+    return commitSync(
         prefs.edit()
             .putString(KEY_API_KEY, apiKey)
             .putString(KEY_API_SECRET, apiSecret)
     )
 }
 
-/** 清除给定 prefs 里的密钥（commit 同步落盘） */
-internal fun clearCredentials(prefs: SharedPreferences) {
-    commitSync(
+/** 清除给定 prefs 里的密钥（commit 同步落盘）。返回是否落盘成功。 */
+internal fun clearCredentials(prefs: SharedPreferences): Boolean {
+    return commitSync(
         prefs.edit()
             .remove(KEY_API_KEY)
             .remove(KEY_API_SECRET)
@@ -42,8 +57,9 @@ internal fun clearCredentials(prefs: SharedPreferences) {
 /**
  * 把旧明文 prefs 的密钥搬到加密 prefs（纯逻辑便于单测）。
  *
- * 全程 commit：先在 enc 写密文并 commit，读回校验成功后再清旧明文并 commit。
- * 这样任何一步被杀进程都不会「密文没写成却删了明文」导致密钥丢失。
+ * 全程 commit，且**只有 commit 返回 true 且读回非空**才清旧明文：
+ * SharedPreferences 的 commit 返回 false 时内存里已经是新值，读回照样通过，
+ * 单靠读回会把「没写进磁盘」误判为成功，进而删掉唯一一份明文。
  */
 internal fun migrateCredentials(
     enc: SharedPreferences,
@@ -53,13 +69,13 @@ internal fun migrateCredentials(
     val oldSecret = legacy.getString(KEY_API_SECRET, null)
     if (oldKey.isNullOrBlank() && oldSecret.isNullOrBlank()) return MigrationOutcome.NO_LEGACY_DATA
 
-    commitSync(
+    val encCommitted = commitSync(
         enc.edit()
             .putString(KEY_API_KEY, oldKey)
             .putString(KEY_API_SECRET, oldSecret)
     )
-    // 读回校验加密写入真的成功，再清旧明文——避免「写密文失败却删了明文」丢密钥
-    return if (!enc.getString(KEY_API_KEY, null).isNullOrBlank()) {
+    // 落盘成功 + 读回非空，两个条件同时满足才允许清理旧明文
+    return if (encCommitted && !enc.getString(KEY_API_KEY, null).isNullOrBlank()) {
         commitSync(legacy.edit().clear())
         MigrationOutcome.MIGRATED
     } else {
@@ -97,11 +113,25 @@ class BinanceCredentialsManager private constructor(context: Context) {
     private val prefs: SharedPreferences = buildPrefs()
 
     /**
+     * 当前凭据实际使用的存储方式。
+     * [CredentialStorageMode.PLAINTEXT_EMPTY] 表示需要提示用户重新录入（见 [needsCredentialReentry]）。
+     */
+    var storageMode: CredentialStorageMode = CredentialStorageMode.ENCRYPTED
+        private set
+
+    /**
      * 是否因 Android Keystore 不可用而回退到明文 SharedPreferences。
      * true 时密钥以明文落盘（已 root 设备可读），UI 应据此向用户告警。
      */
-    var isPlaintextFallback: Boolean = false
-        private set
+    val isPlaintextFallback: Boolean
+        get() = storageMode != CredentialStorageMode.ENCRYPTED
+
+    /**
+     * 回退明文、且明文区里也没有任何密钥——用户此前保存的密钥已不可读，
+     * UI 必须提示重新录入，而不是笼统说「已回退明文存储」。
+     */
+    val needsCredentialReentry: Boolean
+        get() = storageMode == CredentialStorageMode.PLAINTEXT_EMPTY && !hasCredentials()
 
     private fun buildPrefs(): SharedPreferences {
         return try {
@@ -115,25 +145,41 @@ class BinanceCredentialsManager private constructor(context: Context) {
                 EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
             )
             // 升级迁移：把旧明文 prefs 里的密钥搬过来（旧版用的就是 PREFS_NAME_LEGACY）。
-            // 全程 commit() 同步落盘：迁移成功后立刻清旧明文，若中途进程被杀，
-            // commit 保证「密文已落盘」才清明文，不会出现「写密文半途而废却删了明文」丢密钥。
+            // 迁移内部要求「commit 成功 + 读回非空」才清旧明文，见 [migrateCredentials]。
             val legacy = appContext.getSharedPreferences(PREFS_NAME_LEGACY, Context.MODE_PRIVATE)
             when (migrateCredentials(enc, legacy)) {
                 MigrationOutcome.MIGRATED -> AppLogger.i("币安密钥已从明文迁移到加密存储", TAG)
                 MigrationOutcome.VERIFY_FAILED -> AppLogger.w("币安密钥加密写入校验失败，保留明文兜底", TAG)
                 MigrationOutcome.NO_LEGACY_DATA -> Unit
             }
+            storageMode = CredentialStorageMode.ENCRYPTED
             enc
         } catch (e: Exception) {
             // Keystore 不可用：退化明文，与旧版一致，绝不崩
-            isPlaintextFallback = true
+            val legacy = appContext.getSharedPreferences(PREFS_NAME_LEGACY, Context.MODE_PRIVATE)
+            val legacyHasCredentials = !legacy.getString(KEY_API_KEY, null).isNullOrBlank() ||
+                !legacy.getString(KEY_API_SECRET, null).isNullOrBlank()
+            storageMode = if (legacyHasCredentials) {
+                CredentialStorageMode.PLAINTEXT_LEGACY
+            } else {
+                CredentialStorageMode.PLAINTEXT_EMPTY
+            }
             AppLogger.w("EncryptedSharedPreferences 不可用，币安密钥回退明文存储: ${e.message}", TAG)
-            AppLogger.w(
-                "【安全警告】本设备 Android Keystore 不可用，币安 API Key/Secret 将以明文保存在 SharedPreferences，" +
-                    "已 root 的设备可读。建议尽快更换支持加密存储的设备，或仅在可信环境使用币安导入。",
-                TAG
-            )
-            appContext.getSharedPreferences(PREFS_NAME_LEGACY, Context.MODE_PRIVATE)
+            if (legacyHasCredentials) {
+                AppLogger.w(
+                    "【安全警告】本设备 Android Keystore 不可用，币安 API Key/Secret 将以明文保存在 SharedPreferences，" +
+                        "已 root 的设备可读。建议尽快更换支持加密存储的设备，或仅在可信环境使用币安导入。",
+                    TAG
+                )
+            } else {
+                // 不回显任何密钥内容，只说明状态与用户需要做什么
+                AppLogger.w(
+                    "【安全警告】本设备 Android Keystore 不可用，且未找到旧的明文密钥：" +
+                        "此前保存的币安密钥已无法读取，需要重新录入；重新保存后将明文存储在 SharedPreferences。",
+                    TAG
+                )
+            }
+            legacy
         }
     }
 
@@ -153,14 +199,20 @@ class BinanceCredentialsManager private constructor(context: Context) {
      * 崩溃主路径（GlobalExceptionHandler.recordCrash）同样已是 commit，这里补齐凭据路径。
      * 注意这里刻意不打印任何确认日志——「已保存 api_key=xxx」这种日志
      * 正是密钥泄露最常见的方式。
+     *
+     * @return 是否真正写盘成功（commit 返回值）；false 时调用方必须提示用户，不能当成功。
      */
-    fun save(apiKey: String, apiSecret: String) {
-        saveCredentials(prefs, apiKey, apiSecret)
+    fun save(apiKey: String, apiSecret: String): Boolean {
+        return saveCredentials(prefs, apiKey, apiSecret)
     }
 
-    /** 清除密钥。用户解除绑定/换账号时调用，同样 commit 同步落盘防杀进程后复活 */
-    fun clear() {
-        clearCredentials(prefs)
+    /**
+     * 清除密钥。用户解除绑定/换账号时调用，同样 commit 同步落盘防杀进程后复活。
+     *
+     * @return 是否真正写盘成功；false 表示清除可能没生效，调用方必须提示用户。
+     */
+    fun clear(): Boolean {
+        return clearCredentials(prefs)
     }
 
     companion object {

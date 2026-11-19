@@ -370,3 +370,15 @@ CODE_ARCHITECTURE.md 部分过时），一律以实际代码 + git log 为准。
 
 **阻塞不变**：push（本地 ahead 以 `git status -sb` 实时为准）+ 真机验收（adb 无设备，需梦瑶本人）。本包未做真机冒烟。
 
+---
+
+## 2026-11-19 再出包（基于 HEAD `71ea207`）
+
+梦瑶 11-19 再次要求出包。**push 已解除阻塞**：`git status -sb` = `## main...origin/main`（无 ahead），此前积压的本地提交已全部推送到远端。距上次出包（`0de53b8`）新增 2 笔且已推送：`71ea207` 备份缺表拒绝恢复（防缺表备份静默清库，BackupCodec + 测试 + VM 测试）、`cd1f59e` 分红周期任务未执行的诊断日志（新增 WorkDiagnostics + Scheduler/Worker 适配）。确认未碰硬约定（测试构造 payload 用 `dbVersion = 18` 是正确用法）、版本号仍 1.0.0/code11。工作区仅 `tools/__pycache__` 缓存垃圾，已清。
+
+**验证**：9 步门禁 EXIT=0 / GATE PASSED，**1760 例 / 164 XML / 0 失败 / 0 错误 / 0 跳过 / STALE=0**（较 11-18 的 1756 多 4 例，来自备份缺表新测试）。
+
+**产物**：`releases/GoldVault-1.0.0-release-arm64-v8a-71ea207.apk`（v1.0.0/code11，26,829,210 B，SHA-256 `282760a17d2ca3a70c5e7793ca1b626e0f19b970f53fb38284b7b9b196a8e9fd`，Android Debug 签名，apksigner verify 通过，native-code 仅 arm64-v8a）。`releases/` 已清理只留此包，旧 `0de53b8` 包已删。
+
+**唯一剩余阻塞**：真机验收（adb 无设备，需梦瑶本人）——装新包验备份恢复全链路（含新的缺表拒绝路径）、旋转屏确认恢复、分红周期任务与诊断排障摘要。门禁全绿 ≠ 真机通过，本包未做真机冒烟。
+

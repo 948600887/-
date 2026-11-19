@@ -19,10 +19,12 @@ import org.junit.Test
  * ## 关于 [shouldUpdateDividendCache] 两个用例（2026-11-11 勘误，R3）
  *
  * 它们是**纯函数层的防御性契约**，**不是 A16 主链路验证**：QA 已确认
- * `DividendRepository.kt:744-749` 写进缓存的是从 DB 读回的完整 `mergedData`，
- * 「缓存守卫使主链路失效」不成立，A16 仍有效。这里只钉住「缓存写入决策与删库决策同口径」，
- * 防止将来改纯函数时把两者拆开。`DividendRepository` 目前无完整单测（仅策略纯函数），
- * 主链路 cache 断言需 mock 大量 DAO，非低成本，本轮不补。
+ * `DividendRepository.kt:344-371` 写进缓存的是从 DB 读回的完整 `mergedData`
+ * （`:344-354` 组装、`:364-371` 写缓存），「缓存守卫使主链路失效」不成立，A16 仍有效。
+ * 这里只钉住「缓存写入决策与删库决策同口径」，防止将来改纯函数时把两者拆开。
+ * `DividendRepository` 目前无完整单测（仅策略纯函数），写入侧实现已迁到
+ * [DividendWriter]，见 [DividendWriterDeleteGuardTest]（R3）——主链路 cache 断言
+ * 已在那边按「mock DAO + 注入事务执行器」的方式补上。
  */
 class DividendRepositoryCachePolicyTest {
 

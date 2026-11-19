@@ -25,10 +25,13 @@ class DividendFetchStateStoreBatchTest {
 
     private val store: DividendFetchStateStore
 
+    /** 可控时钟：用于推进 30 秒检查点窗口 */
+    private var now = 1_700_000_000_000L
+
     init {
         // 必须先桩好 getSharedPreferences，再构造 store（构造函数会立即取 prefs）
         every { context.getSharedPreferences(any(), any()) } returns prefs
-        store = DividendFetchStateStore(context)
+        store = DividendFetchStateStore(context) { now }
     }
 
     @Test
@@ -149,6 +152,78 @@ class DividendFetchStateStoreBatchTest {
         store.markFetched("sh600519")
         store.endBatch()
         assertEquals("内层结束不落盘", 0, prefs.commitCount)
+        store.endBatch()
+        assertEquals(1, prefs.commitCount)
+    }
+
+    @Test
+    fun `累计达到10条自动检查点_重启后已落盘标记仍在`() {
+        store.beginBatch()
+        repeat(10) { store.markFetched("s$it") }
+
+        assertEquals("满 10 条必须先落一次盘", 1, prefs.commitCount)
+
+        // 模拟进程重启：同一份磁盘（FakePrefs）上新建 store
+        val restarted = DividendFetchStateStore(context) { now }
+        repeat(10) { assertNotNull("检查点前的标记重启后必须仍在: s$it", restarted.lastFetchedAt("s$it")) }
+
+        // 检查点之后写入的还在待落盘表，重启会丢——这正是设计允许的一个区间
+        store.markFetched("s10")
+        assertEquals(1, prefs.commitCount)
+        assertNull(DividendFetchStateStore(context) { now }.lastFetchedAt("s10"))
+
+        // 轮末收尾把它补上
+        store.endBatch()
+        assertEquals(2, prefs.commitCount)
+        assertNotNull(DividendFetchStateStore(context) { now }.lastFetchedAt("s10"))
+    }
+
+    @Test
+    fun `未满10条且未到30秒不提前落盘`() {
+        store.beginBatch()
+        repeat(3) { store.markFetched("s$it") }
+        assertEquals(0, prefs.commitCount)
+
+        store.endBatch()
+        assertEquals(1, prefs.commitCount)
+    }
+
+    @Test
+    fun `距上次落盘超过30秒触发检查点`() {
+        store.beginBatch()
+        store.markFetched("s0")
+        assertEquals(0, prefs.commitCount)
+
+        now += 30_001L
+        store.markFetched("s1")
+
+        assertEquals("低频写入也要按时间窗落盘", 1, prefs.commitCount)
+        assertNotNull(DividendFetchStateStore(context) { now }.lastFetchedAt("s0"))
+        assertNotNull(DividendFetchStateStore(context) { now }.lastFetchedAt("s1"))
+    }
+
+    @Test
+    fun `一轮多次检查点_每次最多一个区间且轮末补齐剩余`() {
+        store.beginBatch()
+        repeat(25) { store.markFetched("s$it") }
+
+        assertEquals("25 条应触发 2 次检查点", 2, prefs.commitCount)
+
+        store.endBatch()
+        assertEquals("轮末补第 3 次", 3, prefs.commitCount)
+        val restarted = DividendFetchStateStore(context) { now }
+        repeat(25) { assertNotNull(restarted.lastFetchedAt("s$it")) }
+    }
+
+    @Test
+    fun `检查点commit失败不抛出且待落盘表清空`() {
+        prefs.nextCommitResult = false
+        store.beginBatch()
+        repeat(10) { store.markFetched("s$it") }
+
+        assertEquals(1, prefs.commitCount)
+
+        // 失败后不跨轮累积：轮末没有新的待落盘值，不再产生 commit
         store.endBatch()
         assertEquals(1, prefs.commitCount)
     }

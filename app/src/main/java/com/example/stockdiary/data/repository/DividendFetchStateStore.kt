@@ -16,13 +16,19 @@ import com.example.stockdiary.utils.StockCodeManager
  * 同步磁盘写；而原来的逐只 `apply()` 又是异步的——进程在预取刚结束、落盘队列还没刷完时被杀，
  * 「今天抓过」的结论会全部丢失，下一轮冷启动重抓一遍。
  *
- * 所以预取轮次内改为：**内存立即可见 + 轮末一次 commit**。[beginBatch] / [endBatch] 由
- * 编排层包住整轮（正常结束、预算用尽、取消、抛异常都会走到 `finally`）。
- * 读取方法会先查批次内待落盘的值，因此同一轮里的 [isFetchedToday] 去重仍然即时准确。
+ * 所以预取轮次内改为：**内存立即可见 + 分段检查点 + 轮末收尾**。
+ * [beginBatch] / [endBatch] 由编排层包住整轮（正常结束、预算用尽、取消、抛异常都会走到 `finally`）。
+ * 轮内每累计 [CHECKPOINT_MAX_PENDING] 条待落盘记录，或距上次落盘超过
+ * [CHECKPOINT_MAX_INTERVAL_MS]，就先合并 commit 一次：进程被杀时最多丢一个检查点区间，
+ * 而不是整轮。读取方法会先查批次内待落盘的值，因此同一轮里的 [isFetchedToday] 去重仍然即时准确。
  *
  * 不在批次内时保持原有 `apply()` 行为（单标的查询、详情页等零星写入）。
  */
-internal class DividendFetchStateStore(context: Context) {
+internal class DividendFetchStateStore(
+    context: Context,
+    /** 时钟可注入，仅用于单测推进 30 秒检查点窗口；生产默认系统时间 */
+    private val clock: () -> Long = { System.currentTimeMillis() }
+) {
 
     private val prefs = context.getSharedPreferences(FETCH_STATE_PREFS, Context.MODE_PRIVATE)
 
@@ -30,6 +36,9 @@ internal class DividendFetchStateStore(context: Context) {
     private val lock = Any()
 
     private var batchDepth = 0
+
+    /** 上一次批量落盘（检查点或轮末）的时刻；批次开始时重置 */
+    private var lastFlushAtMs = 0L
 
     /** 待落盘：symbol → 抓取完成时间 */
     private val pendingFetched = HashMap<String, Long>()
@@ -47,9 +56,12 @@ internal class DividendFetchStateStore(context: Context) {
     private val pendingDataAt = HashMap<String, Long>()
     private val pendingMissAt = HashMap<String, Long>()
 
-    /** 开始一个预取批次；可重入（深度归零时才真正落盘） */
+    /** 开始一个预取批次；可重入（深度归零时才真正收尾落盘） */
     fun beginBatch() {
-        synchronized(lock) { batchDepth++ }
+        synchronized(lock) {
+            if (batchDepth == 0) lastFlushAtMs = clock()
+            batchDepth++
+        }
     }
 
     /**
@@ -76,10 +88,11 @@ internal class DividendFetchStateStore(context: Context) {
 
     /** 记录一次抓取完成（不管抓没抓到）。必须在抓取**成功**后写，失败时写会把错误固化 24 小时 */
     fun markFetched(symbol: String) {
-        val now = System.currentTimeMillis()
+        val now = clock()
         synchronized(lock) {
             if (batchDepth > 0) {
                 pendingFetched[symbol] = now
+                maybeCheckpointLocked()
                 return
             }
         }
@@ -95,7 +108,7 @@ internal class DividendFetchStateStore(context: Context) {
      * 批次内失败次数先在内存累加（以持久化值为基数），读取立即反映新档位；轮末一次落盘。
      */
     fun markFailed(symbol: String) {
-        val now = System.currentTimeMillis()
+        val now = clock()
         synchronized(lock) {
             if (batchDepth > 0) {
                 pendingFailureCleared.remove(symbol)
@@ -104,6 +117,7 @@ internal class DividendFetchStateStore(context: Context) {
                 val base = pendingFailureCount[symbol]
                     ?: runCatching { prefs.getInt(countKey, 0) }.getOrDefault(0)
                 pendingFailureCount[symbol] = base + 1
+                maybeCheckpointLocked()
                 return
             }
         }
@@ -126,6 +140,7 @@ internal class DividendFetchStateStore(context: Context) {
                 pendingFailureAt.remove(symbol)
                 pendingFailureCount.remove(symbol)
                 pendingFailureCleared.add(symbol)
+                maybeCheckpointLocked()
                 return
             }
         }
@@ -175,15 +190,35 @@ internal class DividendFetchStateStore(context: Context) {
     }
 
     private fun writeAuxTimestamp(symbol: String, prefix: String, pending: MutableMap<String, Long>) {
-        val now = System.currentTimeMillis()
+        val now = clock()
         synchronized(lock) {
             if (batchDepth > 0) {
                 pending[symbol] = now
+                maybeCheckpointLocked()
                 return
             }
         }
         runCatching { prefs.edit().putLong(prefix + symbol, now).apply() }
     }
+
+    /**
+     * 分段检查点：待落盘条目达到上限，或距上次落盘超过时间窗口，就提前 commit 一次。
+     *
+     * 进程被杀是这台设备上的常态（日志里两次抓到一半就没结束行）。整轮只在轮末落盘，
+     * 一旦被杀就是整轮重抓；检查点把丢失窗口压到一个区间（最多 N 条 / 30 秒）。
+     */
+    private fun maybeCheckpointLocked() {
+        if (pendingEntryCountLocked() >= CHECKPOINT_MAX_PENDING ||
+            clock() - lastFlushAtMs >= CHECKPOINT_MAX_INTERVAL_MS
+        ) {
+            flushLocked()
+        }
+    }
+
+    /** 待落盘「条目」数：失败次数与失败时间按同一 symbol 计一条，不重复累加 */
+    private fun pendingEntryCountLocked(): Int =
+        pendingFetched.size + pendingFailureAt.size + pendingFailureCleared.size +
+            pendingDataAt.size + pendingMissAt.size
 
     /**
      * 某标的分红数据的新鲜度（只供 UI 提示，不参与抓取 / 缓存 / 退避）。
@@ -276,6 +311,8 @@ internal class DividendFetchStateStore(context: Context) {
             )
         } finally {
             clearPendingLocked()
+            // 无论 commit 成功与否都重置窗口：失败后不应每次写入都重试一次磁盘
+            lastFlushAtMs = clock()
         }
     }
 
@@ -289,6 +326,12 @@ internal class DividendFetchStateStore(context: Context) {
     }
 
     private companion object {
+        /** 分段检查点：累计待落盘条目达到该数量就提前 commit 一次 */
+        const val CHECKPOINT_MAX_PENDING = 10
+
+        /** 分段检查点：距上次落盘超过该时长也提前 commit，避免低频写入一直攒到轮末 */
+        const val CHECKPOINT_MAX_INTERVAL_MS = 30_000L
+
         /** 「上次抓取时间」存放的 preferences 名 */
         const val FETCH_STATE_PREFS = "dividend_fetch_state"
 

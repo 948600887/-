@@ -382,3 +382,25 @@ CODE_ARCHITECTURE.md 部分过时），一律以实际代码 + git log 为准。
 
 **唯一剩余阻塞**：真机验收（adb 无设备，需梦瑶本人）——装新包验备份恢复全链路（含新的缺表拒绝路径）、旋转屏确认恢复、分红周期任务与诊断排障摘要。门禁全绿 ≠ 真机通过，本包未做真机冒烟。
 
+---
+
+## 2026-11-19 全面体检（a9d804b → 53a3723，6 笔修复）
+
+梦瑶要求「全面检查一下 app」。走完整 SOP：QA 跑门禁 + 审测试有效性，架构师逐函数比对 5 笔未推送改动 + 核 7 条硬约束，工程师修，QA 复验。
+
+**体检结论（a9d804b 上）**：9 步门禁全绿 1783 例 / 165 XML / 0 失败 / STALE=0；`d732a69` 把 `DividendRepository` 1690→819 行、拆出 7 个组件，**逐函数归一化 diff 为机械委托，行为等价**，19 个公开成员与 8 处 `client` 测试注入点全部保留，无循环依赖、无反向依赖（`data|network|database → ui` 的 import 为 0）；7 条硬约束逐条未违反。`d732a69` 的收益是**可测性**而非覆盖度——拆出的 6 个类 847 行在测试树里引用数为 0。
+
+**找到并修掉的缺陷（6 笔）**
+1. `9275f32` **P1-1** `storageMode` 声明在 `prefs` 之后 → 初始化器把 `buildPrefs()` 里写的 `PLAINTEXT_*` 覆盖回 `ENCRYPTED`（`javap` 字节码实证：构造器 offset 24 无条件 `putfield`）。后果：`isPlaintextFallback` / `needsCredentialReentry` 恒 false，R05「明文存储」告警（**71ea207 起就已失效的旧洞**）与 463fb87 新增的「请重新填写」提示双双击穿。修：声明前移（KDoc 写死「声明顺序是行为的一部分」）+ `encryptedPrefsProvider` 测试注入点 + 3 例测试，红态实证 `expected:<PLAINTEXT_EMPTY> but was:<ENCRYPTED>`。
+2. `341bc06` 检查点改纯 `apply()`——口径过宽（会把 a9d804b 的持久性让掉），保留为历史记录、不 amend。
+3. `2dd65a9` **P1-2** 检查点**按调用线程分流**：非主线程 `commit()`（预取轮全走这条，持久性不变）、主线程 `apply()`（消掉主线程 fsync）；`endBatch` 为字面常量 `true`；`isMainThread` 构造注入（默认 `Looper.getMainLooper()?.thread === Thread.currentThread()` + fail-safe false，**不能用 `myLooper() == getMainLooper()`**——`isReturnDefaultValues=true` 下 null==null 会误判成主线程）。
+4. `22a9f4f` A16 删库守卫的 writer 级集成测试 2 例（残缺 ⇒ `deleteNonManualBySymbol` 零调用；正常 ⇒ 一次），变异验证：把 `replaceAllowed` 改 `true` 该例立刻红——这是原来「改一行 1783 例仍全绿」那个洞的直接证据。为落地批准了 `DividendWriter` 加 `transactionRunner` 默认参数（lambda 体内才取 `StockDatabase`，现有调用点零改动）。
+5. `a809b42` 修正 `DividendRepositoryCachePolicyTest` 的行号引用（`744-749` → `344-371`）。
+6. `53a3723` 主线程下 `endBatch` 仍强制同步 commit 的独立护栏例。
+
+**验收（53a3723）**：9 步门禁全绿，**1791 例 / 166 XML / 0 失败 / 0 错误 / 0 跳过 / STALE=0**，323s。4 条验收口径全通过（fake 可区分 apply/commit、三例钉住分流、原 13 例原样绿、「commit 失败」假绿已修）。红态证据分级：P1-1、分流持久性、A16 为实证；「主线程走 apply」为 diff 推理。
+
+**已知风险（不阻断）**：① 主线程 `apply()` 排队到系统 flush 之间被杀，该区间结论内存/磁盘都不在（既定代价，毫秒级）；② `freshness()` 读侧仍可能与 IO commit 的锁耦合（P2）；③ `verify_test_count` 无用例数下限，建议加 `MIN_TESTS` 断言；④ P2 待排：`DividendCacheReader` 单标的/批量负缓存时间戳口径不一致（单标的写 `now` 会让空结论在本会话内永不按 7 天失效）、`DividendSourceFetcher` 重复 `fiscalYear` 映射（`substring(0,4)` vs `take(4)`）、`DataExporter` 分组保留使上限涨到约 40 份、`prefetchGate.unlock()` 在 `withContext` 之后；⑤ androidTest 仍只有 `MigrationTest.kt`，Compose UI 零测试。
+
+**流程教训**：门禁失败先确认快照干净（HEAD 未变 + 工作区无未提交改动）再判红——本轮 QA 首轮撞上工程师「写到一半的测试文件」，2 例红属快照问题，隔离实验（单类 16/16、子集 320 全绿）后才定性。
+

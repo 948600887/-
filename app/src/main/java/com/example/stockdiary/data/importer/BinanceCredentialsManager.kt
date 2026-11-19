@@ -22,6 +22,32 @@ enum class CredentialStorageMode { ENCRYPTED, PLAINTEXT_LEGACY, PLAINTEXT_EMPTY 
 internal const val KEY_API_KEY = "api_key"
 internal const val KEY_API_SECRET = "api_secret"
 
+/** 加密存储的 preferences 文件名（值不变，兼容老数据） */
+private const val PREFS_NAME_ENCRYPTED = "binance_api_enc"
+
+/** Android Keystore 里的主密钥别名（不存在时 security-crypto 会自动创建） */
+private const val MASTER_KEY_ALIAS = "binance_master_key"
+
+/**
+ * 创建加密 SharedPreferences（Android Keystore + AES-256）。
+ *
+ * 抽成顶层函数只有一个目的：让 [BinanceCredentialsManager] 的构造能够注入替身。
+ * 「Keystore 不可用 → 回退明文」这条状态机在真机上几乎不会发生，而本工程没有
+ * Robolectric，`EncryptedSharedPreferences.create` 无法在 JVM 单测里被强制失败——
+ * 不给注入点，这条分支就永远无法被测试覆盖（这正是 storageMode 被覆盖回 ENCRYPTED
+ * 却能逃过 1783 例门禁的原因）。**生产路径行为零变化。**
+ */
+private fun createEncryptedPrefs(context: Context): SharedPreferences =
+    // security-crypto 1.0.0 的 create 用「masterKeyAlias 字符串」而非 MasterKey 对象，
+    // 别名不存在时内部会自动在 Android Keystore 生成一个 AES256_GCM 主密钥。
+    EncryptedSharedPreferences.create(
+        PREFS_NAME_ENCRYPTED,
+        MASTER_KEY_ALIAS,
+        context,
+        EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+        EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+    )
+
 /**
  * 同步落盘 SharedPreferences 编辑（commit）。
  *
@@ -105,19 +131,38 @@ internal fun migrateCredentials(
  * - 不拼进异常 message。
  * - 不参与任何 UI 之外的隐式传递。
  */
-class BinanceCredentialsManager private constructor(context: Context) {
+class BinanceCredentialsManager private constructor(
+    context: Context,
+    /**
+     * 加密 prefs 提供者。生产固定为 [createEncryptedPrefs]（默认值）；
+     * 单测通过 [createForTest] 注入「直接抛异常」的替身来模拟 Keystore 不可用。
+     * 业务代码不得传入其他实现。
+     */
+    private val encryptedPrefsProvider: (Context) -> SharedPreferences = ::createEncryptedPrefs
+) {
 
     private val appContext = context.applicationContext
-
-    /** 真正使用的存储：加密优先，明文兜底 */
-    private val prefs: SharedPreferences = buildPrefs()
 
     /**
      * 当前凭据实际使用的存储方式。
      * [CredentialStorageMode.PLAINTEXT_EMPTY] 表示需要提示用户重新录入（见 [needsCredentialReentry]）。
+     *
+     * ## 声明顺序是行为的一部分，不能挪到 [prefs] 之后
+     *
+     * Kotlin 的属性初始化器**按声明顺序**执行：谁在后，谁的值就是最终值。
+     * [buildPrefs] 内部会写 [CredentialStorageMode.ENCRYPTED] /
+     * [CredentialStorageMode.PLAINTEXT_LEGACY] / [CredentialStorageMode.PLAINTEXT_EMPTY]，
+     * 所以本字段必须声明在 [prefs] **之前**——否则下面的 `= CredentialStorageMode.ENCRYPTED`
+     * 会在 [buildPrefs] 之后才执行，把回退状态整体覆盖回 ENCRYPTED，
+     * 导致 [isPlaintextFallback] 恒 false、[needsCredentialReentry] 恒 false，
+     * UI 上的「本机不支持加密存储」与「请重新填写 API Key 与 Secret」两条提示静默失效。
+     * 初始值 ENCRYPTED 只是「尚未探测」的占位，探测结果由 [buildPrefs] 覆盖。
      */
     var storageMode: CredentialStorageMode = CredentialStorageMode.ENCRYPTED
         private set
+
+    /** 真正使用的存储：加密优先，明文兜底（构造时探测，并回填 [storageMode]） */
+    private val prefs: SharedPreferences = buildPrefs()
 
     /**
      * 是否因 Android Keystore 不可用而回退到明文 SharedPreferences。
@@ -135,15 +180,7 @@ class BinanceCredentialsManager private constructor(context: Context) {
 
     private fun buildPrefs(): SharedPreferences {
         return try {
-            // security-crypto 1.0.0 的 create 用「masterKeyAlias 字符串」而非 MasterKey 对象，
-            // 别名不存在时内部会自动在 Android Keystore 生成一个 AES256_GCM 主密钥。
-            val enc = EncryptedSharedPreferences.create(
-                PREFS_NAME_ENCRYPTED,
-                MASTER_KEY_ALIAS,
-                appContext,
-                EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-                EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
-            )
+            val enc = encryptedPrefsProvider(appContext)
             // 升级迁移：把旧明文 prefs 里的密钥搬过来（旧版用的就是 PREFS_NAME_LEGACY）。
             // 迁移内部要求「commit 成功 + 读回非空」才清旧明文，见 [migrateCredentials]。
             val legacy = appContext.getSharedPreferences(PREFS_NAME_LEGACY, Context.MODE_PRIVATE)
@@ -217,11 +254,7 @@ class BinanceCredentialsManager private constructor(context: Context) {
 
     companion object {
         private const val TAG = "BinanceCreds"
-        private const val PREFS_NAME_ENCRYPTED = "binance_api_enc"
         private const val PREFS_NAME_LEGACY = "binance_api"
-
-        /** Android Keystore 里的主密钥别名（不存在时 security-crypto 会自动创建） */
-        private const val MASTER_KEY_ALIAS = "binance_master_key"
 
         @Volatile
         private var instance: BinanceCredentialsManager? = null
@@ -231,5 +264,17 @@ class BinanceCredentialsManager private constructor(context: Context) {
                 instance ?: BinanceCredentialsManager(context.applicationContext).also { instance = it }
             }
         }
+
+        /**
+         * **仅供单测**：注入加密 prefs 提供者，用来模拟「Android Keystore 不可用」。
+         *
+         * 生产入口是 [getInstance]，永远走 [createEncryptedPrefs]；这里不缓存实例、
+         * 也不改变任何生产行为。
+         */
+        internal fun createForTest(
+            context: Context,
+            encryptedPrefsProvider: (Context) -> SharedPreferences
+        ): BinanceCredentialsManager =
+            BinanceCredentialsManager(context.applicationContext, encryptedPrefsProvider)
     }
 }

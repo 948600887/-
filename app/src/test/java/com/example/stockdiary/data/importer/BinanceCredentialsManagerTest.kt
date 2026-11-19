@@ -1,6 +1,9 @@
 package com.example.stockdiary.data.importer
 
+import android.content.Context
 import android.content.SharedPreferences
+import io.mockk.every
+import io.mockk.mockk
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -14,8 +17,15 @@ import org.junit.Test
  * 是典型假绿。这里用 [RecordingEditor] 分别记录 commit / apply 调用次数，
  * **真钉死** save / clear / 迁移走的是同步落盘（commit），apply 一次都不许有。
  *
- * 不依赖 Robolectric / Keystore：只测抽出来的纯函数，EncryptedSharedPreferences
- * 的构造在原类里仍是 try-catch 兜底，不在本测试范围。
+ * 除此之外还钉死 [BinanceCredentialsManager] 的**存储方式状态机**（storageMode /
+ * isPlaintextFallback / needsCredentialReentry）。这三者曾经零测试覆盖，于是
+ * 「storageMode 的属性初始化器晚于 prefs 执行、把 buildPrefs() 写的回退状态覆盖回
+ * ENCRYPTED」这种静默失效一路穿过了门禁：UI 上的「本机不支持加密存储」和
+ * 「请重新填写 API Key 与 Secret」两条提示永远不会出现。见本文件末尾三例。
+ *
+ * 加密 prefs 的构造通过 `BinanceCredentialsManager.createForTest` 注入替身来模拟
+ * Keystore 不可用（本工程无 Robolectric，真机上 `create` 也不会失败）；生产的
+ * [BinanceCredentialsManager.getInstance] 路径与注入点无关，行为不变。
  */
 class BinanceCredentialsManagerTest {
 
@@ -182,5 +192,72 @@ class BinanceCredentialsManagerTest {
         // 校验失败绝不能清旧明文——否则密钥就真丢了
         assertEquals("old-key", legacy.getString(KEY_API_KEY, null))
         assertEquals(0, legacy.editCount)
+    }
+
+    // ---------------------------------------------------------------- //
+    // 存储方式状态机：storageMode / isPlaintextFallback / needsCredentialReentry
+    // ---------------------------------------------------------------- //
+
+    /**
+     * 伪造 Context：`applicationContext` 指向自身，`getSharedPreferences` 返回指定的
+     * 旧明文 prefs（`binance_api`）。
+     *
+     * 刻意让两个角色共用同一个 mock（不用两个 mock 互相指向）：这样桩不会被
+     * 「context → applicationContext → 另一个 mock」这层间接引丢。
+     */
+    private fun fakeContext(legacy: SharedPreferences): Context {
+        val ctx = mockk<Context>(relaxed = true)
+        every { ctx.applicationContext } returns ctx
+        every { ctx.getSharedPreferences(any(), any()) } returns legacy
+        return ctx
+    }
+
+    /** 构造一个「加密存储可用」的 manager */
+    private fun managerWithEncryptedAvailable(legacy: SharedPreferences = FakePrefs()): BinanceCredentialsManager =
+        BinanceCredentialsManager.createForTest(fakeContext(legacy)) { FakePrefs() }
+
+    /**
+     * 构造一个「Android Keystore 不可用」的 manager：加密 prefs 提供者直接抛异常，
+     * 与真机上 `EncryptedSharedPreferences.create` 失败（Keystore 缺失 / 密钥不可恢复）等价。
+     */
+    private fun managerWithEncryptedUnavailable(legacy: SharedPreferences): BinanceCredentialsManager =
+        BinanceCredentialsManager.createForTest(fakeContext(legacy)) {
+            throw IllegalStateException("Android Keystore 不可用（单测注入）")
+        }
+
+    @Test
+    fun `加密可用时storageMode为ENCRYPTED且两条告警都不出现`() {
+        val manager = managerWithEncryptedAvailable()
+
+        assertEquals(CredentialStorageMode.ENCRYPTED, manager.storageMode)
+        assertFalse("加密可用不该报明文回退", manager.isPlaintextFallback)
+        assertFalse("加密可用不该要求重新录入", manager.needsCredentialReentry)
+    }
+
+    @Test
+    fun `加密不可用但旧明文有密钥时为PLAINTEXT_LEGACY且只提示明文风险`() {
+        val legacy = FakePrefs().apply {
+            values[KEY_API_KEY] = "old-key"
+            values[KEY_API_SECRET] = "old-secret"
+        }
+
+        val manager = managerWithEncryptedUnavailable(legacy)
+
+        // 这条断言曾经必挂：storageMode 的初始化器在 buildPrefs() 之后执行，把回退状态覆盖回 ENCRYPTED
+        assertEquals(CredentialStorageMode.PLAINTEXT_LEGACY, manager.storageMode)
+        assertTrue("回退明文必须让 UI 报警", manager.isPlaintextFallback)
+        assertFalse("旧明文里还有密钥，不该要求重新录入", manager.needsCredentialReentry)
+        assertEquals("回退后读的必须是旧明文文件", "old-key", manager.getApiKey())
+    }
+
+    @Test
+    fun `加密不可用且旧明文为空时为PLAINTEXT_EMPTY且必须要求重新录入`() {
+        val manager = managerWithEncryptedUnavailable(FakePrefs())
+
+        // 同上：覆盖回 ENCRYPTED 时这条也必挂
+        assertEquals(CredentialStorageMode.PLAINTEXT_EMPTY, manager.storageMode)
+        assertTrue("回退明文必须让 UI 报警", manager.isPlaintextFallback)
+        assertTrue("密钥已不可读，必须提示重新填写 API Key 与 Secret", manager.needsCredentialReentry)
+        assertFalse("旧明文里确实没有密钥", manager.hasCredentials())
     }
 }

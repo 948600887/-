@@ -1,6 +1,7 @@
 package com.example.stockdiary.data.repository
 
 import android.content.Context
+import android.os.Looper
 import com.example.stockdiary.utils.AppLogger
 import com.example.stockdiary.utils.StockCodeManager
 
@@ -22,22 +23,39 @@ import com.example.stockdiary.utils.StockCodeManager
  * [CHECKPOINT_MAX_INTERVAL_MS]，就先合并落盘一次：进程被杀时最多丢一个检查点区间，
  * 而不是整轮。读取方法会先查批次内待落盘的值，因此同一轮里的 [isFetchedToday] 去重仍然即时准确。
  *
- * ## 落盘方式：检查点异步 apply，轮末同步 commit
+ * ## 落盘口径：检查点按调用线程分流，轮末恒定同步 commit
  *
- * 检查点与轮末刻意用两种口径。原因：持批次的不只是后台预取——详情页的
- * `AssetDetailViewModel` 也在主线程（`Main.immediate`）里抓分红，抓成功就 [markFetched]，
- * 命中检查点时如果同步 `commit()`，就是**主线程上一次 fsync**（StrictMode DiskWriteViolation、
- * 慢 flash 上掉帧），而且主线程随后的读取还要排队等同一把 [lock]。
+ * - 后台线程的检查点（预取 Worker / IO，常态）：同步 `commit()`。这是 a9d804b 的立身之本——
+ *   `apply()` 依赖 `QueuedWork`，而预取跑在 Worker 里，进程被低内存 SIGKILL 时
+ *   没有任何 Activity/Service 生命周期点兜底，「今天抓过」的结论会整段落空。
+ * - 主线程的检查点（详情页 `Main.immediate` 里抓单只后 [markFetched]）：退化为 `apply()`。
+ *   命中检查点时同步 `commit()` 就是主线程一次 fsync（StrictMode DiskWriteViolation、掉帧），
+ *   而且主线程随后的读取要排队等同一把 [lock]，阻塞时长 = 对方的落盘时长。
+ * - 轮末 [endBatch]：**无条件**同步 `commit()`（常量 true，不经过线程判定）。
+ *   它的调用点在 `NonCancellable + Dispatchers.IO` 上，是本轮结论的最后一道保证。
  *
- * 检查点的作用只是「别攒整轮」，本身不需要「已写进磁盘」这个强保证：
- * 「同轮立刻可见」由待落盘表保证，进程被杀最多丢一个区间——异步 `apply()` 就能满足。
- * 轮末 [endBatch] 则保持同步 `commit()`：它的调用点在 `NonCancellable + Dispatchers.IO` 上，
- * 且是「本轮结论」的最后一道保证，值得等磁盘。
+ * 三种情况都不影响「同轮立刻可见」：读取先查待落盘表，与该表何时落盘无关。
+ * 检查点的作用始终只是「别攒整轮」，最多丢一个检查点区间。
  *
  * 不在批次内时保持原有 `apply()` 行为（单标的查询、详情页等零星写入）。
  */
 internal class DividendFetchStateStore(
     context: Context,
+    /**
+     * 当前是否运行在主线程。抽成注入参数有两个原因：纯 JVM 单测要能直接验分流；
+     * 真机上 `Looper` 也可能在极端时序下不可用，绝不能因此崩掉簿记。
+     *
+     * 默认实现必须 **fail-safe 到 false**（视为非主线程 → 走同步 commit）：
+     * JVM 单测开了 `unitTests.isReturnDefaultValues = true`，`Looper.getMainLooper()`
+     * 返回 null，若写成 `myLooper() == getMainLooper()` 就是 `null == null` → true，
+     * 会把检查点全线误判成主线程、持久性悄悄退回 apply。
+     *
+     * 注意参数顺序：现有调用与单测用尾随 lambda（`DividendFetchStateStore(context) { now }`），
+     * 尾随 lambda 只绑定**最后一个**参数，所以本参数必须排在 [clock] 之前。
+     */
+    private val isMainThread: () -> Boolean = {
+        runCatching { Looper.getMainLooper()?.thread === Thread.currentThread() }.getOrDefault(false)
+    },
     /** 时钟可注入，仅用于单测推进 30 秒检查点窗口；生产默认系统时间 */
     private val clock: () -> Long = { System.currentTimeMillis() }
 ) {
@@ -79,7 +97,11 @@ internal class DividendFetchStateStore(
     /**
      * 结束批次：深度归零时把本轮所有待落盘值合并成**一次同步 commit**。
      *
-     * 这里必须同步：调用点在 `NonCancellable + Dispatchers.IO`，且这是本轮结论的最后一道保证。
+     * 这里必须是**常量 true**，不经过 [isMainThread] 判定：调用点在
+     * `NonCancellable + Dispatchers.IO`（`DividendRepository` 的 finally），
+     * 是本轮结论的最后一道保证。若改成 `!isMainThread()`，一旦 endBatch 恰好在主线程
+     * 被调用，最后一次保底同步落盘也会退化成 apply，a9d804b 的收尾保证被打穿。
+     *
      * 失败只记日志不抛：本轮结论留在内存，最多导致下次冷启动多抓一轮，不能影响预取收尾。
      * 调用方必须在 `finally` 里执行（取消 / 异常路径同样要落盘）。
      */
@@ -220,14 +242,23 @@ internal class DividendFetchStateStore(
      * 进程被杀是这台设备上的常态（日志里两次抓到一半就没结束行）。整轮只在轮末落盘，
      * 一旦被杀就是整轮重抓；检查点把丢失窗口压到一个区间（最多 N 条 / 30 秒）。
      *
-     * **走异步 apply**：本方法会在持锁状态下被任意线程调用，包括主线程
-     * （详情页抓分红成功后 [markFetched]）。同步 commit 会让主线程等一次 fsync。
+     * ## 落盘口径按调用线程分流
+     *
+     * 持批次的不只有后台预取：详情页 `AssetDetailViewModel` 在 `Main.immediate` 上抓分红，
+     * 抓成功即 [markFetched]，命中检查点时如果同步 `commit()`，就是**主线程一次 fsync**
+     * （StrictMode DiskWriteViolation、慢 flash 掉帧），且主线程随后的读取还要排队等 [lock]。
+     *
+     * - **主线程**（[isMainThread] 为真）：`apply()`。`apply` 立即返回，写盘交给系统队列；
+     *   代价是进程被 SIGKILL 时没有任何生命周期点兜底 —— 但这条路径只是「预取批次开着
+     *   的同时用户在主线程看单只标的」的窄路径，丢失窗口是毫秒级排队，远小于整轮。
+     * - **后台线程**（预取 Worker / IO，常态）：保持同步 `commit()`。绝大多数检查点都走这里，
+     *   a9d804b「最多丢一个检查点区间」的持久性保证因此完全不变。
      */
     private fun maybeCheckpointLocked() {
         if (pendingEntryCountLocked() >= CHECKPOINT_MAX_PENDING ||
             clock() - lastFlushAtMs >= CHECKPOINT_MAX_INTERVAL_MS
         ) {
-            flushLocked(synchronous = false)
+            flushLocked(synchronous = !isMainThread())
         }
     }
 
@@ -287,10 +318,10 @@ internal class DividendFetchStateStore(
     /**
      * 合并写出本轮全部待落盘值。
      *
-     * @param synchronous true（轮末 [endBatch]）：`commit()` 同步落盘，返回 false 说明没写进磁盘，
-     *   必须 WARN 留痕，否则「以为记住了、重启全忘」无从排查。
-     *   false（分段检查点）：`apply()` 异步落盘。apply 没有返回值，**不能**谎报落盘结果，
-     *   日志只说明「已提交」。这条路主要是为了避免主线程 fsync。
+     * @param synchronous true（轮末 [endBatch]，以及后台线程的检查点）：`commit()` 同步落盘，
+     *   返回 false 说明没写进磁盘，必须 WARN 留痕，否则「以为记住了、重启全忘」无从排查。
+     *   false（**主线程**上的检查点）：`apply()` 异步排队落盘。apply 没有返回值，
+     *   **不能**谎报落盘结果，日志只说明「已排队」。这条路只为避免 UI 线程 fsync。
      *
      * 失败日志要能回答「丢了什么」：已抓只数 / 失败只数 / 辅助簿记条数。
      * 无论成功失败都清空待落盘表，避免跨轮无限累积；失败后下一轮冷启动重抓即可。
@@ -320,7 +351,7 @@ internal class DividendFetchStateStore(
             pendingMissAt.forEach { (symbol, at) -> editor.putLong(MISS_AT_PREFIX + symbol, at) }
 
             if (synchronous) {
-                // 轮末：一次同步 commit。落盘失败必须留痕
+                // 轮末 / 后台线程检查点：一次同步 commit。落盘失败必须留痕
                 if (!editor.commit()) {
                     AppLogger.w(
                         "分红抓取状态批量落盘失败(commit=false)：已抓 $fetchedCount 只、失败 $failedCount 只、" +
@@ -329,12 +360,12 @@ internal class DividendFetchStateStore(
                     )
                 }
             } else {
-                // 分段检查点：异步落盘，不阻塞调用线程（可能是主线程）
+                // 主线程检查点：换成异步排队，免得 UI 线程 fsync。
+                // apply 没有返回值，日志不能谎报落盘成功，只能说明「已排队」。
                 editor.apply()
-                // apply 无返回值——这里只能说明「已提交」，不能说「已落盘成功」
                 AppLogger.i(
-                    "分红抓取状态批量落盘已提交(异步)：已抓 $fetchedCount 只、失败 $failedCount 只、" +
-                        "辅助簿记 $auxCount 条",
+                    "分红抓取状态检查点已异步排队落盘（主线程调用），是否真正写盘由系统 flush 决定：" +
+                        "已抓 $fetchedCount 只、失败 $failedCount 只、辅助簿记 $auxCount 条",
                     TAG
                 )
             }

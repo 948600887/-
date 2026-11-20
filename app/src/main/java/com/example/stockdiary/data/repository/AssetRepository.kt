@@ -25,6 +25,7 @@ import kotlinx.coroutines.flow.first
 import java.time.LocalDate
 import kotlinx.coroutines.CancellationException
 import java.util.Collections
+import kotlin.math.abs
 
 class AssetRepository private constructor(
     private val assetDao: AssetDao,
@@ -76,8 +77,21 @@ class AssetRepository private constructor(
             a = a.copy(symbol = normalized.takeIf { it.isNotBlank() })
         }
         if (a.name.isBlank()) a = a.copy(name = a.symbol ?: "未命名资产")
-        if (a.purchasePrice < 0) a = a.copy(purchasePrice = 0.0)
-        if (a.balance < 0 && a.type != AssetType.CRYPTO) a = a.copy(balance = 0.0)
+        // 数值边界：只钳「非有限」与「荒谬量级」，不碰正常负数之外语义（加密的负 balance 是负债）。
+        // 为什么必须有这一层：totalValue = balance × price。输入 1e308 会让它溢出成 Infinity，
+        // 一旦写进快照的 REAL 列就永久固化 —— SUM 掺入 Infinity 后**所有历史点一起失真**，
+        // 而且 BackupCodec.requireFinitePayload 会永远拒绝这份备份（提示是
+        // 「snapshotXXX.netAssets 非有限值」，用户根本想不到是自己输的数造成的）。
+        // 价格路径（updatePriceBySymbol / updatePricesInTransaction）已有 isFinite 护栏，
+        // 这里补的是数量/参考价这一侧 —— 同一份代码里两侧口径要一致。
+        if (!a.purchasePrice.isFinite() || a.purchasePrice > MAX_SANE_PRICE || a.purchasePrice < 0) {
+            a = a.copy(purchasePrice = 0.0)
+        }
+        if (!a.balance.isFinite() || abs(a.balance) > MAX_SANE_BALANCE) {
+            a = a.copy(balance = 0.0)
+        } else if (a.balance < 0 && a.type != AssetType.CRYPTO) {
+            a = a.copy(balance = 0.0)
+        }
         return a
     }
 
@@ -950,6 +964,19 @@ class AssetRepository private constructor(
     companion object {
         /** 交易去重的短时间窗（毫秒）：窗口内完全相同的交易才判为误触重复 */
         private const val TRANSACTION_DEDUP_WINDOW_MS = 5_000L
+
+        /**
+         * 参考单价的上界。取 1e12：比特币量级的价格也只有 1e5，任何真实标的都远低于此。
+         * 超过它的一律视为脏输入（含 `1e308` 这类手滑），避免 `balance × price` 溢出成 Infinity。
+         */
+        private const val MAX_SANE_PRICE = 1e12
+
+        /**
+         * 持仓数量的上界。取 1e18：meme 币的天量持仓也在 1e15 量级；
+         * 1e18 × 1e12 = 1e30，离 Double 上界（1.8e308）还有 278 个数量级，
+         * 足以保证 totalValue 不会因为「两个合法上限值相乘」而溢出。
+         */
+        private const val MAX_SANE_BALANCE = 1e18
 
         @SuppressLint("StaticFieldLeak")
         @Volatile

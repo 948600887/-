@@ -16,6 +16,7 @@ import com.example.stockdiary.utils.NumberFormatUtils
 import com.example.stockdiary.utils.StockCodeManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 import java.nio.charset.Charset
 import java.nio.charset.CodingErrorAction
@@ -95,6 +96,18 @@ class BrokerageImportService internal constructor(private val context: Context) 
     )
 
     companion object {
+        /**
+         * 单次导入文件的体积上限。
+         *
+         * 这条路径会把整份文件读进内存，下游还要再解码一次 `String`、逐格建 `List<List<String>>`。
+         * 按实测系数（bytes 1.0 + String 1.33 + 逐格 4.75 + 解析结果 2.5 ≈ **9.6×/字节**），
+         * 16MB 文件约 154MB 峰值，仍在 384MB 堆的安全余量内；再往上应先提示用户拆分，
+         * 而不是先 OOM —— `OutOfMemoryError` 是 `Error` 不是 `Exception`，
+         * 调用方的 `catch (e: Exception)` 接不住，会直接崩到全局处理器，
+         * 表现就是「选了个大文件就闪退」。
+         */
+        internal const val MAX_IMPORT_BYTES = 16L * 1024 * 1024
+
         /**
          * 截图导入时证券代码缺失的提示文案。解析层、预览页、提交前校验都引用这一处，
          * 避免同一句提示在多处各写一遍后逐渐不一致。
@@ -269,8 +282,36 @@ class BrokerageImportService internal constructor(private val context: Context) 
         }
 
     private suspend fun readBytes(uri: Uri): ByteArray = withContext(Dispatchers.IO) {
-        context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+        val input = context.contentResolver.openInputStream(uri)
             ?: throw IllegalStateException("无法读取文件")
+
+        // 第一道闸：按 provider 声明的大小快速拒绝（本地文件与多数网盘 provider 都提供 statSize）
+        val declared = runCatching {
+            context.contentResolver.openFileDescriptor(uri, "r")?.use { it.statSize }
+        }.getOrNull() ?: -1L
+        if (declared > MAX_IMPORT_BYTES) throw oversize(declared)
+
+        // 第二道闸：不信任 statSize（可能为 -1 或撒谎）。边读边计数、超限立刻停，
+        // 峰值内存最多是「上限 + 一个 8KB 缓冲块」，不会先把 200MB 读进来再判。
+        input.use { stream ->
+            val buffer = ByteArrayOutputStream()
+            val chunk = ByteArray(8 * 1024)
+            var total = 0L
+            while (true) {
+                val read = stream.read(chunk)
+                if (read < 0) break
+                total += read
+                if (total > MAX_IMPORT_BYTES) throw oversize(total)
+                buffer.write(chunk, 0, read)
+            }
+            buffer.toByteArray()
+        }
+    }
+
+    private fun oversize(bytes: Long): IllegalStateException {
+        val mb = bytes / 1024 / 1024
+        val limitMb = MAX_IMPORT_BYTES / 1024 / 1024
+        return IllegalStateException("文件过大（约 ${mb}MB），单次导入上限 ${limitMb}MB，请拆分后再导入")
     }
 
     internal fun detectCharset(bytes: ByteArray): Charset {

@@ -56,6 +56,15 @@ import java.io.File
  */
 data class PendingRestore(val uri: Uri, val summary: BackupSummary)
 
+/**
+ * 备份文件读取上限（字节）。
+ *
+ * 恢复链路的峰值大约是文件大小的 3.3 倍（ByteArray + String + `JSONObject` 树 + 实体列表），
+ * 32MB 对应峰值约 106MB，给 384MB 堆留足余量。用户从网盘误选一个 200MB 的
+ * `.json`/视频时，应当得到一句可理解的中文提示，而不是 OOM 闪退。
+ */
+private const val MAX_BACKUP_BYTES = 32L * 1024 * 1024
+
 class SettingsViewModel(
     private val appContext: Context,
     private val assetRepository: AssetRepository,
@@ -494,8 +503,39 @@ class SettingsViewModel(
     private fun readBackupText(uri: Uri): String {
         val input = appContext.contentResolver.openInputStream(uri)
             ?: throw InvalidBackupException("无法打开所选文件，请确认文件仍存在且可被读取")
-        val text = input.use { it.readBytes().toString(Charsets.UTF_8) }
-        return text.removePrefix("\uFEFF")
+
+        // 体积闸：备份文件由用户在 SAF 里任选，可能来自网盘、微信、任何一个 .json/视频。
+        // 从前这里是 `readBytes()` 一把梭：整份进 ByteArray、再转 String（≈2×），
+        // restore 时还要再把 JSONObject 树建起来（≈3.3×/字节）。
+        // 32MB 上限对应峰值约 106MB，留足 384MB 堆的余量；再大就明确告知用户，
+        // 而不是先 OOM —— OOM 是 Error，下面的 catch(Exception) 接不住，会直接闪退。
+        val declared = runCatching {
+            appContext.contentResolver.openFileDescriptor(uri, "r")?.use { it.statSize }
+        }.getOrNull() ?: -1L
+        if (declared > MAX_BACKUP_BYTES) throw backupOversize(declared)
+
+        val bytes = input.use { stream ->
+            // 不信任 statSize（可能 -1 或撒谎）：边读边计数，超限立刻停，
+            // 峰值最多「上限 + 一个 8KB 缓冲块」。
+            val buffer = java.io.ByteArrayOutputStream()
+            val chunk = ByteArray(8 * 1024)
+            var total = 0L
+            while (true) {
+                val read = stream.read(chunk)
+                if (read < 0) break
+                total += read
+                if (total > MAX_BACKUP_BYTES) throw backupOversize(total)
+                buffer.write(chunk, 0, read)
+            }
+            buffer.toByteArray()
+        }
+        return bytes.toString(Charsets.UTF_8).removePrefix("\uFEFF")
+    }
+
+    private fun backupOversize(bytes: Long): InvalidBackupException {
+        val mb = bytes / 1024 / 1024
+        val limitMb = MAX_BACKUP_BYTES / 1024 / 1024
+        return InvalidBackupException("备份文件过大（约 ${mb}MB），单次恢复上限 ${limitMb}MB")
     }
 
     /**

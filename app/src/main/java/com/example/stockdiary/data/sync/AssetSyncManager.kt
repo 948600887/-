@@ -670,9 +670,18 @@ object AssetSyncManager {
                 .distinct()
             val stockManager = StockDataManager.getInstance(context)
             val networkAvailable = stockManager.isNetworkAvailableNow()
+            // 批量阶段也必须受本轮预算管辖：它跑在逐标的扇出与看门狗**之前**，
+            // 从前这里没有任何预算口径——调用方已经拖到预算边缘时，这一批仍会照发，
+            // 单次请求最长吃满 callTimeout(20s)，把整轮推过 SyncBudget 记录的
+            // 「~83s 被系统 LMK 静默击毙」线（真机形态：转圈很久然后闪退）。
+            val batchDeadline = if (enforceTimeLimit) startTime + timeLimitMs else Long.MAX_VALUE
             val batchPriceMap: Map<String, AssetPrice> = if (batchStockCodes.isNotEmpty()) {
-                UnifiedPriceService.prewarmStockPrices(batchStockCodes, forceRefresh, networkAvailable)
-                    .getOrDefault(emptyMap())
+                UnifiedPriceService.prewarmStockPrices(
+                    batchStockCodes,
+                    forceRefresh,
+                    networkAvailable,
+                    deadlineMs = batchDeadline
+                ).getOrDefault(emptyMap())
             } else {
                 emptyMap()
             }
@@ -709,9 +718,13 @@ object AssetSyncManager {
                 .distinct()
             // 截止点必须传进去：预取阻塞在 OkHttp 里、看门狗要等它跑完才启动，
             // 不传预算它可以把整轮刷新（70s 手动 / 9min 后台）吃光在请求超时上。
-            val cryptoDeadline = if (enforceTimeLimit) startTime + timeLimitMs else Long.MAX_VALUE
+            // 加密批量与股票批量共用同一个本轮截止点（batchDeadline）。
+            // 预算已尽时**不再启动**：它的片间检查只在两片之间生效，第一片发出去
+            // 至少再吃 20s，正好把整轮推过 LMK 线。
+            val cryptoBudgetLeft = batchCryptoCodes.isNotEmpty() && networkAvailable &&
+                System.currentTimeMillis() < batchDeadline
             val cryptoPriceMap: Map<String, AssetPrice> =
-                if (batchCryptoCodes.isNotEmpty() && networkAvailable) {
+                if (cryptoBudgetLeft) {
                     // 必须带上本轮上下文：prewarmCryptoPrices 用 RoundSourceFailureScope
                     // 读轮次 ID 记源统计。批量预取在逐标的扇出的 withContext 之外，
                     // 从前没这层 → roundId 取默认 0 → 统计写进 0 号桶，轮次汇总按
@@ -720,10 +733,13 @@ object AssetSyncManager {
                         UnifiedPriceService.prewarmCryptoPrices(
                             batchCryptoCodes,
                             forceRefresh,
-                            deadlineMs = cryptoDeadline
+                            deadlineMs = batchDeadline
                         ).getOrDefault(emptyMap())
                     }
                 } else {
+                    if (batchCryptoCodes.isNotEmpty() && networkAvailable) {
+                        AppLogger.w("批量预取加密货币已达时间预算，跳过本次预取（回落逐标的/下一轮）", TAG)
+                    }
                     emptyMap()
                 }
             AppLogger.i(

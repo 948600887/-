@@ -111,6 +111,26 @@ class UnifiedPriceServiceBatchTest {
     }
 
     /**
+     * 预算已尽：不发这一批，直接返回空 map 让逐标的走多源兜底。
+     *
+     * 回归背景：批量预取跑在逐标的扇出与看门狗**之前**，从前它完全不受预算管辖。
+     * 调用方已经拖到预算边缘时这一批仍照发，单次请求最长吃满 callTimeout(20s)，
+     * 把整轮推过 `SyncBudget` 记录的「~83s 被系统 LMK 静默击毙」那条线。
+     */
+    @Test
+    fun prewarmStockPrices_pastDeadline_skipsWithoutTouchingNetwork() = runBlocking {
+        val result = UnifiedPriceService.prewarmStockPrices(
+            listOf("sh600519", "sz000001"),
+            forceRefresh = true,
+            networkAvailable = true,
+            deadlineMs = System.currentTimeMillis() - 1
+        )
+        assertTrue(result.isSuccess)
+        assertTrue("超预算必须返回空 map", result.getOrDefault(emptyMap()).isEmpty())
+        verify(exactly = 0) { StockDataManager.getInstance(any()) }
+    }
+
+    /**
      * 请求量落地点：网络可用时整批只委托 getBatchStockDataThroughSina 一次，
      * 内部把 N 个代码分块成 ~⌈N/20⌉ 次新浪请求（该项在 SinaStockAPI 层校验），
      * 上层编排器对每个标的只调用一次预取。

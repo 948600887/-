@@ -304,9 +304,23 @@ object UnifiedPriceService {
     suspend fun prewarmStockPrices(
         codes: List<String>,
         forceRefresh: Boolean,
-        networkAvailable: Boolean
+        networkAvailable: Boolean,
+        /**
+         * 本轮同步的时间预算截止点（epoch ms，默认 [Long.MAX_VALUE] 表示不限）。
+         *
+         * 批量预取发生在逐标的扇出**之前**、看门狗启动**之前**（见 AssetSyncManager），
+         * 从前这里没有任何预算口径：只要调用方已经拖到预算边缘，这一批仍会照发，
+         * 单次请求最长吃满 `callTimeout`（20s），把整轮推过 `SyncBudget` 记录的
+         * 「~83 秒被系统 LMK 静默击毙」那条线。超预算时直接返回空 map，让逐标的
+         * 走多源兜底（正确性不丢），而不是硬发一批必然超时的请求。
+         */
+        deadlineMs: Long = Long.MAX_VALUE
     ): kotlin.Result<Map<String, AssetPrice>> = withContext(Dispatchers.IO) {
         if (!networkAvailable || codes.isEmpty()) return@withContext Result.success(emptyMap())
+        if (System.currentTimeMillis() >= deadlineMs) {
+            AppLogger.w("批量预取 STOCK 已达时间预算，跳过本次预取（回落逐标的/下一轮）", "UnifiedPriceService")
+            return@withContext Result.success(emptyMap())
+        }
         val manager = stockDataManager
             ?: return@withContext Result.failure(
                 IllegalStateException("行情门面未初始化（UnifiedPriceService.init 未调用）")

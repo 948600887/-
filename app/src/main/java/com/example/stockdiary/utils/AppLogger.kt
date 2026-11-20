@@ -9,8 +9,9 @@ import java.io.FileWriter
 import java.io.BufferedWriter
 import java.io.IOException
 import java.util.ArrayDeque
+import java.time.Instant
 import java.time.LocalDateTime
-import java.time.format.DateTimeFormatter
+import java.time.ZoneId
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
@@ -24,11 +25,19 @@ object AppLogger {
     /**
      * 一条待落盘日志（**未格式化**）。
      *
-     * 时间戳在写盘线程落笔时才取：从前在调用线程取 `LocalDateTime.now()`，
-     * 一次全量同步的日志在队列里排 2 秒甚至更久，落盘时间与调用时间差出几个批次，
-     * 逐条日志的先后次序会被时间戳说反。
+     * [epochMillis] 在**入队时**取一次 `System.currentTimeMillis()`，落盘时只做格式化。
+     *
+     * 为什么不能像从前那样「写盘线程统一取一次时间戳」：flush 是 2 秒合并批次，
+     * 一批几百上千行会共用同一个时间戳。真机诊断里实测 **1000 行落在同一毫秒**
+     * （51602 行日志只有 8168 个唯一时间戳），同批内的先后顺序、每步耗时全部失真，
+     * 而 OkHttp 那行明明写着 `411ms`。入队取毫秒只是一次纳秒级读，代价可忽略。
      */
-    private data class LogRecord(val level: String, val tag: String, val message: String) {
+    internal data class LogRecord(
+        val level: String,
+        val tag: String,
+        val message: String,
+        val epochMillis: Long = System.currentTimeMillis()
+    ) {
         fun render(timestamp: String): String = "[$timestamp] [$level/$tag] $message"
     }
 
@@ -66,6 +75,35 @@ object AppLogger {
     private const val FORCE_FLUSH_WAIT_MS = 500L
 
     private val logTimestampFormatter = DateFormats.ISO_DATETIME_MILLIS_FORMATTER
+
+    /** epoch 毫秒 → 日志时间戳（`yyyy-MM-dd HH:mm:ss.SSS`），按设备本地时区 */
+    internal fun formatEpochMillis(epochMillis: Long): String =
+        LocalDateTime.ofInstant(Instant.ofEpochMilli(epochMillis), ZoneId.systemDefault())
+            .format(logTimestampFormatter)
+
+    /**
+     * 给一批记录分配时间戳，**逐条**对应各自入队时刻。
+     *
+     * 连续同毫秒的条目复用上一次的格式化结果（省掉重复 format），跨毫秒必重新格式化 ——
+     * 这样既不会退化成「整批一个时间戳」，也不会为几百条同毫秒日志各做一次格式化。
+     *
+     * 抽成 internal 纯函数是为了能被单测钉住：同一批里不同毫秒必须得到不同时间戳、
+     * 顺序必须与入队顺序一致。这条正是诊断里丢掉的属性。
+     */
+    internal fun allocateTimestamps(records: List<LogRecord>): List<String> {
+        if (records.isEmpty()) return emptyList()
+        val result = ArrayList<String>(records.size)
+        var lastMillis = Long.MIN_VALUE
+        var lastTimestamp = ""
+        for (record in records) {
+            if (record.epochMillis != lastMillis) {
+                lastTimestamp = formatEpochMillis(record.epochMillis)
+                lastMillis = record.epochMillis
+            }
+            result.add(lastTimestamp)
+        }
+        return result
+    }
 
     private var appContext: Context? = null
 
@@ -189,7 +227,7 @@ object AppLogger {
     
     private fun queueLog(level: String, tag: String, message: String) {
         try {
-            // 时间戳不在这里取：由写盘线程在真正写文件那一刻统一生成（见 [flushLogs]）
+            // 时间戳在构造 LogRecord 时取（毫秒）：交给写盘线程统一取会把整批压成同一时刻
             val record = LogRecord(level, tag, message)
 
             // 达到上限：丢弃最旧、保留最新（崩溃前后最新段最该保留），并立即落盘一次，
@@ -289,12 +327,13 @@ object AppLogger {
                 // 超过 8MB 先轮转（归档保留 4 份），再追加本批日志
                 prepareLogFile(logFile)
                 try {
-                    // 写盘线程统一取一次时间戳：同一批日志时间戳一致，且反映真实落盘时刻
-                    val timestamp = LocalDateTime.now().format(logTimestampFormatter)
+                    // 时间戳逐条取各自入队时刻（见 LogRecord）：同批 1000 行曾共用同一毫秒，
+                    // 同批内的先后与每步耗时全部失真。格式化仍在写盘线程做，不占调用方线程。
+                    val timestamps = allocateTimestamps(logsToWrite)
                     FileWriter(logFile, true).use { fileWriter ->
                         BufferedWriter(fileWriter).use { writer ->
-                            for (log in logsToWrite) {
-                                writer.write(log.render(timestamp))
+                            for (index in logsToWrite.indices) {
+                                writer.write(logsToWrite[index].render(timestamps[index]))
                                 writer.newLine()
                                 written++
                             }

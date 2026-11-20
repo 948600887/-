@@ -124,4 +124,74 @@ class AppLoggerTest {
 
         assertEquals("a\nb\n", File(dir, "app.log.1").readText())
     }
+
+    // ---- 时间戳必须逐条对应入队时刻 ----
+    //
+    // 回归背景：真机诊断 51602 行日志只有 8168 个唯一时间戳，最夸张一次 1000 行
+    // 共用同一毫秒 —— 因为旧实现是「写盘线程给整批取一次时间」。同批内的先后顺序、
+    // 每步耗时全部失真，而 OkHttp 行本身写着 411ms。
+
+    private fun record(level: String, message: String, epochMillis: Long): AppLogger.LogRecord =
+        AppLogger.LogRecord(level = level, tag = "Test", message = message, epochMillis = epochMillis)
+
+    @Test
+    fun allocateTimestamps_跨毫秒逐条递增且与入队顺序一致() {
+        val base = 1_763_000_000_000L
+        val records = listOf(
+            record("DEBUG", "a", base),
+            record("DEBUG", "b", base + 1),
+            record("DEBUG", "c", base + 2),
+        )
+
+        val timestamps = AppLogger.allocateTimestamps(records)
+
+        assertEquals(3, timestamps.size)
+        assertEquals("三条不同毫秒必须得到三个不同时间戳", 3, timestamps.toSet().size)
+        // 固定格式 `yyyy-MM-dd HH:mm:ss.SSS` 的字典序即时间序
+        assertTrue(timestamps[0] < timestamps[1])
+        assertTrue(timestamps[1] < timestamps[2])
+    }
+
+    @Test
+    fun allocateTimestamps_同一毫秒复用_但顺序仍与记录一一对应() {
+        val base = 1_763_000_000_000L
+        // 故意乱序：第二条比第一条早 500ms，证明不是「整批取一个值」
+        val records = listOf(
+            record("DEBUG", "later", base + 500),
+            record("DEBUG", "earlier", base),
+            record("DEBUG", "same-as-later", base + 500),
+        )
+
+        val timestamps = AppLogger.allocateTimestamps(records)
+
+        assertEquals(3, timestamps.size)
+        assertEquals(timestamps[0], timestamps[2])
+        assertTrue("第 2 条记录更早，其时间戳必须更小", timestamps[1] < timestamps[0])
+    }
+
+    @Test
+    fun allocateTimestamps_一千条不退化成一整批同一时间戳() {
+        // 旧实现下这里只会有 1 个唯一值
+        val base = 1_763_000_000_000L
+        val records = (1..1000).map { record("DEBUG", "line$it", base + it) }
+
+        val timestamps = AppLogger.allocateTimestamps(records)
+
+        assertEquals(1000, timestamps.size)
+        assertEquals("1000 条各差 1ms 必须有 1000 个唯一时间戳", 1000, timestamps.toSet().size)
+    }
+
+    @Test
+    fun allocateTimestamps_空列表返回空() {
+        assertTrue(AppLogger.allocateTimestamps(emptyList()).isEmpty())
+    }
+
+    @Test
+    fun formatEpochMillis_格式为yyyy_MM_dd_HH_mm_ss_SSS() {
+        val formatted = AppLogger.formatEpochMillis(1_763_000_000_123L)
+        assertTrue(
+            "实际输出: $formatted",
+            Regex("""^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}$""").matches(formatted)
+        )
+    }
 }

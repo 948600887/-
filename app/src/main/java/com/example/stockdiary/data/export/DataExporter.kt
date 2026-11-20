@@ -124,7 +124,7 @@ private val CSV_TIMESTAMP_SUFFIX = Regex("_\\d{8}_\\d{6}$")
  * 进程被杀也不会让文件消失。只有 rename 在个别文件系统上不支持覆盖时，才删旧目标
  * 后重试一次；再失败则退回直接写，保住这次导出。
  *
- * [rename] / [deleteTarget] 可注入，仅用于单测构造 rename / delete 失败分支。
+ * [rename] / [moveAside] 可注入，仅用于单测构造 rename / 挪走旧文件失败分支。
  *
  * @return true 表示通过原子 rename 落盘；false 表示走了删后重试或直接写兜底。
  */
@@ -132,7 +132,7 @@ internal fun writeAtomically(
     target: File,
     text: String,
     rename: (File, File) -> Boolean = { from, to -> from.renameTo(to) },
-    deleteTarget: (File) -> Boolean = { it.delete() }
+    moveAside: (File, File) -> Boolean = { from, to -> from.renameTo(to) }
 ): Boolean {
     val parent = target.parentFile ?: error("导出目标没有父目录: $target")
     // 随机后缀：同一秒内两次同前缀导出不会争用同一个 .tmp
@@ -141,9 +141,27 @@ internal fun writeAtomically(
         tmp.writeText(text)
         if (rename(tmp, target)) return true
 
-        // rename 不支持覆盖已存在目标（部分文件系统）：删旧目标后重试一次
-        if (target.exists() && deleteTarget(target) && rename(tmp, target)) {
-            return false
+        // rename 不支持覆盖已存在目标（部分文件系统）：先把旧目标**改名**成 .bak，
+        // 成功替换就删 .bak，失败就还原。
+        //
+        // 从前这里是「先删旧目标、再 rename」——一旦 rename 与随后的直接写都失败，
+        // 用户上一份导出（可能就是唯一的诊断报告）就凭空消失了，而且删的正是排障线索。
+        if (target.exists()) {
+            val backup = File(parent, "${target.name}.bak")
+            backup.delete()
+            if (moveAside(target, backup)) {
+                if (rename(tmp, target)) {
+                    backup.delete()
+                    return false
+                }
+                // 替换仍失败：把旧内容还原回去。还原也失败就保留 .bak 不删——
+                // 宁可留两个文件，也不能让旧内容消失。
+                if (!moveAside(backup, target)) {
+                    AppLogger.w("导出原子替换失败且旧文件未能还原，旧内容保留在 ${backup.name}", "DataExporter")
+                }
+            }
+            // 连改名都做不到（目标被占用 / 权限不足）：不主动删旧文件，
+            // 退到下面的直接覆盖写——写坏了也比「先删掉、再写失败」强。
         }
 
         // 仍失败（权限/占用）：退回直接写，别丢这次导出，再清 tmp

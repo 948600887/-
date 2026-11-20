@@ -76,8 +76,8 @@ class AtomicWriteTest {
                 )
                 true
             },
-            // 只要清理路径被走到就失败：正常覆盖不应删除目标
-            deleteTarget = { throw AssertionError("rename 成功时不应删除目标文件") }
+            // 只要「挪走旧文件」的路径被走到就失败：正常覆盖不应碰目标
+            moveAside = { _, _ -> throw AssertionError("rename 成功时不应挪走目标文件") }
         )
 
         assertTrue(ok)
@@ -107,21 +107,39 @@ class AtomicWriteTest {
     }
 
     @Test
-    fun `rename失败且delete失败时退回直接写_不丢本次导出`() {
+    fun `rename失败且旧目标无法挪走时退回直接写_不丢本次导出`() {
         val target = File(tmp.root, "assets_1.csv").apply { writeText("旧的完整版") }
-        var deleteCalled = false
+        var moveAttempted = false
 
         val ok = writeAtomically(
             target,
             "新的完整版",
             rename = { _, _ -> false },
-            deleteTarget = { deleteCalled = true; false }
+            // 旧目标被占用 / 权限不足：连改名都做不到
+            moveAside = { _, _ -> moveAttempted = true; false }
         )
 
         assertFalse(ok)
-        assertTrue("delete 失败分支必须真的尝试过删除", deleteCalled)
+        assertTrue("必须真的尝试过把旧目标挪走", moveAttempted)
         assertEquals("新的完整版", target.readText())
         assertTrue("直接写兜底后 tmp 不能残留", lingeringTmpFiles().isEmpty())
+    }
+
+    @Test
+    fun `旧目标挪走但替换失败时旧内容被还原_而不是被删掉`() {
+        val target = File(tmp.root, "report.txt").apply { writeText("旧的完整版") }
+
+        val ok = writeAtomically(
+            target,
+            "新的完整版",
+            rename = { _, _ -> false }
+        )
+
+        // 走兜底直接写：旧文件先被挪成 .bak、失败后必须被还原，不能凭空消失
+        assertFalse(ok)
+        assertEquals("新的完整版", target.readText())
+        assertFalse("旧文件应被还原，不应残留 .bak", File(tmp.root, "report.txt.bak").exists())
+        assertTrue(lingeringTmpFiles().isEmpty())
     }
 
     @Test
@@ -131,8 +149,7 @@ class AtomicWriteTest {
         val ok = writeAtomically(
             target,
             "新的完整版",
-            rename = { _, _ -> false },
-            deleteTarget = { it.delete() }
+            rename = { _, _ -> false }
         )
 
         assertFalse(ok)

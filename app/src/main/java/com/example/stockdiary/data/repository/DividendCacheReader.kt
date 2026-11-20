@@ -18,6 +18,20 @@ internal const val NEGATIVE_RESULT_TTL = 7L * 24 * 60 * 60 * 1000
 internal const val STALE_CEILING_MS = 30L * 24 * 60 * 60 * 1000
 
 /**
+ * `IN (:symbols)` 的分片大小。
+ *
+ * SQLite 的 IN 子句变量个数有上限：Android ≤11 编译默认 **999**，Android 12+（SQLite ≥3.32）
+ * 为 32766。本项目 `minSdk = 26`，所以 999 那条是真会发生在真实设备上的。
+ *
+ * 从前这里只有一句注释「240 个远低于 999 上限」，没有分片——标的过千时整批抛
+ * `SQLiteException: too many SQL variables`，而这条链路上三层调用都没有 try/catch，
+ * 「预计收入」与日历分红会**整块永久失效**（每次进页面都失败，用户无自救）。
+ * 同仓 [com.example.stockdiary.data.importer.HoldingSnapshotService] 早已按 500 分片，
+ * 这里对齐同一口径。
+ */
+internal const val SQL_IN_CHUNK = 500
+
+/**
  * 分红缓存读取（内存 Map + Room + 「抓过」时间戳三层判定）。
  *
  * 从 [DividendRepository] 外提：这里回答「这份数据能不能直接复用」，
@@ -84,8 +98,9 @@ internal class DividendCacheReader(
         }
         if (needDb.isEmpty()) return@withContext out
 
-        // 一次 IN 查询取代 N 次按 symbol 查（240 个远低于 SQLite 的 999 变量上限）
-        val rowsBySymbol = dao.getBySymbols(needDb)
+        // 分片 IN 查询取代 N 次按 symbol 查；分片是为了不撞 SQLite 的变量个数上限（见 [SQL_IN_CHUNK]）
+        val rowsBySymbol = needDb.chunked(SQL_IN_CHUNK)
+            .flatMap { chunk -> dao.getBySymbols(chunk) }
             .groupBy { StockCodeManager.normalizeSymbol(it.symbol) }
 
         for (symbol in needDb) {

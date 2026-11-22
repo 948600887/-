@@ -239,12 +239,14 @@ object HoldingSnapshotParser {
         val head = line.trimStart().takeWhile { !it.isWhitespace() }
         val digits = head.filter { it.isDigit() }
         if (digits.length != 6 || !SIX_DIGIT.matches(digits)) return null
-        // 别把表头数字或日期当代码：日期含 "-"，已被上面过滤；
-        // 这里再要求 6 位且首位是合法市场前缀。
-        // 首位合法集合：0/3 深市（含创业板）、1 国债/基金、4/8 北交所与老三板、
-        // 5/6/9 沪市（9 含沪市B股 900xxx）、**2 深市B股 200xxx** ——
-        // 少了 2 的话，一码通持仓里的 B 股会被整条跳过（有 incomplete 兜底不会错数，但导不进）
-        if (digits.first() !in "0123456789") return null
+        // 别把表头数字或日期当代码：日期含 "-"，已被上面过滤。
+        //
+        // **刻意不做首位白名单**：一码通持有里 7 开头是配股 / 可转债申购 / 优先股
+        // （如 733xxx），2 是深市 B 股（200xxx），收窄就会把这些整条丢掉。
+        // 曾经这里写过一句 `first() !in ...` 的判断，但它对所有 0~9 都放行（恒为真），
+        // 注释却声称做了白名单校验 —— 「看着在拦、实际不拦」比不写更危险，已删除。
+        // 是不是真代码由上层用上下文判定（名称行 + 数量行），判不出来就进 incomplete
+        // 让用户看见，绝不在解析层静默丢弃整行。
         return digits
     }
 

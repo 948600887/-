@@ -1,6 +1,7 @@
 package com.example.stockdiary.common
 
 import java.time.format.DateTimeFormatter
+import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -61,7 +62,15 @@ object DateFormats {
     private val formatterCache = ConcurrentHashMap<String, DateTimeFormatter>()
 
     fun ofPattern(pattern: String): DateTimeFormatter =
-        formatterCache.getOrPut(pattern) { DateTimeFormatter.ofPattern(pattern) }
+        formatterCache.getOrPut(pattern) {
+            // 必须锁 Locale.ROOT：不传 locale 时用的是 Locale.getDefault(FORMAT)，
+            // 而 DateTimeFormatter 的 DecimalStyle 是本地化的 —— 阿拉伯/波斯语系统会把
+            // "yyyy-MM-dd" 写成 "٢٠٢٦-١١-٢٢"。后果全是静默的：SnapshotDao 的 date GLOB
+            // 自检把这些行判成脏行、历史区间查询返回空、导出 CSV 不可解析，
+            // 且切换语言前后写入的行互不匹配。本项目所有 pattern 都是纯数字
+            // （没有 MMM/EEEE 这类受 locale 影响的字段），ROOT 不会把中文变成英文。
+            DateTimeFormatter.ofPattern(pattern, Locale.ROOT)
+        }
 
     // ---- 预构造的 DateTimeFormatter（热点路径直接引用，零构造开销） ----
     // 全部走 ofPattern：保证静态入口与动态入口收敛到同一实例，全 App 一个 pattern 一份。

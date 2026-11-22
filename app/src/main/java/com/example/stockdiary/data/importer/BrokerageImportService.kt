@@ -282,14 +282,16 @@ class BrokerageImportService internal constructor(private val context: Context) 
         }
 
     private suspend fun readBytes(uri: Uri): ByteArray = withContext(Dispatchers.IO) {
-        val input = context.contentResolver.openInputStream(uri)
-            ?: throw IllegalStateException("无法读取文件")
-
-        // 第一道闸：按 provider 声明的大小快速拒绝（本地文件与多数网盘 provider 都提供 statSize）
+        // 第一道闸：按 provider 声明的大小快速拒绝（本地文件与多数网盘 provider 都提供 statSize）。
+        // **必须在 openInputStream 之前**：超限时抛异常若发生在开流之后，刚打开的那个流
+        // 就没人关（`input.use{}` 还没进入）—— 每试一次超大文件泄漏一个 FD。
         val declared = runCatching {
             context.contentResolver.openFileDescriptor(uri, "r")?.use { it.statSize }
         }.getOrNull() ?: -1L
         if (declared > MAX_IMPORT_BYTES) throw oversize(declared)
+
+        val input = context.contentResolver.openInputStream(uri)
+            ?: throw IllegalStateException("无法读取文件")
 
         // 第二道闸：不信任 statSize（可能为 -1 或撒谎）。边读边计数、超限立刻停，
         // 峰值内存最多是「上限 + 一个 8KB 缓冲块」，不会先把 200MB 读进来再判。
@@ -575,9 +577,22 @@ class BrokerageImportService internal constructor(private val context: Context) 
             }
             try {
                 // 事务内处理单笔：先去重，再写持仓 + 写流水。
-                // 抽出 commitTransaction 仅为可单测；事务边界与原来完全一致。
-                val added = db.withTransaction { commitTransaction(t) }
-                if (added) success++ else skippedDup++
+                // 三态返回：APPLIED 计入成功、DUPLICATE 计入跳过、REJECTED（卖超）进 failures。
+                // 从前 Boolean 把后两者并成一个 false 全算「跳过重复」，卖超那笔既不写流水、
+                // 也不报错，用户以为是导入过，实际永久丢失。
+                when (db.withTransaction { commitTransactionOutcome(t) }) {
+                    CommitOutcome.APPLIED -> success++
+                    CommitOutcome.DUPLICATE -> skippedDup++
+                    CommitOutcome.REJECTED -> {
+                        failures.add(
+                            RowFailure(
+                                t.rowNumber,
+                                "卖出数量超过当前持仓，已跳过（请检查是否有漏导的买入）"
+                            )
+                        )
+                        failed++
+                    }
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -598,16 +613,30 @@ class BrokerageImportService internal constructor(private val context: Context) 
     }
 
     /**
+     * 单笔提交的三种结局。
+     *
+     * 从前只有一个 Boolean：`false` 同时表示「库内去重跳过」与「卖超被拒」，
+     * 调用方一律计入 `skippedDup` —— 卖超那笔既不写流水、也不进 failures，
+     * 用户看到的是「跳过重复」，实际这笔永久丢失且无从发现。
+     * 三态分开后才能把「拒绝」单独报给用户。
+     */
+    internal enum class CommitOutcome { APPLIED, DUPLICATE, REJECTED }
+
+    /**
      * 处理单笔已校验通过的交易：事务内先按「同标的+同方向+同数量+同价格+同日期」去重，
      * 再去重写持仓（加权成本 / 减仓清仓）与写交易流水。
      *
-     * 返回 true=成功写入，false=被去重跳过。抽出为 internal 仅为可单测，
-     * [commit] 在 withTransaction 内调用它，事务边界与原来完全一致。
+     * @return true=成功写入；false=被去重跳过**或**卖超被拒。需要区分两者请用
+     *         [commitTransactionOutcome]（[commit] 已改用三态）。
      */
-    internal suspend fun commitTransaction(t: ParsedTransaction): Boolean {
+    internal suspend fun commitTransaction(t: ParsedTransaction): Boolean =
+        commitTransactionOutcome(t) == CommitOutcome.APPLIED
+
+    /** 同 [commitTransaction]，但返回三态结局，供 [commit] 区分「重复」与「拒绝」。 */
+    internal suspend fun commitTransactionOutcome(t: ParsedTransaction): CommitOutcome {
         // 事务内二次确认去重（防止预览后库内新增同记录）
         if (transactionDao.findDuplicate(t.symbol, t.type, t.quantity, t.price, t.date) != null) {
-            return false
+            return CommitOutcome.DUPLICATE
         }
         val now = System.currentTimeMillis()
         val applied = if (t.type == TransactionType.BUY.value) {
@@ -616,8 +645,8 @@ class BrokerageImportService internal constructor(private val context: Context) 
         } else {
             applySell(t, now)
         }
-        // 卖超被跳过：持仓没动，交易流水也不能写，否则台账与持仓对不上
-        if (!applied) return false
+        // 卖超被拒绝：持仓没动，交易流水也不能写，否则台账与持仓对不上
+        if (!applied) return CommitOutcome.REJECTED
         transactionDao.insert(
             Transaction(
                 symbol = t.symbol,
@@ -629,7 +658,7 @@ class BrokerageImportService internal constructor(private val context: Context) 
                 fee = t.fee
             )
         )
-        return true
+        return CommitOutcome.APPLIED
     }
 
     /** 买入：同 symbol 且同 account 的已有持仓则合并加权成本（含手续费摊入），否则新建资产 */

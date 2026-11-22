@@ -123,7 +123,14 @@ internal class DividendWriter(
         }
         val validRecords = records.filter { record ->
             val amount = record.dividendPerShare.toDoubleOrNull() ?: 0.0
-            if (amount <= 0) {
+            // isFinite 必须先判：`<= 0` 与 `> 上限` 对 NaN 都是 false，NaN 会一路写进
+            // dividend.amount，让年化收入/收息进度整块变 NaN（且 SUM 掺 NaN 后所有历史点一起失真），
+            // 还会让备份被 requireFinitePayload 永久拒绝 —— 用户只能靠重新导入自救。
+            // 同仓价格与资产数值路径都有这道闸，唯此处从前没有。
+            if (!amount.isFinite()) {
+                AppLogger.w("跳过分红金额非有限值: $symbol, 日期=${record.exDividendDate}, 金额=$amount", "DividendRepository")
+                false
+            } else if (amount <= 0) {
                 AppLogger.w("跳过非正分红记录: $symbol, 日期=${record.exDividendDate}, 金额=$amount", "DividendRepository")
                 false
             } else if (amount > maxAmount) {

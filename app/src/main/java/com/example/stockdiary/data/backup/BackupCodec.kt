@@ -241,6 +241,14 @@ object BackupCodec {
         assertUniqueKeys("transactions.id", payload.transactions.map { it.id })
         assertUniqueKeys("stock_basic.code", payload.stockBasics.map { it.code })
         assertUniqueKeys("fund_nav_cache.code", payload.fundNavCaches.map { it.code })
+        // dividend 除了主键，还有一条**业务唯一键**（实体上的 UNIQUE(symbol,date)）。
+        // 主键不重复不代表业务键不重复，而 DividendDao.insertAll 是 REPLACE ——
+        // 同标的同除息日的两行会被静默吃掉一行，界面仍显示「恢复成功」，用户少了一条分红。
+        // 与「主键重复必须拒绝」同口径：在事务外拦掉，绝不写库。
+        assertUniqueKeys(
+            "dividend.(symbol,date)",
+            payload.dividends.map { it.symbol to it.date }
+        )
     }
 
     private fun <T> assertUniqueKeys(table: String, keys: List<T>) {

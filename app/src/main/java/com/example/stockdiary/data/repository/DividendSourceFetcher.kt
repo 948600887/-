@@ -42,7 +42,7 @@ internal class DividendSourceFetcher(
                         exDividendDate = divData.date,
                         dividendPerShare = divData.dividendPerShare.toString(),
                         announceDate = divData.reportDate ?: "",
-                        fiscalYear = divData.date.substring(0, 4),
+                        fiscalYear = divData.date.take(4),
                         paymentDate = divData.paymentDate
                     )
                 }
@@ -69,7 +69,7 @@ internal class DividendSourceFetcher(
                         exDividendDate = divData.date,
                         dividendPerShare = divData.dividendPerShare.toString(),
                         announceDate = divData.reportDate ?: "",
-                        fiscalYear = divData.date.substring(0, 4),
+                        fiscalYear = divData.date.take(4),
                         paymentDate = divData.paymentDate
                     )
                 }

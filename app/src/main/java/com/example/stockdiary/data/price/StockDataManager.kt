@@ -234,7 +234,10 @@ class StockDataManager(
      * 获取数据源实例
      */
     private fun getDataSource(apiName: String): StockDataSource {
-        return dataSourceCache.getOrPut(apiName) {
+        // 必须用 computeIfAbsent 而不是 getOrPut：后者是「先 get、再 put」，两步之间
+        // 另一个线程可以插进来，同一源被构造两次（本文件 KDoc 已记录过这个坑，
+        // 熔断器那边早就改成 computeIfAbsent 了，这里漏了）。
+        return dataSourceCache.computeIfAbsent(apiName) {
             when (apiName) {
                 ApiManager.API_SKILL -> SkillDataSource()
                 ApiManager.API_SINA -> networkStockDataSource("新浪财经") { SinaStockAPI.getStockData(it) }

@@ -279,6 +279,46 @@ class BinanceAccountAPIGateTest {
         assertEquals(Phase.CLOSED, BinanceHostGate.phaseForTesting())
     }
 
+    @Test
+    fun `getPrices 451 只发一次请求不拆批且计入地区封锁`() = runBlocking {
+        var calls = 0
+        val geoBlocked = Interceptor { chain ->
+            calls++
+            Response.Builder()
+                .request(chain.request())
+                .protocol(Protocol.HTTP_1_1)
+                .code(451)
+                .message("Unavailable For Legal Reasons")
+                .body(
+                    """{"code":0,"msg":"Service unavailable from a restricted location."}"""
+                        .toResponseBody("application/json".toMediaType())
+                )
+                .build()
+        }
+
+        val prices = BinanceAccountAPI.getPrices(
+            listOf("BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT"),
+            fakeClient(geoBlocked)
+        )
+
+        assertTrue("451 时整批放弃，结果为空 map", prices.isEmpty())
+        assertEquals(
+            "451 绝不能对半拆批：4 个标的只应发 1 次请求（拆批会放大成 2N-1 次）",
+            1,
+            calls
+        )
+        assertEquals(
+            "451 是地区封锁，必须计入独立的 REGION_BLOCKED 计数，否则封锁期间熔断永不触发",
+            1,
+            BinanceHostGate.consecutiveRegionFailuresForTesting()
+        )
+        assertEquals(
+            "地区封锁也计入连续失败总数（瞬断 + 封锁都算），但它另有更小的独立阈值",
+            1,
+            BinanceHostGate.consecutiveFailuresForTesting()
+        )
+    }
+
     // ---------- 跨路径：账户的失败不计入公开行情 gate（本次解耦的核心目的） ----------
 
     @Test

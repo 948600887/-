@@ -352,9 +352,13 @@ object AppLogger {
             return true
         } catch (e: CancellationException) {
             throw e
-        } catch (e: Exception) {
-            Log.w(LOG_TAG, "日志刷新失败", e)
-            // 意外异常（非 IOException）：没写下去的照样回队，下一轮重试
+        } catch (t: Throwable) {
+            // 必须是 Throwable 而不是 Exception：写盘线程上抛出的 OOM / StackOverflow
+            // 不属于 Exception，会逃到 JVM 的默认未捕获处理器（= GlobalExceptionHandler），
+            // 于是「记一条日志失败」被判成 App 崩溃并走完整个崩溃流程/终止进程 ——
+            // 本该可存活的低内存状态变成闪退，且崩溃现场还会二次触发日志与落盘。
+            // 日志绝不能成为崩溃源：Error 在这里就地吞掉，只把没写下去的回队。
+            Log.w(LOG_TAG, "日志刷新失败", t)
             requeue(logsToWrite, written)
             return true
         } finally {

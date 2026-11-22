@@ -204,6 +204,11 @@ object StockCodeManager {
                 val third = code.getOrNull(2) ?: return false
                 third >= '4'
             }
+            // 10xxxx/11xxxx/12xxxx —— 场外开放式基金的主力号段。
+            // 110022（易方达消费行业）、100038、121003 这类手动添加的场外基金会从前被判成
+            // EXCHANGE_FUND，归一时加 `sz` 前缀走股票行情，取价永久失败、只表现为「跳过」。
+            // 159xxx 是深市 ETF（[isETF] 已排除），不会落进来；15xxxx 场内分级/LOF 保持原判。
+            code.startsWith("11") || code.startsWith("10") || code.startsWith("12") -> true
             else -> false
         }
     }

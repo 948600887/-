@@ -221,7 +221,7 @@ class EastmoneyDividendApiServiceTest {
     // ---------- 降级 ----------
 
     @Test
-    fun `getDividendHistory 接口错误码降级为空列表且只请求一次`() = runBlocking {
+    fun `getDividendHistory 接口错误码必须报失败而不是空列表`() = runBlocking {
         val resp = responseOf("""{"code":1,"message":"param error"}""")
         val call = mockk<Call>()
         every { call.execute() } returns resp
@@ -231,8 +231,9 @@ class EastmoneyDividendApiServiceTest {
 
         val result = service.getDividendHistory("600519")
 
-        assertTrue(result.isSuccess)
-        assertTrue(result.getOrNull()!!.isEmpty())
+        // 错误码 ≠「确实没有分红」。从前这里降级成 success(空列表)，上层据此写
+        // markFetched + 7 天负缓存 —— 一次接口抽风就让这只票的分红停更一周。
+        assertTrue("接口错误码必须报失败，不能被当成「没有分红」", result.isFailure)
         verify(exactly = 1) { client.newCall(any()) }
     }
 

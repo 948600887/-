@@ -95,12 +95,20 @@ class EastmoneyDividendApiService(private val context: Context) {
                         .build()
                     
                     val response = client.newCall(request).execute()
+                    if (!response.isSuccessful) {
+                        val httpCode = response.code
+                        response.close()
+                        // 非 2xx 一律当「源未应答」。绝不能落成「成功且无分红」：
+                        // 上层据此写 markFetched + 7 天负缓存，一次接口抽风就让这只票停更一周。
+                        AppLogger.w("HTTP $httpCode，按源未应答处理", "EastmoneyDividend")
+                        return@withContext Result.failure(IOException("东财分红接口 HTTP $httpCode"))
+                    }
                     val responseText = response.body?.string() ?: ""
                     response.close()
                     
                     if (responseText.isEmpty()) {
-                        AppLogger.w("响应为空", "EastmoneyDividend")
-                        break
+                        AppLogger.w("响应为空，按源未应答处理", "EastmoneyDividend")
+                        return@withContext Result.failure(IOException("东财分红接口返回空响应"))
                     }
                     
                     if (currentPage == 1) {
@@ -112,13 +120,13 @@ class EastmoneyDividendApiService(private val context: Context) {
                     
                     if (resultCode != 0) {
                         AppLogger.w("API返回错误码: $resultCode, 消息: ${jsonData.optString("message")}", "EastmoneyDividend")
-                        break
+                        return@withContext Result.failure(IOException("东财分红接口错误码 $resultCode"))
                     }
                     
                     val result = jsonData.optJSONObject("result")
                     if (result == null) {
-                        AppLogger.w("无result字段", "EastmoneyDividend")
-                        break
+                        AppLogger.w("无result字段，按源未应答处理", "EastmoneyDividend")
+                        return@withContext Result.failure(IOException("东财分红接口缺 result 字段"))
                     }
                     
                     totalPages = result.optInt("pages", 1)
@@ -237,6 +245,14 @@ class EastmoneyDividendApiService(private val context: Context) {
                         .build()
 
                     val response = client.newCall(request).execute()
+                    if (!response.isSuccessful) {
+                        val httpCode = response.code
+                        response.close()
+                        // 非 2xx 一律当「源未应答」。绝不能落成「成功且无分红」：
+                        // 上层据此写 markFetched + 7 天负缓存，一次接口抽风就让这只票停更一周。
+                        AppLogger.w("HTTP $httpCode，按源未应答处理", "EastmoneyDividend")
+                        return@withContext Result.failure(IOException("东财分红接口 HTTP $httpCode"))
+                    }
                     val responseText = response.body?.string() ?: ""
                     response.close()
 

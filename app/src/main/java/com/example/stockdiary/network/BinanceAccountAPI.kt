@@ -13,6 +13,7 @@ import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
+import org.json.JSONException
 import org.json.JSONObject
 import java.io.IOException
 import java.io.InterruptedIOException
@@ -1399,15 +1400,16 @@ object BinanceAccountAPI {
                 }
                 while (queue.isNotEmpty()) {
                     val batch = queue.removeFirst()
-                    val fetched = fetchBatch(batch, httpClient)
+                    val (fetched, httpCode) = fetchBatch(batch, httpClient)
                     if (fetched != null) {
                         result.putAll(fetched)
                         continue
                     }
-                    // 整批失败：币安语义「一个符号非法 → 整批 400」。对半拆开继续试，
-                    // 逐步隔离出坏符号。单条仍失败说明这条本身非法，直接丢弃（不写库、
-                    // 不影响其它批）。
-                    if (batch.size > 1) {
+                    // 只有 400 才拆批：币安语义「一个符号非法 → 整批 400」，对半拆开能逐步
+                    // 隔离出坏符号。451/403（地区封锁）、429（限流）、5xx 拆开只会把请求数
+                    // 放大成 2N-1 个、每片必然失败 —— 147 个标的能打出 147 次请求，
+                    // 正是别处明令禁止的「451 不放大」。这些直接放弃本批，保留已取到的部分。
+                    if (httpCode == 400 && batch.size > 1) {
                         val mid = batch.size / 2
                         // 先压后半、再压前半，保持原批内顺序优先（仅影响排查，不影响结果）
                         queue.addFirst(batch.takeLast(batch.size - mid))
@@ -1455,7 +1457,10 @@ object BinanceAccountAPI {
      *         网络异常不在这里吞——上抛给 [getPrices] 的兜底
      *         （CancellationException 原样重抛，其余记日志并返回已取到的部分）。
      */
-    private suspend fun fetchBatch(batch: List<String>, httpClient: OkHttpClient): Map<String, Double>? {
+    private suspend fun fetchBatch(
+        batch: List<String>,
+        httpClient: OkHttpClient
+    ): Pair<Map<String, Double>?, Int> {
         val encoded = buildSymbolsParam(batch)
         val url = "$PRICE_URL?symbols=$encoded"
 
@@ -1468,17 +1473,35 @@ object BinanceAccountAPI {
             .build()
 
         val response = httpClient.newCall(request).execute()
-        // 记账放在 response.use 之前，所以语义就是「只要拿到 HTTP 响应就算主机可达」：
-        // 含 451 地区封锁、含一个坏符号导致整批 400——与 getAccount / 行情路径统一口径，
-        // 让主机级熔断器复位连续失败计数。非 2xx 不是"主机不可达"，不该顶爆熔断；
-        // 真正的"连不上"由 [getPrices] 的兜底 catch 记 [BinanceHostGate.onNetworkFailure]。
-        BinanceHostGate.onSuccess()
         response.use { resp ->
-            if (!resp.isSuccessful) return null
-            val body = resp.body?.string() ?: return null
+            if (!resp.isSuccessful) {
+                // 451/403 是地区封锁：走独立的 REGION_BLOCKED 计数（它有自己的更小阈值）。
+                // 从前 onSuccess() 放在状态码检查**之前**，会把这批失败记成「主机可达」，
+                // 于是这条路径上的熔断永远攒不够数，封锁期间请求会无限重复。
+                if (resp.code == 451 || resp.code == 403) {
+                    BinanceHostGate.onNetworkFailure(
+                        System.currentTimeMillis(),
+                        FailureType.REGION_BLOCKED
+                    )
+                } else if (resp.code == 400) {
+                    // 400 = 主机应答了、只是某个符号非法：与既有口径一致，仍算「主机可达」
+                    // 并复位连续失败计数（见 BinanceAccountAPIGateTest）。区别只在调用方：
+                    // 400 才值得对半拆批去隔离坏符号，451/429/5xx 绝不拆。
+                    BinanceHostGate.onSuccess()
+                }
+                return null to resp.code
+            }
+            BinanceHostGate.onSuccess()
+            val body = resp.body?.string() ?: return null to resp.code
             val map = mutableMapOf<String, Double>()
-            parsePrices(body).forEach { (symbol, price) -> map[symbol] = price }
-            return map
+            try {
+                parsePrices(body).forEach { (symbol, price) -> map[symbol] = price }
+            } catch (e: JSONException) {
+                // 反爬 / 热点劫持会返回 HTML：解析异常只让本批失败，不能让整条队列崩掉
+                AppLogger.w("批量报价解析失败（非 JSON 响应）: ${e.message}", "BinanceAccountAPI")
+                return null to resp.code
+            }
+            return map to resp.code
         }
     }
 

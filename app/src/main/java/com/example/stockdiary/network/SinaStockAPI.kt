@@ -164,13 +164,17 @@ object SinaStockAPI : StockAPI {
                 val cachedResults = mutableMapOf<String, SinaStockData>()
                 val needRequest = mutableListOf<String>()
                 
-                if (!forceRefresh && context != null) {
+                if (!forceRefresh) {
                     for (code in uniqueStockCodes) {
-                        val cached = PriceCacheManager.getCachedPrice(code)
+                        // 磁盘缓存依赖 context（PriceCacheManager 要它做初始化）
+                        val cached = if (context != null) PriceCacheManager.getCachedPrice(code) else null
                         if (cached != null) {
                             cachedResults[code] = cached
                             stockDataCache.put(code, cached)
                         } else {
+                            // 内存缓存**不依赖 context**：从前整段被 `context != null` 包住，
+                            // 而 StockDataManager 逐只取价时并不传 context —— 单只路径于是连
+                            // 内存里的旧值都读不到，请求失败时少了最后一道兜底。
                             val oldCached = getCachedData(code)
                             if (oldCached != null) {
                                 cachedResults[code] = oldCached

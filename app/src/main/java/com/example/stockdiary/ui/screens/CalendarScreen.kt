@@ -563,7 +563,10 @@ private fun MonthlySummary(
             Spacer(modifier = Modifier.height(8.dp))
             Text(
                 text = when {
-                    isAssetCalendar && latestValue > 0 -> "¥${latestValue.format(2)}"
+                    // 资产日历只显示「最新一天的净值」，负值也带负号照常显示。
+                    // 不能落到下面的 monthlyIncome 分支：那是当月每日净值累加，
+                    // 跨天不可相加（5 天 × 50 万会显示成 250 万，比真实净值大一个数量级）。
+                    isAssetCalendar -> if (snapshotDays > 0) "¥${latestValue.format(2)}" else "—"
                     monthlyIncome >= 0 -> "+¥${monthlyIncome.format(2)}"
                     else -> "-¥${(-monthlyIncome).format(2)}"
                 },

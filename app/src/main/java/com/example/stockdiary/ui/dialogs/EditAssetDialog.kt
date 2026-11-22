@@ -44,6 +44,19 @@ import com.example.stockdiary.utils.StockCodeManager
  * 用户必须能明确指定到底是哪一种。
  */
 @OptIn(ExperimentalMaterial3Api::class)
+/**
+ * 回填输入框用的纯十进制文本。
+ *
+ * **不能用 `Double.toString()`**：它会对 |v| < 1e-3 输出科学计数法
+ * （`0.0006068` → `"6.068E-4"`），而输入框的清洗（`sanitizeDecimalInput`）
+ * 只保留数字与小数点，用户一动这个字段就会把 `"6.068E-4"` 变成 `6.0684`
+ * —— 币安小额持仓被静默放大一万倍。`BigDecimal.valueOf` 走 Double 的最短十进制
+ * 表示再展开，得到 `"0.0006068"`。非有限值（NaN/Infinity）不能交给 BigDecimal，
+ * 会抛 NumberFormatException，按 0 处理。
+ */
+internal fun Double.toPlainInput(): String =
+    if (!isFinite()) "0" else java.math.BigDecimal.valueOf(this).toPlainString()
+
 @Composable
 fun EditAssetDialog(
     asset: Asset,
@@ -54,10 +67,10 @@ fun EditAssetDialog(
     var name by remember { mutableStateOf(asset.name) }
     var symbol by remember { mutableStateOf(asset.symbol ?: "") }
     var account by remember { mutableStateOf(asset.account) }
-    var balance by remember { mutableStateOf(asset.balance.toString()) }
-    var purchasePriceInput by remember { mutableStateOf(asset.purchasePrice.toString()) }
+    var balance by remember { mutableStateOf(asset.balance.toPlainInput()) }
+    var purchasePriceInput by remember { mutableStateOf(asset.purchasePrice.toPlainInput()) }
     var notes by remember { mutableStateOf(asset.notes ?: "") }
-    var interestRateInput by remember { mutableStateOf(asset.interestRate?.toString() ?: "") }
+    var interestRateInput by remember { mutableStateOf(asset.interestRate?.toPlainInput() ?: "") }
     // 币种 / 到期日：一一对应改造新增，编辑时从原资产带出
     var currency by remember { mutableStateOf(asset.currency) }
     var dueDate by remember { mutableStateOf(asset.dueDate) }

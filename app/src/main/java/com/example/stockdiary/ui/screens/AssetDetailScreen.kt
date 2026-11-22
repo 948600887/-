@@ -66,6 +66,13 @@ fun AssetDetailScreen(
     // 订阅汇率版本：详情页的「¥ 当前价」在汇率刷新后立即更新（读普通字段不会触发重组）
     rememberExchangeRateRevision()
 
+    // 每次进入都重读一次本地库。
+    // 详情页 VM 挂在 Activity 级 ViewModelStore 上（key = "detail_$id"），返回后实例不销毁，
+    // 而它的 init 只加载一次 —— 不重读的话，用户刷新行情/改账户后再进同一资产，
+    // 看到的是上次打开时的旧价与旧分红，并且会据此编辑或删除。
+    // loadAssetData 只读库、不打网络（forceRefreshDividend 默认 false）。
+    LaunchedEffect(viewModel) { viewModel.loadAssetData() }
+
     var showEditDialog by remember { mutableStateOf(false) }
     var showAdjustDialog by remember { mutableStateOf(false) }
     var showDeleteDialog by remember { mutableStateOf(false) }

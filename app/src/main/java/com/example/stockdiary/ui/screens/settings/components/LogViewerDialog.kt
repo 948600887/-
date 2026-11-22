@@ -124,7 +124,9 @@ fun LogViewerDialog(onDismiss: () -> Unit) {
 
     // 轮次索引基于原始日志（多份轮转文件拼起来）：先给「哪一轮有多少失败/跳过」，
     // 再让用户点某一轮过滤，比在几千行里 grep 快得多
-    val rawLog = report?.logFiles?.joinToString("\n") { it.content } ?: report?.appLog.orEmpty()
+    val rawLog = remember(report) {
+        report?.logFiles?.joinToString("\n") { it.content } ?: report?.appLog.orEmpty()
+    }
     val roundIndex = remember(rawLog) { LogDiagnostics.buildRoundIndex(rawLog) }
 
     Dialog(

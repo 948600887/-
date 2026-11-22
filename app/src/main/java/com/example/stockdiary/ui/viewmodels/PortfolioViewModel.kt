@@ -226,7 +226,20 @@ class PortfolioViewModel(private val container: AppContainer) : ViewModel() {
     }
 
     fun loadDividendIncome(stockAssets: List<Asset>) {
-        if (stockAssets.isEmpty()) return
+        // 空组合必须显式清零：概览卡在「只剩负债」时仍会渲染（displayAssets 含负债），
+        // 直接 return 会让删干净之前的年度分红一直挂在中资产 ¥0 的卡片下面，
+        // 与首页同场景（DashboardViewModel 已清零）互相矛盾。
+        if (stockAssets.isEmpty()) {
+            _uiState.update {
+                it.copy(
+                    estimatedAnnualDividend = 0.0,
+                    incomeCalculationStatus = "暂无分红数据",
+                    dividendLoading = false
+                )
+            }
+            hasLoadedDividend = false
+            return
+        }
 
         val symbols = stockAssets.mapNotNull { it.symbol }.toSet()
         val fingerprint = dividendInputFingerprint(stockAssets)

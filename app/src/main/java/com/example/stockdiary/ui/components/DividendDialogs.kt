@@ -257,7 +257,7 @@ fun DividendDetailDialog(
                                         SingleLineText(
                                             // 除息日只说明「有没有资格拿」，钱到账通常还要等 1~4 周，
                                             // 有发放日就一并标出来，免得被当成到账日
-                                            record.date + (record.payDate?.let { " · 到账 ${it.take(5)}" } ?: ""),
+                                            record.date + (record.payDate?.let { " · 到账 ${it.takeLast(5)}" } ?: ""),
                                             style = MaterialTheme.typography.bodyMedium.copy(fontSize = 13.sp),
                                             fontWeight = FontWeight.Medium
                                         )

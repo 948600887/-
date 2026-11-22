@@ -250,13 +250,20 @@ fun PortfolioScreen(
     // 低价值虚拟货币隐藏：在「显示开关」按类别过滤之上再滤一层。
     // 仅藏「已知价且人民币市值低于阈值」的加密货币；价格未知的不藏（避免误丢真实持仓）。
     // 总资产仍按全量（allAssetsOnly / allLiabilities）算，这里只影响列表与分组头计数。
+    // 汇率版本：所有「按人民币折算」的聚合都必须把它放进 remember 的 key。
+    // Asset.equals 不含汇率，Room 重发同一批资产时 key 判等相等 → 汇率刷新后行内金额
+    // （AssetCards 已订阅 revision）变了，顶部合计/分布/排序却停在旧汇率，同屏两个口径。
+    // 冷启动那次汇率刷新与首帧竞速时最典型（页面已在组合中，没有任何状态变化逼它重算）。
+    val rateRevision = rememberExchangeRateRevision()
     val displayAssets = remember(
         visibleAssets,
         preferences.hideLowValueCrypto,
         preferences.hideUnknownPriceCrypto,
         // 阈值必须进 key：设置里只改阈值、开关不动时，remember 不重算 → 旧阈值继续生效，
         // 用户以为设置没保存（MEMORY.md 同类坑：过滤结果必须随阈值变）
-        preferences.lowValueThreshold()
+        preferences.lowValueThreshold(),
+        // 低价值阈值本身就是按人民币判的：汇率变了某笔币可能跨过/跌破阈值
+        rateRevision
     ) {
         filterLowValueCrypto(
             visibleAssets,
@@ -280,11 +287,11 @@ fun PortfolioScreen(
     val hiddenAssetCount = remember(displayAssets, assets) { assets.size - displayAssets.size }
 
     // 同 DashboardScreen：借款从资产端挪到负债端，净资产数值不变。
-    val totalAssets = remember(allAssetsOnly) { allAssetsOnly.sumTotalValueCny() }
-    val totalLiabilities = remember(allLiabilities) { allLiabilities.sumDebtValueCny() }
+    val totalAssets = remember(allAssetsOnly, rateRevision) { allAssetsOnly.sumTotalValueCny() }
+    val totalLiabilities = remember(allLiabilities, rateRevision) { allLiabilities.sumDebtValueCny() }
     val netAssets = totalAssets - totalLiabilities
 
-    val sortedAssets = remember(assetsOnly, preferences.sortOrder) {
+    val sortedAssets = remember(assetsOnly, preferences.sortOrder, rateRevision) {
         when (preferences.sortOrder) {
             SortOrder.BY_TYPE -> assetsOnly.sortedBy { it.type.ordinal }
             SortOrder.BY_VALUE_DESC -> assetsOnly.sortedByDescending { it.totalValueCny }
@@ -296,8 +303,21 @@ fun PortfolioScreen(
     /**
      * 一级分组（含组间顺序）：金额排序时必须排**分组本身**，不能只排组内资产。
      */
-    val marketGroups = remember(sortedAssets, preferences.sortOrder) {
+    val marketGroups = remember(sortedAssets, preferences.sortOrder, rateRevision) {
         groupAssets(sortedAssets, preferences.sortOrder)
+    }
+
+    // 账户小计预计算：rows 重建（展开/收起、排序、汇率变化）时只查表、不再逐账户求和。
+    // 必须与 rateRevision **同批**改：给 rows 加 revision 后，每次汇率变化都会重建全部 rows，
+    // 不预计算的话这条路径的代价就和「展开/收起」一样高（先抽缓存、后加 revision）。
+    val accountTotals = remember(marketGroups, rateRevision) {
+        buildMap {
+            marketGroups.forEach { group ->
+                group.assets.groupBy { it.account }.forEach { (account, list) ->
+                    put("${group.market.name}|$account", list.sumOf { it.totalValueCny })
+                }
+            }
+        }
     }
 
     /**
@@ -307,7 +327,9 @@ fun PortfolioScreen(
      * 账户名是用户填的，两次导入填同一个名字就会混在一起。
      * 展开/收起只影响要不要把资产行放进去，各级头始终在。
      */
-    val rows = remember(marketGroups, liabilities, expandedAccounts, preferences.sortOrder) {
+    val rows = remember(
+        marketGroups, liabilities, expandedAccounts, preferences.sortOrder, rateRevision
+    ) {
         buildList {
             // 负债组与市场组一起进同一套组间排序：金额一律按**绝对值**比较
             // （币安借币以负余额存储、负债类型存正数，只有绝对值才和资产组同尺度）。
@@ -366,7 +388,8 @@ fun PortfolioScreen(
                         val header = PortfolioRow.AccountHeader(
                             account = account,
                             assetCount = list.size,
-                            totalValue = list.sumOf { it.totalValueCny },
+                            // 查预计算表，不再逐账户 sumOf（见 accountTotals 的说明）
+                            totalValue = accountTotals["${group.market.name}|$account"] ?: 0.0,
                             market = group.market
                         )
                         add(header)

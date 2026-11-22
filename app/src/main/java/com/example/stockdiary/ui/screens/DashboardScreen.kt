@@ -73,20 +73,24 @@ fun DashboardScreen(
             AssetType.CRYPTO.takeIf { preferences.showCrypto }
         )
     }
+    // 汇率版本：所有按人民币折算的聚合都要进 remember 的 key —— Asset.equals 不含汇率，
+    // Room 重发同一批资产时 key 判等相等，汇率刷新后行内金额变了、合计与分布却停在旧值。
+    // 冷启动那次汇率刷新与首帧竞速时没有任何状态变化逼它重算。
+    val rateRevision = rememberExchangeRateRevision()
     val visibleAssetsOnly = remember(assetsOnly, visibleAssetTypes) {
         assetsOnly.filter { it.type in visibleAssetTypes }
     }
 
     // 总资产/总负债按「欠款」口径拆：借币不算资产（它被算进负债），否则同一笔钱两头扣。
     // 净资产结果与旧口径完全一致（见 Asset.isDebt），历史曲线不跳变。
-    val totalAssets = remember(assetsOnly) { assetsOnly.excludingDebts().sumTotalValueCny() }
+    val totalAssets = remember(assetsOnly, rateRevision) { assetsOnly.excludingDebts().sumTotalValueCny() }
 
     // 分布图必须用「可见资产」做分母：分子是过滤后的，若分母用未过滤的总资产，
     // 用户把某类资产藏起来后各分类百分比之和会小于 100%，看起来像账算错了。
-    val visibleTotalAssets = remember(visibleAssetsOnly) { visibleAssetsOnly.sumTotalValueCny() }
+    val visibleTotalAssets = remember(visibleAssetsOnly, rateRevision) { visibleAssetsOnly.sumTotalValueCny() }
     val hasHiddenAssets = remember(visibleAssetsOnly, assetsOnly) { visibleAssetsOnly.size < assetsOnly.size }
 
-    val totalLiabilities = remember(assets) { assets.debts().sumDebtValueCny() }
+    val totalLiabilities = remember(assets, rateRevision) { assets.debts().sumDebtValueCny() }
     val netAssets = totalAssets - totalLiabilities
 
     // R3：刷新期间冻结「年化收入率」用的分母。价格同步一轮 5~19s，Room 每批落价
@@ -120,7 +124,7 @@ fun DashboardScreen(
     // 原来是 remember{ derivedStateOf{...} }：lambda 里读的是普通 List 而不是 State，
     // derivedStateOf 根本不会自动失效，实际靠外层 remember 的 key 失效 ——
     // 等于白包一层 DerivedState 对象。直接 remember 返回 Map 即可。
-    val assetsByType = remember(visibleAssetsOnly, preferences.sortOrder) {
+    val assetsByType = remember(visibleAssetsOnly, preferences.sortOrder, rateRevision) {
         val sorted = when (preferences.sortOrder) {
             SortOrder.BY_TYPE -> visibleAssetsOnly.toList()
             // 按折算后的人民币排：原币金额跨币种没有可比性

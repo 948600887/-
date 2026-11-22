@@ -9,6 +9,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Savings
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalFocusManager
@@ -40,7 +41,13 @@ fun FireCalculationDialog(
     // FIRE 分子（年分红）是人民币口径，分母也必须折算成人民币；
     // 分母统一用【净资产】口径（非负债资产 − 负债资产），与 AssetSnapshot.fromAssets 一致，
     // 避免账户有贷款/信用卡/房贷等负债时 FIRE 目标被系统性夸大。
-    val metrics = computeFireMetrics(assets, realAnnualIncome, expense)
+    // 汇率版本进 key：metrics 内部走 totalValueCny（依赖 ExchangeRateManager 的普通字段），
+    // 组件不订阅 revision 的话，弹窗里的净资产 / FIRE 进度会停在旧汇率，
+    // 而背后持仓页的明细已经按新汇率重算 —— 同一时刻两个口径。
+    val rateRevision = rememberExchangeRateRevision()
+    val metrics = remember(assets, realAnnualIncome, expense, rateRevision) {
+        computeFireMetrics(assets, realAnnualIncome, expense)
+    }
     val totalValue = metrics.netWorth
     val annualDividend = realAnnualIncome
     val monthlyDividend = metrics.monthlyDividend

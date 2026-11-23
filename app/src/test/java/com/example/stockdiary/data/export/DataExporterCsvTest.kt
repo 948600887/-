@@ -146,6 +146,21 @@ class DataExporterCsvTest {
         assertEquals("\"a\tb\"", escapeCsv("a\tb"))
     }
 
+    /**
+     * LF 不在 [FORMULA_LEAD_CHARS] 里，但仍逃不掉——靠的是「含 `\n` 必加双引号」这道防线。
+     *
+     * 这条断言的意义：防止有人以「LF 也没被防护」为由往引导符集合里塞 `\n`（会把
+     * 多行合法文本也当前导候选），同时钉住「`\n=SUM(A1)` 落盘后 `=` 不在单元格首位」
+     * 这个真正的安全依据 —— 引号一旦被去掉，这条会立刻红。
+     */
+    @Test
+    fun `LF开头的公式串被双引号包裹_首位因此不是等号`() {
+        val escaped = escapeCsv("\n=SUM(A1)")
+        assertEquals("\"\n=SUM(A1)\"", escaped)
+        // 落盘后的第一个字符是引号而非 '='，表格软件不会把它当单元格公式
+        assertEquals('"', escaped.first())
+    }
+
     @Test
     fun `存款的单价列留空而不是 0`() {
         val cells = parseRow(CsvContent.assetRow(deposit))

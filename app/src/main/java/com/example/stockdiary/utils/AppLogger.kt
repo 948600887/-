@@ -706,7 +706,9 @@ object AppLogger {
             try {
                 if (!file.delete()) {
                     allDeleted = false
-                    Log.w(LOG_TAG, "文件删除失败（可能被占用或只读）: ${file.name}")
+                    // 文案要涵盖所有已知原因：「已被别人先删掉」同样会返 false，
+                    // 只说「占用/只读」会把看 logcat 的人引向权限问题这条错路
+                    Log.w(LOG_TAG, "文件删除失败（已被占用、只读，或已被其他进程先删掉）: ${file.name}")
                 }
             } catch (e: Exception) {
                 allDeleted = false

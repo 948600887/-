@@ -296,6 +296,11 @@ fun DashboardConfigSheet(
                             annualDividendCache = localPrefs.annualDividendCache,
                             annualDividendSymbols = localPrefs.annualDividendSymbols,
                             annualDividendFingerprint = localPrefs.annualDividendFingerprint,
+                            // 年度分红记录摘要也必须留着：DashboardViewModel:269/281 与
+                            // PortfolioViewModel:254 都拿「它非空」当缓存有效闸门。整块回默认时
+                            // 漏了这一项，一次「恢复默认设置」就把指数/基金持仓的年度分红缓存判成
+                            // 失效，下次进页面重新联网逐只抓——用户完全预期不到。
+                            annualDividendRecordsVersion = localPrefs.annualDividendRecordsVersion,
                             defaultExpanded = localPrefs.defaultExpanded
                         )
                     )

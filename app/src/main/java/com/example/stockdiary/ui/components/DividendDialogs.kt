@@ -73,6 +73,11 @@ fun DividendDetailDialog(
     // 删除是撤不回的操作，手滑点到就永久丢一条分红记录 —— 必须先确认
     var pendingDeleteRecord by remember { mutableStateOf<Dividend?>(null) }
     var deleteError by remember { mutableStateOf<String?>(null) }
+    // 保存（新增/编辑）的进行中与失败态。与删除路径 L386 的 runCatching 对齐：
+    // 两条写路径口径必须一致，否则「删除有兜底、保存没有」——保存时的 DB 异常会直接
+    // 让 rememberCoroutineScope 崩掉整个 App；失败也没有任何提示，用户以为存上了。
+    var isSavingRecord by remember { mutableStateOf(false) }
+    var saveError by remember { mutableStateOf<String?>(null) }
 
     suspend fun loadRecords() {
         if (symbol.isBlank()) {
@@ -345,16 +350,43 @@ fun DividendDetailDialog(
             assetName = asset.name,
             unitWord = unitWord,
             existing = editingRecord,
-            onDismiss = { showEditDialog = false },
-            onSave = {
-                coroutineScope.launch {
-                    withContext(Dispatchers.IO) {
-                        container.dividendRepository.saveManualDividend(it)
+            isSaving = isSavingRecord,
+            saveError = saveError,
+            onDismiss = { showEditDialog = false; saveError = null },
+            onSave = { dividend ->
+                // 同步守卫：isSavingRecord 必须在 launch **之前**置位，否则连点两下
+                // 时第二个点击还看不到 true，两笔保存并发落库 → 同一条分红出现两行
+                // （与 SettingsViewModel.exportData:167 的守卫写法一致）。
+                if (!isSavingRecord) {
+                    isSavingRecord = true
+                    saveError = null
+                    coroutineScope.launch {
+                        var failure: Throwable? = null
+                        try {
+                            withContext(Dispatchers.IO) {
+                                container.dividendRepository.saveManualDividend(dividend)
+                            }
+                        } catch (e: CancellationException) {
+                            // 取消不吞：弹窗被关掉就会取消这个协程，取消信号必须继续上抛
+                            throw e
+                        } catch (e: Exception) {
+                            AppLogger.e("保存分红失败: ${e.message}", e, "DividendDetail")
+                            failure = e
+                        } finally {
+                            // 成功/失败/取消都必须解锁，否则一次异常之后保存按钮永久禁用
+                            isSavingRecord = false
+                        }
+                        if (failure == null) {
+                            showEditDialog = false
+                            loadRecords()
+                            // 通知上层：年度分红的缓存指纹要作废重算（详见 onRecordsChanged 的 KDoc）
+                            onRecordsChanged()
+                        } else {
+                            // 失败时弹窗留着、红字说明原因：用户改一个字段重试，
+                            // 比关掉弹窗把日期金额全部重填轻得多。
+                            saveError = failure.message ?: "保存分红失败"
+                        }
                     }
-                    showEditDialog = false
-                    loadRecords()
-                    // 通知上层：年度分红的缓存指纹要作废重算（详见 onRecordsChanged 的 KDoc）
-                    onRecordsChanged()
                 }
             }
         )
@@ -415,6 +447,10 @@ private fun DividendEditDialog(
     assetName: String,
     unitWord: String = "股",
     existing: Dividend?,
+    /** 保存进行中：按钮禁用 + 文案变化，保证一次保存只发一次写库 */
+    isSaving: Boolean = false,
+    /** 上层保存失败的提示（null 表示无错）。就地显示成红字，弹窗不关 */
+    saveError: String? = null,
     onDismiss: () -> Unit,
     onSave: (Dividend) -> Unit
 ) {
@@ -470,6 +506,8 @@ private fun DividendEditDialog(
                     keyboardActions = KeyboardActions(
                         onDone = {
                             focusManager.clearFocus()
+                            // 保存中不再受理回车：否则键盘回车是第三条并发写路径
+                            if (isSaving) return@KeyboardActions
                             submitAttempted = true
                             if (errors.isValid) {
                                 onSave(buildDividend(existing, symbol, assetName, amountText, date))
@@ -490,11 +528,22 @@ private fun DividendEditDialog(
                         }
                     }
                 )
+                // 写库失败的红字就地显示（与删除失败同一形状）：弹窗关掉再重开
+                // 会让用户以为「已经存上了」，而错的其实是数据没落库。
+                if (saveError != null) {
+                    Text(
+                        "保存失败：$saveError",
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
             }
         },
         confirmButton = {
             TextButton(
+                enabled = !isSaving,
                 onClick = {
+                    if (isSaving) return@TextButton
                     submitAttempted = true
                     if (!errors.isValid) {
                         when (errors.firstField) {
@@ -505,7 +554,7 @@ private fun DividendEditDialog(
                     }
                     onSave(buildDividend(existing, symbol, assetName, amountText, date))
                 }
-            ) { Text("保存") }
+            ) { Text(if (isSaving) "保存中…" else "保存") }
         },
         dismissButton = {
             TextButton(onClick = onDismiss) { Text("取消") }

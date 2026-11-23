@@ -360,7 +360,11 @@ fun EditAssetDialog(
                                 name = name,
                                 type = selectedType,
                                 symbol = normalizedSymbol.takeIf { it.isNotBlank() },
-                                account = account,
+                                // 账户/备注必须 trim，与添加页 AddAssetForm:790 的口径完全一致（#13）：
+                                // 账户尾随空格会让 (symbol + account) 精确匹配失效——同一个账户
+                                // 被当成两个，加仓不合并、持仓分组也分家；备注的尾空格虽然只影响
+                                // 展示，但同一条数据经「添加」和「编辑」落库后形态不同，排查时极易误判。
+                                account = account.trim(),
                                 balance = balance.toDoubleOrNull() ?: 0.0,
                                 purchasePrice = if (isDeposit) {
                                     1.0
@@ -385,7 +389,8 @@ fun EditAssetDialog(
                                 // 币种 / 到期日：一一对应改造新增写入
                                 currency = currency,
                                 dueDate = dueDate,
-                                notes = notes.takeIf { it.isNotBlank() }
+                                // 与添加页同口径（#13）：先 trim 再判空，避免只输空格时存进一条空白备注
+                                notes = notes.trim().takeIf { it.isNotBlank() }
                             )
                         } catch (e: Exception) {
                             // 保留可操作性：把 loader 复位，否则按钮永久禁用且无提示

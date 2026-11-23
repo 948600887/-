@@ -74,4 +74,22 @@ class FireCalculationTest {
         val metrics = computeFireMetrics(assets, realAnnualIncome = 70000.0, monthlyExpense = 5000.0)
         assertEquals(10.0, metrics.realYield, 1e-6)
     }
+
+    @Test
+    fun 月度生活费未填写时覆盖率与目标一律为零() {
+        // 弹窗层用 0 表示「用户还没填月度生活费」。这里必须确认：0 不会让 fireTarget
+        // 变成 Infinity、也不会让覆盖率冒出一个没有分母的百分比；界面据此显示「—」
+        // 而不是「0.0%」（后者会被读成「真的算过，覆盖率是 0」）。
+        val assets = listOf(
+            Asset(name = "股票A", type = AssetType.STOCK, symbol = "sh600000",
+                account = "账户", balance = 100.0, currentPrice = 10000.0)
+        )
+        val metrics = computeFireMetrics(assets, realAnnualIncome = 50000.0, monthlyExpense = 0.0)
+        assertEquals(0.0, metrics.fireCoverage, 1e-6)
+        assertEquals(0.0, metrics.fireTarget, 1e-6)
+        assertEquals(0.0, metrics.fireProgress, 1e-6)
+        // 收益率与月度收入不依赖月度生活费，仍然要正常算出来
+        assertEquals(5.0, metrics.realYield, 1e-6)
+        assertEquals(50000.0 / 12, metrics.monthlyDividend, 1e-6)
+    }
 }

@@ -357,7 +357,14 @@ fun EditAssetDialog(
                                 else -> ""
                             }
                             asset.copy(
-                                name = name,
+                                // 名称/账户/备注统一 trim，与添加页 AddAssetForm 的构造口径一致：
+                                // 名称尾随空格会让同名资产看起来一样、`.trim()` 后却不等，
+                                // 按名字做分组/匹配/搜索时静默漏行（与账户尾空格同一类问题）。
+                                // 空名怎么办：添加页是 `require(trimmedName.isNotBlank())` 直接拒绝，
+                                // 这里同样不会放行——validateAssetInput 的 `name.isBlank()` 已经在
+                                // 保存前拦下纯空格输入（连「三个空格」也算 blank），
+                                // 所以 trim 之后不可能落进库里一个空名称。
+                                name = name.trim(),
                                 type = selectedType,
                                 symbol = normalizedSymbol.takeIf { it.isNotBlank() },
                                 // 账户/备注必须 trim，与添加页 AddAssetForm:790 的口径完全一致（#13）：

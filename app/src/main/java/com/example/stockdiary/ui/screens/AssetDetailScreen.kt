@@ -207,25 +207,40 @@ fun AssetDetailScreen(
                             }
                             Spacer(modifier = Modifier.height(12.dp))
                             DetailRow("账户", a.account)
-                            // 存款没有「份额」概念：balance 就是本金（元）。
-                            // 原先它掉进 else 分支，于是 10000 元存款被显示成「10000.00 份」——
-                            // 单位是错的，用户会以为自己买了一万份理财，也会怀疑利息算错。
-                            // 这里只改显示口径（金额 + ¥、行标签改「余额」），
-                            // balance 字段语义（本金）与利息计算一律不动。
-                            val isDepositAsset = a.type == AssetType.BANK_DEPOSIT
-                            val holdingText = when {
-                                a.type == AssetType.STOCK -> a.balance.format(0)
-                                // 加密货币数量固定 8 位（保留尾随 0）：与持仓页 formatCryptoQuantity 同口径，
-                                // 否则同一笔资产在两页显示的位数不一样
-                                a.type == AssetType.CRYPTO -> a.balance.formatCryptoQuantity()
-                                isDepositAsset -> "¥" + a.balance.formatMoney()
-                                else -> a.balance.format(2)
+                            // 单位必须按「这条记录的 balance 到底是什么」来选，不能一律挂「份」：
+                            // - 银行存款：balance 是本金（元）→「¥金额」，行标签「余额」；
+                            // - 负债类（贷款/信用卡/房贷/车贷/其他负债）：balance 是欠款金额（元）
+                            //   →「¥金额」，行标签「欠款」。原先它掉进 else 分支，30 万房贷被显示成
+                            //   「300000.00 份」，用户以为自己在还某个「份额」，也会怀疑利息算错；
+                            // - 股票/基金/加密：balance 是真的持仓数量 →「股」/「份」。
+                            //
+                            // 判定用 `type.isLiability` 而**不是** `asset.isDebt`：isDebt 里还包含
+                            // 「余额为负的加密借币」（见 Asset.isDebt），可那笔标的的 balance 是
+                            // **数量**（负数份），单位仍该是「份」——把它显示成「¥-5.00」等于把
+                            // 数量和金额两种量纲混成一个数字，比原来的「-5.00 份」更误导。
+                            val isMoneyAmount = a.type.isLiability || a.type == AssetType.BANK_DEPOSIT
+                            val holdingRowLabel = when {
+                                a.type.isLiability -> "欠款"
+                                a.type == AssetType.BANK_DEPOSIT -> "余额"
+                                else -> "持仓"
                             }
                             DetailRow(
-                                if (isDepositAsset) "余额" else "持仓",
-                                // 股票/基金/加密才有「股/份」单位；存款的 ¥ 金额后面不能再挂份数
-                                if (isDepositAsset) holdingText
-                                else "$holdingText${if (a.type == AssetType.STOCK) "股" else "份"}"
+                                holdingRowLabel,
+                                if (isMoneyAmount) {
+                                    // 金额**不取绝对值**：负债余额本该是正数（欠多少写多少），
+                                    // 历史上也确实存在负值脏行（Asset.init 已不做校验，理由见 Asset.kt），
+                                    // 负号本身就是「这行数据有问题」的信号，藏起来只会更难排查。
+                                    "¥" + a.balance.formatMoney()
+                                } else {
+                                    val quantityText = when (a.type) {
+                                        AssetType.STOCK -> a.balance.format(0)
+                                        // 加密货币数量固定 8 位（保留尾随 0）：与持仓页
+                                        // formatCryptoQuantity 同口径，否则同一笔资产在两页位数不一样
+                                        AssetType.CRYPTO -> a.balance.formatCryptoQuantity()
+                                        else -> a.balance.format(2)
+                                    }
+                                    "$quantityText${if (a.type == AssetType.STOCK) "股" else "份"}"
+                                }
                             )
                             // 价格/市值都带 ¥ 符号，那就必须是人民币口径：
                             // 原币价格要按资产币种折算，不能直接套 ¥

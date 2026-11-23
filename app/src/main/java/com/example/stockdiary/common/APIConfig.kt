@@ -42,9 +42,10 @@ object APIEndpoints {
          * 而 data-api.binance.vision/ticker/24hr?symbol=BTCUSDT 稳定返回 200 + lastPrice。
          */
         const val MARKET_DATA_BASE_URL = "https://data-api.binance.vision/api/v3"
+        // TICKER 仍在使用（BinanceAccountAPI.PRICE_URL 拼它）；`EXCHANGE_INFO`（/exchangeInfo）
+        // 与 `KLINE`（/klines）已零引用，随 BinanceAPI.getPrice/get24hrStats 与 klines
+        // 链一起下线。取价统一走 UnifiedPriceService 的 /ticker/24hr 批量端点。
         const val TICKER = "/ticker/price"
-        const val EXCHANGE_INFO = "/exchangeInfo"
-        const val KLINE = "/klines"
     }
 
     // ===== 汤森 =====

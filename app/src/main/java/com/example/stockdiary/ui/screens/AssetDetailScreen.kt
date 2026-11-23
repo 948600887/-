@@ -207,14 +207,26 @@ fun AssetDetailScreen(
                             }
                             Spacer(modifier = Modifier.height(12.dp))
                             DetailRow("账户", a.account)
+                            // 存款没有「份额」概念：balance 就是本金（元）。
+                            // 原先它掉进 else 分支，于是 10000 元存款被显示成「10000.00 份」——
+                            // 单位是错的，用户会以为自己买了一万份理财，也会怀疑利息算错。
+                            // 这里只改显示口径（金额 + ¥、行标签改「余额」），
+                            // balance 字段语义（本金）与利息计算一律不动。
+                            val isDepositAsset = a.type == AssetType.BANK_DEPOSIT
                             val holdingText = when {
                                 a.type == AssetType.STOCK -> a.balance.format(0)
                                 // 加密货币数量固定 8 位（保留尾随 0）：与持仓页 formatCryptoQuantity 同口径，
                                 // 否则同一笔资产在两页显示的位数不一样
                                 a.type == AssetType.CRYPTO -> a.balance.formatCryptoQuantity()
+                                isDepositAsset -> "¥" + a.balance.formatMoney()
                                 else -> a.balance.format(2)
                             }
-                            DetailRow("持仓", "$holdingText${if (a.type == AssetType.STOCK) "股" else "份"}")
+                            DetailRow(
+                                if (isDepositAsset) "余额" else "持仓",
+                                // 股票/基金/加密才有「股/份」单位；存款的 ¥ 金额后面不能再挂份数
+                                if (isDepositAsset) holdingText
+                                else "$holdingText${if (a.type == AssetType.STOCK) "股" else "份"}"
+                            )
                             // 价格/市值都带 ¥ 符号，那就必须是人民币口径：
                             // 原币价格要按资产币种折算，不能直接套 ¥
                             a.currentPrice?.let { price ->

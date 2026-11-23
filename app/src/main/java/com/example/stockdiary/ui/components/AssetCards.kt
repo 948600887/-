@@ -382,12 +382,17 @@ fun StockAssetItem(
                 asset.type == AssetType.CRYPTO && binanceUnavailable -> "币安暂不可达"
                 else -> "价格待更新"
             }
-            Column(modifier = Modifier.weight(1f), horizontalAlignment = Alignment.End) {
+            // 金额列**不加 weight**（见 SingleLineText 的用法约定）：
+            // 名称和金额都 weight(1f) 时两者同权争夺剩余宽度，长基金名会把
+            // ¥1,234,567.89 挤成两行「¥1,234,5 / 67.89」——金额被折行比名字被省略严重得多。
+            // 这里的取舍与全项目一致：文字可以省略号，金额一个字符都不能少。
+            // maxLines=1 兜住极端情况（超长金额 + 大字号无障碍设置）也不折行。
+            Column(horizontalAlignment = Alignment.End) {
                 // 负债行按「欠多少」取正数展示：借币以负余额存储，直接透出会变成
                 // 「-¥12,000」，组内/组间看起来像负资产，与「负债合计取正」的口径也不一致。
                 val displayValue =
                     if (isLiability) kotlin.math.abs(asset.totalValueCny) else asset.totalValueCny
-                Text(displayValue.formatMoney(), style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold, color = AppTheme.colors.onSurface)
+                Text(displayValue.formatMoney(), style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold, color = AppTheme.colors.onSurface, maxLines = 1)
                 Text(
                     // 状态词（「价格待更新」「退市」「币安暂不可达」）保持原样，不再拼任何相对时间。
                     priceText,

@@ -37,6 +37,61 @@ private data class MonthlyBarGeometry(
     val centerX: Float
 )
 
+/** 相邻两个月份标签之间至少留出的空隙（px，与 AssetTrendChart 的 TREND_LABEL_GAP 同量级）。 */
+private const val MONTHLY_LABEL_GAP = 8f
+
+/**
+ * 选出真正要画出来的月份标签下标。
+ *
+ * ## 为什么需要抽稀
+ *
+ * 改造前每根柱子都无条件 `drawText`，而标签比柱子宽得多（"25年12月" 18px 字号约 40px，
+ * 一根柱子只分到 ~30px）：数据一多（≥6 根）相邻标签就互相压住，整条轴糊成一条黑带，
+ * 一个字都读不出来。用户报的「月度柱状图下面一团黑」就是它。
+ *
+ * ## 策略
+ *
+ * - 每个柱位都装得下（`槽宽 ≥ 标签宽 + 空隙`）→ 全画，信息最全；
+ * - 装不下 → 按 `ceil(count / 最多可画数)` 的步长从 0 起等距抽稀；
+ * - **首尾必画**：第一根和最后一根在不在，决定用户能否一眼看出「数据从哪年到哪年、
+ *   是不是没更新」。末根若与上一个抽稀结果挨得太近（会叠字），就把上一个去掉、
+ *   让末尾单独占位——少一个中间标签，好过丢掉「最后一个月」或让两个字叠成一团。
+ *
+ * 抽稀**只影响标签**：点按选中仍按柱位下标工作，所以被隐掉标签的柱子照样能点开看详情。
+ */
+internal fun pickMonthlyLabelIndices(
+    count: Int,
+    chartWidth: Float,
+    widestLabel: Float
+): List<Int> {
+    if (count <= 0) return emptyList()
+    if (count == 1) return listOf(0)
+    // 尺寸还没测量出来：此刻 Canvas 的 geometry 也是 null、什么都不画，
+    // 这里返回空表比返回全量更诚实（避免以 0 宽算出「只画一个」的假结论被缓存下来）。
+    if (chartWidth <= 0f || widestLabel <= 0f) return emptyList()
+
+    val slot = chartWidth / count
+    val need = widestLabel + MONTHLY_LABEL_GAP
+    if (slot >= need) return (0 until count).toList()
+
+    val maxLabels = (chartWidth / need).toInt().coerceAtLeast(1)
+    val step = kotlin.math.ceil(count.toDouble() / maxLabels).toInt().coerceAtLeast(1)
+    val indices = ArrayList<Int>(maxLabels + 1)
+    var index = 0
+    // 先排前 count-1 根，末根单独处理（见下），避免它既被步长排到又被补一次
+    while (index < count - 1) {
+        indices.add(index)
+        index += step
+    }
+    // 末根永远画；与它太近的那个抽稀结果让位（否则两个标签中心距 < need，直接叠字）
+    val previous = indices.lastOrNull()
+    if (previous != null && (count - 1 - previous) * slot < need) {
+        indices.removeAt(indices.lastIndex)
+    }
+    indices.add(count - 1)
+    return indices
+}
+
 private data class MonthlyChartGeometry(
     val width: Float,
     val height: Float,
@@ -121,6 +176,17 @@ fun MonthlyReturnChart(
     val geometry = remember(monthlyReturns, canvasSize, maxAbs) {
         buildMonthlyChartGeometry(monthlyReturns, canvasSize, maxAbs)
     }
+    // 只算出「要画哪几根标签」，真正的绘制仍在 draw lambda 里（见 pickMonthlyLabelIndices）。
+    // 宽度与标签集变化才重算：选中柱子的重组不会再量一遍文字。
+    val labelIndices = remember(canvasSize.width, labels) {
+        pickMonthlyLabelIndices(
+            count = labels.size,
+            chartWidth = canvasSize.width.toFloat(),
+            widestLabel = labels.maxOfOrNull { labelPaint.measureText(it) } ?: 0f
+        )
+    }
+    // 绘制时逐根柱子判断「这根要不要画标签」，Set 命中比 List.contains 干净
+    val labelIndicesSet = remember(labelIndices) { labelIndices.toSet() }
 
     Column(modifier = modifier) {
         Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
@@ -144,12 +210,16 @@ fun MonthlyReturnChart(
                         topLeft = bar.topLeft,
                         size = bar.size
                     )
-                    drawContext.canvas.nativeCanvas.drawText(
-                        labels[index],
-                        bar.centerX,
-                        chart.height - 16f,
-                        labelPaint
-                    )
+                    // 标签不再跟着柱子逐根画：见 pickMonthlyLabelIndices 的说明，
+                    // 装不下时按步长抽稀，否则整条时间轴会糊成黑带。
+                    if (index in labelIndicesSet) {
+                        drawContext.canvas.nativeCanvas.drawText(
+                            labels[index],
+                            bar.centerX,
+                            chart.height - 16f,
+                            labelPaint
+                        )
+                    }
                 }
             }
 

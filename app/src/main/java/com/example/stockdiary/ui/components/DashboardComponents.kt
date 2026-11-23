@@ -196,6 +196,7 @@ private fun GrowthMetric(label: String, delta: Double?) {
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun AssetDistributionCard(
     assetsByType: Map<AssetType, List<Asset>>,
@@ -221,9 +222,15 @@ fun AssetDistributionCard(
                 // 不应在资产分布里出现负百分比——金额标红、占比记为「负债」。
                 // 设计上负余额加密货币计入总资产而非总负债，这里只修正展示口径，不重分类。
                 val positiveTotal = entries.sumOf { it.second.sumOf { a -> a.totalValueCny }.coerceAtLeast(0.0) }
-                Row(
+                // 用 FlowRow 而不是固定单行 Row：DistributionItem 是固定 width(70.dp)，
+                // 5 种类型就是 350dp + 间距，窄屏（360dp 屏幕减去 32dp 内边距）直接放不下，
+                // 最后 1~2 项被裁到屏幕外——用户看不到「虚拟货币/负债」的占比，还以为没这笔钱。
+                // 换行后有几类就显示几类；SpaceEvenly 在每一行内部仍然均分，
+                // 与原来单行时的视觉一致（参考 ui/components/import/ImportAccountField.kt 的写法）。
+                FlowRow(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceEvenly
+                    horizontalArrangement = Arrangement.SpaceEvenly,
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     entries.forEach { (type, typeAssets) ->
                         val typeValue = typeAssets.sumOf { it.totalValueCny }

@@ -15,6 +15,7 @@ import java.time.ZoneId
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CancellationException
 
@@ -416,6 +417,15 @@ object AppLogger {
     private const val LOG_FILE_NAME = "app.log"
 
     /**
+     * [clearLog] 等待清理任务完成的超时（秒）。
+     *
+     * 正常清空只是清队列 + delete 几个小文件，毫秒级；给 2 秒是留足余量。
+     * 之所以不无限等：调用方在界面线程上（清空日志 / 清除所有数据），
+     * writer 正卡在大批量写盘时无限等会直接 ANR。
+     */
+    internal const val CLEAR_LOG_TIMEOUT_SECONDS = 2L
+
+    /**
      * 截断预判的字节下限。
      *
      * **必须大于「轮转阈值内的常规体积」**。从前取 250KB：裁完仍是 400KB+、高于下限，于是
@@ -563,7 +573,12 @@ object AppLogger {
             // 必须和 flushLogs 串行：二者都在 logExecutor 单线程上跑，submit 排队执行，
             // 避免「flush 的 append」与「这里 writeText("")」交错覆盖
             // —— 否则可能把刚落盘的日志又清空，或清空后又被 append 覆盖成非空。
-            // .get() 阻塞到任务完成，保证调用方 reload 时文件已确实清空（同步语义）。
+            //
+            // 等待**必须带超时**：`get()` 无参是无限阻塞，而调用方是界面线程
+            // （LogDiagnostics 清空日志 / 设置页「清除数据」）。writer 正卡在一次大批量
+            // 写盘（几千行、慢速外置存储）时，界面会一直转圈甚至 ANR。
+            // 2 秒足够正常清空（真正耗时的是 delete 几个小文件），超时也不影响正确性：
+            // 任务已在单线程队列里排队，迟早会执行，只是这次不保证「返回时已清空」。
             logExecutor.submit {
                 try {
                     synchronized(queueLock) { logQueue.clear() }
@@ -576,7 +591,11 @@ object AppLogger {
                 } catch (e: Exception) {
                     Log.w(LOG_TAG, "清空日志失败", e)
                 }
-            }.get()
+            }.get(CLEAR_LOG_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+        } catch (e: TimeoutException) {
+            // 超时不抛给调用方：清空是尽力而为，抛异常会让「清除所有数据」整条流程失败。
+            // 但必须留痕——否则下次看到「日志没清掉」会以为是自己代码写错了。
+            Log.w(LOG_TAG, "清空日志超时(${CLEAR_LOG_TIMEOUT_SECONDS}s)，清理任务仍在后台排队")
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {

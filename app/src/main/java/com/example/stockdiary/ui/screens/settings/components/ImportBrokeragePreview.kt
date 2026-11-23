@@ -11,7 +11,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.HorizontalDivider
@@ -66,7 +66,11 @@ internal fun PreviewStep(
         item {
             PreviewHeaderBlock(state = state, onShowRawText = { showRawText = true })
         }
-        items(txs, key = { it.rowNumber }) { tx ->
+        // key 必须带下标：rowNumber 只是「解析时的行序」，同一行可能被拆成多条记录
+        // （一张截图行识别出两笔成交、或一行同时带错误与建议），此时 rowNumber 重复，
+        // LazyColumn 会直接抛 IllegalArgumentException: Key was already used ——
+        // 整个预览页崩掉，用户连哪一行有问题都看不到。
+        itemsIndexed(txs, key = { index, tx -> "${tx.rowNumber}:$index" }) { _, tx ->
             PreviewTransactionRow(
                 tx = tx,
                 suggestions = state.suggestions[tx.rowNumber].orEmpty(),

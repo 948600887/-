@@ -284,9 +284,17 @@ class SettingsViewModel(
             try {
                 val payload = backupManager.buildPayload()
                 val json = BackupCodec.encode(payload)
+                // 体积闸：必须和恢复侧（readBackupText，硬限 MAX_BACKUP_BYTES）同口径。
+                // 原先导出完全不看大小，于是备份可能「保存成功」但恢复时永远被拒——
+                // 用户以为手里有一份能救命的备份，真出事才发现它读不回来。
+                // 超限就在**写盘之前**停下，交给下面的 catch 删掉 CreateDocument 建出的空文件。
+                // 用 UTF-8 编码后的字节数而不是 json.length：中文 3 字节/字，
+                // 按字符数判会低估近 3 倍，闸门形同虚设。
+                val bytes = json.toByteArray(Charsets.UTF_8)
+                if (bytes.size > MAX_BACKUP_BYTES) throw backupExportOversize(bytes.size.toLong())
                 val output = appContext.contentResolver.openOutputStream(uri)
                     ?: throw IllegalStateException("无法打开所选保存位置，请重新选择目录")
-                output.use { it.write(json.toByteArray(Charsets.UTF_8)) }
+                output.use { it.write(bytes) }
                 val message = "全量备份已保存（资产 ${payload.assets.size} · " +
                     "快照 ${payload.snapshots.size} · 交易 ${payload.transactions.size} · " +
                     "分红 ${payload.dividends.size}）"
@@ -306,8 +314,11 @@ class SettingsViewModel(
                 // 清掉残件：CreateDocument 已经把空文件建出来了
                 runCatching { appContext.contentResolver.delete(uri, null, null) }
                 AppLogger.e("全量备份导出失败: ${e.message}", e, "SettingsVM")
+                // 体积超限这类已经是给用户看的中文，原样透传；其余系统异常包一层中文前缀
+                // 并保留 cause（与 readableBackupError 同一口径，不吞异常）
                 val failure: Result<String> = Result.failure(
-                    IllegalStateException("备份导出失败：${e.message ?: e.javaClass.simpleName}", e)
+                    if (e is InvalidBackupException) e
+                    else IllegalStateException("备份导出失败：${e.message ?: e.javaClass.simpleName}", e)
                 )
                 _uiState.update {
                     it.copy(
@@ -536,6 +547,21 @@ class SettingsViewModel(
         val mb = bytes / 1024 / 1024
         val limitMb = MAX_BACKUP_BYTES / 1024 / 1024
         return InvalidBackupException("备份文件过大（约 ${mb}MB），单次恢复上限 ${limitMb}MB")
+    }
+
+    /**
+     * 导出侧的体积超限提示。
+     *
+     * 与 [backupOversize]（恢复侧）共用同一个上限常量，但措辞不同：
+     * 这里要说清「导出去也恢复不回来」这一后果，否则用户会以为是我们不让他备份。
+     */
+    private fun backupExportOversize(bytes: Long): InvalidBackupException {
+        val mb = bytes / 1024 / 1024
+        val limitMb = MAX_BACKUP_BYTES / 1024 / 1024
+        return InvalidBackupException(
+            "备份数据约 ${mb}MB，超过单次恢复上限 ${limitMb}MB —— " +
+                "这样的文件导出去也恢复不回来，已放弃保存。可先清理历史快照或旧交易再备份"
+        )
     }
 
     /**

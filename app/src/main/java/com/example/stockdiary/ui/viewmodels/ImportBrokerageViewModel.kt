@@ -456,6 +456,13 @@ open class ImportBrokerageViewModel(
 
     /** 确认提交：CSV 与 OCR 两条路径统一走 BrokerageImportService.commit */
     fun commit() {
+        // 重入守卫必须在**同步段最前面**置位，不能等到协程里再置：
+        // service.commit 的去重是「先查再写」，两个并发事务都会先查到「库里没有这条」，
+        // 于是同一批交易回放两遍、持仓直接翻倍。连点两下「确认导入」就够触发。
+        // 写法与 SettingsViewModel.exportData:167 的导出守卫一致（同步置位再 launch）。
+        if (_uiState.value.committing) return
+        updateState { state -> state.copy(committing = true) }
+
         // 防抖窗口内用户可能直接按了提交，此时校验结论还没落到状态里。
         // 提交前把 OCR 行的代码同步校验一遍，避免把格式错误的代码写进库。
         // 注意：本段运行在点击回调线程（主线程）上，没有协程兜底，
@@ -476,7 +483,8 @@ open class ImportBrokerageViewModel(
             }
         } catch (e: Exception) {
             AppLogger.e("提交前校验异常: ${e.message}", e, "ImportVM")
-            updateState { state -> state.copy(error = "提交前校验失败: ${e.message}") }
+            // 提前 return 的分支必须自己解锁守卫，否则按钮永久禁用、再也导不进来
+            updateState { state -> state.copy(committing = false, error = "提交前校验失败: ${e.message}") }
             return
         }
         updateState { state -> state.copy(transactions = preValidated) }

@@ -11,7 +11,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.UploadFile
@@ -310,7 +310,11 @@ internal fun ResultStep(
                 Text("失败明细：", fontWeight = FontWeight.Bold)
             }
         }
-        items(result.failures, key = { it.rowNumber }) { f ->
+        // 失败记录的 rowNumber 不保证唯一（同一行可以产生多条失败原因，或解析补行后
+        // 行号回落），拿它单独当 key 会抛 IllegalArgumentException: Key was already used，
+        // 于是「导入完成」这一步——最需要看清失败明细的时候——直接崩掉。
+        // 拼上列表下标才是唯一且稳定的（本列表只在 commit 完成后生成一次，不会重排）。
+        itemsIndexed(result.failures, key = { index, f -> "${f.rowNumber}:$index" }) { _, f ->
             Text(
                 "行 ${f.rowNumber}: ${f.reason}",
                 style = MaterialTheme.typography.bodySmall,

@@ -26,7 +26,7 @@ class AppLoggerTest {
     /** object 级 appContext 必须复位，否则会串到别的测试类（AI_GUIDE §8） */
     @After
     fun tearDown() {
-        AppLogger.resetForTest()
+        AppLogger.resetForTesting()
     }
 
     @Test
@@ -289,12 +289,6 @@ class AppLoggerTest {
     }
 
     /**
-     * 端到端冒烟：真跑一次清空必须收敛到 true（2 秒远远够），且**任何情况下都不抛**。
-     *
-     * 单测里 appContext 未初始化 → 没有日志文件可删，清理任务本身是空操作，
-     * 所以这里验证的是「排队 + 等待 + 返回值」这条链路没坏，不是删文件本身。
-     */
-    /**
      * 端到端冒烟：日志目录可用、目录里没有残留文件 → 真跑一次清空必须收敛到 true
      * （2 秒远远够），且**任何情况下都不抛**。
      *
@@ -311,7 +305,7 @@ class AppLoggerTest {
             // 零超时只验证「不抛」：是否已完成取决于线程调度，断言布尔会引入 flaky
             AppLogger.clearLog(0)
         } finally {
-            AppLogger.resetForTest()
+            AppLogger.resetForTesting()
             root.deleteRecursively()
         }
     }
@@ -329,7 +323,7 @@ class AppLoggerTest {
             AppLogger.init(contextWithFilesDir(null), debug = false)
             assertFalse(AppLogger.clearLog())
         } finally {
-            AppLogger.resetForTest()
+            AppLogger.resetForTesting()
         }
     }
 
@@ -343,7 +337,7 @@ class AppLoggerTest {
             AppLogger.init(contextWithFilesDir(blocker), debug = false)
             assertFalse(AppLogger.clearLog())
         } finally {
-            AppLogger.resetForTest()
+            AppLogger.resetForTesting()
             root.deleteRecursively()
         }
     }
@@ -364,7 +358,7 @@ class AppLoggerTest {
             AppLogger.init(contextWithFilesDir(root), debug = false)
             assertFalse("exists() 为 true 但不是目录，必须算拿不到目录", AppLogger.clearLog())
         } finally {
-            AppLogger.resetForTest()
+            AppLogger.resetForTesting()
             root.deleteRecursively()
         }
     }
@@ -389,7 +383,7 @@ class AppLoggerTest {
             File(root, "GoldVault").writeText("x")
             assertNull("列不出 = 读不到，必须返 null", AppLogger.getLogFiles())
         } finally {
-            AppLogger.resetForTest()
+            AppLogger.resetForTesting()
             root.deleteRecursively()
         }
     }

@@ -333,7 +333,7 @@ class LogDiagnosticsTest {
     /** object 级 appContext 必须复位，否则会串到别的测试类（AI_GUIDE §8） */
     @After
     fun tearDown() {
-        AppLogger.resetForTest()
+        AppLogger.resetForTesting()
     }
 
     /**
@@ -384,7 +384,7 @@ class LogDiagnosticsTest {
             File(sub, "crash_1.log").writeText("x")
             assertFalse(LogDiagnostics.clear(contextWithExternalDir(root)))
         } finally {
-            AppLogger.resetForTest()
+            AppLogger.resetForTesting()
             root.deleteRecursively()
         }
     }

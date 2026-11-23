@@ -622,9 +622,18 @@ object AppLogger {
      * 目录指到临时目录、用例结束又把目录删了，后续用例的 `clearLog` / `getLogFiles`
      * 看到的世界就全错（且错得静默）。AI_GUIDE §8 要求进程内 object 必须
      * `@Before`/`@After` 复位，这就是它的钩子。
+     *
+     * **[logQueue] 也要一并清空**：它同样是 object 级状态。只置 `appContext = null`
+     * 会让上一个用例入队却没写盘的行静默留在队列里，下一个用例 flush 时把它们
+     * （连着上一个用例那个已被删掉的临时目录上下文）写进自己的文件——断言条数/内容的
+     * 用例会莫名飘红，而且红不红取决于用例的执行顺序。
+     *
+     * 命名与本仓库其余进程内 object 一致（`BinanceHostGate.resetForTesting`、
+     * `PriceLineageRecorder.resetForTesting`、`StockDataManager.resetForTesting`）。
      */
-    internal fun resetForTest() {
+    internal fun resetForTesting() {
         appContext = null
+        synchronized(queueLock) { logQueue.clear() }
     }
 
     /**
@@ -668,6 +677,9 @@ object AppLogger {
      * @return true = 内存队列已清空**且**每个日志文件都删掉了；false = 有文件删不掉、
      *         清队列时抛异常、**取不到日志目录**（外部存储不可用 = 无法确认），或
      *         **列不出日志目录**（不是目录 / I/O 错误 = 同样无法确认）。
+     *         **返回 false 时内存队列可能已被清空**（队列先清、文件后删）：走到
+     *         「目录不可用」那几条分支时队列早就空了，所以 false **只表示文件侧
+     *         无法确认**，不代表内存里还压着日志。
      *         **不中途 return**：一个文件删不掉也要把余下的尽力删完，
      *         否则「有一份被占用就整批留下」，下次未必还占用，用户却一直看到旧日志。
      *

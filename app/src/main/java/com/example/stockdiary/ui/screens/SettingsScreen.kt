@@ -228,6 +228,12 @@ fun SettingsScreen(
             viewModel.clearDeleteResult()
             if (result.isSuccess) {
                 showClearDataDialog = false
+                // 部分完成（日志没能确认清掉）单独提示：不把它塞进 result，
+                // 否则「数据清干净了但日志还在清」会被读成「清除失败」，用户会反复点。
+                uiState.deletePartialNotice?.let { notice ->
+                    viewModel.clearDeletePartialNotice()
+                    appSnackbar.show(notice)
+                }
             } else {
                 appSnackbar.show(result.exceptionOrNull()?.message ?: "清除失败")
             }

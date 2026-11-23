@@ -680,11 +680,17 @@ object LogDiagnostics {
      *
      * 只清这两样，不动 SharedPreferences 里的崩溃状态——
      * 那个是下次启动要不要弹恢复框的依据，清了会让用户以为崩溃从没发生过。
+     *
+     * @return true = **已确认清空**（日志文件与崩溃报告都没留下）；false = 没清完
+     *         （日志清理超时仍在后台排队，或崩溃报告删不掉）。调用方据此决定
+     *         是「重读界面」还是「提示仍在清理」——从前返回 Unit，超时被静默吞掉，
+     *         界面立刻 reload 会读到旧日志。
      */
-    fun clear(context: Context) {
-        AppLogger.clearLog()
-        runCatching {
+    fun clear(context: Context): Boolean {
+        val logsCleared = AppLogger.clearLog()
+        val reportsCleared = runCatching {
             GlobalExceptionHandler.crashReportsDir(context).listFiles()?.forEach { it.delete() }
-        }
+        }.isSuccess
+        return logsCleared && reportsCleared
     }
 }

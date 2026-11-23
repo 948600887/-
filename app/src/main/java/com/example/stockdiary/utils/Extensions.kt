@@ -311,16 +311,32 @@ fun Long.toRelativeTime(): String {
 }
 
 /**
- * 是否落在「今天」的本地时间区间内。
+ * 是否落在「今天」的本地时间区间内（以系统时区与真实当前时间为准）。
  *
- * 上界必须用**明天的 atStartOfDay** 现算，不能写成 `todayStart + 86_400_000`：
- * 夏令时切换那天本地只有 23 小时（或 25 小时），加固定 24 小时的毫秒数会
- * 把「明天 0 点后的一小时」算成今天（或把今天最后一小时算成昨天）。
- * 与 [toTimestamp] 同一口径（都用 `atStartOfDay(zone)`）。
+ * @see isTodayAt 真正的实现；本函数只是取默认 now/zone 的便捷入口
  */
-fun Long.isToday(): Boolean {
-    val zone = ZoneId.systemDefault()
-    val today = LocalDate.now(zone)
+fun Long.isToday(): Boolean = isTodayAt(System.currentTimeMillis(), ZoneId.systemDefault())
+
+/**
+ * 是否与 [nowMillis] 处在同一个本地自然日（按 [zone] 判定）。
+ *
+ * ## 为什么把 now 与时区都做成参数
+ *
+ * 原实现直接读 `LocalDate.now()`，于是「DST 那天只有 23 小时」这条结论只能靠注释论证、
+ * 无法被测试钉住：跑了也只在当前系统时区/当前日期上成立，换台机器就测不出差异
+ * （平年跑 CI 把实现改回 `start + 86_400_000` 也照样绿）。注入 now 与 zone 之后，
+ * 才能拿 `America/New_York` 的春/秋切换日做确定性回归。
+ *
+ * 上界用**明天 atStartOfDay** 现算（而不是 `todayStart + 86_400_000`）：
+ * 夏令时切换那天本地只有 23 小时（或 25 小时），加固定 24 小时会把
+ * 「明天 0 点后的一小时」算成今天（或把今天最后一小时算成昨天）。
+ * 与 [toTimestamp] 同一口径（都用 `atStartOfDay(zone)`）。
+ *
+ * @param nowMillis 「现在」的时间戳，决定「今天」是哪一天
+ * @param zone 判定自然日用的时区
+ */
+internal fun Long.isTodayAt(nowMillis: Long, zone: ZoneId): Boolean {
+    val today = Instant.ofEpochMilli(nowMillis).atZone(zone).toLocalDate()
     val start = today.atStartOfDay(zone).toInstant().toEpochMilli()
     val end = today.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli()
     return this >= start && this < end

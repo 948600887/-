@@ -61,6 +61,14 @@ data class SettingsUiState(
      */
     val pendingRestore: PendingRestore? = null,
     val deleteResult: Result<Unit>? = null,
+    /**
+     * 「清除所有数据」的**部分完成**提示（一次性，Snackbar 消费后清空）。
+     *
+     * 库、偏好、缓存都清完了，只有运行日志没能确认删掉（清理任务超时、仍在后台排队）。
+     * 这类残留不该让整条流程报失败——数据确实清干净了，日志只是卫生问题；
+     * 但也不能报纯成功，否则用户以为日志也没了。所以单独一条「已知未完成项」。
+     */
+    val deletePartialNotice: String? = null,
     val errorMessage: String? = null,
     // ---- 价格同步快照：与 PriceSyncPreferencesManager 磁盘值一一对应 ----
     val autoPriceSyncEnabled: Boolean = false,

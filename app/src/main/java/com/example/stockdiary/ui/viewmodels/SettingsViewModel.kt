@@ -65,6 +65,16 @@ data class PendingRestore(val uri: Uri, val summary: BackupSummary)
  */
 private const val MAX_BACKUP_BYTES = 32L * 1024 * 1024
 
+/**
+ * 「清除所有数据」里日志没能确认清掉时的提示文案。
+ *
+ * 刻意写成「已知未完成」而不是「失败」：库、偏好、缓存都已经清干净，
+ * 只有日志文件还没删完（清理任务在后台队列里）。报失败会让用户以为清库没成功，
+ * 从而反复点「清除」，而重复清库本身是有风险的动作。
+ */
+private const val DELETE_LOG_PENDING_NOTICE =
+    "数据已清除，但运行日志还在清理中（不影响使用），可稍后在「运行日志」里再清一次"
+
 class SettingsViewModel(
     private val appContext: Context,
     private val assetRepository: AssetRepository,
@@ -609,7 +619,7 @@ class SettingsViewModel(
 
     fun deleteAllData() {
         viewModelScope.launch(Dispatchers.IO) {
-            _uiState.update { state -> state.copy(isDeleting = true, deleteResult = null) }
+            _uiState.update { state -> state.copy(isDeleting = true, deleteResult = null, deletePartialNotice = null) }
             try {
                 assetRepository.deleteAllData()
                 clearAllPreferences()
@@ -623,7 +633,10 @@ class SettingsViewModel(
                 // 本地文件同样要清：导出的 CSV、诊断报告都在 cacheDir/exports，运行日志在
                 // externalFilesDir。不清的话「清除所有数据」之后，账目快照还躺在手机里。
                 runCatching { dataExporter.clearExportedFiles() }
-                runCatching { LogDiagnostics.clear(appContext) }
+                // 日志清空返回 false 表示**没能确认**删干净（清理任务超时、仍在后台排队）。
+                // 这不该让整条流程失败（数据已经清完，日志残留只是卫生问题），但也不能
+                // 报纯成功——否则用户以为日志也没了。记成一条「部分完成」提示。
+                val logsCleared = runCatching { LogDiagnostics.clear(appContext) }.getOrDefault(false)
                 // 派生缓存也要清：Room/SharedPreferences 清掉不代表内存与磁盘缓存清掉。
                 // 否则用户清库后重新添加同一代码，旧行情、旧分红、旧基金净值会原样回来。
                 // 统一走数据层门面：设置页不再直接认识各个数据源单例。
@@ -636,7 +649,13 @@ class SettingsViewModel(
                 // 否则各页面仍按旧值渲染，再拨任何一个开关就会把「已清除的旧偏好」写回磁盘。
                 dashboardPreferencesManager.resetToDefaults()
                 refreshPriceSyncState()
-                _uiState.update { state -> state.copy(isDeleting = false, deleteResult = Result.success(Unit)) }
+                _uiState.update { state ->
+                    state.copy(
+                        isDeleting = false,
+                        deleteResult = Result.success(Unit),
+                        deletePartialNotice = if (logsCleared) null else DELETE_LOG_PENDING_NOTICE
+                    )
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -740,6 +759,10 @@ class SettingsViewModel(
 
     fun clearDeleteResult() {
         _uiState.update { state -> state.copy(deleteResult = null) }
+    }
+
+    fun clearDeletePartialNotice() {
+        _uiState.update { state -> state.copy(deletePartialNotice = null) }
     }
 
     fun clearErrorMessage() {

@@ -13,6 +13,7 @@ import java.time.Instant
 import java.time.LocalDateTime
 import java.time.ZoneId
 import java.util.concurrent.Executors
+import java.util.concurrent.Future
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
@@ -568,36 +569,59 @@ object AppLogger {
         return getLogFileSafe()
     }
     
-    fun clearLog() {
-        try {
-            // 必须和 flushLogs 串行：二者都在 logExecutor 单线程上跑，submit 排队执行，
-            // 避免「flush 的 append」与「这里 writeText("")」交错覆盖
-            // —— 否则可能把刚落盘的日志又清空，或清空后又被 append 覆盖成非空。
-            //
-            // 等待**必须带超时**：`get()` 无参是无限阻塞，而调用方是界面线程
-            // （LogDiagnostics 清空日志 / 设置页「清除数据」）。writer 正卡在一次大批量
-            // 写盘（几千行、慢速外置存储）时，界面会一直转圈甚至 ANR。
-            // 2 秒足够正常清空（真正耗时的是 delete 几个小文件），超时也不影响正确性：
-            // 任务已在单线程队列里排队，迟早会执行，只是这次不保证「返回时已清空」。
-            logExecutor.submit {
-                try {
-                    synchronized(queueLock) { logQueue.clear() }
-                    // 文件写入同样要拿 fileLock：崩溃路径的 forceFlush 不走这个执行器，
-                    // 两者若只靠单线程排队串行，forceFlush 会和这里的删除交错
-                    // 归档文件一并清掉：只清 app.log 会让用户以为「清空」了、分享里却还带着旧轮次日志
-                    synchronized(fileLock) {
-                        getLogFiles().forEach { it.delete() }
-                    }
-                } catch (e: Exception) {
-                    Log.w(LOG_TAG, "清空日志失败", e)
-                }
-            }.get(CLEAR_LOG_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+    /**
+     * 清空日志（活跃文件 + 全部轮转归档 + 内存待写队列）。
+     *
+     * @param timeoutSeconds 等待清理任务完成的秒数，默认 [CLEAR_LOG_TIMEOUT_SECONDS]
+     * @return **true = 已确认清空**（任务在等待期内跑完）；**false = 超时或失败**，
+     *         任务可能仍在后台排队。调用方必须区分这两种结果：
+     *         从前返回 Unit，超时静默返回后调用方立刻 reload，读到的是**旧日志**，
+     *         用户以为没清掉、反复点；另一处则直接提示「清除成功」而日志其实还在。
+     *         注意 false 不等于永久失败——任务已在单线程队列里排队，迟早会执行。
+     */
+    fun clearLog(timeoutSeconds: Long = CLEAR_LOG_TIMEOUT_SECONDS): Boolean =
+        clearLogAwaiting(logExecutor.submit { clearLogNow() }, timeoutSeconds)
+
+    /**
+     * 等待清理任务完成，超时只记日志、**绝不抛给调用方**（清空是尽力而为，
+     * 抛异常会让「清除所有数据」整条流程失败）。
+     *
+     * 单独抽出来的唯一理由是**可测**：直接断言 `clearLog(0)` 的布尔值是竞态的
+     * ——任务可能在 `get()` 之前就跑完，测试会偶发飘红。注入一个「必然未完成」的
+     * [Future] 才能确定性覆盖「0 超时 → 返回 false 且不抛」这条语义。
+     */
+    internal fun clearLogAwaiting(task: Future<*>, timeoutSeconds: Long): Boolean {
+        return try {
+            task.get(timeoutSeconds, TimeUnit.SECONDS)
+            true
         } catch (e: TimeoutException) {
-            // 超时不抛给调用方：清空是尽力而为，抛异常会让「清除所有数据」整条流程失败。
-            // 但必须留痕——否则下次看到「日志没清掉」会以为是自己代码写错了。
-            Log.w(LOG_TAG, "清空日志超时(${CLEAR_LOG_TIMEOUT_SECONDS}s)，清理任务仍在后台排队")
+            // 必须留痕——否则下次看到「日志没清掉」会以为是自己代码写错了
+            Log.w(LOG_TAG, "清空日志超时(${timeoutSeconds}s)，清理任务仍在后台排队")
+            false
         } catch (e: CancellationException) {
             throw e
+        } catch (e: Exception) {
+            Log.w(LOG_TAG, "清空日志失败", e)
+            false
+        }
+    }
+
+    /**
+     * 真正的清理动作：清内存队列 + 删全部日志文件。
+     *
+     * 必须和 flushLogs 串行：二者都在 logExecutor 单线程上跑，submit 排队执行，
+     * 避免「flush 的 append」与「这里 writeText(\"\")」交错覆盖
+     * —— 否则可能把刚落盘的日志又清空，或清空后又被 append 覆盖成非空。
+     */
+    private fun clearLogNow() {
+        try {
+            synchronized(queueLock) { logQueue.clear() }
+            // 文件写入同样要拿 fileLock：崩溃路径的 forceFlush 不走这个执行器，
+            // 两者若只靠单线程排队串行，forceFlush 会和这里的删除交错
+            // 归档文件一并清掉：只清 app.log 会让用户以为「清空」了、分享里却还带着旧轮次日志
+            synchronized(fileLock) {
+                getLogFiles().forEach { it.delete() }
+            }
         } catch (e: Exception) {
             Log.w(LOG_TAG, "清空日志失败", e)
         }

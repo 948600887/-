@@ -2,6 +2,8 @@ package com.example.stockdiary.utils
 
 import java.io.File
 import java.nio.file.Files
+import java.util.concurrent.Callable
+import java.util.concurrent.FutureTask
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -193,5 +195,40 @@ class AppLoggerTest {
             "实际输出: $formatted",
             Regex("""^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}$""").matches(formatted)
         )
+    }
+
+    // ---- clearLog 的「已清空 vs 仍在排队」语义 ----
+
+    /**
+     * 超时必须返回 false 且**不抛**。
+     *
+     * 用未启动的 [FutureTask] 构造「必然未完成」的任务：直接断言 `clearLog(0)` 的布尔值是
+     * 竞态的（清理任务可能在 `get()` 之前就跑完，测试会偶发飘红），所以确定性覆盖
+     * 放在这个注入了 Future 的入口上。
+     */
+    @Test
+    fun clearLogAwaiting_超时返回false且不抛异常() {
+        val notStarted = FutureTask(Callable { })   // 只构造不 run：state 恒为 NEW
+        assertFalse(AppLogger.clearLogAwaiting(notStarted, 0))
+    }
+
+    /** 任务在等待期内跑完才算「已确认清空」 */
+    @Test
+    fun clearLogAwaiting_任务完成返回true() {
+        val done = FutureTask(Callable { }).apply { run() }
+        assertTrue(AppLogger.clearLogAwaiting(done, 1))
+    }
+
+    /**
+     * 端到端冒烟：真跑一次清空必须收敛到 true（2 秒远远够），且**任何情况下都不抛**。
+     *
+     * 单测里 appContext 未初始化 → 没有日志文件可删，清理任务本身是空操作，
+     * 所以这里验证的是「排队 + 等待 + 返回值」这条链路没坏，不是删文件本身。
+     */
+    @Test
+    fun clearLog_默认超时能完成并返回true_零超时也不抛() {
+        assertTrue(AppLogger.clearLog())
+        // 零超时只验证「不抛」：是否已完成取决于线程调度，断言布尔会引入 flaky
+        AppLogger.clearLog(0)
     }
 }

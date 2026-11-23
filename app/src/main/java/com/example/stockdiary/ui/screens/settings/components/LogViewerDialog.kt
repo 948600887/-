@@ -88,6 +88,12 @@ fun LogViewerDialog(onDismiss: () -> Unit) {
     var loading by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf<String?>(null) }
     var askClear by remember { mutableStateOf(false) }
+    /**
+     * 清空没能**确认**完成（日志清理任务仍在后台排队）。
+     *
+     * 不能复用 [message]：那个弹窗的标题写死「没能分享」，用在清空上会张冠李戴。
+     */
+    var clearPending by remember { mutableStateOf(false) }
     var levelFilter by remember { mutableStateOf(LogLevelFilter.ALL) }
     var keyword by remember { mutableStateOf("") }
     var roundFilter by remember { mutableStateOf<Int?>(null) }
@@ -282,14 +288,44 @@ fun LogViewerDialog(onDismiss: () -> Unit) {
                     onClick = {
                         askClear = false
                         scope.launch {
-                            withContext(Dispatchers.IO) { LogDiagnostics.clear(context) }
-                            reload()
+                            // clear 返回 false 说明**没能确认**清空（日志清理任务超时、仍在后台排队）。
+                            // 此时绝不能 reload：读到的还是旧日志，用户会以为没清掉、反复点。
+                            // 什么都不显示同样是坏结果（「点了没反应」），所以给一条待完成提示。
+                            val cleared = withContext(Dispatchers.IO) { LogDiagnostics.clear(context) }
+                            if (cleared) {
+                                reload()
+                            } else {
+                                clearPending = true
+                            }
                         }
                     }
                 ) { Text("清空") }
             },
             dismissButton = {
                 TextButton(onClick = { askClear = false }) { Text("取消") }
+            }
+        )
+    }
+
+    if (clearPending) {
+        AlertDialog(
+            onDismissRequest = { clearPending = false },
+            title = { Text("已在清理，稍后重开", fontWeight = FontWeight.Bold) },
+            text = {
+                Text(
+                    "日志文件还没来得及删完（写入队列里仍有内容在落盘），清理任务已经排到后台继续执行。\n\n" +
+                        "这不是失败：关掉本页稍后重新打开，日志就空了。没有立刻刷新列表，" +
+                        "是为了不把旧内容当成「没清掉」再给你看一遍。"
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        clearPending = false
+                        // 用户点「好」时可能已经清完：允许主动刷新一次，拿到最新状态
+                        reload()
+                    }
+                ) { Text("好") }
             }
         )
     }

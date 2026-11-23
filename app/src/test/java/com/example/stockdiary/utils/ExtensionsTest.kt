@@ -192,4 +192,55 @@ class ExtensionsTest {
         assertEquals("12", 12.4.format(quantityPrecisionFor(AssetType.STOCK, "sh600000")))
         assertEquals(2, pricePrecisionFor(AssetType.STOCK, "sh600000"))
     }
+
+    // ---------- isToday 的夏令时边界（DST 那天只有 23h / 有 25h） ----------
+
+    /** 用真实 tzdb 在指定时区构造时间戳，避免手算 UTC 偏移出错 */
+    private fun nyMillis(localDateTime: String): Long =
+        java.time.LocalDateTime.parse(localDateTime)
+            .atZone(NY_ZONE)
+            .toInstant()
+            .toEpochMilli()
+
+    /**
+     * 春季前跳（2026-03-08，America/New_York 00:00 EST → 次日 00:00 EDT，本地日长 **23 小时**）。
+     *
+     * 旧实现上界写死 `start + 86_400_000`，跨过「明天 0 点」多出一小时，
+     * 于是**次日 00:30 会被算成今天**。这条断言就是那个错误的具体复现。
+     */
+    @Test
+    fun isToday_春季DST当天只有23小时_次日0点半不算今天() {
+        val now = nyMillis("2026-03-08T12:00")
+        // 今天 23:30 仍是今天
+        assertTrue(nyMillis("2026-03-08T23:30").isTodayAt(now, NY_ZONE))
+        // 次日 00:30：新实现判 false；旧实现（+24h）会误判 true
+        assertFalse(nyMillis("2026-03-09T00:30").isTodayAt(now, NY_ZONE))
+        // 今天 00:00 是下界（闭区间）
+        assertTrue(nyMillis("2026-03-08T00:00").isTodayAt(now, NY_ZONE))
+        // 昨天 23:59:59 不是今天
+        assertFalse(nyMillis("2026-03-07T23:59").isTodayAt(now, NY_ZONE))
+    }
+
+    /**
+     * 秋季回拨（2026-11-01，America/New_York 本地日长 **25 小时**）。
+     *
+     * 旧实现的 24 小时上界会把「今天 23:30」判成昨天最后一小时之外——直接丢一天。
+     * 这里用 UTC 字面量构造那个瞬间：2026-11-02T04:30Z == 纽约 11-01 23:30（EST）。
+     */
+    @Test
+    fun isToday_秋季DST当天有25小时_23点半仍算今天() {
+        val now = nyMillis("2026-11-01T12:00")
+        val lateNight = java.time.Instant.parse("2026-11-02T04:30:00Z").toEpochMilli()
+        assertEquals("前提：该瞬间在纽约仍是 11-01", "2026-11-01",
+            java.time.Instant.ofEpochMilli(lateNight).atZone(NY_ZONE).toLocalDate().toString())
+        // 新实现判 true；旧实现（+24h）会误判 false
+        assertTrue(lateNight.isTodayAt(now, NY_ZONE))
+        // 真正的次日 00:30（EST）不是今天
+        assertFalse(nyMillis("2026-11-02T00:30").isTodayAt(now, NY_ZONE))
+    }
+
+    private companion object {
+        /** 有 DST 的时区：用它才能测出「固定 24 小时」那类错误 */
+        val NY_ZONE: java.time.ZoneId = java.time.ZoneId.of("America/New_York")
+    }
 }

@@ -310,12 +310,11 @@ fun LogViewerDialog(onDismiss: () -> Unit) {
     if (clearPending) {
         AlertDialog(
             onDismissRequest = { clearPending = false },
-            title = { Text("已在清理，稍后重开", fontWeight = FontWeight.Bold) },
+            title = { Text("清理中", fontWeight = FontWeight.Bold) },
             text = {
                 Text(
-                    "日志文件还没来得及删完（写入队列里仍有内容在落盘），清理任务已经排到后台继续执行。\n\n" +
-                        "这不是失败：关掉本页稍后重新打开，日志就空了。没有立刻刷新列表，" +
-                        "是为了不把旧内容当成「没清掉」再给你看一遍。"
+                    "日志清理已提交，后台正在执行。稍后重新打开即可看到最新状态。\n\n" +
+                        "没有立刻刷新列表，是为了不把旧内容当成「没清掉」再给你看一遍。"
                 )
             },
             confirmButton = {

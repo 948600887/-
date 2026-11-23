@@ -107,17 +107,10 @@ interface SnapshotDao {
     suspend fun insertAllSnapshotDetails(details: List<AssetSnapshotDetail>)
 }
 
-@Dao
-interface SnapshotDetailDao {
-    @Query("SELECT * FROM asset_snapshot_details WHERE snapshotId = :snapshotId")
-    fun getDetailsBySnapshotId(snapshotId: Long): Flow<List<AssetSnapshotDetail>>
-    
-    @Query("SELECT * FROM asset_snapshot_details WHERE assetId = :assetId ORDER BY snapshotId DESC")
-    fun getHistoryByAssetId(assetId: Long): Flow<List<AssetSnapshotDetail>>
-    
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insertDetails(details: List<AssetSnapshotDetail>)
-    
-    @Query("DELETE FROM asset_snapshot_details WHERE snapshotId = :snapshotId")
-    suspend fun deleteDetailsBySnapshotId(snapshotId: Long)
-}
+// 这里原本还有一个 `SnapshotDetailDao`（按 snapshotId / assetId 查明细的 4 个方法）。
+// 它已于本轮删除：**从未在 `@Database(entities/daos)` 里注册过**，Room 不会为未注册的
+// DAO 生成实现、`StockDatabase` 也没有对应的 `snapshotDetailDao()` 访问器，于是全仓
+// 0 引用、任何代码都拿不到它的实例——它不是「差一行就接上」，而是连实例都取不到的骨架。
+//
+// 若将来真要按资产查历史明细：重新引入接口 + **在 `@Database` 里注册** + 加访问器，
+// 三件事一起做；只写接口不注册等于又留一份会误导人的死代码。

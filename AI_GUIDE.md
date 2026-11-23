@@ -250,6 +250,11 @@ app/src/main/java/com/example/stockdiary/
 12. **日历有两处专门修过的坑，别改回去**：① `CalendarViewModel` 对 assets 流按 `(symbol, balance, currency)` 签名做 `distinctUntilChanged`（`ee6054e`）——日历不依赖实时价，去掉它一次同步会重算日历 20+ 次；② 日期格子是**固定高度 + 三段固定槽位**（`41e71a9` / `b17fe07` / `cee874b`），贴底的「分」槽位收太紧会被 Surface 的 `clip` 切掉半截。动日历布局前先读这三笔注释。
 13. **以下死代码已删除，旧资料别再引用**（`f5b44f5`、`b47cee8`）：`AssetDao` 的 `getAssetsByAccount(Flow)` / `getTotalValueByCurrency` / `getAccountsByType` / `getAssetsPaged` / `deleteAssetsByType` 及其 Repository 转发、`Extensions.DividendData.isNewest()`、`DashboardComponent` 枚举及三处方法。若某份审查报告让你用它们，说明那份报告基于旧版本。
 14. **行情数据源没有手动切换入口了**（2026-10-23 应用户要求去除）：顺序**全自动** = 妙想Skill(仅配置了 API Key 时参与) > 新浪 > 腾讯，某个源连续失败由 `SourceCircuitBreaker` 自动短期禁用并降级。`ApiManager` 现在只保留三个源名字符串常量，**不再有 SharedPreferences 偏好读写**；`ApiSelectionDialog.kt` 已删除。设置页保留「**数据源状态**」入口（`DataSourceStatusDialog`）用来看每个源通不通、熔断状态。批量预取 `StockDataManager.getBatchStockDataThroughSina` 仍写死走新浪（只有新浪有批量接口，N 个代码 ≈ ⌈N/20⌉ 次请求），某个代码没被预取到时才走上面的自动链。**别再去加"让用户选数据源"的 UI**——那是被明确去掉的。
+15. **注释不得比实现强**（本轮清理反复踩到的坑：三次都是「注释承诺了实现做不到的事」）：
+    - `AddAssetDialog` 曾写「优先用 FundAPI…，**EnhancedFundAPI 兜底**」——代码里从来没有兜底调用（那个类只是纯转发壳，现已删除）。照着注释排障会去找一个不存在的通道。
+    - `StockCodeManager.normalizeSymbol` 曾写「顺手兼容 `fund-400030`」——实际 `hasFundPrefix` 只认 `fund_`，连字符写法会落到号段推断、变成 `bj400030`，根本不是场外基金。
+    - `CSV_TIMESTAMP_SUFFIX` 曾写「毫秒段与序号段都在剥离范围内」——正则却把毫秒段锁成 `\d{3}`，导出序号涨到 `_1000`（第 1000 次同毫秒撞名）就整段剥不掉，文件被归进 `CSV:full` 而非 `CSV:full_statement`，保留配额互相挤占（QA 实测复现）。
+    **规则**：注释里凡是写「兼容 X」「等价于 Y」「已覆盖 Z」「会兜底」的，必须能被**一条测试或一次 grep** 证实；写不出证法，就老实写成「当前只支持 …／未覆盖 …」。删代码时若删掉了注释描述的行为，注释必须同步改——否则我们删掉一个误导，又留下一个新的。
 
 ## 8. 测试怎么加
 

@@ -1,77 +1,22 @@
 package com.example.stockdiary.network.base
 
-import com.example.stockdiary.common.Timeouts
-import com.example.stockdiary.network.NetworkClient
-import com.example.stockdiary.utils.AppLogger
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import java.util.concurrent.TimeUnit
-import kotlinx.coroutines.CancellationException
+/**
+ * `network.base` 包只放**数据契约接口**（[PriceData] / [MarketData]），
+ * 供 `network.model.DataModels` 实现、由各行情源填充。
+ *
+ * 这里原本还有一个 `abstract class BaseAPI<T>`（OkHttp 抓取 + 正则 JSON 解析的基类）。
+ * 它已于本轮删除：**全项目没有任何子类**，类名与 6 个成员在 main/test/androidTest/
+ * 反射字符串/proguard 规则里全部零引用——一个没人继承的抽象基类不可能有调用方，
+ * 留着只会让人以为「新行情源应当继承它」，而真实的行情源都直接调
+ * [com.example.stockdiary.network.UnifiedPriceService]（带缓存/熔断/健康度）。
+ *
+ * 结论：新增行情源请实现 `PriceSourceAdapter` + 注册到 `SourceRegistry`，
+ * **不要**再引入「基类 + 每源自写解析」的模式。
+ */
 
-abstract class BaseAPI<T>(
-    protected val tag: String = "BaseAPI"
-) {
-    protected val client: OkHttpClient by lazy {
-        NetworkClient.defaultClient.newBuilder()
-            .addInterceptor { chain ->
-                val request = chain.request().newBuilder()
-                    .apply { getDefaultHeaders().forEach { addHeader(it.key, it.value) } }
-                    .build()
-                chain.proceed(request)
-            }
-            .build()
-    }
-
-    protected abstract fun getDefaultHeaders(): Map<String, String>
-
-    protected suspend fun fetch(url: String): Result<String> = withContext(Dispatchers.IO) {
-        try {
-            val request = Request.Builder()
-                .url(url)
-                .build()
-            
-            val startTime = System.currentTimeMillis()
-            val response = client.newCall(request).execute()
-            response.use {
-                val duration = System.currentTimeMillis() - startTime
-
-                AppLogger.api("GET $url", it.message, duration, tag)
-
-                if (it.isSuccessful) {
-                    return@withContext Result.success(it.body?.string() ?: "")
-                } else {
-                    AppLogger.e("Request failed: ${it.code}", null, tag)
-                    return@withContext Result.failure(Exception("HTTP ${it.code}"))
-                }
-            }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            AppLogger.e("Request error: ${e.message}", e, tag)
-            Result.failure(e)
-        }
-    }
-
-    protected fun parseJson(json: String, key: String): String? {
-        val patterns = listOf(
-            "\"$key\"\\s*:\\s*\"([^\"]+)\"" to 1,
-            "\"$key\"\\s*:\\s*([^,}]+)" to 1
-        )
-        patterns.forEach { (pattern, group) ->
-            Regex(pattern).find(json)?.groupValues?.getOrNull(group)?.let {
-                return it.trim().removeSurrounding("\"")
-            }
-        }
-        return null
-    }
-
-    protected fun parseJsonInt(json: String, key: String): Int? = parseJson(json, key)?.toIntOrNull()
-    protected fun parseJsonDouble(json: String, key: String): Double? = parseJson(json, key)?.toDoubleOrNull()
-    protected fun parseJsonBoolean(json: String, key: String): Boolean = parseJson(json, key)?.toBoolean() ?: false
-}
-
+/**
+ * 统一的报价契约：所有行情源解析出的价格都要满足它。
+ */
 interface PriceData {
     val code: String
     val name: String
@@ -81,6 +26,9 @@ interface PriceData {
     val timestamp: Long
 }
 
+/**
+ * K 线/盘口补充字段契约（可缺省）。
+ */
 interface MarketData {
     val high: Double?
     val low: Double?

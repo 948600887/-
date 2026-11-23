@@ -10,6 +10,8 @@ import java.util.concurrent.FutureTask
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -317,9 +319,9 @@ class AppLoggerTest {
     /**
      * **拿不到日志目录 = 无法确认 = false**（外部存储未挂载时 `getExternalFilesDir` 返 null）。
      *
-     * 这条钉住的正是「空集合恒真」：拿不到目录时 `getLogFiles()` 返 emptyList()，
-     * `deleteFiles(emptyList())` 空转返 true，于是 clearLog 报「已确认清空」，
-     * 调用方提示清空成功、reload 又把旧日志显示一遍。
+     * 这条钉住的正是「空集合恒真」：拿不到目录时 `getLogFiles()` 返 null（读不到），
+     * 从前它折成 emptyList()，`deleteFiles(emptyList())` 空转返 true，于是 clearLog
+     * 报「已确认清空」，调用方提示清空成功、reload 又把旧日志显示一遍。
      */
     @Test
     fun clearLog_取不到日志目录时返回false() {
@@ -340,6 +342,52 @@ class AppLoggerTest {
             val blocker = File(root, "not-a-dir").apply { writeText("x") }
             AppLogger.init(contextWithFilesDir(blocker), debug = false)
             assertFalse(AppLogger.clearLog())
+        } finally {
+            AppLogger.resetForTest()
+            root.deleteRecursively()
+        }
+    }
+
+    /**
+     * **日志目录被同名普通文件占住 → false**（`exists()` 为 true 但不是目录）。
+     *
+     * 只判 `exists()` 的实现会放行：文件存在 → 不 `mkdirs()` → 把普通文件当目录返回，
+     * 随后 `list()` 对非目录返 null，null 再被折成空列表就成了「已确认清空」。
+     * 这与上一条不同：上一条是 `mkdirs()` 直接失败，这一条路径**能通过 `exists()` 检查**。
+     */
+    @Test
+    fun clearLog_日志目录被普通文件占住时返回false() {
+        val root = Files.createTempDirectory("goldvault-clear-isdir").toFile()
+        try {
+            // GoldVault 建成普通文件：exists() = true、isDirectory = false
+            File(root, "GoldVault").writeText("x")
+            AppLogger.init(contextWithFilesDir(root), debug = false)
+            assertFalse("exists() 为 true 但不是目录，必须算拿不到目录", AppLogger.clearLog())
+        } finally {
+            AppLogger.resetForTest()
+            root.deleteRecursively()
+        }
+    }
+
+    /**
+     * `getLogFiles()` 的 null 语义：「读不到」不能折成「空列表」。
+     *
+     * 目录可用且没文件 → **空列表**（真的空，`clearLog` 据此返 true）；
+     * 目录列不出（不是目录）→ **null**（读不到，调用方不得据此断言「已清空」）。
+     */
+    @Test
+    fun getLogFiles_真的空返空列表_读不到返null() {
+        val root = Files.createTempDirectory("goldvault-listfiles").toFile()
+        try {
+            AppLogger.init(contextWithFilesDir(root), debug = false)
+            val empty = AppLogger.getLogFiles()
+            assertNotNull("目录可用、确实没文件时应返空列表而不是 null", empty)
+            assertTrue("确实没文件 = 真的空", empty!!.isEmpty())
+
+            // 把目录换成同名普通文件 → list() 返 null = 读不到
+            File(root, "GoldVault").deleteRecursively()
+            File(root, "GoldVault").writeText("x")
+            assertNull("列不出 = 读不到，必须返 null", AppLogger.getLogFiles())
         } finally {
             AppLogger.resetForTest()
             root.deleteRecursively()

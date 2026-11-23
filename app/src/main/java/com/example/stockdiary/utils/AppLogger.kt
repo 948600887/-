@@ -547,17 +547,45 @@ object AppLogger {
      * 磁盘上现有的全部日志文件，**新的在前**（活跃文件 → .1 → .2 → .3）。
      *
      * 诊断导出、界面浏览都要跨文件读：只读 app.log 会丢掉崩溃前刚轮转出去的那份。
+     *
+     * **不变式（null 语义）：null/空集合只有在「确认目录可读且确实无文件」时才代表空。**
+     * 所以这里返 `List<File>?` 而不是恒返 List：`File.list()` 返 null 的契约是
+     * 「**不是目录 或 I/O 错误**」，把它折成 `emptyList()` 会让
+     * `deleteFiles(emptyList())` 的 forEach 空转返 true，[clearLogNow] 再据此把
+     * 「读不到日志目录」谎报成「已确认清空」（用户看到提示后 reload，旧日志还在）。
+     *
+     * 调用方必须区分两者：
+     * - `null` = **读不到**（外部存储不可用 / 中途卸载 / 路径被普通文件占 / FUSE EIO），
+     *   任何「已清空」的结论都不成立；
+     * - `emptyList()` = **目录列得出来、确实一个日志文件都没有**（从没写过日志），
+     *   这才是真的空。
+     *
+     * 别把两者混为一谈的依据：「目录在但没文件」在 `File.listFiles()` 里返的本来就是
+     * **空数组**，而 null 表示的根本不是「空目录」。
      */
-    fun getLogFiles(): List<File> {
-        val dir = getLogDirSafe() ?: return emptyList()
-        return (0 until KEEP_LOG_FILES).map { logFileAt(dir, it) }.filter { it.exists() }
+    fun getLogFiles(): List<File>? {
+        val dir = getLogDirSafe() ?: return null
+        // 一次目录枚举就能区分「列不出」与「确实没有」；逐份 exists() 只会得到 false，
+        // 与「读不到」不可区分——那正是这条 bug 的成因。
+        val present = dir.list()?.toSet() ?: return null
+        return (0 until KEEP_LOG_FILES)
+            .map { logFileAt(dir, it) }
+            .filter { it.name in present }
     }
 
+    /**
+     * 可写的日志目录；拿不到、**或拿到的不是目录**，一律返 null。
+     *
+     * 只判 `exists()` 不够：同名**普通文件**同样 `exists() == true`，拿它当目录去
+     * `list()` 会返 null（不是目录），于是「路径被普通文件占了」被当成可用目录一路放行，
+     * 上层再把这个 null 折成空列表就成了「已清空」。故必须显式判 `isDirectory`。
+     */
     private fun getLogDirSafe(): File? {
         return try {
             val context = appContext ?: return null
             val dir = context.getExternalFilesDir(null)?.let { File(it, "GoldVault") } ?: return null
             if (!dir.exists() && !dir.mkdirs()) return null
+            if (!dir.isDirectory) return null
             dir
         } catch (e: CancellationException) {
             throw e
@@ -638,7 +666,8 @@ object AppLogger {
      * 真正的清理动作：清内存队列 + 删全部日志文件。
      *
      * @return true = 内存队列已清空**且**每个日志文件都删掉了；false = 有文件删不掉、
-     *         清队列时抛异常，或**取不到日志目录**（外部存储不可用 = 无法确认）。
+     *         清队列时抛异常、**取不到日志目录**（外部存储不可用 = 无法确认），或
+     *         **列不出日志目录**（不是目录 / I/O 错误 = 同样无法确认）。
      *         **不中途 return**：一个文件删不掉也要把余下的尽力删完，
      *         否则「有一份被占用就整批留下」，下次未必还占用，用户却一直看到旧日志。
      *
@@ -659,10 +688,12 @@ object AppLogger {
         }
 
         // **先确认日志目录真的拿到了**，不能靠 getLogFiles() 的返回值反推：
-        // 拿不到目录时它返 emptyList()，而 deleteFiles(emptyList()) 的 forEach 空转
-        // 会返回 true —— 空集合恒真，于是「外部存储不可用」被报成「已确认清空」，
-        // 调用方（LogDiagnostics.clear）据此提示「已清空」并 reload，用户又看到旧日志。
-        // 注意区分两种情况：「目录在、本来就没文件」仍算真的空（继续走下面的删除，返 true）。
+        // 拿不到目录时它返 null（= 读不到），而从前那条路折叠成 emptyList()，
+        // deleteFiles(emptyList()) 的 forEach 空转返回 true —— 空集合恒真，于是
+        // 「外部存储不可用」被报成「已确认清空」，调用方（LogDiagnostics.clear）据此
+        // 提示「已清空」并 reload，用户又看到旧日志。
+        // 注意区分两种情况：getLogFiles() 返**空列表**才是「目录在、本来就没文件」
+        // （真的空，继续走下面的删除、返 true）；返 **null** 是读不到，必须 false。
         if (getLogDirSafe() == null) {
             Log.w(LOG_TAG, "清空日志找不到日志目录（外部存储不可用？），无法确认已清空")
             return false
@@ -670,9 +701,19 @@ object AppLogger {
 
         // 文件写入同样要拿 fileLock：崩溃路径的 forceFlush 不走这个执行器，
         // 两者若只靠单线程排队串行，forceFlush 会和这里的删除交错
-        // 归档文件一并清掉：只清 app.log 会让用户以为「清空」了、分享里却还带着旧轮次日志
         val filesDeleted = try {
-            synchronized(fileLock) { deleteFiles(getLogFiles()) }
+            synchronized(fileLock) {
+                val logFiles = getLogFiles()
+                if (logFiles == null) {
+                    // 目录在却列不出（不是目录 / I/O 错误）＝ 读不到，不等于已清空。
+                    // 归档文件一并清掉：只清 app.log 会让用户以为「清空」了、
+                    // 分享里却还带着旧轮次日志，故这里仍走同一批 deleteFiles。
+                    Log.w(LOG_TAG, "列不出日志目录（不是目录或 I/O 错误），无法确认已清空")
+                    false
+                } else {
+                    deleteFiles(logFiles)
+                }
+            }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {

@@ -151,7 +151,7 @@ object LogDiagnostics {
         return Report(
             crashes = crashes,
             appLog = logFiles.firstOrNull()?.content,
-            appLogPath = AppLogger.getLogFiles().firstOrNull()?.absolutePath,
+            appLogPath = AppLogger.getLogFiles()?.firstOrNull()?.absolutePath,
             crashFileCount = crashFiles.size,
             deviceState = collectDeviceState(context),
             logFiles = logFiles,
@@ -166,7 +166,11 @@ object LogDiagnostics {
      * 静默截断会让人误以为日志真的只有这些）。读文件有 IO，调用方在 IO 线程。
      */
     private fun collectLogFiles(): Pair<List<LogFile>, Long> {
-        val files = AppLogger.getLogFiles()
+        // 这里只**读出来给用户看/分享**，不参与任何「是否已清空」的判定，所以 null
+        // （外部存储不可用 / 列不出）退化成空列表是可接受的降级：报告里什么都读不到时
+        // 只能如实呈现为空，同 [collect] 里崩溃报告那侧的处理。判定清空必须在
+        // deleteCrashReports / clearLogNow 里显式区分 null 与空集合。
+        val files = AppLogger.getLogFiles() ?: emptyList()
         var budget = EXPORT_MAX_BYTES
         var omitted = 0L
         val result = ArrayList<LogFile>(files.size)
@@ -699,6 +703,11 @@ object LogDiagnostics {
      * 此时「一个文件都没删到」与「本来就空」在代码里长得一样（空集合恒真），
      * 必须显式判目录可用性，否则会把「读不到」谎报成「已清空」。
      * 反过来，「目录在、本来就没文件」仍算**真的空**、返 true。
+     *
+     * **统一的不变式**：null/空集合只有在「确认目录可读且确实无文件」时才代表空。
+     * 同一条不变式的三个入口——`AppLogger.getLogDirSafe`（`isDirectory` 不过 = null）、
+     * [AppLogger.getLogFiles]（返 null = 列不出）、[deleteCrashReports]（返 null = 列不出）
+     * ——全部按这条判定：「目录/路径不存在」= 真的空；「目录在却列不出」= 读不到 = false。
      */
     fun clear(context: Context): Boolean {
         val logsCleared = AppLogger.clearLog()
@@ -741,8 +750,12 @@ object LogDiagnostics {
             AppLogger.w("枚举崩溃报告目录失败: ${e.message}", "LogDiagnostics")
             return false
         }
-        // 目录存在却没有文件 = 真的空
-        if (files == null) return true
+        // **列不出 ≠ 空**。`File.listFiles()` 返 null 的契约是「**不是目录 或 I/O 错误**」，
+        // 而「目录在但没文件」返的是**空数组**（走下面 deleteFiles(emptyList()) 那条路）。
+        // 所以只有「目录不存在」才算空——崩溃报告目录只在首次崩溃时才 mkdirs()，
+        // 不存在即「从没崩过」；目录在却列不出（存储中途卸载 / 路径被普通文件占 /
+        // FUSE EIO）是**读不到**，必须 false。
+        if (files == null) return !dir.exists()
         return AppLogger.deleteFiles(files.toList())
     }
 }

@@ -390,6 +390,33 @@ class LogDiagnosticsTest {
     }
 
     /**
+     * **目录存在但列不出 → false**：`listFiles()` 返 null 不等于「空目录」。
+     *
+     * `File.listFiles()` 的 null 契约是「**不是目录 或 I/O 错误**」；「目录在但没文件」
+     * 返的是**空数组**（走 `deleteFiles(emptyList())` 那条路）。把 null 当「真的空」
+     * 正是这条 bug：外部存储中途卸载、路径被普通文件占、FUSE EIO 都会走到这里，
+     * 却被报成「已清空」。
+     *
+     * 造法取最简：把 `crash_reports` 建成**普通文件** —— `listFiles()` 对非目录固定返
+     * null，而 `exists()` 为 true，于是「目录在却列不出」这条分支被确定性命中，
+     * 不依赖文件锁 / 只读属性这类跨平台不一致的行为。
+     */
+    @Test
+    fun clear_崩溃报告路径是普通文件时返回false() {
+        val root = tempRoot()
+        try {
+            val blocker = File(root, "crash_reports").apply { writeText("x") }
+            assertTrue("前置条件：普通文件 exists() 必须为 true", blocker.exists())
+            assertFalse(
+                "目录在却列不出 = 读不到，不能报「已清空」",
+                LogDiagnostics.clear(contextWithExternalDir(root))
+            )
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    /**
      * **外部存储不可用（`getExternalFilesDir` 返 null）→ false**，不能报「已清空」。
      *
      * 从前 `File(null, "crash_reports")` 退化成相对路径，`listFiles()` 返 null 而不是

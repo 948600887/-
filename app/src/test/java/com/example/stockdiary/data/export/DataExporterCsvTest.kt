@@ -127,6 +127,25 @@ class DataExporterCsvTest {
         assertEquals("", escapeCsv(""))
     }
 
+    /**
+     * TAB / CR 也是公式引导符（OWASP CSV Injection）。
+     *
+     * 表格软件解析单元格时会跳过前导空白再判公式，所以 `\t=SUM(A1)` 与 `=SUM(A1)` 等价。
+     * 旧实现只挡 `= + - @` 且 TAB 不在引号触发集里，攻击者只要在 payload 前加一个
+     * 肉眼看不清的 TAB，就能原样、无引号落盘 —— 防护形同虚设。
+     */
+    @Test
+    fun `TAB与CR开头的单元格同样被防护且被引号包裹`() {
+        // 加前缀 + 被引号包裹（TAB 进引号触发集）
+        assertEquals("\"'\t=SUM(A1)\"", escapeCsv("\t=SUM(A1)"))
+        assertEquals("\"'\r=SUM(A1)\"", escapeCsv("\r=SUM(A1)"))
+
+        // 只有 TAB、没有引导符：不前置 '（不是公式），但仍要被引号包裹住 TAB
+        assertEquals("\"长江\t电力\"", escapeCsv("长江\t电力"))
+        // TAB 在中间同理，不加前缀
+        assertEquals("\"a\tb\"", escapeCsv("a\tb"))
+    }
+
     @Test
     fun `存款的单价列留空而不是 0`() {
         val cells = parseRow(CsvContent.assetRow(deposit))

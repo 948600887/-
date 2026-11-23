@@ -113,8 +113,16 @@ internal fun exportRetentionGroup(name: String): String {
     return "${group.name}:$prefix"
 }
 
-/** 导出文件名末尾的时间戳（与 `toFileTimestamp()` 的 pattern 一致），可带毫秒与去重序号 */
-private val CSV_TIMESTAMP_SUFFIX = Regex("_\\d{8}_\\d{6}(?:_\\d{3}(?:_\\d+)?)?$")
+/**
+ * 导出文件名末尾的时间戳（与 `toFileTimestamp()` 的 pattern 一致），可带毫秒段与去重序号。
+ *
+ * 毫秒段与序号段都写成 `\d+`（**不锁 3 位/不锁单段**）：[exportFileName] 的序号是
+ * `_2`、`_3`… 无限递增的，锁 `_\d{3}` 会从第 1000 次撞名起整段剥不掉，
+ * `full_statement_…_1000.csv` 就会被 [exportRetentionGroup] 退回「第一段」推断成
+ * `CSV:full`——分组一变，保留配额与其它导出类型互相挤占（QA 已实测复现）。
+ * 宁可放宽匹配，也不要让文件名长度去约束解析。
+ */
+private val CSV_TIMESTAMP_SUFFIX = Regex("_\\d{8}_\\d{6}(?:_\\d+(?:_\\d+)*)?$")
 
 /**
  * 生成**不会互相覆盖**的导出文件名（纯函数，`exists` 由调用方注入，便于单测）。
@@ -389,12 +397,23 @@ class DataExporter(private val context: Context) {
 private val PLAIN_DECIMAL = Regex("^[+-]?\\d+(\\.\\d+)?$")
 
 /**
+ * 公式引导符（OWASP CSV Injection）：`=` `+` `-` `@` 之外**必须**包含 TAB(0x09) 与 CR(0x0D)。
+ *
+ * 这两个最容易漏：表格软件解析单元格时会**跳过前导空白再判公式**，于是
+ * `\t=SUM(A1)` 与 `=SUM(A1)` 等价。只挡四个符号等于给攻击者留一个字符的绕过空间
+ * （payload 前加一个 TAB 即可），而且这种字符肉眼几乎看不见，事后审查也难发现。
+ */
+private const val FORMULA_LEAD_CHARS = "=+-@\t\r"
+
+/**
  * 统一 CSV 字段转义。
  *
- * 1. **公式注入防护**：以 `=` `+` `-` `@` 开头的单元格会被 Excel/WPS 当公式求值
- *    （资产名存成 `=HYPERLINK(...)` 就能在别人机器上拉外链、`=cmd|...` 更糟）。
- *    对这类**非纯数字**字段前置一个单引号，让表格软件按文本处理。
- * 2. 含引号、逗号、回车或换行时用双引号包裹，内部引号转义为两个连续引号。
+ * 1. **公式注入防护**：以 [FORMULA_LEAD_CHARS]（`=` `+` `-` `@` `TAB` `CR`）开头的单元格
+ *    会被 Excel/WPS 当公式求值（资产名存成 `=HYPERLINK(...)` 就能在别人机器上拉外链、
+ *    `=cmd|...` 更糟）。对这类**非纯数字**字段前置一个单引号，让表格软件按文本处理。
+ * 2. 含引号、逗号、TAB、回车或换行时用双引号包裹，内部引号转义为两个连续引号。
+ *    TAB 若不进引号触发集，`\t=SUM(A1)` 会**无引号**落盘，某些解析器读到的是
+ *    未加保护的原始串（RFC 4180 允许 TAB 裸奔，但 Excel 的宽容解析反而更危险）。
  *
  * 已知取舍：前置的 `'` 会随文件进入数据本身，程序化解析（pandas 等）拿到的是
  * `'=SUM(A1)`。这是 OWASP 推荐做法，代价是「恶意/异常文本多一个前导引号」，
@@ -402,7 +421,9 @@ private val PLAIN_DECIMAL = Regex("^[+-]?\\d+(\\.\\d+)?$")
  */
 internal fun escapeCsv(field: String): String {
     val guarded = if (needsFormulaGuard(field)) "'$field" else field
-    val needsQuoting = guarded.any { it == '"' || it == ',' || it == '\n' || it == '\r' }
+    val needsQuoting = guarded.any {
+        it == '"' || it == ',' || it == '\n' || it == '\r' || it == '\t'
+    }
     return if (needsQuoting) {
         "\"" + guarded.replace("\"", "\"\"") + "\""
     } else {
@@ -413,7 +434,7 @@ internal fun escapeCsv(field: String): String {
 /** 是否需要用前置 `'` 挡公式求值：首字符是公式引导符、且不是纯十进制数字。 */
 private fun needsFormulaGuard(field: String): Boolean {
     val first = field.firstOrNull() ?: return false
-    if (first != '=' && first != '+' && first != '-' && first != '@') return false
+    if (first !in FORMULA_LEAD_CHARS) return false
     return !PLAIN_DECIMAL.matches(field)
 }
 

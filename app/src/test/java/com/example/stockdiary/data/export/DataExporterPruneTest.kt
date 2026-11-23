@@ -169,6 +169,21 @@ class DataExporterPruneTest {
     }
 
     /**
+     * 序号涨到 4 位（第 1000 次同毫秒撞名）时仍要剥得干净。
+     *
+     * 旧正则把毫秒段锁成 `_\d{3}`，`_1000` 整段匹配不上 → 退回「第一个下划线前」推断，
+     * `full_statement_…_1000.csv` 被归成 `CSV:full`，与真正的 `CSV:full_statement`
+     * 分成两组、互相挤占保留配额（QA 实测复现）。文件名长度不该反向约束解析逻辑。
+     */
+    @Test
+    fun `四位序号仍归到同一导出类型分组`() {
+        assertEquals("CSV:full_statement", exportRetentionGroup("full_statement_20261119_101500_1000.csv"))
+        assertEquals("CSV:assets", exportRetentionGroup("assets_20261119_101500_9999.csv"))
+        // 毫秒段本身位数异常（脏文件名）也不该退回第一段
+        assertEquals("CSV:full_statement", exportRetentionGroup("full_statement_20261119_101500_1234_2.csv"))
+    }
+
+    /**
      * 导出文件名必须唯一。
      *
      * 旧命名只到秒：同一秒两次导出算出同一个绝对路径，后者覆盖前者，

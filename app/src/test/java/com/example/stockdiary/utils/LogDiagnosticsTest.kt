@@ -5,6 +5,7 @@ import io.mockk.every
 import io.mockk.mockk
 import java.io.File
 import java.nio.file.Files
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -310,16 +311,30 @@ class LogDiagnosticsTest {
         assertTrue(lines.last().contains("轮次#10"))
     }
 
-    // ---- clear()：崩溃报告删不掉时必须如实返 false ----
+    // ---- clear()：崩溃报告删不掉 / 拿不到目录时必须如实返 false ----
 
-    /** 造一个「getExternalFilesDir 指向临时目录」的 Context */
+    /**
+     * 造一个「getExternalFilesDir 指向临时目录」的 Context，并把 AppLogger 也指到它。
+     *
+     * 必须同时 init AppLogger：`clear()` = 日志清理 **且** 崩溃报告清理，日志那侧
+     * 在拿不到日志目录时返 false（外部存储不可用 = 无法确认），若不 init 就会让每条
+     * 崩溃报告用例都因为日志侧 false 而失败，测不到崩溃报告那条路径。
+     */
     private fun contextWithExternalDir(root: File): Context {
         val context = mockk<Context>(relaxed = true)
+        every { context.applicationContext } returns context
         every { context.getExternalFilesDir(null) } returns root
+        AppLogger.init(context, debug = false)
         return context
     }
 
     private fun tempRoot(): File = Files.createTempDirectory("gv-clear").toFile()
+
+    /** object 级 appContext 必须复位，否则会串到别的测试类（AI_GUIDE §8） */
+    @After
+    fun tearDown() {
+        AppLogger.resetForTest()
+    }
 
     /**
      * 目录都不存在（从没崩过）→ 按「没有崩溃报告 = 已清空」返 true。
@@ -369,7 +384,24 @@ class LogDiagnosticsTest {
             File(sub, "crash_1.log").writeText("x")
             assertFalse(LogDiagnostics.clear(contextWithExternalDir(root)))
         } finally {
+            AppLogger.resetForTest()
             root.deleteRecursively()
         }
+    }
+
+    /**
+     * **外部存储不可用（`getExternalFilesDir` 返 null）→ false**，不能报「已清空」。
+     *
+     * 从前 `File(null, "crash_reports")` 退化成相对路径，`listFiles()` 返 null 而不是
+     * 抛异常，被「null = 目录不存在 = 空」的规则当成清空成功 —— 「读不到」被谎报成
+     * 「确实没有」。日志那侧同一条规则（见 AppLoggerTest 的同名用例）。
+     */
+    @Test
+    fun clear_取不到外部存储时返回false() {
+        val context = mockk<Context>(relaxed = true)
+        every { context.applicationContext } returns context
+        every { context.getExternalFilesDir(null) } returns null
+        AppLogger.init(context, debug = false)
+        assertFalse(LogDiagnostics.clear(context))
     }
 }

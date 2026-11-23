@@ -588,6 +588,18 @@ object AppLogger {
         clearLogAwaiting(logExecutor.submit(Callable { clearLogNow() }), timeoutSeconds)
 
     /**
+     * 复位进程内状态（**仅测试用**）。
+     *
+     * [init] 写的是 object 级的 [appContext]，用例之间不清就会串味：上一个用例把日志
+     * 目录指到临时目录、用例结束又把目录删了，后续用例的 `clearLog` / `getLogFiles`
+     * 看到的世界就全错（且错得静默）。AI_GUIDE §8 要求进程内 object 必须
+     * `@Before`/`@After` 复位，这就是它的钩子。
+     */
+    internal fun resetForTest() {
+        appContext = null
+    }
+
+    /**
      * 等待清理任务完成，超时只记日志、**绝不抛给调用方**（清空是尽力而为，
      * 抛异常会让「清除所有数据」整条流程失败）。
      *
@@ -625,8 +637,9 @@ object AppLogger {
     /**
      * 真正的清理动作：清内存队列 + 删全部日志文件。
      *
-     * @return true = 内存队列已清空**且**每个日志文件都删掉了；false = 有文件删不掉
-     *         或清队列时抛异常。**不中途 return**：一个文件删不掉也要把余下的尽力删完，
+     * @return true = 内存队列已清空**且**每个日志文件都删掉了；false = 有文件删不掉、
+     *         清队列时抛异常，或**取不到日志目录**（外部存储不可用 = 无法确认）。
+     *         **不中途 return**：一个文件删不掉也要把余下的尽力删完，
      *         否则「有一份被占用就整批留下」，下次未必还占用，用户却一直看到旧日志。
      *
      * 必须和 flushLogs 串行：二者都在 logExecutor 单线程上跑，submit 排队执行，
@@ -643,6 +656,16 @@ object AppLogger {
             // 队列都没清掉就别谎称成功，但文件仍要尽量删
             queueCleared = false
             Log.w(LOG_TAG, "清空日志时清理内存队列失败", e)
+        }
+
+        // **先确认日志目录真的拿到了**，不能靠 getLogFiles() 的返回值反推：
+        // 拿不到目录时它返 emptyList()，而 deleteFiles(emptyList()) 的 forEach 空转
+        // 会返回 true —— 空集合恒真，于是「外部存储不可用」被报成「已确认清空」，
+        // 调用方（LogDiagnostics.clear）据此提示「已清空」并 reload，用户又看到旧日志。
+        // 注意区分两种情况：「目录在、本来就没文件」仍算真的空（继续走下面的删除，返 true）。
+        if (getLogDirSafe() == null) {
+            Log.w(LOG_TAG, "清空日志找不到日志目录（外部存储不可用？），无法确认已清空")
+            return false
         }
 
         // 文件写入同样要拿 fileLock：崩溃路径的 forceFlush 不走这个执行器，

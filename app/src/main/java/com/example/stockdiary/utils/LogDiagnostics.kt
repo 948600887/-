@@ -135,8 +135,10 @@ object LogDiagnostics {
      * 把日志从磁盘读出来。**会做文件 IO，必须在 Dispatchers.IO 上调用。**
      */
     fun collect(context: Context): Report {
-        val crashFiles = GlobalExceptionHandler.crashReportsDir(context)
-            .let { dir -> dir.listFiles()?.toList() ?: emptyList() }
+        // crashReportsDir 在外部存储不可用时返 null：此时「读不到崩溃报告」，
+        // 与「真的没有崩溃报告」是两件事，但报告里都只能如实呈现为空列表
+        val crashFiles = (GlobalExceptionHandler.crashReportsDir(context)
+            ?.let { dir -> dir.listFiles()?.toList() } ?: emptyList<File>())
             // 文件名是 crash_<定长时间戳>.log，字典序即时间序，倒序取最近几份
             .sortedByDescending { it.name }
 
@@ -691,6 +693,12 @@ object LogDiagnostics {
      * 别人先删掉」（`delete()` 对不存在的路径返 false）也记 false。要区分得逐份
      * stat 前后比对，为一次手动清理引入这种复杂度不划算：多给一次「仍在清理」的
      * 提示，好过谎称已清空（那会让用户又看到旧日志）。
+     *
+     * **取不到目录 = 无法确认 = false**（日志与崩溃报告两侧同一条规则）：外部存储
+     * 不可用时 `getExternalFilesDir()` 返 null，日志目录与崩溃报告目录都拿不到；
+     * 此时「一个文件都没删到」与「本来就空」在代码里长得一样（空集合恒真），
+     * 必须显式判目录可用性，否则会把「读不到」谎报成「已清空」。
+     * 反过来，「目录在、本来就没文件」仍算**真的空**、返 true。
      */
     fun clear(context: Context): Boolean {
         val logsCleared = AppLogger.clearLog()
@@ -701,23 +709,40 @@ object LogDiagnostics {
     /**
      * 删掉崩溃报告目录下的全部文件，如实汇报。
      *
-     * `listFiles()` 返 null（目录不存在）按**「没有崩溃报告 = 已清空」返 true**：
-     * 这个目录只在首次崩溃时由 `GlobalExceptionHandler` 的 `mkdirs()` 建出来，
-     * 从没崩过的用户这里本来就是空的，不该因为「目录不在」把他卡在「仍在清理」的提示里。
+     * 三种情况必须分开，它们的返回值**不一样**：
+     * 1. 拿不到目录（`crashReportsDir` 返 null = 外部存储不可用）→ **false**。
+     *    「无法枚举」不等于「已清空」；从前 `File(null, "crash_reports")` 退化成相对路径，
+     *    `listFiles()` 返 null 而不是抛异常，被当成「目录不存在 = 空」报了「已清空」。
+     * 2. 目录在、但一个文件都没有（从没崩过）→ **true**。目录只在首次崩溃时才
+     *    `mkdirs()`，这就是真的空，不该把用户卡在「仍在清理」的提示里。
+     * 3. 目录在、有文件 → 逐份删，全删掉才 true（`delete()` 返 false 或抛异常 = false）。
      *
-     * 从前这里是 `runCatching { listFiles()?.forEach { it.delete() } }.isSuccess`：
-     * `delete()` 的返回值被丢弃，删不掉（文件被占用 / 只读）也照样返 true，而 KDoc
-     * 承诺的是「崩溃报告删不掉时返 false」—— 与日志那侧刚修的是同一个 bug。
+     * 目录获取必须**包在 try 内**：`getExternalFilesDir` 可能抛 SecurityException /
+     * IllegalStateException，而 `clear()` 由界面 `scope.launch` 直接调用、外面没有 try
+     * —— 穿出去就是一次闪退。
      */
     private fun deleteCrashReports(context: Context): Boolean {
-        val dir = GlobalExceptionHandler.crashReportsDir(context)
+        val dir = try {
+            GlobalExceptionHandler.crashReportsDir(context)
+        } catch (e: Exception) {
+            AppLogger.w("读取崩溃报告目录失败: ${e.message}", "LogDiagnostics")
+            return false
+        }
+        if (dir == null) {
+            // 外部存储未挂载 / 不可用：无法枚举 ≠ 已清空
+            AppLogger.w("崩溃报告目录不可用（外部存储未就绪？），无法确认已清空", "LogDiagnostics")
+            return false
+        }
+
         val files = try {
             dir.listFiles()
         } catch (e: Exception) {
-            // 枚举都失败的目录（外部存储被卸载等）不能算清空
+            // 目录在但读不了（权限 / 存储被卸载）：同样不能算清空
             AppLogger.w("枚举崩溃报告目录失败: ${e.message}", "LogDiagnostics")
             return false
-        } ?: return true   // 目录不存在 = 没有崩溃报告可删
+        }
+        // 目录存在却没有文件 = 真的空
+        if (files == null) return true
         return AppLogger.deleteFiles(files.toList())
     }
 }

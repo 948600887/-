@@ -1,9 +1,13 @@
 package com.example.stockdiary.utils
 
+import android.content.Context
+import io.mockk.every
+import io.mockk.mockk
 import java.io.File
 import java.nio.file.Files
 import java.util.concurrent.Callable
 import java.util.concurrent.FutureTask
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -16,6 +20,12 @@ import org.junit.Test
  * 一个定长滑动窗口，保证只保留尾部、内存上限 N 行。截断错了会直接丢排障线索。
  */
 class AppLoggerTest {
+
+    /** object 级 appContext 必须复位，否则会串到别的测试类（AI_GUIDE §8） */
+    @After
+    fun tearDown() {
+        AppLogger.resetForTest()
+    }
 
     @Test
     fun trimToLastLines_低于上限原样返回且补末尾换行() {
@@ -282,10 +292,65 @@ class AppLoggerTest {
      * 单测里 appContext 未初始化 → 没有日志文件可删，清理任务本身是空操作，
      * 所以这里验证的是「排队 + 等待 + 返回值」这条链路没坏，不是删文件本身。
      */
+    /**
+     * 端到端冒烟：日志目录可用、目录里没有残留文件 → 真跑一次清空必须收敛到 true
+     * （2 秒远远够），且**任何情况下都不抛**。
+     *
+     * 必须显式 init 一个指向临时目录的 Context：从前这条用例靠的是「appContext 为
+     * null → 没文件可删 → 空集合恒真 → true」，而那恰恰是修掉的 bug（拿不到目录被
+     * 报成已确认清空）。现在「目录在、没文件」才是真的空，「拿不到目录」见下一条。
+     */
     @Test
-    fun clearLog_默认超时能完成并返回true_零超时也不抛() {
-        assertTrue(AppLogger.clearLog())
-        // 零超时只验证「不抛」：是否已完成取决于线程调度，断言布尔会引入 flaky
-        AppLogger.clearLog(0)
+    fun clearLog_目录可用且为空时返回true_零超时也不抛() {
+        val root = Files.createTempDirectory("goldvault-clear-ok").toFile()
+        try {
+            AppLogger.init(contextWithFilesDir(root), debug = false)
+            assertTrue(AppLogger.clearLog())
+            // 零超时只验证「不抛」：是否已完成取决于线程调度，断言布尔会引入 flaky
+            AppLogger.clearLog(0)
+        } finally {
+            AppLogger.resetForTest()
+            root.deleteRecursively()
+        }
+    }
+
+    /**
+     * **拿不到日志目录 = 无法确认 = false**（外部存储未挂载时 `getExternalFilesDir` 返 null）。
+     *
+     * 这条钉住的正是「空集合恒真」：拿不到目录时 `getLogFiles()` 返 emptyList()，
+     * `deleteFiles(emptyList())` 空转返 true，于是 clearLog 报「已确认清空」，
+     * 调用方提示清空成功、reload 又把旧日志显示一遍。
+     */
+    @Test
+    fun clearLog_取不到日志目录时返回false() {
+        try {
+            AppLogger.init(contextWithFilesDir(null), debug = false)
+            assertFalse(AppLogger.clearLog())
+        } finally {
+            AppLogger.resetForTest()
+        }
+    }
+
+    /** `getExternalFilesDir` 指向一个「无法在其下建目录」的路径（父级是文件）→ 同样算拿不到目录 */
+    @Test
+    fun clearLog_日志目录无法创建时返回false() {
+        val root = Files.createTempDirectory("goldvault-clear-nodir").toFile()
+        try {
+            // parent 是个普通文件 → File(parent, "GoldVault").mkdirs() 必失败
+            val blocker = File(root, "not-a-dir").apply { writeText("x") }
+            AppLogger.init(contextWithFilesDir(blocker), debug = false)
+            assertFalse(AppLogger.clearLog())
+        } finally {
+            AppLogger.resetForTest()
+            root.deleteRecursively()
+        }
+    }
+
+    /** 造一个 `getExternalFilesDir` 返 [dir] 的 Context；`applicationContext` 也要指回自己 */
+    private fun contextWithFilesDir(dir: File?): Context {
+        val context = mockk<Context>(relaxed = true)
+        every { context.applicationContext } returns context
+        every { context.getExternalFilesDir(null) } returns dir
+        return context
     }
 }

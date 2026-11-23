@@ -11,7 +11,6 @@ import java.io.PrintWriter
 import java.io.StringWriter
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
-import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CancellationException
 
 object GlobalExceptionHandler {
@@ -21,7 +20,7 @@ object GlobalExceptionHandler {
     private var appContext: Context? = null
     private var onCrashListener: (() -> Unit)? = null
     
-    private val crashLogs = ConcurrentHashMap<String, String>()
+    /** 磁盘上最多保留这么多份崩溃报告（超出的在启动时由 [pruneCrashFiles] 删掉） */
     private const val MAX_CRASH_LOGS = 50
     
     fun initialize(application: Application, onCrash: (() -> Unit)? = null) {
@@ -131,16 +130,9 @@ object GlobalExceptionHandler {
             val timestamp = System.currentTimeMillis().toFileTimestamp()
             val crashId = "crash_$timestamp"
 
-            crashLogs[crashId] = crashInfo
-
-            if (crashLogs.size > MAX_CRASH_LOGS) {
-                // key 格式为 "crash_<timestamp>"，按字典序即按时间排序，删除最旧记录
-                crashLogs.keys().toList().minOrNull()?.let { oldestKey ->
-                    crashLogs.remove(oldestKey)
-                }
-            }
-
-            val crashFile = crashReportsDir(appContext ?: return)
+            // 外部存储不可用时 crashReportsDir 返 null：没地方写就直接放弃，
+            // 不能落到相对路径 crash_reports（那是进程 CWD，写完用户也找不到）
+            val crashFile = crashReportsDir(appContext ?: return) ?: return
             if (!crashFile.exists()) crashFile.mkdirs()
 
             val logFile = File(crashFile, "$crashId.log")
@@ -155,25 +147,30 @@ object GlobalExceptionHandler {
     }
 
     /**
-     * 崩溃报告目录。
+     * 崩溃报告目录；**外部存储不可用时返 null**（而不是一个假的路径）。
      *
      * 对外暴露是因为界面要把它列出来给用户看、给用户分享——
      * 光有文件没有入口等于没有：Android 11 起 `Android/data` 对用户和大多数
      * 文件管理器都不可见，用户根本拿不到，只能靠 App 自己把内容送出去。
+     *
+     * 为什么必须返 null 而不是 `File(null, "crash_reports")`：`File(File?, String)`
+     * 接受 null parent，于是退化成**相对路径** `crash_reports`（解析到进程 CWD），
+     * `listFiles()` 对不存在的相对路径返 null（不是抛异常），调用方再用
+     * 「null = 目录不存在 = 空」的规则就会把「外部存储没挂载」报成「已清空」。
+     * 那是**两个完全不同的事实**：前者是「读不到」，后者是「确实没有」。
      */
-    fun crashReportsDir(context: Context): File =
-        File(context.getExternalFilesDir(null), "crash_reports")
+    fun crashReportsDir(context: Context): File? =
+        context.getExternalFilesDir(null)?.let { File(it, "crash_reports") }
 
     /**
      * 只保留最近 [MAX_CRASH_LOGS] 份崩溃日志。
      *
-     * 放在启动阶段做，不在崩溃现场做：磁盘目录不受 MAX_CRASH_LOGS 约束，
-     * 只删内存里的旧记录而文件一直留着，反复崩溃会把外部存储悄悄写满。
-     * 而崩溃现场多一次 listFiles + 排序的分配，在 OOM 时是纯负收益。
+     * 放在启动阶段做，不在崩溃现场做：磁盘上的崩溃报告没人裁剪，反复崩溃会把外部
+     * 存储悄悄写满。而崩溃现场多一次 listFiles + 排序的分配，在 OOM 时是纯负收益。
      */
     fun pruneCrashFiles() {
         try {
-            val dir = crashReportsDir(appContext ?: return)
+            val dir = crashReportsDir(appContext ?: return) ?: return
             val files = dir.listFiles() ?: return
             if (files.size <= MAX_CRASH_LOGS) return
             // 文件名是 "crash_<timestamp>.log"，定长时间戳，字典序即时间序
@@ -222,21 +219,6 @@ object GlobalExceptionHandler {
         // 复用 readAppVersionLabel：崩溃文件从前只记 versionCode，排查时看不到
         // versionName；现在统一带 "versionName(versionCode)"，并和诊断报告头部同源。
         return readAppVersionLabel(appContext) ?: "Unknown"
-    }
-    
-    fun getCrashLogs(): List<Pair<String, String>> {
-        return crashLogs.toList().sortedByDescending { it.first }
-    }
-    
-    fun clearCrashLogs() {
-        crashLogs.clear()
-        try {
-            crashReportsDir(appContext ?: return).listFiles()?.forEach { it.delete() }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            AppLogger.e("清除崩溃日志失败", e, "CrashHandler")
-        }
     }
     
     fun logSafe(tag: String, message: String) {

@@ -10,7 +10,7 @@ import kotlinx.coroutines.CancellationException
 
 /**
  * 天天基金数据解析器：从 pingzhongdata JS 响应中提取基金名称、净值和回报率。
- * FundAPI 和 EnhancedFundAPI 共享此解析逻辑。
+ * 由 FundAPI 使用（原 EnhancedFundAPI 兼容壳已删除，解析逻辑只此一份）。
  */
 object FundDataParser {
     private const val TAG = "FundDataParser"

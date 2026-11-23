@@ -5,9 +5,10 @@ object APIEndpoints {
     object Sina {
         const val BASE_URL = "https://finance.sina.com.cn"
         const val HQ_API = "https://hq.sinajs.cn"
-        const val HISTORY_API = "https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData"
-        const val STOCK_SEARCH = "https://stock.finance.sina.com.cn/stock/api/openapi.php/StockSearchService.search"
-        const val STOCK_SEARCH_KEYWORD = "keyword"
+        // 历史 K 线（HISTORY_API）与个股搜索（STOCK_SEARCH*）两组 endpoint 已随
+        // getKLineData / searchStock 一起下线：App 的历史净值曲线走快照表、标的选择走
+        // 导入与手动录入，两条链都没有产品调用方。常量表的价值是「当前在用的 endpoint
+        // 全集」，混进已下线的会让下一个人以为它们还在用。
         const val DIVIDEND_PAGE = "https://vip.stock.finance.sina.com.cn/corp/go.php/vISSUE_ShareBonus/stockid/"
         const val BONUS_PAGE = "https://finance.sina.com.cn/realstock/company/"
     }

@@ -1,100 +1,24 @@
 package com.example.stockdiary.network
 
-import com.example.stockdiary.utils.AppLogger
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
-import okhttp3.Request
-import org.json.JSONObject
-import kotlinx.coroutines.CancellationException
-
+/**
+ * 币安**公开行情/符号**相关的纯逻辑（不涉及密钥）。
+ *
+ * 行情请求方法（`getPrice` / `get24hrStats`）已下线：全 App 取价统一走
+ * `UnifiedPriceService`（带三层缓存、熔断与来源健康度），这里只剩符号归一与
+ * 理财/稳定币判定这类**纯函数**，它们被 `UnifiedPriceService` 与 `BinanceImportService`
+ * 共用（币安领域知识只允许有一处定义）。
+ */
 object BinanceAPI {
-    // 公开行情走 data-api.binance.vision（不做地区封锁，与 api.binance.com 同套 /api/v3 路径）
-    private const val BASE_URL = "https://data-api.binance.vision/api/v3"
-    private const val PRICE_URL = "$BASE_URL/ticker/price"
-    private const val KLINE_URL = "$BASE_URL/klines"
-    
-    private val client = NetworkClient.binanceClient
-    
-    suspend fun getPrice(symbol: String): Double? {
-        return withContext(Dispatchers.IO) {
-            try {
-                val tradingPair = formatSymbol(symbol)
-                val url = "$PRICE_URL?symbol=$tradingPair"
-                AppLogger.apiUrl("GET", url, "BinanceAPI")
-                
-                val request = Request.Builder()
-                    .url(url)
-                    .addHeader("User-Agent", "Mozilla/5.0")
-                    .build()
-                
-                val response = client.newCall(request).execute()
-                response.use {
-                    if (!it.isSuccessful) {
-                        AppLogger.e("API响应错误: ${it.code}", tag = "BinanceAPI")
-                        return@withContext null
-                    }
-
-                    val body = it.body?.string() ?: return@withContext null
-                    AppLogger.d("响应长度: ${body.length}", "BinanceAPI")
-
-                    val json = JSONObject(body)
-                    return@withContext json.getString("price").toDoubleOrNull()
-                }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                AppLogger.e("获取价格失败: ${e.message}", e, "BinanceAPI")
-                null
-            }
-        }
-    }
-    
-    suspend fun get24hrStats(symbol: String): Binance24hrStats? {
-        return withContext(Dispatchers.IO) {
-            try {
-                val tradingPair = formatSymbol(symbol)
-                val url = "$BASE_URL/ticker/24hr?symbol=$tradingPair"
-                
-                val request = Request.Builder()
-                    .url(url)
-                    .addHeader("User-Agent", "Mozilla/5.0")
-                    .build()
-                
-                val response = client.newCall(request).execute()
-                response.use {
-                    if (!it.isSuccessful) return@withContext null
-
-                    val body = it.body?.string() ?: return@withContext null
-                    return@withContext parse24hrStats(body)
-                }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                AppLogger.e("获取24小时统计失败: ${e.message}", e, "BinanceAPI")
-                null
-            }
-        }
-    }
-    
-    private fun parse24hrStats(json: String): Binance24hrStats? {
-        return try {
-            val obj = JSONObject(json)
-            Binance24hrStats(
-                symbol = obj.getString("symbol"),
-                lastPrice = obj.getString("lastPrice").toDoubleOrNull() ?: 0.0,
-                priceChange = obj.getString("priceChange").toDoubleOrNull() ?: 0.0,
-                priceChangePercent = obj.getString("priceChangePercent").toDoubleOrNull() ?: 0.0,
-                highPrice = obj.getString("highPrice").toDoubleOrNull() ?: 0.0,
-                lowPrice = obj.getString("lowPrice").toDoubleOrNull() ?: 0.0,
-                volume = obj.getString("volume").toDoubleOrNull() ?: 0.0
-            )
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            null
-        }
-    }
-    
+    /**
+     * 把用户输入的交易对/简称归一成币安符号（`btc-usdt` → `BTCUSDT`，`BTC` → `BTCUSDT`）。
+     *
+     * ⚠️ **当前仅测试使用**：产品侧调用方（`getPrice`/`get24hrStats`）已随行情链下线下线，
+     * 但 `APITest` 有 8 条断言钉住了这套口径（后缀优先级、`BTC/ETH` 当报价币等）。
+     * 不要因为「没有产品调用」就删掉它——它是币安符号语义的唯一可执行文档。
+     *
+     * ⚠️ 也不要用它处理**账户接口返回的裸基础资产**：它对 `BTC`/`ETH` 会返回自身
+     * （当成报价币），导入侧必须用 [cryptoTradingPairFor]（见 BinanceImportService 的说明）。
+     */
     internal fun formatSymbol(symbol: String): String {
         val cleanSymbol = symbol.uppercase().replace(" ", "").replace("-", "")
 
@@ -334,29 +258,13 @@ object BinanceAPI {
     }
 }
 
-data class Binance24hrStats(
-    val symbol: String,
-    val lastPrice: Double,
-    val priceChange: Double,
-    val priceChangePercent: Double,
-    val highPrice: Double,
-    val lowPrice: Double,
-    val volume: Double
-)
-
 /**
- * 常见 USD 稳定币集合。
- *
- * 这些币锚定 1 美元，且币安上没有 `XXXUSDT` 自我交易对（USDT 本身就是报价币），
- * 查价必然查空。估算市值时按 1.0 美元计，省掉一次注定取不到价的请求。
+ * 常见 USD 稳定币集合（锚定 1 美元，币安上没有 XXXUSDT 自我交易对，查价必然空，
+ * 估值按 1.0 美元计）。
  *
  * 放在这里（network 包顶层）而不是 data/importer：币安的领域知识应当只有一处定义，
  * 两边各写一份正是历史上出过 bug 的原因（见 [BinanceAPI.cryptoTradingPairFor]）。
  * 顶层声明（而非 object 成员）是为了让 data 层能 `import` 到它。
- */
-/**
- * 常见 USD 稳定币集合（锚定 1 美元，币安上没有 XXXUSDT 自我交易对，查价必然空，
- * 估值按 1.0 美元计）。
  *
  * ⚠️ 这是**手工维护**的名单，天然会随市场上新稳定币而漂移——PYUSD / USDE / USDG 等都曾漏过。
  * 漏网的稳定币不会拿到 1.0 兜底，而是退化成裸码去查价 → 查不到 → 市值显 0 / 价格待更新。

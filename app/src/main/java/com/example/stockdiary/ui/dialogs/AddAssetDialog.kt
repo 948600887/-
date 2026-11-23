@@ -200,7 +200,8 @@ fun AddAssetDialog(
     }
 
     // 天天基金API查询（必须先定义，因为 LaunchedEffect 中会调用）
-    // 优先用 FundAPI（无 Referer 头，不会被天天基金反爬拦截），EnhancedFundAPI 兜底
+    // 只走 FundAPI（无 Referer 头，不会被天天基金反爬拦截），结果经仓库映射成 FundQuote。
+    // 旧的 EnhancedFundAPI「兜底」已删除——它只是 FundAPI 的转发壳，且从来没有被真正调用过。
     suspend fun tryFundAPI() {
         try {
             // 先用 FundAPI（与 AddStockDialog 一致，已确认可用），结果经仓库映射成 FundQuote

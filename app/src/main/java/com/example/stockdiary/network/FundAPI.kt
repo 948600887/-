@@ -263,11 +263,6 @@ object FundAPI {
         val isStale: Boolean = false
     )
 
-    /** 获取基金净值（无缓存，始终请求最新） */
-    suspend fun getFundPrice(fundCode: String): Double? {
-        return getFundInfo(fundCode)?.price
-    }
-
     /** 获取基金信息（无缓存，始终请求最新） */
     suspend fun getFundInfo(fundCode: String): FundInfo? {
         return fetchFundInfo(fundCode)

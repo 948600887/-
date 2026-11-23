@@ -12,12 +12,9 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.CompletableDeferred
 import okhttp3.*
 import java.io.IOException
-import java.net.URLEncoder
 import java.nio.charset.Charset
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicReference
-import org.json.JSONArray
-import org.json.JSONObject
 import com.example.stockdiary.common.APIEndpoints
 import com.example.stockdiary.common.CacheConfig
 import com.example.stockdiary.common.RequestLimits
@@ -34,7 +31,6 @@ import kotlinx.coroutines.sync.withPermit
 object SinaStockAPI : StockAPI {
     private const val TAG = "SinaStockAPI"
     private const val BASE_URL_REALTIME = APIEndpoints.Sina.HQ_API + "/list="
-    private const val BASE_URL_HISTORY = APIEndpoints.Sina.HISTORY_API
 
     private const val CACHE_DURATION = CacheConfig.PORTFOLIO_CACHE_MS
     private const val MAX_CACHE_SIZE = 200
@@ -418,150 +414,6 @@ object SinaStockAPI : StockAPI {
         }
     }
 
-    suspend fun getKLineData(stockCode: String, scale: Int = 240, ma: String = "5", dataLen: Int = 100): Result<List<KLineData>> {
-        return withContext(Dispatchers.IO) {
-            try {
-                val formattedCode = formatStockCode(stockCode)
-                val url = "$BASE_URL_HISTORY?symbol=$formattedCode&scale=$scale&ma=$ma&datalen=$dataLen"
-                AppLogger.apiUrl("GET", url, TAG)
-                
-                val request = Request.Builder()
-                    .url(url)
-                    .build()
-                
-                val response = activeClient.newCall(request).execute()
-                response.use {
-                    if (!it.isSuccessful) {
-                        val errorMsg = "API响应错误: ${it.code}"
-                        AppLogger.e(errorMsg, tag = TAG)
-                        return@withContext Result.failure(IOException(errorMsg))
-                    }
-
-                    val responseBody = it.body
-                    if (responseBody == null) {
-                        AppLogger.e("API返回空数据", tag = TAG)
-                        return@withContext Result.failure(IOException("API返回空数据"))
-                    }
-                    val text = responseBody.use { body -> body.string() }
-                    AppLogger.d("K线API响应长度: ${text.length}", TAG)
-
-                    val kLineData = parseKLineData(text)
-                    if (kLineData.isEmpty()) {
-                        return@withContext Result.failure(IOException("未获取到K线数据"))
-                    }
-
-                    return@withContext Result.success(kLineData)
-                }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                AppLogger.e("K线API异常: ${e.message}", e, TAG)
-                Result.failure(e)
-            }
-        }
-    }
-    
-    private fun parseKLineData(jsonText: String): List<KLineData> {
-        val result = mutableListOf<KLineData>()
-        try {
-            val jsonArray = JSONArray(jsonText.trim())
-            for (i in 0 until jsonArray.length()) {
-                val item = jsonArray.getJSONObject(i)
-                val day = item.optString("day", "")
-                if (day.isNotEmpty()) {
-                    result.add(
-                        KLineData(
-                            day = day,
-                            open = item.optDouble("open", 0.0),
-                            high = item.optDouble("high", 0.0),
-                            low = item.optDouble("low", 0.0),
-                            close = item.optDouble("close", 0.0),
-                            volume = item.optLong("volume", 0L)
-                        )
-                    )
-                }
-            }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            AppLogger.e("解析K线数据错误: ${e.message}", e, TAG)
-        }
-        return result
-    }
-    
-    suspend fun searchStock(keyword: String): Result<List<StockSearchResult>> {
-        return withContext(Dispatchers.IO) {
-            try {
-                val encodedKeyword = URLEncoder.encode(keyword, "UTF-8")
-                val url = "https://stock.finance.sina.com.cn/stock/api/openapi.php/StockSearchService.search?keyword=$encodedKeyword"
-                AppLogger.apiUrl("GET", url, TAG)
-                
-                val request = Request.Builder()
-                    .url(url)
-                    .build()
-                
-                val response = activeClient.newCall(request).execute()
-                response.use {
-                    if (!it.isSuccessful) {
-                        val errorMsg = "API响应错误: ${it.code}"
-                        AppLogger.e(errorMsg, tag = TAG)
-                        return@withContext Result.failure(IOException(errorMsg))
-                    }
-
-                    val responseBody = it.body
-                    if (responseBody == null) {
-                        AppLogger.e("API返回空数据", tag = TAG)
-                        return@withContext Result.failure(IOException("API返回空数据"))
-                    }
-                    val text = responseBody.use { body -> body.string() }
-                    AppLogger.d("搜索API响应: $text", TAG)
-
-                    val searchResults = parseSearchResult(text)
-
-                    return@withContext Result.success(searchResults)
-                }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                AppLogger.e("搜索API异常: ${e.message}", e, TAG)
-                Result.failure(e)
-            }
-        }
-    }
-    
-    private fun parseSearchResult(jsonText: String): List<StockSearchResult> {
-        val result = mutableListOf<StockSearchResult>()
-        try {
-            AppLogger.d("解析搜索结果: $jsonText", TAG)
-
-            val root = JSONObject(jsonText.trim())
-            val dataArray = root.optJSONObject("result")?.optJSONArray("data")
-                ?: root.optJSONArray("data")
-                ?: return result
-
-            for (i in 0 until dataArray.length()) {
-                val item = dataArray.getJSONObject(i)
-                val symbol = item.optString("symbol").ifBlank { item.optString("code") }
-                val name = item.optString("name")
-                val type = item.optString("type")
-
-                if (symbol.isNotEmpty() && name.isNotEmpty()) {
-                    val market = when {
-                        symbol.startsWith("sh") || type.contains("沪") -> "sh"
-                        symbol.startsWith("sz") || type.contains("深") -> "sz"
-                        else -> "sh"
-                    }
-                    result.add(StockSearchResult(symbol, name, market))
-                }
-            }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            AppLogger.e("解析搜索结果错误: ${e.message}", e, TAG)
-        }
-        return result
-    }
-    
     /**
      * 解析新浪实时行情。
      *
@@ -706,17 +558,3 @@ object SinaStockAPI : StockAPI {
     )
 }
 
-data class KLineData(
-    val day: String,
-    val open: Double,
-    val high: Double,
-    val low: Double,
-    val close: Double,
-    val volume: Long
-)
-
-data class StockSearchResult(
-    val symbol: String,
-    val name: String,
-    val market: String
-)

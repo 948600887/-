@@ -12,6 +12,7 @@ import java.util.ArrayDeque
 import java.time.Instant
 import java.time.LocalDateTime
 import java.time.ZoneId
+import java.util.concurrent.Callable
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
 import java.util.concurrent.ScheduledExecutorService
@@ -573,34 +574,49 @@ object AppLogger {
      * 清空日志（活跃文件 + 全部轮转归档 + 内存待写队列）。
      *
      * @param timeoutSeconds 等待清理任务完成的秒数，默认 [CLEAR_LOG_TIMEOUT_SECONDS]
-     * @return **true = 已确认清空**（任务在等待期内跑完）；**false = 超时或失败**，
-     *         任务可能仍在后台排队。调用方必须区分这两种结果：
+     * @return **true = 已确认清空**（任务在等待期内跑完，且**每一个**日志文件都确实删掉了）；
+     *         **false = 没清完**——超时（任务仍在后台排队）、被中断，或任务跑完了但有
+     *         文件删不掉（被占用 / 只读）。调用方必须区分这两种结果：
      *         从前返回 Unit，超时静默返回后调用方立刻 reload，读到的是**旧日志**，
      *         用户以为没清掉、反复点；另一处则直接提示「清除成功」而日志其实还在。
-     *         注意 false 不等于永久失败——任务已在单线程队列里排队，迟早会执行。
+     *         为了让 true 名副其实（UI 已经拿它决定 reload 还是提示「仍在清理」），
+     *         [clearLogNow] 一旦有文件删失败就返 false —— 宁可多给一次「仍在清理」，
+     *         也不谎称已清空。注意 false 不等于永久失败——任务已在单线程队列里排队，
+     *         迟早会执行。
      */
     fun clearLog(timeoutSeconds: Long = CLEAR_LOG_TIMEOUT_SECONDS): Boolean =
-        clearLogAwaiting(logExecutor.submit { clearLogNow() }, timeoutSeconds)
+        clearLogAwaiting(logExecutor.submit(Callable { clearLogNow() }), timeoutSeconds)
 
     /**
      * 等待清理任务完成，超时只记日志、**绝不抛给调用方**（清空是尽力而为，
      * 抛异常会让「清除所有数据」整条流程失败）。
      *
+     * 返回值直接透传 [Future.get] 的结果：任务**跑完且删干净**才 true；任务本身返
+     * false（有文件删不掉）、超时、被中断、执行时抛异常，全部收敛成 false。
+     *
      * 单独抽出来的唯一理由是**可测**：直接断言 `clearLog(0)` 的布尔值是竞态的
      * ——任务可能在 `get()` 之前就跑完，测试会偶发飘红。注入一个「必然未完成」的
      * [Future] 才能确定性覆盖「0 超时 → 返回 false 且不抛」这条语义。
      */
-    internal fun clearLogAwaiting(task: Future<*>, timeoutSeconds: Long): Boolean {
+    internal fun clearLogAwaiting(task: Future<Boolean>, timeoutSeconds: Long): Boolean {
         return try {
+            // 删除失败已在 clearLogNow 里折成 false，这里只负责「等待 + 透传」
             task.get(timeoutSeconds, TimeUnit.SECONDS)
-            true
         } catch (e: TimeoutException) {
             // 必须留痕——否则下次看到「日志没清掉」会以为是自己代码写错了
             Log.w(LOG_TAG, "清空日志超时(${timeoutSeconds}s)，清理任务仍在后台排队")
             false
         } catch (e: CancellationException) {
             throw e
+        } catch (e: InterruptedException) {
+            // 先恢复中断标志再返回：`get()` 抛出时会**清掉**线程的中断状态，吞掉它等于
+            // 让调用方线程后续的阻塞点再也收不到「请收手」的信号（标准做法是补打标记，
+            // 不重新抛——本方法的契约就是「绝不抛给调用方」）。
+            Thread.currentThread().interrupt()
+            Log.w(LOG_TAG, "等待清空日志时被中断，清理任务仍在后台排队")
+            false
         } catch (e: Exception) {
+            // ExecutionException：清理任务内部抛了没接住的异常
             Log.w(LOG_TAG, "清空日志失败", e)
             false
         }
@@ -609,22 +625,67 @@ object AppLogger {
     /**
      * 真正的清理动作：清内存队列 + 删全部日志文件。
      *
+     * @return true = 内存队列已清空**且**每个日志文件都删掉了；false = 有文件删不掉
+     *         或清队列时抛异常。**不中途 return**：一个文件删不掉也要把余下的尽力删完，
+     *         否则「有一份被占用就整批留下」，下次未必还占用，用户却一直看到旧日志。
+     *
      * 必须和 flushLogs 串行：二者都在 logExecutor 单线程上跑，submit 排队执行，
      * 避免「flush 的 append」与「这里 writeText(\"\")」交错覆盖
      * —— 否则可能把刚落盘的日志又清空，或清空后又被 append 覆盖成非空。
      */
-    private fun clearLogNow() {
+    private fun clearLogNow(): Boolean {
+        var queueCleared = true
         try {
             synchronized(queueLock) { logQueue.clear() }
-            // 文件写入同样要拿 fileLock：崩溃路径的 forceFlush 不走这个执行器，
-            // 两者若只靠单线程排队串行，forceFlush 会和这里的删除交错
-            // 归档文件一并清掉：只清 app.log 会让用户以为「清空」了、分享里却还带着旧轮次日志
-            synchronized(fileLock) {
-                getLogFiles().forEach { it.delete() }
-            }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
-            Log.w(LOG_TAG, "清空日志失败", e)
+            // 队列都没清掉就别谎称成功，但文件仍要尽量删
+            queueCleared = false
+            Log.w(LOG_TAG, "清空日志时清理内存队列失败", e)
         }
+
+        // 文件写入同样要拿 fileLock：崩溃路径的 forceFlush 不走这个执行器，
+        // 两者若只靠单线程排队串行，forceFlush 会和这里的删除交错
+        // 归档文件一并清掉：只清 app.log 会让用户以为「清空」了、分享里却还带着旧轮次日志
+        val filesDeleted = try {
+            synchronized(fileLock) { deleteLogFiles(getLogFiles()) }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(LOG_TAG, "清空日志时枚举日志文件失败", e)
+            false
+        }
+        return queueCleared && filesDeleted
+    }
+
+    /**
+     * 逐个删除 [files] 并如实汇报，**不中途 return**——一份删不掉也要把余下的删完。
+     *
+     * @return true = **全部**删掉。任一 `delete()` 返回 false（被占用 / 只读 / 已被别人
+     *         先删掉）或抛异常都记 false。从前这里丢弃了 `delete()` 的返回值，
+     *         删失败时 Future 仍正常完成 → [clearLog] 返 true → UI 走 reload →
+     *         用户又看到旧日志，提示变成谎话。
+     *
+     * 已知取舍：并发下「文件已被别人先删掉」也会记 false（`delete()` 对不存在的路径返
+     * false）。这是有意偏保守：多给一次「仍在清理」的提示，好过谎称已清空。
+     *
+     * 调用方必须持有 [fileLock]（见 [clearLogNow]）。
+     */
+    internal fun deleteLogFiles(files: List<File>): Boolean {
+        var allDeleted = true
+        files.forEach { file ->
+            try {
+                if (!file.delete()) {
+                    allDeleted = false
+                    Log.w(LOG_TAG, "日志文件删除失败（可能被占用或只读）: ${file.name}")
+                }
+            } catch (e: Exception) {
+                allDeleted = false
+                Log.w(LOG_TAG, "删除日志文件异常: ${file.name}", e)
+            }
+        }
+        return allDeleted
     }
     
     /**

@@ -208,15 +208,72 @@ class AppLoggerTest {
      */
     @Test
     fun clearLogAwaiting_超时返回false且不抛异常() {
-        val notStarted = FutureTask(Callable { })   // 只构造不 run：state 恒为 NEW
+        val notStarted = FutureTask(Callable { true })   // 只构造不 run：state 恒为 NEW
         assertFalse(AppLogger.clearLogAwaiting(notStarted, 0))
     }
 
-    /** 任务在等待期内跑完才算「已确认清空」 */
+    /** 任务在等待期内跑完、且删干净，才算「已确认清空」 */
     @Test
     fun clearLogAwaiting_任务完成返回true() {
-        val done = FutureTask(Callable { }).apply { run() }
+        val done = FutureTask(Callable { true }).apply { run() }
         assertTrue(AppLogger.clearLogAwaiting(done, 1))
+    }
+
+    /**
+     * 任务跑完但自我汇报「没删净」时必须透传 false。
+     *
+     * 这正是修掉的那个 bug：从前 `clearLogAwaiting` 只等 `get()` 返回就无条件写 true，
+     * 于是 `delete()` 失败也会被当成「已确认清空」，UI 走 reload 又给用户看一遍旧日志。
+     */
+    @Test
+    fun clearLogAwaiting_任务完成但删除失败返回false() {
+        val done = FutureTask(Callable { false }).apply { run() }
+        assertFalse(AppLogger.clearLogAwaiting(done, 1))
+    }
+
+    // ---- deleteLogFiles：删失败必须如实汇报 ----
+
+    @Test
+    fun deleteLogFiles_全部删掉返回true且文件消失() {
+        val dir = Files.createTempDirectory("goldvault-del").toFile()
+        try {
+            val files = (0..2).map { File(dir, "app.log.$it").apply { writeText("x") } }
+            assertTrue(AppLogger.deleteLogFiles(files))
+            files.forEach { assertFalse("应已删除: ${it.name}", it.exists()) }
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    /**
+     * `delete()` 返回 false 必须记 false（修前的实现把返回值丢了，永远报成功）。
+     *
+     * 用「不存在的路径」构造确定性失败：`File.delete()` 对不存在的路径固定返回 false，
+     * 不依赖文件锁/只读属性这类跨平台不一致的行为。
+     */
+    @Test
+    fun deleteLogFiles_删除失败返回false() {
+        val dir = Files.createTempDirectory("goldvault-del-fail").toFile()
+        try {
+            val ghost = File(dir, "gone.log")   // 从未创建 → delete() 必返 false
+            assertFalse(AppLogger.deleteLogFiles(listOf(ghost)))
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    /** 一个删不掉不能拖累其余：成功的照样删掉，整体仍报 false */
+    @Test
+    fun deleteLogFiles_部分失败仍尽力删完其余() {
+        val dir = Files.createTempDirectory("goldvault-del-mixed").toFile()
+        try {
+            val real = File(dir, "app.log").apply { writeText("x") }
+            val ghost = File(dir, "gone.log")
+            assertFalse(AppLogger.deleteLogFiles(listOf(ghost, real)))
+            assertFalse("能删的仍要删掉，不能中途 return", real.exists())
+        } finally {
+            dir.deleteRecursively()
+        }
     }
 
     /**

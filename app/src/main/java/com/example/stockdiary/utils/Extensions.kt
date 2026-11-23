@@ -1,7 +1,6 @@
 package com.example.stockdiary.utils
 
 import com.example.stockdiary.common.DateFormats
-import com.example.stockdiary.data.dividend.DividendData
 import com.example.stockdiary.database.Asset
 import com.example.stockdiary.database.AssetType
 import java.math.RoundingMode
@@ -10,10 +9,8 @@ import java.text.DecimalFormatSymbols
 import java.util.Locale
 import java.time.Instant
 import java.time.LocalDate
-import java.time.LocalDateTime
 import java.time.ZoneId
 import java.time.ZonedDateTime
-import java.time.format.DateTimeFormatter
 
 // ========== 资产列表去重（给 Room 全表 Flow 用） ==========
 
@@ -231,19 +228,6 @@ fun currencySymbol(currency: String?): String = when (currency?.uppercase()) {
     else -> "¥"
 }
 
-fun Double?.orZero(): Double = this ?: 0.0
-fun Float?.orZero(): Float = this ?: 0f
-fun Int?.orZero(): Int = this ?: 0
-fun Long?.orZero(): Long = this ?: 0L
-
-fun Double?.orDefault(default: Double): Double = this ?: default
-fun Float?.orDefault(default: Float): Float = this ?: default
-fun Int?.orDefault(default: Int): Int = this ?: default
-fun Long?.orDefault(default: Long): Long = this ?: default
-
-fun Double.toPercentString(digits: Int = 2) = "${(this * 100).format(digits)}%"
-fun Double.toCurrencyString(symbol: String = "¥") = "$symbol${this.format(2)}"
-
 fun Double.toProfitDisplay(currency: String = "¥"): String =
     "${if (this >= 0) "+" else ""}$currency${this.format(2)}"
 
@@ -256,34 +240,7 @@ fun Long.toFileTimestamp(): String =
     ZonedDateTime.ofInstant(Instant.ofEpochMilli(this), ZoneId.systemDefault()).toLocalDateTime()
         .format(DateFormats.FILE_TIMESTAMP_FORMATTER)
 
-fun Int.toKMB(): String = when {
-    this >= 1_000_000_000 -> "${(this / 1_000_000_000.0).format(1)}B"
-    this >= 1_000_000 -> "${(this / 1_000_000.0).format(1)}M"
-    this >= 1_000 -> "${(this / 1_000.0).format(1)}K"
-    else -> this.toString()
-}
-
-fun Double.toKMB(): String = when {
-    this >= 1_000_000_000 -> "${(this / 1_000_000_000).format(1)}B"
-    this >= 1_000_000 -> "${(this / 1_000_000).format(1)}M"
-    this >= 1_000 -> "${(this / 1_000).format(1)}K"
-    else -> this.format(1)
-}
-
 // ========== 日期格式化 ==========
-
-fun Long.toDateString(format: String = DateFormats.ISO_DATE): String {
-    return try {
-        ZonedDateTime.ofInstant(Instant.ofEpochMilli(this), ZoneId.systemDefault()).toLocalDateTime()
-            .format(DateFormats.ofPattern(format))
-    } catch (e: Exception) {
-        ""
-    }
-}
-
-fun Long.toDisplayDate(): String = toDateString(DateFormats.ISO_DATE)
-fun Long.toDisplayTime(): String = toDateString(DateFormats.TIME_ONLY)
-fun Long.toDisplayDateTime(): String = toDateString(DateFormats.DISPLAY_DATETIME)
 
 fun String.toLocalDate(format: String = DateFormats.ISO_DATE): LocalDate? {
     return try {
@@ -295,19 +252,6 @@ fun String.toLocalDate(format: String = DateFormats.ISO_DATE): LocalDate? {
 
 fun String.toTimestamp(format: String = DateFormats.ISO_DATE): Long {
     return toLocalDate(format)?.atStartOfDay(ZoneId.systemDefault())?.toInstant()?.toEpochMilli() ?: 0L
-}
-
-fun Long.toRelativeTime(): String {
-    val now = System.currentTimeMillis()
-    val diff = now - this
-    
-    return when {
-        diff < 60_000 -> "刚刚"
-        diff < 3_600_000 -> "${diff / 60_000}分钟前"
-        diff < 86_400_000 -> "${diff / 3_600_000}小时前"
-        diff < 604_800_000 -> "${diff / 86_400_000}天前"
-        else -> toDisplayDate()
-    }
 }
 
 /**
@@ -342,63 +286,18 @@ internal fun Long.isTodayAt(nowMillis: Long, zone: ZoneId): Boolean {
     return this >= start && this < end
 }
 
-// ========== 网络相关 ==========
-
-fun String.isValidUrl(): Boolean = startsWith("http://") || startsWith("https://")
-
-fun String.appendIfMissing(suffix: String): String = 
-    if (endsWith(suffix)) this else this + suffix
-
-fun String.prependIfMissing(prefix: String): String = 
-    if (startsWith(prefix)) this else prefix + this
-
 // ========== 字符串处理 ==========
 
 fun String?.orEmpty(): String = this ?: ""
-fun String?.orBlank(default: String): String = this?.takeIf { it.isNotBlank() } ?: default
-
-fun String.isValidStockCode(): Boolean {
-    if (isEmpty()) return false
-    return all { it.isDigit() || it in "shSHszSZ" }
-}
-
-fun String.normalizeStockCode(): String = uppercase()
-fun String.extractStockCode(): String = filter { it.isDigit() }
 
 // ========== 集合处理 ==========
 
 fun <T> List<T>?.orEmpty(): List<T> = this ?: emptyList()
 
-fun <T> List<T>.takeIfNotEmpty(): List<T>? = if (isNotEmpty()) this else null
-
 fun <K, V> Map<K, V>?.orEmpty(): Map<K, V> = this ?: emptyMap()
-
-inline fun <T, R> List<T>.mapNotNullToList(transform: (T) -> R?): List<R> =
-    mapNotNull(transform)
-
-fun <T> List<T>.joinToStringLimited(separator: String = ", ", limit: Int = 3): String {
-    if (size <= limit) return joinToString(separator)
-    return "${take(limit).joinToString(separator)}...(+${size - limit})"
-}
 
 fun List<com.example.stockdiary.data.dividend.DividendData>.getLatest(): List<com.example.stockdiary.data.dividend.DividendData> =
     this.sortedByDescending { it.date }.take(1)
-
-fun <T : Collection<*>> Result<T>.hasContent(): Boolean = isSuccess && getOrNull()?.isNotEmpty() == true
-
-// ========== 颜色处理 ==========
-
-fun Int.toColorString(): String = String.format("#%06X", 0xFFFFFF and this)
-
-// ========== 范围判断 ==========
-
-fun Double.isInRange(min: Double, max: Double): Boolean = this in min..max
-fun Float.isInRange(min: Float, max: Float): Boolean = this in min..max
-fun Int.isInRange(min: Int, max: Int): Boolean = this in min..max
-
-fun Double.isPositive(): Boolean = this > 0
-fun Double.isNegative(): Boolean = this < 0
-fun Double.isZero(): Boolean = this == 0.0
 
 // ========== 图表/日历通用格式化 ==========
 

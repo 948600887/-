@@ -335,13 +335,20 @@ object AppLogger {
                             for (index in logsToWrite.indices) {
                                 writer.write(logsToWrite[index].render(timestamps[index]))
                                 writer.newLine()
-                                written++
                             }
                             writer.flush()
+                            // written 的语义必须是「已 flush 成功的行数」，不是「已塞进
+                            // BufferedWriter 缓冲区的行数」。默认 8KB 缓冲下，1000 行完全可能
+                            // 一行都还没真正落盘：此时 flush() 抛 IOException 而 written 已经
+                            // 是 size，下面的 `if (written < size)` 不成立 → 整批静默丢弃，
+                            // 日志里看不出任何异常（复盘时最要命的正是这条）。
+                            written = logsToWrite.size
                         }
                     }
                 } catch (e: IOException) {
-                    // 磁盘满 / 文件被占用：已写下去的保留，剩下的回队等下次
+                    // 磁盘满 / 文件被占用：缓冲区里到底落了几行无从得知，
+                    // 一律整批回队。宁可下次重复几行（日志重复无害），也绝不丢行。
+                    written = 0
                 }
                 if (written < logsToWrite.size) {
                     requeue(logsToWrite, written)

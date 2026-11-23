@@ -177,14 +177,24 @@ object ExchangeRateManager {
         bumpRateRevision()
     }
 
+    /**
+     * 取币种汇率。**未知币种按 1:1（等同人民币）兜底**，绝不返回 0。
+     *
+     * 为什么不做成 0：0 会让这一笔资产的市值直接归零，净资产曲线出现一次无法解释的
+     * 断崖（用户会以为数据丢了）；1:1 虽然也不准，但幅度是同量级的偏差。
+     * 代价是汇率错误被藏在「看起来正常」的数字里，所以这里会 warn 一次（每种币种一次）。
+     *
+     * 调用方若需要严格口径（例如写历史快照、把数字固化进曲线），先用 [isKnownCurrency]
+     * 拦一道，别把这个兜底值当成真汇率记下来。
+     */
     fun getRate(currency: String): Double {
         val code = currency.uppercase()
         return liveRates[code] ?: run {
-            // 未知币种：保留 1.0 兜底（等同人民币，比返回 0 把金额清零安全），但告警一次，
-            // 否则「离岸人民币」「泰铢」之类会被无声无息地按人民币汇总，错得毫无痕迹。
             if (warnedUnknownCurrencies.add(code)) {
                 AppLogger.w(
-                    "未知币种 '$code'，汇率按 1.0（等同人民币）兜底；请在 defaultRates 补汇率或核对币种代码",
+                    "未知币种 '$code'：汇率按 1:1（等同人民币）折算，该币种资产的人民币市值与" +
+                        "净资产可能失真。请在 defaultRates 补汇率，或核对币种代码是否写错" +
+                        "（调用方如需严格口径，先用 isKnownCurrency 拦截）",
                     "ExchangeRateManager"
                 )
             }

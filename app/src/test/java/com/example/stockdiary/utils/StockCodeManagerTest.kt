@@ -210,6 +210,24 @@ class StockCodeManagerTest {
     }
 
     @Test
+    fun `normalizeSymbol 把 fund_ 前缀归一成小写加纯数字`() {
+        // 原实现命中 hasFundPrefix 后直接 `return trimmed`：FUND_400030、Fund_400030、
+        // fund_ 400030 都合法入库。而快照对齐是按 symbol 精确分组的 ——
+        // 同一只场外基金被判成两只、落两条资产、持仓翻倍。
+        listOf("FUND_400030", "Fund_400030", "fund_ 400030", " fund_004502 ")
+            .forEach { raw ->
+                assertEquals(
+                    "$raw 应归一成小写 fund_ + 纯数字",
+                    "fund_" + StockCodeManager.extractDigits(raw),
+                    StockCodeManager.normalizeSymbol(raw)
+                )
+            }
+        // 前缀后一个数字都没有的脏数据（fund_abc）保持原样：
+        // 归一成光秃秃的 `fund_` 会让所有这类脏数据在库里撞成同一个 symbol
+        assertEquals("fund_abc", StockCodeManager.normalizeSymbol("fund_abc"))
+    }
+
+    @Test
     fun `normalizeSymbol 幂等，重复调用结果不变`() {
         // 存储边界（AssetRepository.addOrUpdateStockAsset）会对 symbol 兜底做一次规范化，
         // 而调用方大多已经规范化过了 —— 这整条链依赖 normalizeSymbol 幂等，

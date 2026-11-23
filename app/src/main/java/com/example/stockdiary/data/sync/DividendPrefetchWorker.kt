@@ -41,6 +41,16 @@ class DividendPrefetchWorker(
 ) : CoroutineWorker(context, params) {
 
     override suspend fun doWork(): Result {
+        // 总开关（与 PriceSyncWorker:57-60 对齐）：「自动刷新价格与分红」关掉后，
+        // 这个 Worker 仍每 30 分钟联网跑天天基金，用户完全无从制止——
+        // 设置页的开关话术是「价格**与分红**」，分红补齐必须受同一个总开关约束。
+        // 关掉时直接 success 且**不重排**（重排由调度器负责，见 PriceSyncScheduler）；
+        // 返回 success 而不是 failure，避免 WorkManager 把它当失败去做指数退避重试。
+        if (!PriceSyncPreferencesManager.getInstance(applicationContext).isAutoSyncEnabled()) {
+            AppLogger.i("自动同步总开关已关闭，跳过本轮定期分红补齐", TAG)
+            return Result.success()
+        }
+
         return try {
             // 只在真正执行时记录，用来对照「启动调度」那条：若 WorkInfo 计划时间已过、
             // 系统却直到前台才调度，就能直接判定是系统侧压住而非排期错误。

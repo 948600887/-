@@ -307,9 +307,19 @@ object StockCodeManager {
             if (codePart.all { it.isDigit() }) return trimmed.lowercase()
         }
         
-        // 保留fund_前缀
+        // 保留 fund_ 前缀 —— 但必须**归一成固定形态**，不能原样返回。
+        //
+        // 原先 `return trimmed`：`FUND_400030`、`Fund_400030`、`fund_400030` 三种写法
+        // 都合法入库，而快照对齐是按 symbol 字符串精确分组的 → 同一只场外基金被判成
+        // 两只基金、落两条资产、持仓翻倍（与下方「纯数字 + fund_ 前缀」那段是同一个坑，
+        // 只是从大小写这侧漏进来）。这里强制 `FUND_PREFIX + 纯数字`：
+        // 前缀统一小写、代码剥掉任何非数字字符（顺手兼容 `fund_ 400030` / `fund-400030`）。
         if (hasFundPrefix(trimmed)) {
-            return trimmed
+            val digits = extractDigits(trimmed)
+            // 前缀后面连一个数字都没有（脏数据 `fund_abc`）：保持原样，别把它归一成
+            // 光秃秃的 `fund_` —— 那会让所有这类脏数据在库里撞成同一个 symbol。
+            if (digits.isEmpty()) return trimmed
+            return FUND_PREFIX + digits
         }
         
         // 纯数字代码，判断是否为场外基金

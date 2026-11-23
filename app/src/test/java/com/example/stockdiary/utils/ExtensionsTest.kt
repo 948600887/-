@@ -40,6 +40,23 @@ class ExtensionsTest {
         assertEquals("0.1234567891", 0.1234567891.formatTrim(CRYPTO_DECIMALS))
     }
 
+    /**
+     * `digits == 0` 时输出的是纯整数，**不能**去尾随 0。
+     *
+     * 旧实现无条件 `trimEnd('0').trimEnd('.')`，`100.0.formatTrim(0)` 会变成 `"1"`
+     * —— 数量差一个数量级，而且看起来像个正常数字，没有任何地方会拦住它。
+     */
+    @Test
+    fun formatTrim_零位小数不得削掉整数位的尾随0() {
+        assertEquals("100", 100.0.formatTrim(0))
+        assertEquals("1000", 1000.0.formatTrim(0))
+        assertEquals("0", 0.0.formatTrim(0))
+        assertEquals("-2500", (-2500.0).formatTrim(0))
+        // 有小数点的普通情况仍然去尾随 0（口径不变）
+        assertEquals("100", 100.0.formatTrim(2))
+        assertEquals("100.5", 100.5.formatTrim(2))
+    }
+
     // ---------- 加密货币「数量」固定 8 位（用户需求：为什么有些显示 8 位、有些没有） ----------
 
     @Test

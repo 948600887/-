@@ -182,6 +182,10 @@ fun Double.formatTrim(digits: Int): String {
     val s = format(digits)
     // 与 createDecimalFormat 同一口径（固定 '.'），否则德语设备 format 出 ',' 而这里按 '.' 截
     val sep = DecimalFormatSymbols(Locale.US).decimalSeparator
+    // 没有小数点时**绝不能** trim：`digits == 0` 的整数输出（`100`）会被 trimEnd('0') 削成
+    // `1`——数量差一个数量级，而且看着像个合法数字，不会被任何校验拦住。
+    // 有小数点时 trimEnd('0') 只会吃到小数部分（如 `1000.00` → `1000.` → `1000`），是安全的。
+    if (s.indexOf(sep) < 0) return s
     return s.trimEnd('0').trimEnd(sep)
 }
 
@@ -306,10 +310,20 @@ fun Long.toRelativeTime(): String {
     }
 }
 
+/**
+ * 是否落在「今天」的本地时间区间内。
+ *
+ * 上界必须用**明天的 atStartOfDay** 现算，不能写成 `todayStart + 86_400_000`：
+ * 夏令时切换那天本地只有 23 小时（或 25 小时），加固定 24 小时的毫秒数会
+ * 把「明天 0 点后的一小时」算成今天（或把今天最后一小时算成昨天）。
+ * 与 [toTimestamp] 同一口径（都用 `atStartOfDay(zone)`）。
+ */
 fun Long.isToday(): Boolean {
-    val todayStart = LocalDate.now().atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
-    val todayEnd = todayStart + 86_400_000
-    return this in todayStart until todayEnd
+    val zone = ZoneId.systemDefault()
+    val today = LocalDate.now(zone)
+    val start = today.atStartOfDay(zone).toInstant().toEpochMilli()
+    val end = today.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli()
+    return this >= start && this < end
 }
 
 // ========== 网络相关 ==========

@@ -1,6 +1,7 @@
 package com.example.stockdiary.data.export
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -154,5 +155,40 @@ class DataExporterPruneTest {
         assertEquals("CSV:full_statement", exportRetentionGroup("full_statement_20261119_101500.csv"))
         assertEquals("DIAGNOSTICS", exportRetentionGroup("goldvault_diagnostics_20261119_101500.txt"))
         assertEquals("TEXT", exportRetentionGroup("asset_report_20261119_101500.txt"))
+    }
+
+    /**
+     * 带毫秒/序号后缀的新命名必须仍归到**同一个**导出类型分组，
+     * 否则「同类型共享保留配额」的口径会被文件名格式变化悄悄破坏。
+     */
+    @Test
+    fun `毫秒与序号后缀不影响保留分组`() {
+        assertEquals("CSV:assets", exportRetentionGroup("assets_20261119_101500_123.csv"))
+        assertEquals("CSV:full_statement", exportRetentionGroup("full_statement_20261119_101500_123.csv"))
+        assertEquals("CSV:full_statement", exportRetentionGroup("full_statement_20261119_101500_007_2.csv"))
+    }
+
+    /**
+     * 导出文件名必须唯一。
+     *
+     * 旧命名只到秒：同一秒两次导出算出同一个绝对路径，后者覆盖前者，
+     * 而先分享出去的 URI 指向的仍是那个路径 —— 用户点开看到的是后一份内容。
+     */
+    @Test
+    fun `同一秒内两次连续导出得到不同文件名`() {
+        val millis = 1_800_000_000_000L
+        val first = exportFileName("assets", "csv", millis) { false }
+        val second = exportFileName("assets", "csv", millis + 137L) { false }
+
+        assertNotEquals(first, second)
+        assertTrue(first.endsWith(".csv"))
+
+        // 极端情况：同一毫秒也撞名（批量循环里连续调用）时递增序号，不再指向同一个路径
+        val taken = mutableSetOf(first)
+        val third = exportFileName("assets", "csv", millis) { it in taken }
+        assertNotEquals(first, third)
+        assertTrue(third, third.endsWith("_2.csv"))
+        taken += third
+        assertTrue(exportFileName("assets", "csv", millis) { it in taken }.endsWith("_3.csv"))
     }
 }

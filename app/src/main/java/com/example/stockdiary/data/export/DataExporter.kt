@@ -113,8 +113,47 @@ internal fun exportRetentionGroup(name: String): String {
     return "${group.name}:$prefix"
 }
 
-/** 导出文件名末尾的时间戳（与 `toFileTimestamp()` 的 pattern 一致） */
-private val CSV_TIMESTAMP_SUFFIX = Regex("_\\d{8}_\\d{6}$")
+/** 导出文件名末尾的时间戳（与 `toFileTimestamp()` 的 pattern 一致），可带毫秒与去重序号 */
+private val CSV_TIMESTAMP_SUFFIX = Regex("_\\d{8}_\\d{6}(?:_\\d{3}(?:_\\d+)?)?$")
+
+/**
+ * 生成**不会互相覆盖**的导出文件名（纯函数，`exists` 由调用方注入，便于单测）。
+ *
+ * 旧命名只精确到秒（`yyyyMMdd_HHmmss`）。同一秒内连发两次导出（批量「全选导出」、
+ * 手快连点）会算出同一个绝对路径：第二次写入覆盖第一次的文件，而第一次已经
+ * 分享出去的 URI 指向的**还是同一个路径**——用户点开看到的是第二次的内容。
+ * 所以文件名在秒级时间戳后再追加 3 位毫秒；极端到同一毫秒仍撞名（理论上可能，
+ * 例如批量循环里连续调用）时再递增序号。
+ *
+ * 毫秒段与序号段都在 [CSV_TIMESTAMP_SUFFIX] 的剥离范围内，[exportRetentionGroup]
+ * 仍能把它们归到同一个导出类型分组，保留策略不受影响。
+ *
+ * 已知取舍：`exists` 判空与真正落盘之间不是原子的，多线程并发导出同一类型理论上
+ * 仍可能撞名；导出是用户主动触发的低频操作、且 [DataExporter] 内无并发入口，
+ * 这里不为它引入锁。
+ *
+ * @param prefix 导出类型前缀（`assets` / `full_statement` 等）
+ * @param extension 不带点的扩展名（`csv` / `txt`）
+ * @param timestampMillis 导出时刻，注入以便单测
+ * @param exists 判断同目录下该文件名是否已存在
+ */
+internal fun exportFileName(
+    prefix: String,
+    extension: String,
+    timestampMillis: Long,
+    exists: (String) -> Boolean = { false }
+): String {
+    val stamp = timestampMillis.toFileTimestamp()
+    val millis = (timestampMillis % 1000L).toString().padStart(3, '0')
+    val base = "${prefix}_${stamp}_$millis"
+    var name = "$base.$extension"
+    var seq = 2
+    while (exists(name)) {
+        name = "${base}_$seq.$extension"
+        seq++
+    }
+    return name
+}
 
 /**
  * 把 [text] **原子地**写入 [target]：先写同目录随机命名的 `.tmp`，成功后用
@@ -265,7 +304,8 @@ class DataExporter(private val context: Context) {
     private fun exportFile(prefix: String, extension: String, build: (Writer) -> Unit): Result<Uri> {
         return try {
             pruneOldExports()
-            val file = File(exportDir, "${prefix}_${System.currentTimeMillis().toFileTimestamp()}.$extension")
+            val dir = exportDir
+            val file = File(dir, exportFileName(prefix, extension, System.currentTimeMillis()) { File(dir, it).exists() })
             val writer = newBomWriter()
             writer.use(build)
             writeAtomically(file, writer.toString())
@@ -341,14 +381,40 @@ class DataExporter(private val context: Context) {
     }
 }
 
-/** 统一 CSV 字段转义：含引号、逗号或换行时用双引号包裹，内部引号转义为两个连续引号。 */
+/**
+ * 纯十进制数字（含正负号）。用于把「负数列」从公式注入防护里排除出去：
+ * `-12.5`（浮亏、负数量）是合法数值，前置 `'` 会被 Excel/pandas 当文本，
+ * 列就再也算不了了。CSV 里本 App 从不给数字补 `+`/千分位，故这个正则够用。
+ */
+private val PLAIN_DECIMAL = Regex("^[+-]?\\d+(\\.\\d+)?$")
+
+/**
+ * 统一 CSV 字段转义。
+ *
+ * 1. **公式注入防护**：以 `=` `+` `-` `@` 开头的单元格会被 Excel/WPS 当公式求值
+ *    （资产名存成 `=HYPERLINK(...)` 就能在别人机器上拉外链、`=cmd|...` 更糟）。
+ *    对这类**非纯数字**字段前置一个单引号，让表格软件按文本处理。
+ * 2. 含引号、逗号、回车或换行时用双引号包裹，内部引号转义为两个连续引号。
+ *
+ * 已知取舍：前置的 `'` 会随文件进入数据本身，程序化解析（pandas 等）拿到的是
+ * `'=SUM(A1)`。这是 OWASP 推荐做法，代价是「恶意/异常文本多一个前导引号」，
+ * 比「打开就知道执行了公式」便宜得多；纯数字（负号开头）已排除，正常账目不受影响。
+ */
 internal fun escapeCsv(field: String): String {
-    val needsQuoting = field.any { it == '"' || it == ',' || it == '\n' || it == '\r' }
+    val guarded = if (needsFormulaGuard(field)) "'$field" else field
+    val needsQuoting = guarded.any { it == '"' || it == ',' || it == '\n' || it == '\r' }
     return if (needsQuoting) {
-        "\"" + field.replace("\"", "\"\"") + "\""
+        "\"" + guarded.replace("\"", "\"\"") + "\""
     } else {
-        field
+        guarded
     }
+}
+
+/** 是否需要用前置 `'` 挡公式求值：首字符是公式引导符、且不是纯十进制数字。 */
+private fun needsFormulaGuard(field: String): Boolean {
+    val first = field.firstOrNull() ?: return false
+    if (first != '=' && first != '+' && first != '-' && first != '@') return false
+    return !PLAIN_DECIMAL.matches(field)
 }
 
 /** 拼一行 CSV：每个单元格都过一遍 [escapeCsv]，避免调用方漏转义。 */
@@ -374,7 +440,10 @@ internal fun csvNumber(value: Double, digits: Int): String =
  * 「数量 0、市值有钱」或「-0.00001 股凭空消失」的自相矛盾行。
  */
 private fun csvExportNumber(value: Double, digits: Int): String {
-    val trimmed = String.format(Locale.US, "%.${digits}f", value).trimEnd('0').trimEnd('.')
+    val fixed = String.format(Locale.US, "%.${digits}f", value)
+    // 只有含小数点时才 trim 尾随 0：`digits == 0` 时输出的是纯整数（`1000`），
+    // 直接 trimEnd('0').trimEnd('.') 会削成 `1` —— 数量差一个数量级（与 formatTrim 同款坑）。
+    val trimmed = if (fixed.indexOf('.') < 0) fixed else fixed.trimEnd('0').trimEnd('.')
     // 只有真正的 0（含 -0.0，IEEE 下 -0.0 == 0.0）或空串才写 "0"。
     // 负数被舍成 "-0" 时必须继续往下走「退回原值」分支，不能提前吞成 "0"。
     if (value == 0.0 || trimmed.isEmpty()) return "0"

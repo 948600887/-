@@ -93,7 +93,6 @@ class DataExporterCsvTest {
         assertEquals("\"a\"\"b\"", escapeCsv("a\"b"))
         assertEquals("\"a\nb\"", escapeCsv("a\nb"))
         assertEquals("abc", escapeCsv("abc"))
-
         val weird = Asset(
             id = 9, name = "长,江\"电", type = AssetType.STOCK, symbol = "600900",
             account = "默认", balance = 1.0, purchasePrice = 1.0
@@ -101,6 +100,31 @@ class DataExporterCsvTest {
         val cells = parseRow(CsvContent.assetRow(weird))
         assertEquals("长,江\"电", cells[0])
         assertEquals(15, cells.size)
+    }
+
+    /**
+     * CSV 公式注入防护：以 `=` `+` `-` `@` 开头的**非数字**单元格前置单引号。
+     *
+     * 资产名/备注是用户可自由输入的，存成 `=HYPERLINK("http://x","点我")` 或
+     * 老式 DDE 的 `=cmd|' /c calc'!A0`，用 Excel 打开就会被当公式求值。
+     * 同时**负数必须原样输出**——浮亏、负数量都是负数，前置 `'` 会让整列变成文本。
+     */
+    @Test
+    fun `以公式引导符开头的单元格被前置单引号_负数不受影响`() {
+        assertEquals("'=SUM(A1)", escapeCsv("=SUM(A1)"))
+        assertEquals("'+1+1", escapeCsv("+1+1"))
+        assertEquals("'-abc", escapeCsv("-abc"))
+        assertEquals("'@SUM(A1)", escapeCsv("@SUM(A1)"))
+
+        // 纯数字（含负号）不加前缀，保持可计算
+        assertEquals("-12.5", escapeCsv("-12.5"))
+        assertEquals("-0.00001", escapeCsv("-0.00001"))
+        assertEquals("+3", escapeCsv("+3"))
+        assertEquals("100", escapeCsv("100"))
+
+        // 首字符不是引导符的普通文本不受影响
+        assertEquals("浦发银行", escapeCsv("浦发银行"))
+        assertEquals("", escapeCsv(""))
     }
 
     @Test

@@ -1,6 +1,12 @@
 package com.example.stockdiary.utils
 
+import android.content.Context
+import io.mockk.every
+import io.mockk.mockk
+import java.io.File
+import java.nio.file.Files
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -302,5 +308,68 @@ class LogDiagnosticsTest {
         val lines = LogDiagnostics.filterLog(log, roundId = null, maxLines = 3)
         assertEquals(3, lines.size)
         assertTrue(lines.last().contains("轮次#10"))
+    }
+
+    // ---- clear()：崩溃报告删不掉时必须如实返 false ----
+
+    /** 造一个「getExternalFilesDir 指向临时目录」的 Context */
+    private fun contextWithExternalDir(root: File): Context {
+        val context = mockk<Context>(relaxed = true)
+        every { context.getExternalFilesDir(null) } returns root
+        return context
+    }
+
+    private fun tempRoot(): File = Files.createTempDirectory("gv-clear").toFile()
+
+    /**
+     * 目录都不存在（从没崩过）→ 按「没有崩溃报告 = 已清空」返 true。
+     *
+     * 这个目录只在首次崩溃时才 `mkdirs()`，从没崩过的用户这里本来就是空的；
+     * 若因为「目录不在」判失败，用户会被永久卡在「仍在清理」的提示里。
+     */
+    @Test
+    fun clear_崩溃报告目录不存在时算已清空() {
+        val root = tempRoot()
+        try {
+            assertTrue(LogDiagnostics.clear(contextWithExternalDir(root)))
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun clear_崩溃报告文件删掉后返回true且文件消失() {
+        val root = tempRoot()
+        try {
+            val dir = File(root, "crash_reports").apply { mkdirs() }
+            val crash = File(dir, "crash_1.log").apply { writeText("x") }
+            assertTrue(LogDiagnostics.clear(contextWithExternalDir(root)))
+            assertFalse("崩溃报告应已被删掉", crash.exists())
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    /**
+     * 删不掉时必须返 false —— 这正是修掉的 bug。
+     *
+     * 从前是 `runCatching { listFiles()?.forEach { it.delete() } }.isSuccess`：
+     * `delete()` 的返回值被丢弃，删不掉也报成功，而 KDoc 承诺的正是「崩溃报告删不掉
+     * 时返 false」。UI 拿到这个 true 就会 reload 并把旧崩溃报告再显示一遍。
+     *
+     * 用**非空子目录**构造确定性失败：`File.delete()` 对非空目录在所有平台都返 false，
+     * 不依赖「文件被占用」这种 OS 相关的行为。
+     */
+    @Test
+    fun clear_崩溃报告删不掉时返回false() {
+        val root = tempRoot()
+        try {
+            val dir = File(root, "crash_reports").apply { mkdirs() }
+            val sub = File(dir, "sub").apply { mkdirs() }
+            File(sub, "crash_1.log").writeText("x")
+            assertFalse(LogDiagnostics.clear(contextWithExternalDir(root)))
+        } finally {
+            root.deleteRecursively()
+        }
     }
 }

@@ -231,14 +231,14 @@ class AppLoggerTest {
         assertFalse(AppLogger.clearLogAwaiting(done, 1))
     }
 
-    // ---- deleteLogFiles：删失败必须如实汇报 ----
+    // ---- deleteFiles：删失败必须如实汇报 ----
 
     @Test
-    fun deleteLogFiles_全部删掉返回true且文件消失() {
+    fun deleteFiles_全部删掉返回true且文件消失() {
         val dir = Files.createTempDirectory("goldvault-del").toFile()
         try {
             val files = (0..2).map { File(dir, "app.log.$it").apply { writeText("x") } }
-            assertTrue(AppLogger.deleteLogFiles(files))
+            assertTrue(AppLogger.deleteFiles(files))
             files.forEach { assertFalse("应已删除: ${it.name}", it.exists()) }
         } finally {
             dir.deleteRecursively()
@@ -252,11 +252,11 @@ class AppLoggerTest {
      * 不依赖文件锁/只读属性这类跨平台不一致的行为。
      */
     @Test
-    fun deleteLogFiles_删除失败返回false() {
+    fun deleteFiles_删除失败返回false() {
         val dir = Files.createTempDirectory("goldvault-del-fail").toFile()
         try {
             val ghost = File(dir, "gone.log")   // 从未创建 → delete() 必返 false
-            assertFalse(AppLogger.deleteLogFiles(listOf(ghost)))
+            assertFalse(AppLogger.deleteFiles(listOf(ghost)))
         } finally {
             dir.deleteRecursively()
         }
@@ -264,12 +264,12 @@ class AppLoggerTest {
 
     /** 一个删不掉不能拖累其余：成功的照样删掉，整体仍报 false */
     @Test
-    fun deleteLogFiles_部分失败仍尽力删完其余() {
+    fun deleteFiles_部分失败仍尽力删完其余() {
         val dir = Files.createTempDirectory("goldvault-del-mixed").toFile()
         try {
             val real = File(dir, "app.log").apply { writeText("x") }
             val ghost = File(dir, "gone.log")
-            assertFalse(AppLogger.deleteLogFiles(listOf(ghost, real)))
+            assertFalse(AppLogger.deleteFiles(listOf(ghost, real)))
             assertFalse("能删的仍要删掉，不能中途 return", real.exists())
         } finally {
             dir.deleteRecursively()

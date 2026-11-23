@@ -649,7 +649,7 @@ object AppLogger {
         // 两者若只靠单线程排队串行，forceFlush 会和这里的删除交错
         // 归档文件一并清掉：只清 app.log 会让用户以为「清空」了、分享里却还带着旧轮次日志
         val filesDeleted = try {
-            synchronized(fileLock) { deleteLogFiles(getLogFiles()) }
+            synchronized(fileLock) { deleteFiles(getLogFiles()) }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -662,6 +662,9 @@ object AppLogger {
     /**
      * 逐个删除 [files] 并如实汇报，**不中途 return**——一份删不掉也要把余下的删完。
      *
+     * 通用「删一堆文件」动作，目前两个调用点：[clearLogNow] 删日志、
+     * `LogDiagnostics.deleteCrashReports` 删崩溃报告（故不叫 deleteLogFiles）。
+     *
      * @return true = **全部**删掉。任一 `delete()` 返回 false（被占用 / 只读 / 已被别人
      *         先删掉）或抛异常都记 false。从前这里丢弃了 `delete()` 的返回值，
      *         删失败时 Future 仍正常完成 → [clearLog] 返 true → UI 走 reload →
@@ -669,20 +672,22 @@ object AppLogger {
      *
      * 已知取舍：并发下「文件已被别人先删掉」也会记 false（`delete()` 对不存在的路径返
      * false）。这是有意偏保守：多给一次「仍在清理」的提示，好过谎称已清空。
+     * 因此 false 只代表「没确认删干净」，**不代表**权限或路径有问题。
      *
-     * 调用方必须持有 [fileLock]（见 [clearLogNow]）。
+     * 本函数自身不持锁。日志文件由 [clearLogNow] 在 [fileLock] 内调用；
+     * 崩溃报告目录没有进程内并发写入（只在崩溃现场写，那时进程已在退出），直接调用即可。
      */
-    internal fun deleteLogFiles(files: List<File>): Boolean {
+    internal fun deleteFiles(files: List<File>): Boolean {
         var allDeleted = true
         files.forEach { file ->
             try {
                 if (!file.delete()) {
                     allDeleted = false
-                    Log.w(LOG_TAG, "日志文件删除失败（可能被占用或只读）: ${file.name}")
+                    Log.w(LOG_TAG, "文件删除失败（可能被占用或只读）: ${file.name}")
                 }
             } catch (e: Exception) {
                 allDeleted = false
-                Log.w(LOG_TAG, "删除日志文件异常: ${file.name}", e)
+                Log.w(LOG_TAG, "删除文件异常: ${file.name}", e)
             }
         }
         return allDeleted

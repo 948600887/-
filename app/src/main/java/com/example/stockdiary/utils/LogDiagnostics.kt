@@ -685,12 +685,39 @@ object LogDiagnostics {
      *         （日志清理超时仍在后台排队，或崩溃报告删不掉）。调用方据此决定
      *         是「重读界面」还是「提示仍在清理」——从前返回 Unit，超时被静默吞掉，
      *         界面立刻 reload 会读到旧日志。
+     *
+     * **false 的正确读法**：只代表「没确认删干净」，**不等于**权限/路径有问题。
+     * 崩溃报告那侧复用了 [AppLogger.deleteFiles] 的保守语义——并发下「文件已被
+     * 别人先删掉」（`delete()` 对不存在的路径返 false）也记 false。要区分得逐份
+     * stat 前后比对，为一次手动清理引入这种复杂度不划算：多给一次「仍在清理」的
+     * 提示，好过谎称已清空（那会让用户又看到旧日志）。
      */
     fun clear(context: Context): Boolean {
         val logsCleared = AppLogger.clearLog()
-        val reportsCleared = runCatching {
-            GlobalExceptionHandler.crashReportsDir(context).listFiles()?.forEach { it.delete() }
-        }.isSuccess
+        val reportsCleared = deleteCrashReports(context)
         return logsCleared && reportsCleared
+    }
+
+    /**
+     * 删掉崩溃报告目录下的全部文件，如实汇报。
+     *
+     * `listFiles()` 返 null（目录不存在）按**「没有崩溃报告 = 已清空」返 true**：
+     * 这个目录只在首次崩溃时由 `GlobalExceptionHandler` 的 `mkdirs()` 建出来，
+     * 从没崩过的用户这里本来就是空的，不该因为「目录不在」把他卡在「仍在清理」的提示里。
+     *
+     * 从前这里是 `runCatching { listFiles()?.forEach { it.delete() } }.isSuccess`：
+     * `delete()` 的返回值被丢弃，删不掉（文件被占用 / 只读）也照样返 true，而 KDoc
+     * 承诺的是「崩溃报告删不掉时返 false」—— 与日志那侧刚修的是同一个 bug。
+     */
+    private fun deleteCrashReports(context: Context): Boolean {
+        val dir = GlobalExceptionHandler.crashReportsDir(context)
+        val files = try {
+            dir.listFiles()
+        } catch (e: Exception) {
+            // 枚举都失败的目录（外部存储被卸载等）不能算清空
+            AppLogger.w("枚举崩溃报告目录失败: ${e.message}", "LogDiagnostics")
+            return false
+        } ?: return true   // 目录不存在 = 没有崩溃报告可删
+        return AppLogger.deleteFiles(files.toList())
     }
 }

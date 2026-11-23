@@ -1,15 +1,25 @@
 package com.example.stockdiary.data.dividend
 
 import com.example.stockdiary.database.Asset
-import com.example.stockdiary.database.AssetType
 import com.example.stockdiary.utils.ExchangeRateManager
 import com.example.stockdiary.utils.totalValueCny
 import com.example.stockdiary.utils.sumTotalValueCny
 import com.example.stockdiary.utils.excludingDebts
 import java.time.LocalDate
 import java.time.Year
-import kotlin.math.pow
 import kotlinx.coroutines.CancellationException
+
+/**
+ * `@Deprecated` 的统一说明：**产品代码零调用，只有单测覆盖**。
+ *
+ * 这几个方法是「收息佬」FIRE 指标体系剩下的部分：界面从未接入，但单测拿它们钉住了
+ * 多币种折算口径（`MultiCurrencyAmountTest` / `DividendIncomeCalculatorTest` 里共 13 处断言）。
+ * 直接删等于顺手削掉覆盖，所以保留方法本体、只让 IDE 把误接线的地方划掉。
+ *
+ * 为什么需要这个常量而不是每处写一遍字符串：`@Deprecated` 的参数必须是编译期常量，
+ * 且这 5 个方法将来一起下线时，改一处即可让所有调用点的提示同步更新。
+ */
+private const val ONLY_TEST_COVERED = "零产品调用，仅测试覆盖；误接线请改用 DividendIncomeLoader"
 
 /**
  * 指定日期所在自然年的天数（闰年 366、平年 365）。
@@ -103,9 +113,6 @@ object DividendIncomeCalculator {
         get() = daysInCurrentYear().toDouble()
 
     /**
-     * 计算单个资产的年化收入（分红+利息）
-     */
-    /**
      * 计算单个资产的年化收入（分红+利息）。
      *
      * 返回值统一为**人民币口径**：利息随本金币种而来、每股分红随标的币种而来，
@@ -140,6 +147,7 @@ object DividendIncomeCalculator {
     /**
      * 计算整个组合的年化总收入（分红+利息）
      */
+    @Deprecated(ONLY_TEST_COVERED)
     fun calculateTotalAnnualIncome(
         assets: List<com.example.stockdiary.database.Asset>,
         dividendsBySymbol: Map<String, Double> = emptyMap()
@@ -158,6 +166,7 @@ object DividendIncomeCalculator {
      * 计算组合的年化收入率（分红 + 利息）占总资产的比例。
      * 注：App 已去掉成本概念，这里不是「收益率」，是「收入率」。
      */
+    @Deprecated(ONLY_TEST_COVERED)
     fun calculatePortfolioYield(
         assets: List<com.example.stockdiary.database.Asset>,
         dividendsBySymbol: Map<String, Double> = emptyMap()
@@ -169,32 +178,11 @@ object DividendIncomeCalculator {
     }
 
     /**
-     * 计算单只股票的年度股息收入
-     * @param asset 资产
-     * @param dividendPerShare 每十股分红
-     * @return 年度股息收入
-     */
-    fun calculateAnnualDividendIncome(asset: Asset, dividendPerShare: Double): Double {
-        if (asset.type != AssetType.STOCK && asset.type != AssetType.FUND) return 0.0
-        return asset.balance * ExchangeRateManager.toCny(dividendPerShare, asset.currency) / 10.0
-    }
-
-    /**
-     * 计算股息率（基于当前价）
-     * @param dividendPerShare 每十股分红
-     * @param currentPrice 当前股价
-     * @return 股息率百分比
-     */
-    fun calculateDividendYieldByPrice(dividendPerShare: Double, currentPrice: Double): Double {
-        if (currentPrice <= 0) return 0.0
-        return (dividendPerShare / 10.0 / currentPrice) * 100
-    }
-
-    /**
      * 计算整个账户的加权平均股息率
      * @param holdings 持仓列表（资产+每十股分红）
      * @return 加权平均股息率
      */
+    @Deprecated(ONLY_TEST_COVERED)
     fun calculatePortfolioDividendYield(
         holdings: List<HoldingDividendInfo>
     ): Double {
@@ -213,6 +201,7 @@ object DividendIncomeCalculator {
     /**
      * 计算年度总股息收入
      */
+    @Deprecated(ONLY_TEST_COVERED)
     fun calculateTotalAnnualDividend(holdings: List<HoldingDividendInfo>): Double {
         return holdings.sumOf { 
             it.asset.balance * ExchangeRateManager.toCny(it.annualDividendPerShare, it.asset.currency) / 10.0 
@@ -222,105 +211,9 @@ object DividendIncomeCalculator {
     /**
      * 计算月度平均股息收入
      */
+    @Deprecated(ONLY_TEST_COVERED)
     fun calculateMonthlyAverageDividend(holdings: List<HoldingDividendInfo>): Double {
         return calculateTotalAnnualDividend(holdings) / 12
-    }
-
-    /**
-     * 计算FIRE覆盖率（分红收入覆盖月度生活费的比例）
-     * @param monthlyDividend 月度分红收入
-     * @param monthlyExpense 月度生活费
-     * @return 覆盖率（0-100+）
-     */
-    fun calculateFireCoverage(monthlyDividend: Double, monthlyExpense: Double): Double {
-        if (monthlyExpense <= 0) return 0.0
-        return (monthlyDividend / monthlyExpense) * 100
-    }
-
-    /**
-     * 计算达到FIRE目标所需的投资金额
-     * @param monthlyExpense 月度生活费
-     * @param targetDividendYield 目标股息率（如4%）
-     * @return 所需投资金额
-     */
-    fun calculateFireTargetAmount(monthlyExpense: Double, targetDividendYield: Double): Double {
-        if (targetDividendYield <= 0) return 0.0
-        val annualExpense = monthlyExpense * 12
-        return annualExpense / (targetDividendYield / 100)
-    }
-
-    /**
-     * 计算分红再投资收益（复利）
-     * @param initialInvestment 初始投资
-     * @param annualDividendYield 年化股息率
-     * @param years 投资年限
-     * @param reinvestRate 再投资比例（0-1）
-     * @return 再投资收益预测
-     */
-    fun calculateReinvestmentProjection(
-        initialInvestment: Double,
-        annualDividendYield: Double,
-        years: Int,
-        reinvestRate: Double = 1.0
-    ): ReinvestmentProjection {
-        if (initialInvestment <= 0 || annualDividendYield <= 0 || years <= 0) {
-            return ReinvestmentProjection(0.0, 0.0, 0.0, emptyList())
-        }
-
-        val yearlyData = mutableListOf<YearlyReinvestmentData>()
-        var currentValue = initialInvestment
-        var totalDividendReceived = 0.0
-
-        for (year in 1..years) {
-            val annualDividend = currentValue * (annualDividendYield / 100)
-            val reinvestedAmount = annualDividend * reinvestRate
-            val cashReceived = annualDividend * (1 - reinvestRate)
-
-            totalDividendReceived += annualDividend
-            currentValue += reinvestedAmount
-
-            yearlyData.add(YearlyReinvestmentData(
-                year = year,
-                portfolioValue = currentValue,
-                annualDividend = annualDividend,
-                reinvestedAmount = reinvestedAmount,
-                cashReceived = cashReceived,
-                cumulativeDividend = totalDividendReceived
-            ))
-        }
-
-        return ReinvestmentProjection(
-            finalPortfolioValue = currentValue,
-            totalDividendReceived = totalDividendReceived,
-            totalReturn = currentValue - initialInvestment + totalDividendReceived,
-            yearlyData = yearlyData
-        )
-    }
-
-    /**
-     * 预测未来N年的分红收入
-     */
-    fun projectFutureDividends(
-        holdings: List<HoldingDividendInfo>,
-        years: Int,
-        growthRate: Double = 0.05 // 默认5%年化增长
-    ): List<YearlyDividendProjection> {
-        val currentAnnualDividend = calculateTotalAnnualDividend(holdings)
-        
-        return (1..years).map { year ->
-            val projectedDividend = currentAnnualDividend * (1 + growthRate).pow(year)
-            val cumulativeDividend = if (growthRate == 0.0) {
-                currentAnnualDividend * year
-            } else {
-                currentAnnualDividend *
-                    ((1 + growthRate).pow(year) - 1) / growthRate
-            }
-            YearlyDividendProjection(
-                year = year,
-                projectedDividend = projectedDividend,
-                cumulativeDividend = cumulativeDividend
-            )
-        }
     }
 
     /**
@@ -374,37 +267,6 @@ data class HoldingDividendInfo(
     val dividendYieldByPrice: Double,    // 基于当前价的股息率
     val lastDividendDate: String? = null,
     val nextEstimatedDividendDate: String? = null
-)
-
-/**
- * 再投资收益预测
- */
-data class ReinvestmentProjection(
-    val finalPortfolioValue: Double,      // 最终投资组合价值
-    val totalDividendReceived: Double,    // 累计收到分红
-    val totalReturn: Double,              // 总收益
-    val yearlyData: List<YearlyReinvestmentData>
-)
-
-/**
- * 年度再投资数据
- */
-data class YearlyReinvestmentData(
-    val year: Int,
-    val portfolioValue: Double,           // 当年投资组合价值
-    val annualDividend: Double,           // 当年分红
-    val reinvestedAmount: Double,         // 再投资金额
-    val cashReceived: Double,             // 现金分红
-    val cumulativeDividend: Double        // 累计分红
-)
-
-/**
- * 年度分红预测
- */
-data class YearlyDividendProjection(
-    val year: Int,
-    val projectedDividend: Double,        // 预计分红
-    val cumulativeDividend: Double        // 累计分红
 )
 
 
